@@ -261,6 +261,19 @@ def test_the_compute_watchdog_raise_becomes_the_template_with_no_sqlstate():
 # Mode binding: parse on every dialect, apply per dialect and per population.
 # ---------------------------------------------------------------------------
 
+#: The batch size these tests hold FIXED when they are testing something else.
+#: The default a deploy resolves to when nothing overrides it — so a test that
+#: does not care about the sweep's page count still prices it at the shape
+#: production runs, rather than at whichever end of the range happened to be
+#: convenient. Tests that DO care pass their own.
+_BATCH = mod.DEFAULT_BATCH_SIZE
+
+
+def _scan_budget(*, g_moves, g_sessions, n_stale=0, batch_size=_BATCH):
+    return mod.assert_runtime_scan_budget(
+        n_stale=n_stale, batch_size=batch_size, g_moves=g_moves, g_sessions=g_sessions
+    )
+
 
 def test_unset_mode_parses_to_none_rather_than_to_atomic(monkeypatch):
     """"Unset" is not a mode. Turning it into one here is exactly how a deployment
@@ -271,16 +284,18 @@ def test_unset_mode_parses_to_none_rather_than_to_atomic(monkeypatch):
 
 def test_sqlite_needs_no_mode_and_refuses_batch(monkeypatch):
     monkeypatch.delenv(mod.ENV_MODE, raising=False)
-    assert mod.bind_mode("sqlite", n_stale=9, n_repair=1, g_moves=1.0, g_sessions=1.0) is (
-        mod.ATOMIC_ENV
-    )
+    assert mod.bind_mode(
+        "sqlite", n_stale=9, n_repair=1, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
+    ) is mod.ATOMIC_ENV
     monkeypatch.setenv(mod.ENV_MODE, "atomic")
-    assert mod.bind_mode("sqlite", n_stale=9, n_repair=1, g_moves=1.0, g_sessions=1.0) is (
-        mod.ATOMIC_ENV
-    )
+    assert mod.bind_mode(
+        "sqlite", n_stale=9, n_repair=1, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
+    ) is mod.ATOMIC_ENV
     monkeypatch.setenv(mod.ENV_MODE, "batch")
     with pytest.raises(mod.MigrationError, match="unsupported on sqlite"):
-        mod.bind_mode("sqlite", n_stale=9, n_repair=1, g_moves=1.0, g_sessions=1.0)
+        mod.bind_mode(
+            "sqlite", n_stale=9, n_repair=1, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
+        )
 
 
 def test_postgres_requires_the_mode_when_either_population_is_nonzero(monkeypatch):
@@ -288,7 +303,7 @@ def test_postgres_requires_the_mode_when_either_population_is_nonzero(monkeypatc
     # Both zero: a fresh database, a disposable migration database and the shared
     # fixture all upgrade with no configuration.
     assert mod.bind_mode(
-        "postgresql", n_stale=0, n_repair=0, g_moves=1.0, g_sessions=1.0
+        "postgresql", n_stale=0, n_repair=0, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
     ) is mod.ATOMIC_ENV
     for n_stale, n_repair in [(1, 0), (0, 1), (5, 5)]:
         with pytest.raises(mod.MigrationError) as exc:
@@ -296,6 +311,7 @@ def test_postgres_requires_the_mode_when_either_population_is_nonzero(monkeypatc
                 "postgresql",
                 n_stale=n_stale,
                 n_repair=n_repair,
+                batch_size=_BATCH,
                 g_moves=1.0,
                 g_sessions=1.0,
             )
@@ -309,7 +325,12 @@ def test_batch_mode_needs_no_stall_projection(monkeypatch):
     one at all — so a population the atomic projection rejects still runs."""
     monkeypatch.setenv(mod.ENV_MODE, "batch")
     env = mod.bind_mode(
-        "postgresql", n_stale=10_000_000, n_repair=10_000_000, g_moves=50.0, g_sessions=50.0
+        "postgresql",
+        n_stale=10_000_000,
+        n_repair=10_000_000,
+        batch_size=_BATCH,
+        g_moves=50.0,
+        g_sessions=50.0,
     )
     assert env is mod.BATCH_ENV
     assert env.per_batch and env.locked_selection
@@ -321,6 +342,7 @@ def test_batch_mode_needs_no_stall_projection(monkeypatch):
 
 def _admit(monkeypatch, **kw):
     monkeypatch.setenv(mod.ENV_MODE, "atomic")
+    kw.setdefault("batch_size", _BATCH)
     return mod.bind_mode("postgresql", **kw)
 
 
@@ -386,11 +408,11 @@ def test_atomic_projection_charges_the_teardown_terms(monkeypatch):
         n * mod.MARGINED_MS_PER_REPAIR_ROW
         + mod.ATOMIC_SCANS_UNDER_LOCK * mod.MARGINED_MS_PER_SCAN_STMT
         + mod.MARGINED_MS_COVERAGE_ASSERT
-        + mod.MARGINED_MS_BACKFILL_SELECT_SWEEP
+        + mod.backfill_sweep_ms(pages=mod.backfill_sweep_pages(n_stale=0, batch_size=_BATCH))
         + mod.MARGINED_MS_BACKFILL_REMAINING
     )
     assert without_teardown < mod.MAX_WRITER_STALL_MS
-    projected = mod.project_atomic_stall_ms(n_stale=0, n_repair=n)
+    projected = mod.project_atomic_stall_ms(n_stale=0, n_repair=n, batch_size=_BATCH)
     assert projected > mod.MAX_WRITER_STALL_MS
     assert projected - without_teardown == pytest.approx(
         mod.atomic_teardown_reserve_ms(n_stale=0, n_repair=n)
@@ -433,6 +455,138 @@ def test_atomic_projection_admits_growth_within_the_margin(monkeypatch):
     assert _admit(
         monkeypatch, n_stale=100, n_repair=100, g_moves=1.5, g_sessions=1.5
     ) is mod.ATOMIC_ENV
+
+
+# --- the sweep's page count, which is the operator's to move ----------------
+
+
+def test_atomic_projection_moves_with_the_resolved_batch_size():
+    """The assertion that fails against a scalar sweep constant.
+
+    Same population, same relations, same everything — only the batch size
+    differs, and the sweep is ``ceil(N_stale / batch_size) + 1`` pages. A
+    projection that could not see it charged one number for 7 pages and for
+    6,001, and its verdicts were a property of the relation size rather than of
+    the check.
+    """
+    n_stale = 6_000
+    at_min = mod.project_atomic_stall_ms(
+        n_stale=n_stale, n_repair=0, batch_size=mod.MIN_ADMITTED_BATCH
+    )
+    at_max = mod.project_atomic_stall_ms(
+        n_stale=n_stale, n_repair=0, batch_size=mod.MAX_BATCH_SIZE
+    )
+    assert at_min > at_max
+    # And the difference is EXACTLY the per-page term over the extra pages: the
+    # relation-scan component does not move with the batch size, and the row work
+    # and teardown do not either.
+    extra_pages = mod.backfill_sweep_pages(
+        n_stale=n_stale, batch_size=mod.MIN_ADMITTED_BATCH
+    ) - mod.backfill_sweep_pages(n_stale=n_stale, batch_size=mod.MAX_BATCH_SIZE)
+    assert at_min - at_max == pytest.approx(
+        mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK
+        * mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE
+        * extra_pages
+        / 1000
+    )
+
+
+@pytest.mark.parametrize("n_stale", [0, 1, mod.SIZED_TOTAL_ROWS])
+def test_atomic_projection_charges_a_nonzero_sweep_at_every_boundary(n_stale):
+    """``N_stale = 0`` is ONE page — the empty-teardown shape — not zero pages.
+
+    A run with nothing to backfill still issues the first selection page, gets
+    nothing back and stops. Pricing that at zero would be the same class of error
+    as dropping the scan terms on a clean audit.
+    """
+    for batch_size in (mod.MIN_ADMITTED_BATCH, mod.DEFAULT_BATCH_SIZE):
+        pages = mod.backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size)
+        assert pages >= 1
+        assert mod.backfill_sweep_ms(pages=pages) > 0
+        naked = mod.project_atomic_stall_ms(
+            n_stale=n_stale, n_repair=0, batch_size=batch_size
+        ) - mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * mod.backfill_sweep_ms(pages=pages)
+        assert naked < mod.project_atomic_stall_ms(
+            n_stale=n_stale, n_repair=0, batch_size=batch_size
+        )
+
+
+def test_atomic_admission_rejects_at_the_batch_size_the_scalar_admitted(monkeypatch):
+    """A population inside the false-admission band, from both ends.
+
+    Admitted at ``MAX_BATCH_SIZE`` and refused at ``MIN_ADMITTED_BATCH`` — the
+    same database, the same relations, one environment variable apart. The
+    refusal has to name the batch size and the page count, because "lower your
+    batch size" is the advice an operator reaching for this knob would otherwise
+    take from a stall message.
+    """
+    monkeypatch.setenv(mod.ENV_MODE, "atomic")
+    admitted = mod.bind_mode(
+        "postgresql",
+        n_stale=5_400,
+        n_repair=0,
+        batch_size=mod.MAX_BATCH_SIZE,
+        g_moves=1.0,
+        g_sessions=1.0,
+    )
+    assert admitted is mod.ATOMIC_ENV
+    with pytest.raises(mod.MigrationError) as exc:
+        mod.bind_mode(
+            "postgresql",
+            n_stale=5_400,
+            n_repair=0,
+            batch_size=mod.MIN_ADMITTED_BATCH,
+            g_moves=1.0,
+            g_sessions=1.0,
+        )
+    assert f"batch_size={mod.MIN_ADMITTED_BATCH}" in str(exc.value)
+    assert f"pages={mod.backfill_sweep_pages(n_stale=5_400, batch_size=1)}" in str(exc.value)
+
+
+def test_runtime_scan_budget_moves_with_batch_size_and_live_population():
+    """The leak batch mode has no stall projection to catch.
+
+    The import-time check prices the sweep at the DECLARED worst case — the sized
+    relation at the smallest admitted batch. A live population past that basis,
+    combined with a small override, is past the declaration, and the runtime check
+    is the only thing that sees it.
+    """
+    # Comfortable at the default batch, at a population well past the sized basis.
+    _scan_budget(n_stale=200_000, batch_size=mod.DEFAULT_BATCH_SIZE, g_moves=1.0, g_sessions=1.0)
+    with pytest.raises(mod.MigrationError, match="sweep_pages"):
+        _scan_budget(
+            n_stale=200_000,
+            batch_size=mod.MIN_ADMITTED_BATCH,
+            g_moves=1.0,
+            g_sessions=1.0,
+        )
+
+
+def test_stall_probe_projection_matches_the_admission_projection(monkeypatch):
+    """The duplicate projection is now a duplicate of something with five inputs.
+
+    ``stall_for`` re-computes what ``bind_mode`` already projected and hands it to
+    the shipped stall probe as ``projected_stall_ms``. Leaving it on a signature
+    that could not see the batch size would have the probe classify the observed
+    stall against a projection the admission check never made — a report about a
+    configuration that did not run.
+    """
+    monkeypatch.setenv(mod.ENV_MODE, "atomic")
+    args = dict(n_stale=2_000, n_repair=300, g_moves=1.3, g_sessions=1.7)
+    for batch_size in (mod.MIN_ADMITTED_BATCH, 25, mod.MAX_BATCH_SIZE):
+        env = mod.bind_mode("postgresql", batch_size=batch_size, **args)
+        stall = mod.stall_for(
+            mod.SQL_PG, mod._RunClock(), env=env, batch_size=batch_size, **args
+        )
+        assert stall is not None
+        assert stall.projected_ms == mod.project_atomic_stall_ms(
+            batch_size=batch_size, **args
+        )
+    # And the two ends really are different numbers, or the assertion above would
+    # hold for a stall_for that ignored its batch size entirely.
+    assert mod.project_atomic_stall_ms(
+        batch_size=mod.MIN_ADMITTED_BATCH, **args
+    ) != mod.project_atomic_stall_ms(batch_size=mod.MAX_BATCH_SIZE, **args)
 
 
 def test_teardown_reserve_divides_the_per_row_term_by_one_thousand():
@@ -487,12 +641,12 @@ def test_growth_factor_falls_back_to_bytes_when_the_relation_was_never_analyzed(
 
 def test_runtime_scan_budget_raises_when_the_relations_outgrew_their_sizing():
     """Batch mode has no stall projection, so this is the check that catches it."""
-    mod.assert_runtime_scan_budget(g_moves=1.0, g_sessions=1.0)  # the frozen shape fits
+    _scan_budget(g_moves=1.0, g_sessions=1.0)  # the frozen shape fits
     with pytest.raises(mod.MigrationError, match="live scan budget"):
-        mod.assert_runtime_scan_budget(g_moves=100.0, g_sessions=1.0)
+        _scan_budget(g_moves=100.0, g_sessions=1.0)
     with pytest.raises(mod.MigrationError, match="live scan budget"):
         # game_sessions ALONE — the relation the session_moves terms never touch.
-        mod.assert_runtime_scan_budget(g_moves=1.0, g_sessions=2_000.0)
+        _scan_budget(g_moves=1.0, g_sessions=2_000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -753,7 +907,7 @@ def test_the_stall_anchor_arms_once_and_records_on_the_shipped_singleton():
     """
     migration_guard.migration_stall_probe.reset()
     clock = mod._RunClock(deadline_s=900)
-    projected = mod.project_atomic_stall_ms(n_stale=10, n_repair=10)
+    projected = mod.project_atomic_stall_ms(n_stale=10, n_repair=10, batch_size=_BATCH)
     stall = mod._AtomicStall(clock, n_stale=10, n_repair=10, projected_ms=projected)
     assert clock.atomic_deadline is None
 
@@ -1039,7 +1193,7 @@ def test_the_residual_stall_budget_needs_both_atomic_mode_and_postgresql():
     ``not env.per_batch`` is TRUE there: it cannot be the whole condition.
     """
     assert not mod.bind_mode(
-        "sqlite", n_stale=1, n_repair=1, g_moves=1.0, g_sessions=1.0
+        "sqlite", n_stale=1, n_repair=1, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
     ).per_batch
 
     def stall(bundle, env):
@@ -1049,6 +1203,7 @@ def test_the_residual_stall_budget_needs_both_atomic_mode_and_postgresql():
             env=env,
             n_stale=1,
             n_repair=1,
+            batch_size=_BATCH,
             g_moves=1.0,
             g_sessions=1.0,
         )
@@ -1067,7 +1222,9 @@ def test_the_stall_gate_leaves_the_sqlite_clock_with_one_deadline(tmp_path):
         _seed_session(conn, "s-1", plies=INTACT_PLIES)
     with eng.connect() as conn:
         clock = mod._RunClock()
-        env = mod.bind_mode("sqlite", n_stale=1, n_repair=0, g_moves=1.0, g_sessions=1.0)
+        env = mod.bind_mode(
+            "sqlite", n_stale=1, n_repair=0, batch_size=_BATCH, g_moves=1.0, g_sessions=1.0
+        )
         with mod._ComputeWatchdog() as watchdog:
             mod._Runner(
                 conn,
@@ -1081,6 +1238,7 @@ def test_the_stall_gate_leaves_the_sqlite_clock_with_one_deadline(tmp_path):
                     env=env,
                     n_stale=1,
                     n_repair=0,
+                    batch_size=_BATCH,
                     g_moves=1.0,
                     g_sessions=1.0,
                 ),

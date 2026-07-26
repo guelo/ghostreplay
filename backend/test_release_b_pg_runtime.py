@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import pathlib
 import re
+import statistics
 import threading
 import time
 import uuid
@@ -762,6 +763,431 @@ def test_pg_backfill_issues_one_selection_sweep_and_one_convergence_count_per_pa
 
 
 # ---------------------------------------------------------------------------
+# 3b. The sweep model, against a real sweep (g-b-sweep-batch-cost).
+#
+# The three tests below are the only place the page FORMULA, the frozen pair, and
+# an actually-executed sweep meet. Everything else about the model is arithmetic
+# over recorded numbers; this is where it touches PostgreSQL.
+# ---------------------------------------------------------------------------
+
+
+def _observed_sweep_pages(conn, trace, batch_size):
+    """The page count the RUNNER walked, from its own statement markers."""
+    before = len(trace.events)
+    _run_phase(conn, "backfill", env=mod.ATOMIC_ENV, batch_size=batch_size)
+    markers = [
+        v
+        for k, v in trace.events[before:]
+        if k == "stmt" and v in ("ghostreplay:select_batch_first", "ghostreplay:select_batch")
+    ]
+    return len(markers)
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_sweep_page_count_matches_the_model(pg_migration_db, monkeypatch):
+    """``ceil(n_stale / batch_size) + 1`` against the runner's ACTUAL paging.
+
+    The whole model hangs off that formula: it is what the atomic projection, the
+    import-time budget and the runtime recheck all price the sweep from. Asserted
+    against real statements rather than derived twice, and the ``+1`` — the empty
+    page that terminates the sweep — is included precisely because it is the term
+    an off-by-one would land on.
+
+    Atomic mode, so selection is UNLOCKED and one pass drains the population: the
+    page count is exact rather than an estimate. Each batch size gets its own
+    freshly seeded population, because the pass consumes the one it walks.
+    """
+    url = pg_migration_db
+    eng = _at_previous_head(url, monkeypatch)
+    for i, (n_stale, batch_size) in enumerate(
+        [(7, 1), (7, 2), (7, 3), (7, 7), (7, 1_000), (1, 1), (0, 1)]
+    ):
+        with eng.begin() as conn:
+            conn.execute(text("DELETE FROM session_moves"))
+            conn.execute(text("DELETE FROM game_sessions"))
+            if n_stale:
+                _seed_stale(conn, n_stale, user_id=950_300 + i)
+        with eng.connect() as conn, _Trace(conn) as trace:
+            conn.commit()
+            observed = _observed_sweep_pages(conn, trace, batch_size)
+        assert observed == mod.backfill_sweep_pages(
+            n_stale=n_stale, batch_size=batch_size
+        ), (n_stale, batch_size, observed)
+    eng.dispose()
+
+
+def _time_sweeps(eng, batch_size, trials):
+    """EVERY trial's duration, and the pages they all walked.
+
+    Timed through the harness's own ``_sweep_once`` — the function that produced
+    the evidence the constants are fitted to — so this measures the same unit the
+    model prices rather than a second implementation of it.
+
+    The trials are returned rather than reduced here. A caller that wants coverage
+    wants the maximum; a caller comparing two page counts must PAIR them by trial
+    (see ``_sweep_rounds``), and it cannot do that from a maximum that has already
+    forgotten which trial it came from.
+    """
+    from scripts import size_accuracy_backfill as harness
+
+    durations, pages = [], set()
+    with eng.connect() as conn:
+        for _ in range(trials):
+            ms, walked = harness._sweep_once(conn, batch_size)
+            durations.append(ms)
+            pages.add(walked)
+    assert len(pages) == 1, pages  # nothing mutates, so every trial walks the same pages
+    return durations, pages.pop()
+
+
+def _sweep_rounds(eng, batch_sizes, *, rounds, warmup):
+    """Sweep every batch size once per round, BOUSTROPHEDON, after a warm-up round.
+
+    Returns ``{pages: [ms per retained round]}`` — the lists are index-aligned, so
+    entry ``k`` of two different page counts came from the SAME round, minutes
+    apart at most, on one connection.
+
+    That alignment is the point. A slope taken between two page counts is only a
+    slope if both readings describe the same machine state: subtracting summary
+    statistics sampled independently (two maxima, say) lets a single slow reading
+    at the low end SUPPRESS the segment above it and a single slow reading in the
+    reference range INFLATE the budget — both in the direction that hides
+    nonlinearity, which is the one thing this sampling exists to detect.
+
+    Sweeping in rounds rather than all trials of one size back to back also spreads
+    any drift in host load across every page count instead of concentrating it in
+    whichever size happened to run during it. The warm-up round is discarded whole:
+    the first sweep of each size pays for cold cache and a cold plan, and at the
+    cheap end that overhead is a large fraction of a small reading.
+
+    **The order REVERSES every round**, and that is load-bearing rather than tidy.
+    A fixed order confounds position-in-round with page count perfectly: if the
+    biggest page counts always run last, any within-round drift is indistinguishable
+    from a page-count effect. Pairing and medians cannot touch that, because it is
+    not noise — it is the same bias in every round, and repeating the run does not
+    average it away. Worse, the plausible drift here (residual cache warming) makes
+    LATE sweeps cheaper, so a fixed ascending order biases the beyond-domain slopes
+    DOWN: it could only ever mask the nonlinearity this gate exists to find.
+
+    Alternating forward and reverse fixes it deterministically — no shuffling, so
+    the run stays reproducible, and pairing is untouched since every size still runs
+    exactly once per round. With an EVEN number of retained rounds every batch size
+    occupies each end equally often, so all of them share one mean position and a
+    monotone within-round drift cancels in the median instead of accumulating. That
+    balance is asserted rather than argued: ``rounds`` must be even, and the summed
+    positions must come out identical for every size.
+    """
+    from scripts import size_accuracy_backfill as harness
+
+    assert rounds % 2 == 0, rounds  # or forward/reverse do not cancel
+    forward = list(batch_sizes)
+    samples: dict[int, list[float]] = {}
+    pages_of: dict[int, int] = {}
+    positions: dict[int, list[int]] = {b: [] for b in forward}
+    with eng.connect() as conn:
+        for r in range(warmup + rounds):
+            this_round = forward if r % 2 == 0 else forward[::-1]
+            for position, batch_size in enumerate(this_round):
+                ms, walked = harness._sweep_once(conn, batch_size)
+                seen = pages_of.setdefault(batch_size, walked)
+                assert walked == seen, (batch_size, walked, seen)
+                if r >= warmup:
+                    samples.setdefault(walked, []).append(ms)
+                    positions[batch_size].append(position)
+    assert all(len(v) == rounds for v in samples.values()), samples
+    balance = {b: sum(p) for b, p in positions.items()}
+    assert len(set(balance.values())) == 1, balance  # every size, same mean position
+    return samples, pages_of
+
+
+_median = statistics.median
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_frozen_sweep_model_covers_a_live_sweep(pg_migration_db, monkeypatch):
+    """The shipped pair, against a sweep that actually ran.
+
+    Fixture-scale, and that is stated rather than hidden: a forty-row relation is
+    not production. What it proves is the shape — that the frozen pair, evaluated
+    at the page count a real sweep walked and at that relation's own growth factor,
+    covers what the sweep cost.
+
+    COVERS, not "covers 3x". §2.1's invariant is ``margined_model >= 3 x max_i``
+    and it holds BY CONSTRUCTION for the fitted points, since both literals are
+    ``ceil``-ed up from ``3 x`` the LP solution; it is asserted where that is true
+    and checkable, over every retained point of every artifact, by
+    ``test_release_b_sizing.py::test_frozen_sweep_model_covers_every_retained_measurement``.
+    Demanding it of a LIVE sweep is a different and much stronger claim: dividing
+    the margined model by 3 leaves the RAW fit — coefficients measured on another
+    machine, with no margin at all — and asks it to cover this host's worst reading.
+    That is the same "compare this host to a frozen constant with zero margin"
+    defect the endpoint gate below documents, in its purest form, and it behaved
+    accordingly: it passed alone and failed under full-gate load, where a 40-row
+    sweep picked up a scheduling stall (the whole test runs in 0.4s unloaded, so
+    the 3x form was budgeting ~24 ms for a two-page sweep).
+
+    So the live claim is the one a live sweep can carry, and the same one the
+    endpoint gate makes: the already-margined pair covers what the sweep cost,
+    leaving the 3x for host variance — which is what a margin is for. It still
+    fails if the frozen pair genuinely under-prices a real sweep; it no longer
+    fails when this host hiccups inside the margin.
+    """
+    url = pg_migration_db
+    eng = _at_previous_head(url, monkeypatch)
+    with eng.begin() as conn:
+        _seed_stale(conn, 40, user_id=950_310)
+        conn.execute(text("ANALYZE game_sessions"))
+
+    clock = mod._RunClock()
+    with eng.connect() as conn:
+        _, g_sessions, dims = mod.probe_growth(conn, mod.SQL_PG, clock)
+        conn.rollback()
+
+    for batch_size in (1, 7, mod.MAX_BATCH_SIZE):
+        durations, pages = _time_sweeps(eng, batch_size, trials=3)
+        observed_max = max(durations)  # coverage: the worst trial is the one to cover
+        modelled = mod.backfill_sweep_ms(pages=pages, g_sessions=g_sessions)
+        assert modelled >= observed_max, (batch_size, pages, modelled, observed_max, dims)
+    eng.dispose()
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_synthesize_sessions_establishes_the_stale_population_it_promises(
+    pg_migration_db, monkeypatch
+):
+    """The flag targets ``N_stale``, not ``count(*)``, and stamps what it grew.
+
+    The sweep's page count is ``ceil(N_stale / batch_size) + 1``, so BOTH of the
+    obvious shortcuts miss, and both miss silently:
+
+    * counting all of ``game_sessions`` rather than the ended-visible set clones
+      too few, because non-visible rows are in the count but not in the sweep;
+    * stamping only the CLONES leaves the originals out of the population, and on
+      a production restore every original is already at version 1.
+
+    The fixture reproduces both at once — ended-visible rows that are already
+    stamped, plus non-visible rows padding ``count(*)`` — and asserts the
+    postcondition the endpoint measurement depends on: exactly ``target`` stale
+    rows, and a real sweep at ``MIN_ADMITTED_BATCH`` that walks ``target + 1``
+    pages.
+    """
+    from scripts import size_accuracy_backfill as harness
+
+    url = pg_migration_db
+    eng = _at_previous_head(url, monkeypatch)
+    target = 40
+    with eng.begin() as conn:
+        # Ended-visible but ALREADY STAMPED: in the clone source set, out of the
+        # stale population until this flag puts it back.
+        for i in range(6):
+            _seed_pg_session(
+                conn, uuid.uuid4(), status="ended", mode="normal", drill_state=None,
+                version=1, accuracy=INTACT_ACCURACY, plies=INTACT_PLIES, user_id=950_330 + i,
+            )
+        # NOT ended, so not visible and not swept — but counted by count(*).
+        for i in range(9):
+            _seed_pg_session(
+                conn, uuid.uuid4(), status="active", mode="normal", drill_state=None,
+                version=None, plies=INTACT_PLIES, user_id=950_340 + i,
+            )
+        grown = harness.synthesize_sessions(conn, target)
+        conn.execute(text("ANALYZE game_sessions"))
+
+    assert grown["visible_before"] == 6, grown
+    assert grown["cloned"] == target - 6, grown
+    assert grown["visible_after"] == target, grown
+    assert grown["n_stale"] == target, grown
+    # The non-visible rows are still there, and still outside the population — the
+    # proof that the count was taken over the predicate rather than over the table.
+    assert grown["total_rows_after"] == target + 9, grown
+
+    with eng.connect() as conn:
+        assert mod.remaining_scan(conn, mod.BACKFILL_REMAINING_SQL)[0] == target
+        conn.rollback()
+    _durations, pages = _time_sweeps(eng, mod.MIN_ADMITTED_BATCH, trials=1)
+    assert pages == target + 1 == mod.backfill_sweep_pages(
+        n_stale=target, batch_size=mod.MIN_ADMITTED_BATCH
+    )
+    eng.dispose()
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
+    pg_migration_db, monkeypatch
+):
+    """THE ENDPOINT GATE — the one test that is not extrapolating.
+
+    The measured sweep domain reaches 1,647 pages
+    (``docs/sizing/sweep_batch_domain_20260725.json``), while the import-time
+    budget evaluates ``IMPORT_WORST_CASE_SWEEP_PAGES`` = 6,001 and the atomic
+    rejection boundary sits near 5,137. Everything between is LINEAR
+    EXTRAPOLATION, and the upper-envelope construction says nothing there.
+
+    This executes the endpoint: ``SIZED_TOTAL_ROWS`` stale rows swept at
+    ``MIN_ADMITTED_BATCH``, which is exactly the configuration the import-time
+    worst case declares. It is small-relation rather than production-sized, and
+    that is the right shape for what it can prove — the per-page term is statement
+    startup, which does not scale with the relation, so a green run here bounds
+    the SLOPE at the endpoint and says nothing about the scan component.
+
+    **The extrapolation claim is LINEARITY, and nothing here may compare this host
+    against a frozen constant.** Two forms were tried and both fail as tests of it:
+
+    * ``model(6001) >= 3 x observed``. The model IS 3x a fit, so this reduces to
+      ``fitted_slope >= this host's slope`` — a comparison of two machines with
+      zero margin. Measured: it flips between passing and failing on repeated runs
+      of this very fixture.
+    * ``marginal_slope <= MARGINED_US_BACKFILL_SWEEP_PER_PAGE``. Same defect one
+      step removed: a perfectly linear host at 600 µs per statement fails it, and a
+      genuinely nonlinear host under 518 passes. A single marginal slope over a
+      4,800-page interval also averages away a late spike, which is the shape a
+      failure of linearity would actually take.
+
+    What is asserted instead is entirely internal to this host: the slope BEYOND
+    the measured domain against the slope INSIDE it, both measured here, minutes
+    apart, over the same population and the same statement. A host that is
+    uniformly slow moves both and the ratio is unchanged; a host whose per-page
+    cost degrades past 1,647 pages moves only the numerator. And the beyond-domain
+    side is checked SEGMENT BY SEGMENT rather than as one average, so a spike in
+    the last stretch cannot hide behind the cheap pages before it.
+
+    **Every slope is PAIRED and then taken robustly**, because a segmented ratio
+    built out of independently sampled summary statistics is not a segmented test.
+    Subtracting two maxima drawn from unrelated trials lets one slow reading at the
+    low end suppress the segment above it, and one slow reading in the reference
+    range inflate the budget — both of which HIDE a late nonlinearity, which is the
+    only thing this test exists to find. So: sweeps are interleaved round-robin
+    after a discarded warm-up round (``_sweep_rounds``), each slope subtracts two
+    readings FROM THE SAME ROUND, and what is compared is the MEDIAN over rounds —
+    a statistic no single outlier on either side can move. Under the linear model
+    every such pair estimates the same per-page cost, since the fixed per-sweep
+    overhead cancels in the difference; the in-domain reference pools all
+    sufficiently wide in-domain pairs to make that estimate as stable as the data
+    allows.
+
+    ``_MIN_SLOPE_SPAN_PAGES`` keeps a slope from being divided by a span too short
+    to survive it: at 6 pages apart, per-trial noise IS the numerator.
+
+    The tolerance is the revision's own ``MARGIN``: the frozen pair claims 3x
+    covers variance, so the claim under test is that extrapolating past the
+    measured domain does not consume more than that margin's worth of slope.
+
+    Absolute coverage is a SEPARATE assertion, at the level it can honestly hold:
+    the frozen pair, already margined 3x, covers what the endpoint sweep cost. That
+    leaves the 3x available for host variance, which is what a margin is for.
+
+    WHAT THIS DOES NOT DO. It measures linearity on THIS host and this fixture, and
+    that is all — a five-thousand-row relation of clones is neither production-width
+    nor production-sized, so it does not convert the extrapolation into a measured
+    claim about the shipped constants. The assumption stands until
+    ``g-b-sweep-endpoint-measure`` measures the endpoint on a copy sized to the
+    frozen basis; what this gate rules out is the specific way the extrapolation
+    could be wrong that is testable without one.
+
+    The population is established with the shipped ``--synthesize-sessions`` path
+    rather than seeded row by row: the clones carry no ``session_moves`` rows,
+    which is exactly why that path is restricted to sweep-domain work, and the
+    sweep statement reads ``game_sessions`` alone.
+
+    Pinned in ``pg_gate_plugin.REQUIRED_PG_GATE_TESTS`` so it cannot silently stop
+    being collected — which for an extrapolation gate is the failure that matters.
+    """
+    from scripts import size_accuracy_backfill as harness
+
+    url = pg_migration_db
+    eng = _at_previous_head(url, monkeypatch)
+    with eng.begin() as conn:
+        _seed_stale(conn, 5, user_id=950_320)
+        # The flag establishes the population itself — clones the ended-visible set
+        # up to the target AND stamps the whole of it stale — and hard-fails if the
+        # live count misses. No post-hoc UPDATE here: one of these two has to own
+        # the postcondition, and a test that fixes it up afterwards cannot notice
+        # when the harness stops producing it.
+        grown = harness.synthesize_sessions(conn, mod.SIZED_TOTAL_ROWS)
+        conn.execute(text("ANALYZE game_sessions"))
+    assert grown["n_stale"] == mod.SIZED_TOTAL_ROWS, grown
+
+    clock = mod._RunClock()
+    with eng.connect() as conn:
+        n_stale = mod.remaining_scan(conn, mod.BACKFILL_REMAINING_SQL)[0]
+        _, g_sessions, dims = mod.probe_growth(conn, mod.SQL_PG, clock)
+        conn.rollback()
+    assert n_stale == mod.SIZED_TOTAL_ROWS
+
+    # The runbook's eight-point domain, on this host, swept in alternating order.
+    # Six retained rounds rather than MIN_SWEEP_TRIALS: this is a GATE over a frozen
+    # pair, not evidence steering a fit, and 6,001 pages per round is the expensive
+    # part. Six is enough for a median that no single reading can move — the
+    # comparisons below need that, not a tail estimate — and EVEN, which is what
+    # makes the forward/reverse alternation balance position exactly.
+    samples, pages_of = _sweep_rounds(
+        eng, (1_000, 500, 100, 25, 10, 5, 2, 1), rounds=6, warmup=1
+    )
+    for batch_size, pages in pages_of.items():
+        assert pages == mod.backfill_sweep_pages(
+            n_stale=n_stale, batch_size=batch_size
+        ), (batch_size, pages)
+    assert max(samples) == mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
+
+    domain_max_pages = 1_647  # what the shipped artifact actually measured
+    _MIN_SLOPE_SPAN_PAGES = 500
+    inside = sorted(p for p in samples if p <= domain_max_pages)
+    beyond = sorted(p for p in samples if p > domain_max_pages)
+    assert len(inside) >= 2 and len(beyond) >= 1, sorted(samples)
+
+    def _paired_slopes_us(lo, hi):
+        """One slope per round, each subtracting two readings from THAT round."""
+        return [
+            (hi_ms - lo_ms) / (hi - lo) * 1000
+            for lo_ms, hi_ms in zip(samples[lo], samples[hi])
+        ]
+
+    # The in-domain reference pools EVERY in-domain pair wide enough to divide out
+    # per-trial noise, across every round, and takes the median of the lot. Under
+    # the linear model each of those pairs estimates the same per-page cost — the
+    # fixed per-sweep overhead cancels in a difference — so pooling them is more
+    # data for one quantity, not an average of different ones. Median rather than
+    # max: a maximum over pairs is exactly the inflated reference that would let a
+    # real slowdown past the domain pass.
+    reference_pairs = [
+        (lo, hi)
+        for i, lo in enumerate(inside)
+        for hi in inside[i + 1:]
+        if hi - lo >= _MIN_SLOPE_SPAN_PAGES
+    ]
+    assert reference_pairs, (inside, _MIN_SLOPE_SPAN_PAGES)
+    in_domain_us = _median(
+        [s for lo, hi in reference_pairs for s in _paired_slopes_us(lo, hi)]
+    )
+    assert in_domain_us > 0, (in_domain_us, samples)
+
+    # Every step past the measured domain, on its own. The first crosses the
+    # boundary; the last is the endpoint's own stretch, which is where a late
+    # nonlinearity would live and where an averaged slope would bury it.
+    for lo, hi in zip([inside[-1]] + beyond, beyond):
+        assert hi - lo >= _MIN_SLOPE_SPAN_PAGES, (lo, hi)  # or the slope means nothing
+        beyond_us = _median(_paired_slopes_us(lo, hi))
+        assert beyond_us <= harness.MARGIN * in_domain_us, (
+            (lo, hi),
+            beyond_us,
+            in_domain_us,
+            samples,
+        )
+
+    # Separately, and against the frozen pair rather than against this host: the
+    # already-margined model covers the WORST round's endpoint sweep. A maximum is
+    # right here and wrong above — coverage is a claim about the tail, a slope is
+    # not.
+    endpoint_pages = max(samples)
+    endpoint_max_ms = max(samples[endpoint_pages])
+    modelled = mod.backfill_sweep_ms(pages=endpoint_pages, g_sessions=g_sessions)
+    assert modelled >= endpoint_max_ms, (
+        endpoint_pages, modelled, endpoint_max_ms, dims
+    )
+    eng.dispose()
+
+
+# ---------------------------------------------------------------------------
 # 4. The materialization's transaction contract is mode-split.
 # ---------------------------------------------------------------------------
 
@@ -1386,14 +1812,29 @@ def test_pg_atomic_cumulative_lock_waits_breach_the_residual_budget(
     is what extends a hold already open over every row locked so far, and that is
     what the residual budget bounds.
 
-    One SQLSTATE is deliberately NOT pinned. Once the residual budget falls below
-    ``ATOMIC_LOCK_WAIT_MS`` the two armed timeouts COINCIDE (``lock_timeout =
-    min(cap, remaining)``), so whether the terminal breach surfaces as 57014 or
-    55P03 is a race, and a test that pinned it would be pinning the race rather than
-    the budget. What is pinned is the budget: the armed values decrease across
-    batches, the breach happens at the remaining budget rather than at a fresh
-    allowance, no INDIVIDUAL wait exceeded the cap, nothing was stamped, and every
-    row lock came off.
+    HOW the breach surfaces is deliberately NOT pinned, and there are THREE ways,
+    not two. Once the residual budget falls below ``ATOMIC_LOCK_WAIT_MS`` the two
+    armed timeouts COINCIDE (``lock_timeout = min(cap, remaining)``), so 57014
+    against 55P03 is a race between two server-side cancellations. And when the
+    budget runs out in the gap BEFORE the next statement is armed, ``_arm`` refuses
+    to arm at all and raises Python-side with ``sqlstate=n/a`` — the revision's
+    documented ``_exhausted`` path, reached when ``remaining_ms <= 0``. Which of
+    the three wins is decided by microseconds against the wall clock: the same
+    budget, enforced either side of the statement boundary.
+
+    Pinning only the SQL pair therefore pinned the race rather than the budget, and
+    it failed intermittently under suite load — load shifts where in that gap the
+    clock lands, it does not change whether the budget held. What is pinned is the
+    budget: the armed values decrease across batches, the breach happens at the
+    remaining budget rather than at a fresh allowance, no INDIVIDUAL wait exceeded
+    the cap, nothing was stamped, and every row lock came off. The one thing the
+    ``n/a`` outcome would NOT witness — that an ARMED timeout really is what
+    cancels, at the value it was armed with — is not this test's claim, and is
+    pinned exactly and unambiguously elsewhere:
+    ``test_pg_validate_lock_timeout_does_not_leak_into_the_row_locks`` (55P03 at
+    ``ATOMIC_LOCK_WAIT_MS``) and
+    ``test_pg_a_permanently_locked_row_exhausts_the_pass_bound_with_the_exact_template``
+    (57014). Widening here costs that coverage nothing.
     """
     url = pg_migration_db
     eng = _at_previous_head(url, monkeypatch)
@@ -1458,7 +1899,10 @@ def test_pg_atomic_cumulative_lock_waits_breach_the_residual_budget(
     message = str(exc.value)
     assert "phase=backfill" in message
     sqlstate = re.search(r"sqlstate=(\S+)", message).group(1)
-    assert sqlstate in ("57014", "55P03"), message
+    # See the docstring: 57014 / 55P03 / n/a are the three faces of ONE budget
+    # expiring, and which one appears is a wall-clock race the suite's load can
+    # shift. The assertions around this one are what carry the claim.
+    assert sqlstate in ("57014", "55P03", "n/a"), message
 
     # The armed values draw on ONE budget: they decrease across the batches.
     armed = trace.armed_before("ghostreplay:guarded_update")
@@ -1722,20 +2166,24 @@ def test_pg_growth_in_neither_population_still_moves_the_growth_factors(
     # scan-budget recheck, once the growth is large enough.
     monkeypatch.setenv(mod.ENV_MODE, "atomic")
     huge = 10_000.0
+    batch_size = mod.DEFAULT_BATCH_SIZE
+    scan_budget = lambda **kw: mod.assert_runtime_scan_budget(  # noqa: E731
+        n_stale=n_stale_after, batch_size=batch_size, **kw
+    )
     with pytest.raises(mod.MigrationError, match="projected writer stall"):
         mod.bind_mode(
             "postgresql", n_stale=n_stale_after, n_repair=n_repair_after,
-            g_moves=huge, g_sessions=huge,
+            batch_size=batch_size, g_moves=huge, g_sessions=huge,
         )
     with pytest.raises(mod.MigrationError, match="live scan budget"):
-        mod.assert_runtime_scan_budget(g_moves=huge, g_sessions=1.0)
+        scan_budget(g_moves=huge, g_sessions=1.0)
     with pytest.raises(mod.MigrationError, match="live scan budget"):
-        mod.assert_runtime_scan_budget(g_moves=1.0, g_sessions=huge)
+        scan_budget(g_moves=1.0, g_sessions=huge)
     # Growth within the margin still admits the run.
-    mod.assert_runtime_scan_budget(g_moves=g_moves, g_sessions=g_sessions)
+    scan_budget(g_moves=g_moves, g_sessions=g_sessions)
     assert mod.bind_mode(
         "postgresql", n_stale=n_stale_after, n_repair=n_repair_after,
-        g_moves=g_moves, g_sessions=g_sessions,
+        batch_size=batch_size, g_moves=g_moves, g_sessions=g_sessions,
     ) is mod.ATOMIC_ENV
     eng.dispose()
 

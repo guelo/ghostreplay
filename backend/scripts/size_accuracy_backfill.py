@@ -74,13 +74,26 @@ Subcommands
     ``FOR NO KEY UPDATE NOWAIT`` on a row the batch held *acquires*. See
     "Why cancel-to-unlock and not teardown_ms" below.
 
+``--mode sweep-domain [--sweep-batch-sizes ...] [--synthesize-sessions N]``
+    The backfill selection SWEEP across the whole admissible batch-size domain.
+    The sweep is ``ceil(N_stale / batch_size) + 1`` pages of one pass, and
+    ``resolve_batch_size`` admits any size in
+    ``MIN_ADMITTED_BATCH..MAX_BATCH_SIZE``, so its cost is a FUNCTION of an
+    operator-chosen variable and no single scalar is honest across it
+    (g-b-sweep-batch-cost). Sweeps the population once per batch size, for
+    ``--scan-trials`` trials each — at least ``MIN_SWEEP_TRIALS``, enforced at
+    generation — and retains EVERY trial, because the failure that produced two
+    unreproducible fits was raw trials not being kept.
+
 ``--derive --measurement F [...] [--production-dimensions F]``
     Phase 2. Pure arithmetic over recorded measurement JSON: projects the
     snapshot numbers to production, applies the 3x margin, and emits the frozen
     constants, the batch-size provenance (every candidate tried, its observed
     maximum, and which bound won), the import-time invariants, and the Decision 1
     verdict — as JSON, for transcription into the runbook. Touches no database
-    and takes no ``--url``.
+    and takes no ``--url``. The sweep model is fitted here, as a two-variable LP
+    over every sweep-domain artifact offered, solved in frozen-basis coordinates
+    so points measured on different copies enter on their own bases.
 
 Why cancel-to-unlock and not ``teardown_ms``
 --------------------------------------------
@@ -111,7 +124,9 @@ import statistics
 import sys
 import threading
 import time
-from typing import Any, Callable
+from decimal import Decimal
+from fractions import Fraction
+from typing import Any, Callable, NamedTuple
 
 _BACKEND_DIR = pathlib.Path(__file__).resolve().parent.parent
 if str(_BACKEND_DIR) not in sys.path:
@@ -137,6 +152,17 @@ DEFAULT_CANCEL_TRIALS = 20
 #: whose maximum is a single outlier is visible as one.
 DEFAULT_SCAN_TRIALS = 5
 
+#: The trial floor for a sweep-domain point that STEERS the fit. A maximum over
+#: three trials is whatever the host happened to do — an ESTIMATE of a bound, not
+#: a bound — and the two directions that estimate can miss by are both on record:
+#: run B's 4-page maximum was a 13.60 ms outlier that fell to 4.94 ms on
+#: re-measurement, while eleven of its other twelve maxima ROSE. Enforced at
+#: GENERATION (``--mode sweep-domain`` refuses a smaller ``--scan-trials``) and
+#: again in ``derive``, and scoped to the OBJECTIVE set only: an under-trialled
+#: maximum must not steer a fit, but a bound still has to cover a number the host
+#: actually produced.
+MIN_SWEEP_TRIALS = 7
+
 
 def _revision_module():
     """The revision, loaded through Alembic — never re-implemented here.
@@ -150,6 +176,14 @@ def _revision_module():
 
 
 mod = _revision_module()
+
+#: The sweep-domain default. Spans ``MIN_ADMITTED_BATCH..MAX_BATCH_SIZE`` — the
+#: exact range ``resolve_batch_size`` admits — densely at the expensive end, where
+#: the page count, and therefore the cost, moves fastest. Named for the BATCH SIZE
+#: an operator sets, never for a page count: pages are DERIVED, and the harness
+#: records the count each sweep actually walked so ``ceil(n / b) + 1`` can be
+#: checked against the runner's real paging rather than assumed.
+DEFAULT_SWEEP_BATCH_SIZES = (1, 2, 5, 10, 25, 50, 100, 250, 500, mod.MAX_BATCH_SIZE)
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +496,138 @@ def synthesize_stamped(conn) -> int:
     ).rowcount
 
 
+#: Columns a CLONE must not copy from its source row. ``id`` gets a fresh UUID
+#: (the clone is a new row, not a duplicate key); the two accuracy columns are
+#: nulled so every clone lands in the stale population; and the two blunder
+#: references are dropped because a clone has no blunder of its own and copying a
+#: reference would attribute one session's recorded blunder to N of them.
+_CLONE_OVERRIDES = {
+    "id": "gen_random_uuid()",
+    "player_accuracy": "NULL",
+    "player_accuracy_algo_version": "NULL",
+    "recorded_blunder_id": "NULL",
+    "blunder_idempotency_key": "NULL",
+}
+
+
+def synthesize_sessions(conn, target: int) -> dict[str, int]:
+    """Establish a STALE ENDED-VISIBLE population of exactly ``target`` rows.
+
+    The population, not the relation. What the sweep walks is
+    ``N_stale = |{ended-visible rows at version NULL or < 1}|``, and
+    ``pages = ceil(N_stale / batch_size) + 1`` is derived from THAT — so a flag
+    that grew ``count(*)`` to ``target`` would miss on both axes at once. On the
+    documented restore (4,184 rows, 1,646 of them ended-visible, production fully
+    stamped) counting all rows clones only 1,816, and stamping only the clones
+    leaves the 1,646 originals at version 1: ``N_stale`` comes out 1,816 and the
+    sweep walks 1,817 pages instead of the promised 6,001. Both errors are silent,
+    and both under-shoot the endpoint by more than 3x.
+
+    So the count is taken over the ended-visible predicate, and the whole
+    ended-visible set — clones AND originals — is stamped stale through
+    :func:`synthesize_stale`, the one definition of "stale" this harness has. The
+    postcondition is checked rather than assumed: this returns only if the live
+    backfill population count agrees with ``target``.
+
+    The sweep domain's endpoint — ``ceil(SIZED_TOTAL_ROWS / MIN_ADMITTED_BATCH) + 1``
+    pages — is not reachable on a production-sized restore: a 1,646-row stale
+    population tops out at 1,647 pages, below both the atomic rejection boundary
+    and the page count the import-time budget evaluates. Growing it needs new ROWS,
+    and they have to be production-shaped or the measurement prices a different
+    statement: the clones keep their source's ``pgn``, ``player_color`` and every
+    other column, so page width and predicate selectivity stay what production's
+    are.
+
+    The clones have **no ``session_moves`` rows**, which makes a copy carrying them
+    valid for the SWEEP DOMAIN and for nothing else. The sweep statement reads
+    ``game_sessions`` alone (``SELECT id, player_color, pgn FROM game_sessions
+    WHERE …``), so it is measured exactly; every ``session_moves``-scaled term and
+    the whole repair population on such a copy are meaningless. The measurement
+    therefore records ``sessions_synthesized: true`` and ``derive`` hard-fails if a
+    measurement carrying that flag is offered as any other kind.
+
+    The column list is read from the catalog rather than restated here, so a schema
+    change cannot leave a stale copy of it silently dropping a NOT NULL column.
+    """
+    columns = [
+        r[0]
+        for r in conn.execute(
+            text(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'game_sessions'
+                ORDER BY ordinal_position
+                """
+            )
+        )
+    ]
+    if not columns:
+        raise SystemExit("game_sessions has no columns in the current schema")
+    visible = lambda: int(  # noqa: E731
+        conn.execute(
+            text(f"SELECT count(*) FROM game_sessions g WHERE {mod.VISIBLE_ENDED_SQL}")
+        ).scalar()
+        or 0
+    )
+    sources = visible()
+    if sources == 0:
+        raise SystemExit(
+            "--synthesize-sessions has nothing to clone: this copy holds no ended-visible "
+            "game_sessions rows, and a clone of nothing is not production-shaped"
+        )
+    if sources > target:
+        # Refused rather than trimmed. Deleting real sessions to hit a page count
+        # is a different operation with different provenance, and silently
+        # returning a copy LARGER than the endpoint would report a page count the
+        # measurement never walked.
+        raise SystemExit(
+            f"--synthesize-sessions {target} is below this copy's ended-visible population "
+            f"({sources}); this flag GROWS a population and will not delete rows to shrink one"
+        )
+    cloned = 0
+    wanted = target - sources
+    if wanted:
+        projected = ", ".join(_CLONE_OVERRIDES.get(c, f"g.{c}") for c in columns)
+        # ceil(wanted / sources) whole copies of the ended-visible set, cut back to
+        # exactly `wanted` by the LIMIT. Sized this way rather than as one product
+        # with a large LIMIT because the latter materializes sources x wanted rows
+        # to throw nearly all of them away.
+        cloned = conn.execute(
+            text(
+                f"""
+                INSERT INTO game_sessions ({", ".join(columns)})
+                SELECT {projected}
+                FROM game_sessions g
+                CROSS JOIN generate_series(1, :copies) AS s(i)
+                WHERE {mod.VISIBLE_ENDED_SQL}
+                LIMIT :wanted
+                """
+            ).bindparams(copies=-(-wanted // sources), wanted=wanted)
+        ).rowcount
+    # Clones arrive at version NULL already; this is what takes the ORIGINALS —
+    # which on a production restore are fully stamped — into the population too.
+    stale_rows = synthesize_stale(conn)
+    n_stale = mod.remaining_scan(conn, mod.BACKFILL_REMAINING_SQL)[0]
+    if n_stale != target:
+        raise SystemExit(
+            f"--synthesize-sessions {target} left N_stale = {n_stale} "
+            f"(ended-visible before: {sources}, cloned: {cloned}, stamped stale: {stale_rows}). "
+            "The sweep's page count is ceil(N_stale / batch_size) + 1, so a population that "
+            "missed its target measures a different page count than the one it reports"
+        )
+    return {
+        "target": target,
+        "visible_before": sources,
+        "cloned": cloned,
+        "visible_after": visible(),
+        "stale_rows": stale_rows,
+        "n_stale": n_stale,
+        "total_rows_after": int(
+            conn.execute(text("SELECT count(*) FROM game_sessions")).scalar() or 0
+        ),
+    }
+
+
 def analyze_after_synthesis(conn) -> None:
     """MANDATORY after any synthesis, and not a tidiness step.
 
@@ -562,29 +728,14 @@ def time_scan_statements(conn, trials: int) -> dict[str, dict[str, float]]:
             "median_ms": statistics.median(durations),
         }
 
-    # One full selection SWEEP: every SELECT_BATCH_* page of one pass, timed as ONE
-    # unit, because that is the unit the constant prices — the atomic projection
-    # charges one sweep per pass, not one page. Unlocked variants and no mutation,
-    # so the sweep is repeatable: nothing it selects leaves the population.
-    sweeps = []
-    for _ in range(trials):
-        started = time.perf_counter()
-        pages = 0
-        last_id: str | None = None
-        while True:
-            page = _select_page(conn, last_id, mod.MAX_BATCH_SIZE, locked=False)
-            pages += 1
-            if not page:
-                break
-            last_id = str(page[-1].id)
-        sweeps.append(_ms(started))
-    out["backfill_select_sweep"] = {
-        "n": trials,
-        "cold_ms": sweeps[0],
-        "max_ms": max(sweeps),
-        "median_ms": statistics.median(sweeps),
-        "pages": pages,
-    }
+    # The selection SWEEP is deliberately NOT timed here. It is not a scan-statement
+    # timing at all: it is a sequence of ceil(N_stale / batch_size) + 1 pages, so its
+    # cost is a FUNCTION of the operator-chosen batch size rather than a scalar this
+    # loop could freeze. Timing it once, at whatever MAX_BATCH_SIZE happens to be
+    # frozen while the same run re-derives MAX_BATCH_SIZE, produced a number that
+    # was 21x under the cost at the batch size the runtime also admits. It comes
+    # from `--mode sweep-domain`, which measures the whole domain — see
+    # `run_sweep_domain`.
     return out
 
 
@@ -608,7 +759,9 @@ def scan_stmt_max_ms(scans: dict[str, dict[str, float]]) -> float:
     """
     complete = max(scans[name]["max_ms"] for name in scan_bearing_statements())
     bare = scans.get("_diagnostic_bare_detector", {}).get("max_ms", 0.0)
-    return max(complete, bare)
+    # float() at the boundary: the exact-decimal intake is for the sweep fit, and a
+    # Decimal leaking into the projection arithmetic is a TypeError two screens away.
+    return float(max(complete, bare))
 
 
 def scan_plan_inversion(scans: dict[str, dict[str, float]]) -> bool:
@@ -696,6 +849,148 @@ def _select_page(conn, last_id: str | None, batch_size: int, *, locked: bool):
     else:
         stmt = text(next_sql).bindparams(last_id=last_id, batch_size=batch_size)
     return conn.execute(stmt).all()
+
+
+def _sweep_once(conn, batch_size: int) -> tuple[float, int]:
+    """One full selection sweep — every page of one pass — timed as ONE unit.
+
+    That is the unit the model prices: the atomic projection charges one sweep per
+    pass, not one page. Unlocked variants and no mutation, so the sweep is
+    repeatable — nothing it selects leaves the population, which is what lets the
+    same population be swept seven times at each of ten batch sizes.
+    """
+    started = time.perf_counter()
+    pages = 0
+    last_id: str | None = None
+    while True:
+        page = _select_page(conn, last_id, batch_size, locked=False)
+        pages += 1
+        if not page:
+            return _ms(started), pages
+        last_id = str(page[-1].id)
+
+
+def resolve_sweep_batch_sizes(requested: list[int] | None) -> list[int]:
+    """Deduplicated and sorted, and every size inside the admitted range.
+
+    Deduplication is load-bearing rather than tidy: ``MAX_BATCH_SIZE`` is derived,
+    so an explicit ``1000`` beside a ``MAX_BATCH_SIZE`` that currently IS 1,000
+    would otherwise measure one point twice and enter the fit as two constraints
+    with the same page count — double-weighting one host reading in the objective.
+    """
+    sizes = sorted(set(requested or DEFAULT_SWEEP_BATCH_SIZES))
+    outside = [s for s in sizes if not mod.MIN_ADMITTED_BATCH <= s <= mod.MAX_BATCH_SIZE]
+    if outside:
+        raise SystemExit(
+            f"--sweep-batch-sizes {outside} is outside the range resolve_batch_size admits "
+            f"({mod.MIN_ADMITTED_BATCH}..{mod.MAX_BATCH_SIZE}); the domain is the domain the "
+            "runtime accepts, not an arbitrary one"
+        )
+    return sizes
+
+
+def agreed_sweep_pages(walked: list[int], *, formula: int, batch_size: int) -> int:
+    """The one page count every trial walked, or a hard failure.
+
+    A fit point is a PAIR — ``(pages, max_ms)`` — and both halves have to come from
+    the same sweep. Taking ``max(walked)`` and ``max(durations)`` independently
+    builds a point no trial ever produced: the largest page count from one trial
+    beside the slowest time from another. Against the envelope that is strictly
+    worse than either real point, because a higher page count with a lower cost
+    RELAXES the constraint ``A / N + b x pages >= max_ms``, so the fictitious pair
+    under-constrains the bound in exactly the direction a bound must not move.
+
+    Averaging or majority-voting would be the same error more quietly. Nothing
+    mutates during an unlocked sweep, so a spread means either a concurrent writer
+    on a copy that is supposed to be disposable, or a real disagreement between
+    ``backfill_sweep_pages`` and the runner's paging — and both are reasons to
+    refuse the measurement rather than to record a number for it. The per-trial
+    counts are not retained in the artifact, so this is the only place the
+    disagreement could ever be seen.
+    """
+    observed = sorted(set(walked))
+    if len(observed) != 1:
+        raise SystemExit(
+            f"--mode sweep-domain at batch_size={batch_size} walked {observed} pages across its "
+            "trials. Nothing mutates during an unlocked sweep, so the population moved under it "
+            "— re-measure on a copy with no other writer. A point pairing one trial's page count "
+            "with another trial's timing is not a measurement"
+        )
+    if observed[0] != formula:
+        raise SystemExit(
+            f"--mode sweep-domain at batch_size={batch_size} walked {observed[0]} pages but "
+            f"backfill_sweep_pages predicts {formula}. The model prices every consumer from that "
+            "formula, so a disagreement invalidates the projection and the budget alike, not just "
+            "this point"
+        )
+    return observed[0]
+
+
+def run_sweep_domain(
+    engine, *, batch_sizes: list[int], trials: int, synthesized: bool
+) -> dict[str, Any]:
+    """The sweep across the whole admissible batch-size domain, every trial kept.
+
+    ``MIN_SWEEP_TRIALS`` is enforced HERE, at generation, so everything this
+    harness produces from now on is objective-eligible and the coverage-only path
+    exists solely for the legacy artifact that predates it.
+
+    ``pages`` is recorded PER POINT, from the sweep that actually walked them, and
+    is required to agree across every trial AND with the formula — see
+    :func:`agreed_sweep_pages`. The previous single-sweep block leaked the last
+    trial's loop variable into the output, so its ``pages`` belonged to whichever
+    trial happened to run last.
+    """
+    if trials < MIN_SWEEP_TRIALS:
+        raise SystemExit(
+            f"--mode sweep-domain needs --scan-trials >= {MIN_SWEEP_TRIALS}, got {trials}: "
+            "a maximum over fewer trials is an estimate of a bound rather than a bound, and "
+            "must not steer the fit"
+        )
+    sizes = resolve_sweep_batch_sizes(batch_sizes)
+    with engine.connect() as conn:
+        dims_before = read_dimensions(conn)
+        pops_before = read_populations(conn)
+        points = []
+        for size in sizes:
+            durations: list[float] = []
+            walked: list[int] = []
+            for _ in range(trials):
+                ms, pages = _sweep_once(conn, size)
+                durations.append(ms)
+                walked.append(pages)
+            formula = mod.backfill_sweep_pages(
+                n_stale=pops_before["n_stale"], batch_size=size
+            )
+            points.append({
+                "batch_size": size,
+                "pages": agreed_sweep_pages(walked, formula=formula, batch_size=size),
+                "pages_formula": formula,
+                "trials_per_point": trials,
+                "raw_trials_retained": True,
+                "trials_ms": durations,
+                "max_ms": max(durations),
+                "median_ms": statistics.median(durations),
+                "min_ms": min(durations),
+            })
+    return {
+        "kind": "sweep_domain",
+        "sessions_synthesized": synthesized,
+        "dimensions_before": dims_before,
+        "populations_before": pops_before,
+        "statement": (
+            "keyset SELECT_BATCH_* page: WHERE <population predicate> AND id > :last "
+            "ORDER BY id LIMIT :n, swept to exhaustion; one 'sweep' = every page of one "
+            "pass, so pages = ceil(N_stale / batch_size) + 1"
+        ),
+        "runs": [{
+            "id": "harness",
+            "trials_per_point": trials,
+            "raw_trials_retained": True,
+            "note": "Generated by --mode sweep-domain; every trial retained.",
+        }],
+        "points": points,
+    }
 
 
 def _compute_batch(conn, batch, timer: Timer) -> list[tuple[Any, int | None]]:
@@ -1233,6 +1528,269 @@ def _probe_max_unlock_ms(probes: list[dict], scope: str) -> tuple[float, dict]:
     return best["cancel_to_unlock_ms"]["max"], best
 
 
+# ---------------------------------------------------------------------------
+# The sweep model: exact intake, per-copy bases, and the covering LP.
+#
+# The sweep is the one term whose cost is a function of an operator-chosen
+# variable, so it is the one term that is FITTED rather than read off a maximum.
+# Everything in this block exists to make that fit conservative and reproducible:
+# exact decimals in, each measurement carried on the basis of the copy it ran on,
+# and a line that COVERS every measured maximum rather than passing through them.
+# ---------------------------------------------------------------------------
+
+
+def _load_measurement_json(path: str) -> dict:
+    """The SINGLE intake point for measurement and production JSON.
+
+    ``parse_float=Decimal``, and that is not fastidiousness. A plain
+    ``json.loads`` turns every decimal timing into the nearest binary float
+    *before* anything downstream can see it, so ``Fraction(155.0007)`` built from
+    that float is the exact value of a number that is not 155.0007 — and the LP
+    below picks between vertices by exact comparison at precisely those last
+    digits. A 68-nanosecond transcription error has already broken one published
+    bound on this data.
+
+    One function rather than an inline load at each call site, so a future caller
+    cannot reintroduce the plain loader without deleting this.
+    """
+    return json.loads(pathlib.Path(path).read_text(), parse_float=Decimal)
+
+
+def _exact(value: Any) -> Fraction:
+    """A measured timing as an EXACT rational.
+
+    A raw ``float`` is REFUSED rather than converted. It cannot be converted
+    honestly: by the time one exists the decimal a producer wrote is already gone,
+    and ``Fraction(<float>)`` would return the exact value of the wrong number
+    while looking like the right one.
+    """
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, Decimal):
+        return Fraction(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return Fraction(value)
+    if isinstance(value, str):
+        return Fraction(Decimal(value))
+    raise SystemExit(
+        f"sweep timing {value!r} reached the fit as a {type(value).__name__}; measurement JSON "
+        "must be read through _load_measurement_json (parse_float=Decimal) so a decimal timing "
+        "stays the value it was written as"
+    )
+
+
+def _int_dimension(dims: dict, key: str, *, artifact: str) -> int:
+    value = dims.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)) or int(value) != value:
+        raise SystemExit(
+            f"{artifact}: dimensions_before.{key} is {value!r}; the copy's basis is a ratio of "
+            "INTEGER dimensions and has to stay exactly rational"
+        )
+    if int(value) <= 0:
+        raise SystemExit(f"{artifact}: dimensions_before.{key} must be positive, got {value!r}")
+    return int(value)
+
+
+def sweep_copy_growth_factor(dims_before: dict, frozen_dims: dict, *, artifact: str) -> Fraction:
+    """``N_copy`` — the factor carrying a timing from ITS copy onto the frozen basis.
+
+    ``max(1, frozen_rows / copy_rows, frozen_bytes / copy_bytes)``, the same
+    ``_growth_factor`` rule the runtime applies, as an EXACT ``Fraction`` over
+    integer dimensions.
+
+    This is not the runtime's ``g_sessions`` and neither substitutes for the
+    other. ``N_copy`` points from the measuring copy TO the frozen basis and is
+    applied at freeze time, per point, inside the fit; ``g_sessions`` points from
+    the frozen basis TO the live relation and is applied at run time. At the frozen
+    basis ``g_sessions`` is exactly 1, so it can never supply this normalization.
+
+    PER POINT, not per fit: the sizing copies share a ``game_sessions`` row count
+    but their relations differ by 26%, and the LEAST bloated copy demands the
+    LARGEST factor — so one shared factor silently under-charges it.
+    """
+    return max(
+        Fraction(1),
+        Fraction(
+            _int_dimension(frozen_dims, "total_rows", artifact=artifact),
+            _int_dimension(dims_before, "total_rows", artifact=artifact),
+        ),
+        Fraction(
+            _int_dimension(frozen_dims, "sessions_bytes", artifact=artifact),
+            _int_dimension(dims_before, "sessions_bytes", artifact=artifact),
+        ),
+    )
+
+
+class SweepPoint(NamedTuple):
+    """One measured sweep maximum, with the basis it was measured on."""
+
+    artifact: str
+    run: str
+    batch_size: int | None
+    pages: int
+    max_ms: Fraction
+    n_copy: Fraction
+    trials: int
+    #: Whether this point may STEER the objective, or only CONSTRAIN the bound.
+    steers: bool
+
+
+def sweep_points(measurement: dict, frozen_dims: dict, *, artifact: str) -> list[SweepPoint]:
+    """Every point of one sweep-domain artifact, sorted into coverage vs objective.
+
+    The sort is by ``raw_trials_retained``, and the trial floor applies to the
+    OBJECTIVE set only. A point claiming retained trials with fewer than
+    ``MIN_SWEEP_TRIALS`` of them is a hard failure — an under-trialled maximum must
+    not steer a fit. A point with NO retained trials is accepted at whatever trial
+    count it carries and is coverage-only: refusing it outright would discard the
+    only measurement at 4 pages, which is an active constraint of the current
+    solution, and would let the shipped bound sit below a maximum a host actually
+    produced.
+    """
+    n_copy = sweep_copy_growth_factor(
+        measurement.get("dimensions_before") or {}, frozen_dims, artifact=artifact
+    )
+    raw = measurement.get("points")
+    if not raw:
+        raise SystemExit(f"{artifact}: a sweep_domain measurement must carry a nonempty points[]")
+    out = []
+    for i, pt in enumerate(raw):
+        where = f"{artifact}[{i}] run={pt.get('run')!r} batch_size={pt.get('batch_size')!r}"
+        pages = pt.get("pages")
+        if isinstance(pages, bool) or not isinstance(pages, int) or pages <= 0:
+            raise SystemExit(f"{where}: pages must be a positive int, got {pages!r}")
+        retained = bool(pt.get("raw_trials_retained"))
+        if retained:
+            trials_ms = [_exact(v) for v in pt.get("trials_ms") or []]
+            if len(trials_ms) < MIN_SWEEP_TRIALS:
+                raise SystemExit(
+                    f"{where}: raw_trials_retained is true with {len(trials_ms)} trial(s), below "
+                    f"MIN_SWEEP_TRIALS ({MIN_SWEEP_TRIALS}). A maximum over fewer trials is an "
+                    "estimate of a bound, not a bound, and must not steer the fit; record it "
+                    "with raw_trials_retained false to keep it as coverage only"
+                )
+            # Taken FROM the trials rather than from the recorded max, so the fit is
+            # reproducible from the retained evidence rather than from a restated
+            # summary — which is exactly what the withdrawn OLS line was not.
+            max_ms = max(trials_ms)
+            if _exact(pt["max_ms"]) != max_ms:
+                raise SystemExit(
+                    f"{where}: max_ms={pt['max_ms']!r} disagrees with max(trials_ms)={max_ms}"
+                )
+            trials = len(trials_ms)
+        else:
+            max_ms = _exact(pt["max_ms"])
+            trials = int(pt.get("trials_per_point") or 0)
+        out.append(SweepPoint(
+            artifact=artifact,
+            run=str(pt.get("run", "")),
+            batch_size=pt.get("batch_size"),
+            pages=pages,
+            max_ms=max_ms,
+            n_copy=n_copy,
+            trials=trials,
+            steers=retained,
+        ))
+    return out
+
+
+def solve_sweep_envelope(points: list[SweepPoint]) -> dict[str, Any]:
+    """The least conservative line that COVERS every measured maximum.
+
+    A 2-variable LP, solved exactly in FROZEN-BASIS coordinates::
+
+        minimize   sum over OBJECTIVE points of (A / N_i + b * p_i - m_i)
+        subject to A / N_i + b * p_i >= m_i   for every COVERAGE point
+                   A >= 0, b >= 0
+
+    ``A`` is the scan coefficient AT THE FROZEN BASIS and ``b`` the per-page slope.
+    Each point contributes its OWN ``1 / N_copy(i)``, so points measured on
+    different copies enter the same fit on their own bases. Fitting raw ``(a, b)``
+    and multiplying ``a`` by one shared ``N_copy`` afterwards would price every
+    point through whichever copy's dimensions happened to be chosen.
+
+    Why not least squares: an OLS line through a set of MAXIMA is a central
+    tendency and sits below some of the points it was fitted to, so tripling its
+    coefficients spends the 3x margin covering fit error instead of variance.
+
+    Why not just the objective's own points: a published maximum is a measurement,
+    and a bound has to cover it. Trial count decides whether a point may STEER the
+    fit, never whether the bound may sit below it.
+
+    The objective's coefficients are strictly positive, so the optimum is always at
+    a VERTEX of the feasible region, and the vertices come in three families —
+    every pair of coverage constraints made tight, plus each axis. Both axes are
+    load-bearing rather than defensive: with points at (10 pages, 1.0 ms) and
+    (1000 pages, 1000.0 ms) the single pair-intersection has ``A < 0``, and
+    omitting the ``A = 0`` boundary returns the flat line at an objective of 999 ms
+    instead of the true optimum ``(A = 0, b = 1)`` at 9 ms.
+
+    ``Fraction`` throughout — including ``N_copy(i)``, a ratio of integer
+    dimensions — so the solution is exact and reproducible bit for bit.
+    """
+    if not points:
+        raise SystemExit("the sweep envelope needs at least one measured point")
+    steering = [p for p in points if p.steers]
+    if not steering:
+        raise SystemExit(
+            "no sweep-domain point retains its per-trial timings, so nothing may steer the fit: "
+            f"every point is coverage-only. Re-measure with --mode sweep-domain "
+            f"(>= {MIN_SWEEP_TRIALS} trials, every trial retained)"
+        )
+
+    def covers(a: Fraction, b: Fraction) -> bool:
+        if a < 0 or b < 0:
+            return False
+        return all(a / p.n_copy + b * p.pages >= p.max_ms for p in points)
+
+    def overcharge(a: Fraction, b: Fraction) -> Fraction:
+        # Summed in each point's OWN measurement coordinates (ms actually observed
+        # on its copy), so a point is not weighted by how far its copy sits from
+        # the frozen basis.
+        return sum((a / p.n_copy + b * p.pages - p.max_ms for p in steering), Fraction(0))
+
+    candidates: list[tuple[Fraction, Fraction]] = []
+    for i, p1 in enumerate(points):
+        for p2 in points[i + 1:]:
+            inv1, inv2 = Fraction(1) / p1.n_copy, Fraction(1) / p2.n_copy
+            det = inv1 * p2.pages - inv2 * p1.pages
+            if det == 0:
+                continue
+            a = (p1.max_ms * p2.pages - p2.max_ms * p1.pages) / det
+            b = (inv1 * p2.max_ms - inv2 * p1.max_ms) / det
+            candidates.append((a, b))
+    # The b = 0 boundary: the flat line high enough to cover every point.
+    candidates.append((max(p.max_ms * p.n_copy for p in points), Fraction(0)))
+    # The A = 0 boundary: the steepest per-page slope any point demands.
+    candidates.append((Fraction(0), max(p.max_ms / p.pages for p in points)))
+
+    feasible = [(a, b) for a, b in candidates if covers(a, b)]
+    if not feasible:
+        raise SystemExit("the sweep envelope LP found no feasible vertex")
+    a, b = min(feasible, key=lambda ab: (overcharge(*ab), ab[1]))
+    active = [
+        {
+            "artifact": p.artifact,
+            "run": p.run,
+            "batch_size": p.batch_size,
+            "pages": p.pages,
+            "max_ms": float(p.max_ms),
+            "steers": p.steers,
+        }
+        for p in points
+        if a / p.n_copy + b * p.pages == p.max_ms
+    ]
+    return {
+        "a": a,
+        "b": b,
+        "active_constraints": active,
+        "sum_overcharge_ms": float(overcharge(a, b)),
+        "coverage_points": len(points),
+        "objective_points": len(steering),
+        "max_pages": max(p.pages for p in points),
+    }
+
+
 def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     """Project the snapshot numbers to production and freeze the constants.
 
@@ -1244,6 +1802,23 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     atomics = [m for m in measurements if m.get("kind") == "atomic"]
     batches = [m for m in measurements if m.get("kind") == "batch"]
     probes = [m for m in measurements if m.get("kind") == "cancel_probe"]
+    sweeps = [m for m in measurements if m.get("kind") == "sweep_domain"]
+
+    # A copy whose game_sessions was grown by row cloning is valid for the sweep
+    # domain and for NOTHING else: the clones carry no session_moves rows, so every
+    # session_moves-scaled term and the whole repair population on such a copy are
+    # meaningless. Checked here, ahead of every consumer, because this is a
+    # statement about the input set rather than about any one term.
+    misused = [
+        m for m in measurements
+        if m.get("sessions_synthesized") and m.get("kind") != "sweep_domain"
+    ]
+    if misused:
+        raise SystemExit(
+            f"a kind={misused[0].get('kind')!r} measurement carries sessions_synthesized: true. "
+            "Cloned sessions have no session_moves rows, so that copy can price the sweep and "
+            "nothing else — re-measure every other term on a copy that was not row-cloned"
+        )
 
     # TWO atomic runs, on two restores: one over a real mutated population (the
     # slope) and one over an empty one (the floor). One measurement point cannot
@@ -1341,11 +1916,16 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     t = atomic["timings"]
     n_stale_snap = snap_pops["n_stale"]
 
-    backfill_total = t.get("single_session_compute", {}).get("total_ms", 0.0) + t.get(
-        "guarded_update", {}
-    ).get("total_ms", 0.0) + t.get("load_moves", {}).get("total_ms", 0.0) + t.get(
-        "select_batch", {}
-    ).get("total_ms", 0.0)
+    # float() AT THE POINT OF USE. The intake keeps every timing as an exact
+    # Decimal, which only the sweep fit and the N_copy ratios need; everything that
+    # merely formats or compares magnitudes works on floats, and mixing the two in
+    # one expression is a TypeError rather than a silent loss.
+    backfill_total = float(
+        t.get("single_session_compute", {}).get("total_ms", 0.0)
+        + t.get("guarded_update", {}).get("total_ms", 0.0)
+        + t.get("load_moves", {}).get("total_ms", 0.0)
+        + t.get("select_batch", {}).get("total_ms", 0.0)
+    )
 
     # PER-ROW FIRST, then multiply by the production population — never
     # "project the total, then divide by the production population".
@@ -1362,9 +1942,9 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     # Sessions can get longer without getting more numerous, and a per-session
     # cost measured at the snapshot's move distribution would miss that. Clamped
     # at 1.0: shorter production games earn no discount.
-    snap_plies = snap_pops.get("m_moves", 0) / n_stale_snap
+    snap_plies = float(snap_pops.get("m_moves", 0)) / n_stale_snap
     prod_plies = (
-        prod_pops["m_moves"] / prod_pops["n_stale"]
+        float(prod_pops["m_moves"]) / float(prod_pops["n_stale"])
         if prod_pops.get("n_stale") and prod_pops.get("m_moves") is not None
         else snap_plies
     )
@@ -1375,22 +1955,67 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     # the production repair population is 0 — and that is a TRUE statement rather
     # than a hidden one, because the scans it would otherwise absorb are priced
     # by their own term below.
-    per_candidate_snap = t.get("repair_per_candidate", {}).get("median_ms", 0.0)
+    per_candidate_snap = float(t.get("repair_per_candidate", {}).get("median_ms", 0.0))
     t_repair_prod = per_candidate_snap * float(prod_pops.get("n_repair") or 0)
 
     # --- scan work: no population, no zero branch --------------------------
     scans = atomic["scans"]
     t_scan_stmt_snap = scan_stmt_max_ms(scans)
     t_scan_stmt_prod = t_scan_stmt_snap * r_moves
-    t_coverage_snap = scans["coverage_assert"]["max_ms"]
+    t_coverage_snap = float(scans["coverage_assert"]["max_ms"])
     t_coverage_prod = t_coverage_snap * r_sessions
-    # The backfill's own game_sessions work: one convergence count, and one full
-    # selection sweep (all pages of one pass). Both scale by r_sessions, not by
-    # either population — see time_scan_statements.
-    t_backfill_remaining_snap = scans.get("backfill_remaining", {}).get("max_ms", 0.0)
+    # The backfill's convergence count: one statement per PASS, so it carries no
+    # page-count term and scales by r_sessions alone — see time_scan_statements.
+    # The SWEEP is the other half of the backfill's own game_sessions work and is
+    # NOT here: it is a domain, fitted below.
+    t_backfill_remaining_snap = float(scans.get("backfill_remaining", {}).get("max_ms", 0.0))
     t_backfill_remaining_prod = t_backfill_remaining_snap * r_sessions
-    t_backfill_sweep_snap = scans.get("backfill_select_sweep", {}).get("max_ms", 0.0)
-    t_backfill_sweep_prod = t_backfill_sweep_snap * r_sessions
+
+    # --- the sweep: fitted over every sweep-domain artifact ----------------
+    #
+    # `prod_dims` IS the frozen basis this run emits as SIZED_*, so solving in
+    # frozen-basis coordinates means each artifact's own dimensions_before are
+    # divided into these — per artifact, inside the fit, never as a post-fit
+    # multiplier.
+    #
+    # The legacy sweep artifact is keyed by top-level `runs` and
+    # `dimensions_of_this_copy`, with no `kind` and no `dimensions_before`. Offered
+    # as it stands it would match nothing here, and the run carrying the only
+    # retained trials on record would be silently invisible — so it is NAMED rather
+    # than skipped.
+    legacy = [m for m in measurements if "dimensions_of_this_copy" in m]
+    if legacy:
+        raise SystemExit(
+            "a sweep measurement is in the pre-schema shape (dimensions_of_this_copy / top-level "
+            "runs, no kind): migrate it to kind: 'sweep_domain' with dimensions_before and a "
+            "flattened points[], per docs/release_b_runbook.md §7. A legacy adapter would be a "
+            "second permanent intake path maintained for exactly one file"
+        )
+    if not sweeps:
+        raise SystemExit(
+            "derivation needs at least one --mode sweep-domain measurement: the selection sweep "
+            "costs ceil(N_stale / batch_size) + 1 pages and no scalar is honest across the range "
+            "resolve_batch_size admits, so the two sweep constants are FITTED from a domain "
+            "rather than read off a single timing"
+        )
+    sweep_all_points: list[SweepPoint] = []
+    sweep_bases = []
+    for i, m in enumerate(sweeps):
+        artifact = str(m.get("artifact") or m.get("database") or f"sweep_domain[{i}]")
+        pts = sweep_points(m, prod_dims, artifact=artifact)
+        sweep_all_points.extend(pts)
+        sweep_bases.append({
+            "artifact": artifact,
+            "sessions_synthesized": bool(m.get("sessions_synthesized")),
+            "dimensions_before": m.get("dimensions_before"),
+            "populations_before": m.get("populations_before"),
+            "N_copy": float(pts[0].n_copy),
+            "N_copy_exact": str(pts[0].n_copy),
+            "points": len(pts),
+            "objective_points": sum(1 for p in pts if p.steers),
+        })
+    sweep_fit = solve_sweep_envelope(sweep_all_points)
+    sweep_a, sweep_b = sweep_fit["a"], sweep_fit["b"]
 
     # --- atomic teardown: a floor AND a slope ------------------------------
     full = atomic["teardown"]
@@ -1398,30 +2023,32 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     n_mut_snap = full["n_mutated"]
     # The larger of commit and cancel-to-unlock at each point: locks are held
     # until whichever one returns, and the breach path ends in a cancellation.
-    teardown_full = max(full["commit_ms"], atomic_unlock_max)
+    teardown_full = float(max(full["commit_ms"], atomic_unlock_max))
     # The EMPTY point has no cancel-to-unlock counterpart and needs none: an
     # atomic run that mutated nothing holds no row lock, so there is no lock for a
     # competing writer to wait on and the commit is the whole of its teardown.
-    teardown_empty = empty["commit_ms"]
+    teardown_empty = float(empty["commit_ms"])
     floor_prod = teardown_empty * (1.0 if full_restore else r_sessions)
     # n_mut_snap is guaranteed positive by the full-point check above, so this is
     # a real division rather than a guarded one that quietly yields a zero slope.
     slope_prod = max(0.0, (teardown_full - teardown_empty) / n_mut_snap)
 
     # --- batch-scoped estimates -------------------------------------------
-    max_single_session_compute = t.get("single_session_compute", {}).get("max_ms", 0.0)
+    max_single_session_compute = float(t.get("single_session_compute", {}).get("max_ms", 0.0))
     # BOTH phases' batch commits. The repair phase runs its own per-batch
     # transactions and holds row locks until they return, so a repair commit is a
     # lock-hold tail exactly as a backfill commit is. Reading only batch_commit
     # let a 100ms repair commit sit behind a 1ms backfill commit and report the
     # maximum as 1ms.
-    max_batch_commit = max(
-        [
-            m["timings"].get(key, {}).get("max_ms", 0.0)
-            for m in batches
-            for key in ("batch_commit", "repair_batch_commit")
-        ]
-        or [0.0]
+    max_batch_commit = float(
+        max(
+            [
+                m["timings"].get(key, {}).get("max_ms", 0.0)
+                for m in batches
+                for key in ("batch_commit", "repair_batch_commit")
+            ]
+            or [0.0]
+        )
     )
 
     # --- the margined constants -------------------------------------------
@@ -1431,7 +2058,15 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     margined_ms_per_scan_stmt = max(1, ceil3(t_scan_stmt_prod))
     margined_ms_coverage_assert = max(1, ceil3(t_coverage_prod))
     margined_ms_backfill_remaining = max(1, ceil3(t_backfill_remaining_prod))
-    margined_ms_backfill_select_sweep = max(1, ceil3(t_backfill_sweep_prod))
+    # The MARGIN and the ceiling are both applied at freeze time, PER COMPONENT,
+    # margin first. Not one ceiling on the margined total: that could only be
+    # applied once a page count exists, i.e. at run time, which would leave the
+    # frozen literals as floats — breaking the "every frozen constant is a positive
+    # int" contract and hiding which component the rounding landed on. Both
+    # coefficients come out of the LP ALREADY in frozen-basis coordinates, so there
+    # is no post-fit multiplication by a normalization factor.
+    margined_ms_backfill_sweep_scan = max(1, int(math.ceil(MARGIN * sweep_a)))
+    margined_us_backfill_sweep_per_page = max(1, int(math.ceil(MARGIN * sweep_b * 1000)))
     max_single_session_compute_ms = max(1, ceil3(max_single_session_compute))
     teardown_allowance_ms = max(1, ceil3(max(max_batch_commit, probe_unlock_max)))
     if int(atomic_probe.get("rows_locked", 0)) < n_mut_snap:
@@ -1543,10 +2178,14 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     # measured cost, and the 57014 surfaces through the exhaustion template as
     # "did not converge".
     #
-    # BACKFILL_SELECT_SWEEP is deliberately NOT in this maximum: the sweep is a
-    # sequence of pages and each page is armed by _arm_batch_stmt against
-    # MAX_BATCH_MS, so the sweep constant prices a multi-statement unit that no
-    # single armed value has to cover. It belongs to the stall projection only.
+    # NEITHER sweep component is in this maximum, and for the same reason: the
+    # sweep is a sequence of pages, each armed by _arm_batch_stmt against
+    # MAX_BATCH_MS, so the two sweep constants price a MULTI-STATEMENT unit that no
+    # single armed value has to cover. The scan component is a whole relation walk
+    # spread across every page of the sweep rather than the cost of any one of
+    # them, and the per-page component is a per-statement slope in microseconds —
+    # neither is a candidate for a per-statement timeout. They belong to the stall
+    # projection and the scan budget only.
     scan_stmt_timeout_ms = max(
         margined_ms_per_scan_stmt,
         margined_ms_coverage_assert,
@@ -1554,22 +2193,55 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     )
 
     # --- Decision 1: the writer-stall admission verdict --------------------
-    t_stall_prod = (
-        t_backfill_prod
-        + t_repair_prod
-        + mod.ATOMIC_SCANS_UNDER_LOCK * t_scan_stmt_prod
-        + t_coverage_prod
-        # The backfill's own game_sessions work, counted 1 and 1 because atomic
-        # backfill converges in a single unlocked-selection pass. Charged
-        # unconditionally, which over-charges the N_stale = 0 path (where both
-        # precede the first, repair-owned, row lock) by two game_sessions scans —
-        # safe in the only direction that matters.
-        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * t_backfill_sweep_prod
-        + mod.BACKFILL_REMAINING_UNDER_LOCK * t_backfill_remaining_prod
-        + floor_prod
-        + slope_prod * ((prod_pops.get("n_stale") or 0) + (prod_pops.get("n_repair") or 0))
-    )
+    #
+    # Evaluated at TWO batch sizes, because the sweep's page count is
+    # ceil(N_stale / batch_size) + 1 and the verdict can differ between them. The
+    # headline verdict is at DEFAULT_BATCH_SIZE — the configuration a deploy
+    # actually runs — and MIN_ADMITTED_BATCH is reported beside it, because a
+    # verdict that flips between the two is a fact the operator needs BEFORE
+    # choosing an override. The runtime admission check re-decides with the batch
+    # size actually resolved either way.
+    n_stale_prod = int(prod_pops.get("n_stale") or 0)
+
+    def _stall_at(batch_size: int) -> tuple[float, int, float]:
+        pages = mod.backfill_sweep_pages(n_stale=n_stale_prod, batch_size=batch_size)
+        # A is stated AT the frozen basis, which is prod_dims, so the scan
+        # component needs no further scaling here — unlike every snapshot-measured
+        # term above, which is carried across by r_sessions / r_moves.
+        sweep_ms = float(sweep_a) + float(sweep_b) * pages
+        return (
+            t_backfill_prod
+            + t_repair_prod
+            + mod.ATOMIC_SCANS_UNDER_LOCK * t_scan_stmt_prod
+            + t_coverage_prod
+            # The backfill's own game_sessions work, counted 1 and 1 because atomic
+            # backfill converges in a single unlocked-selection pass. Charged
+            # unconditionally, which over-charges the N_stale = 0 path (where both
+            # precede the first, repair-owned, row lock) by two game_sessions scans
+            # — safe in the only direction that matters.
+            + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * sweep_ms
+            + mod.BACKFILL_REMAINING_UNDER_LOCK * t_backfill_remaining_prod
+            + floor_prod
+            + slope_prod * (n_stale_prod + int(prod_pops.get("n_repair") or 0))
+        ), pages, sweep_ms
+
+    t_stall_prod, sweep_pages_prod, t_backfill_sweep_prod = _stall_at(max_batch_size)
+    t_stall_min_batch, sweep_pages_min_batch, _ = _stall_at(mod.MIN_ADMITTED_BATCH)
     atomic_admitted = MARGIN * t_stall_prod <= mod.MAX_WRITER_STALL_MS
+    atomic_admitted_min_batch = MARGIN * t_stall_min_batch <= mod.MAX_WRITER_STALL_MS
+
+    # The import-time worst case, over the constants this run just derived.
+    import_worst_case_pages = mod.backfill_sweep_pages(
+        n_stale=int(prod_dims.get("total_rows") or 0), batch_size=mod.MIN_ADMITTED_BATCH
+    )
+    scan_budget = mod._scan_budget_ms(
+        margined_ms_per_scan_stmt,
+        margined_ms_coverage_assert,
+        margined_ms_backfill_sweep_scan,
+        margined_us_backfill_sweep_per_page,
+        margined_ms_backfill_remaining,
+        pages=import_worst_case_pages,
+    )
 
     return {
         "scaling": {
@@ -1591,9 +2263,21 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "T_coverage_assert_prod": t_coverage_prod,
             "T_backfill_remaining_snap": t_backfill_remaining_snap,
             "T_backfill_remaining_prod": t_backfill_remaining_prod,
-            "T_backfill_select_sweep_snap": t_backfill_sweep_snap,
-            "T_backfill_select_sweep_prod": t_backfill_sweep_prod,
-            "backfill_select_sweep_pages": scans.get("backfill_select_sweep", {}).get("pages"),
+            # The sweep, as a MODEL rather than a timing: a scan coefficient stated
+            # at the frozen basis plus a per-page slope, with the page count the
+            # production population produces at the DEFAULT batch size.
+            "T_backfill_sweep_prod": t_backfill_sweep_prod,
+            "T_backfill_sweep_pages_prod": sweep_pages_prod,
+            "sweep_scan_coeff_frozen_basis_ms": float(sweep_a),
+            "sweep_scan_coeff_frozen_basis_ms_exact": str(sweep_a),
+            "sweep_envelope_per_page_ms": float(sweep_b),
+            "sweep_envelope_per_page_ms_exact": str(sweep_b),
+            "sweep_envelope_active_constraints": sweep_fit["active_constraints"],
+            "sweep_envelope_sum_overcharge_ms": sweep_fit["sum_overcharge_ms"],
+            "sweep_domain_points": sweep_fit["coverage_points"],
+            "sweep_domain_objective_points": sweep_fit["objective_points"],
+            "sweep_domain_max_pages": sweep_fit["max_pages"],
+            "sweep_copy_growth_factors": sweep_bases,
             "T_atomic_teardown_floor_prod": floor_prod,
             "T_atomic_teardown_per_row_prod": slope_prod,
             "N_mut_snap": n_mut_snap,
@@ -1618,7 +2302,8 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "MARGINED_MS_PER_SCAN_STMT": margined_ms_per_scan_stmt,
             "MARGINED_MS_COVERAGE_ASSERT": margined_ms_coverage_assert,
             "MARGINED_MS_BACKFILL_REMAINING": margined_ms_backfill_remaining,
-            "MARGINED_MS_BACKFILL_SELECT_SWEEP": margined_ms_backfill_select_sweep,
+            "MARGINED_MS_BACKFILL_SWEEP_SCAN": margined_ms_backfill_sweep_scan,
+            "MARGINED_US_BACKFILL_SWEEP_PER_PAGE": margined_us_backfill_sweep_per_page,
             "SCAN_STMT_TIMEOUT_MS": scan_stmt_timeout_ms,
             "MAX_SINGLE_SESSION_COMPUTE_MS": max_single_session_compute_ms,
             "TEARDOWN_ALLOWANCE_MS": teardown_allowance_ms,
@@ -1644,29 +2329,50 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "zero_batch_repair_ok": r_formula >= 1,
             "est_lock_hold_fits": est_max_lock_hold_ms <= mod.MAX_WRITER_STALL_MS,
             # The revision's OWN formula, over the freshly derived constants — the
-            # last term (the backfill's per-pass game_sessions work) is mandatory
-            # and was the gap a session_moves-only budget left.
-            "scan_budget_ms": mod._scan_budget_ms(
-                margined_ms_per_scan_stmt,
-                margined_ms_coverage_assert,
-                margined_ms_backfill_select_sweep,
-                margined_ms_backfill_remaining,
-            ),
+            # last group (the backfill's per-pass game_sessions work) is mandatory
+            # and was the gap a session_moves-only budget left. Charged at the
+            # DECLARED worst case: the whole sized relation stale, at the smallest
+            # batch resolve_batch_size admits.
+            "scan_budget_ms": scan_budget,
             "scan_budget_limit_ms": mod.REVISION_DEADLINE_S * 1000,
-            "scan_budget_ok": mod._scan_budget_ms(
-                margined_ms_per_scan_stmt,
-                margined_ms_coverage_assert,
-                margined_ms_backfill_select_sweep,
-                margined_ms_backfill_remaining,
-            )
-            < mod.REVISION_DEADLINE_S * 1000,
+            "scan_budget_ok": scan_budget < mod.REVISION_DEADLINE_S * 1000,
+            "scan_budget_sweep_pages": import_worst_case_pages,
+            # §2.1's invariant, carried here as well as in the test suite: the
+            # SHIPPED integers, de-normalized back onto each point's own measuring
+            # copy, still cover 3x what was measured there. True by construction —
+            # the LP covers every point and both literals are ceil-ed UP from
+            # MARGIN x the solution — which is exactly why it is worth asserting.
+            "sweep_envelope_covers_every_measured_point": all(
+                margined_ms_backfill_sweep_scan / float(p.n_copy)
+                + margined_us_backfill_sweep_per_page * p.pages / 1000
+                >= MARGIN * float(p.max_ms)
+                for p in sweep_all_points
+            ),
+            # The measured ceiling beside the page count the budget evaluates, so
+            # the extrapolation gap is visible in the emitted JSON and not only in
+            # prose. Everything between them is linear extrapolation.
+            "sweep_domain_max_pages_vs_import_worst_case": {
+                "measured_max_pages": sweep_fit["max_pages"],
+                "import_worst_case_pages": import_worst_case_pages,
+                "extrapolated": sweep_fit["max_pages"] < import_worst_case_pages,
+            },
         },
         "decision_1": {
+            "batch_size_assumed": max_batch_size,
             "T_stall_prod_ms": t_stall_prod,
             "margined_stall_ms": MARGIN * t_stall_prod,
+            "sweep_pages": sweep_pages_prod,
             "MAX_WRITER_STALL_MS": mod.MAX_WRITER_STALL_MS,
             "verdict": "atomic" if atomic_admitted else "batch",
             "GHOSTREPLAY_ACCURACY_BACKFILL_MODE": "atomic" if atomic_admitted else "batch",
+            # The other end of the admitted range. A verdict that flips here is the
+            # operator's warning that GHOSTREPLAY_ACCURACY_BACKFILL_BATCH is not a
+            # free knob.
+            "batch_size_min_admitted": mod.MIN_ADMITTED_BATCH,
+            "T_stall_prod_ms_min_batch": t_stall_min_batch,
+            "margined_stall_ms_min_batch": MARGIN * t_stall_min_batch,
+            "sweep_pages_min_batch": sweep_pages_min_batch,
+            "verdict_min_batch": "atomic" if atomic_admitted_min_batch else "batch",
         },
     }
 
@@ -1764,7 +2470,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Sizing harness for revision 20260719_01 (Release B).",
     )
     p.add_argument("--url", help="explicit database URL of a DISPOSABLE restore")
-    p.add_argument("--mode", choices=("atomic", "batch"), help="which execution shape to time")
+    p.add_argument(
+        "--mode",
+        choices=("atomic", "batch", "sweep-domain"),
+        help="which execution shape to time",
+    )
     p.add_argument("--cancel-probe", action="store_true", help="time the breach path")
     p.add_argument(
         "--probe-scope",
@@ -1787,8 +2497,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scan-trials", type=int, default=DEFAULT_SCAN_TRIALS)
     p.add_argument("--trials", type=int, default=DEFAULT_CANCEL_TRIALS, help="cancel-probe trials")
     p.add_argument("--park-seconds", type=float, default=1.0, help="cancel-probe park duration")
+    p.add_argument(
+        "--sweep-batch-sizes",
+        type=int,
+        nargs="+",
+        metavar="N",
+        help=(
+            "batch sizes to sweep at (--mode sweep-domain). Named for what the operator sets "
+            "and what resolve_batch_size admits — a LIMIT on one page. Pages are DERIVED and "
+            f"never requested. Deduplicated and sorted. Default: "
+            f"{', '.join(str(s) for s in DEFAULT_SWEEP_BATCH_SIZES)}"
+        ),
+    )
     p.add_argument("--synthesize-stale", action="store_true")
     p.add_argument("--synthesize-repair", type=int, default=0, metavar="K")
+    p.add_argument(
+        "--synthesize-sessions",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "establish a STALE ENDED-VISIBLE population of exactly N rows: clone the "
+            "ended-visible set up to N, then stamp the whole of it stale (originals included). "
+            "The POPULATION, not count(*) — the sweep walks ceil(N_stale / batch_size) + 1 "
+            "pages. Hard-fails if the live count misses N. The clones carry NO session_moves "
+            "rows, so the copy is valid for the sweep domain and nothing else — refused unless "
+            "--mode sweep-domain, and recorded as sessions_synthesized: true so --derive "
+            "refuses it for any other kind."
+        ),
+    )
     p.add_argument(
         "--synthesize-stamped",
         action="store_true",
@@ -1807,9 +2544,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     if args.derive:
-        measurements = [json.loads(pathlib.Path(f).read_text()) for f in args.measurement]
+        # Both sides through the one exact-decimal intake; see _load_measurement_json.
+        measurements = []
+        for f in args.measurement:
+            m = _load_measurement_json(f)
+            # The artifact's PATH is its label in the emitted provenance, so a
+            # reader can tell which basis a point was normalized on without
+            # guessing. Recorded here rather than in derive, which never sees paths.
+            m.setdefault("artifact", f)
+            measurements.append(m)
         production = (
-            json.loads(pathlib.Path(args.production_dimensions).read_text())
+            _load_measurement_json(args.production_dimensions)
             if args.production_dimensions
             else None
         )
@@ -1817,6 +2562,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not args.url:
             raise SystemExit("--url is required (point it at a DISPOSABLE restore)")
+        if args.synthesize_sessions and args.mode != "sweep-domain":
+            raise SystemExit(
+                "--synthesize-sessions is only valid with --mode sweep-domain: cloned sessions "
+                "have no session_moves rows, so every session_moves-scaled term and the whole "
+                "repair population on such a copy are meaningless"
+            )
         engine = create_engine(args.url, future=True)
         with engine.connect() as conn:
             dbname = conn.execute(text("SELECT current_database()")).scalar()
@@ -1840,10 +2591,22 @@ def main(argv: list[str] | None = None) -> int:
         # synthesis the other way round would null the repair candidates it just
         # created and silently leave N_repair at 0.
         synthesis: dict[str, Any] = {}
-        if args.synthesize_stale or args.synthesize_repair or args.synthesize_stamped:
+        if (
+            args.synthesize_stale
+            or args.synthesize_repair
+            or args.synthesize_stamped
+            or args.synthesize_sessions
+        ):
             with engine.begin() as conn:
                 if args.synthesize_stamped:
                     synthesis["stamped_rows"] = synthesize_stamped(conn)
+                # --synthesize-sessions owns its own postcondition: it stamps the
+                # whole ended-visible set stale itself and hard-fails if the live
+                # count misses its target, so it does NOT depend on
+                # --synthesize-stale being passed alongside it. Running before that
+                # flag anyway keeps the two idempotent in either combination.
+                if args.synthesize_sessions:
+                    synthesis["sessions"] = synthesize_sessions(conn, args.synthesize_sessions)
                 if args.synthesize_stale:
                     synthesis["stale_rows"] = synthesize_stale(conn)
                 if args.synthesize_repair:
@@ -1867,8 +2630,18 @@ def main(argv: list[str] | None = None) -> int:
             result = _run_atomic(engine, args)
         elif args.mode == "batch":
             result = _run_batch(engine, args)
+        elif args.mode == "sweep-domain":
+            result = run_sweep_domain(
+                engine,
+                batch_sizes=args.sweep_batch_sizes,
+                trials=args.scan_trials,
+                synthesized=bool(args.synthesize_sessions),
+            )
         else:
-            raise SystemExit("choose one of --mode atomic, --mode batch, --cancel-probe, --derive")
+            raise SystemExit(
+                "choose one of --mode atomic, --mode batch, --mode sweep-domain, "
+                "--cancel-probe, --derive"
+            )
         result["database"] = dbname
         result["server_version"] = server
         if synthesis:

@@ -27,8 +27,11 @@ constants were frozen from.
 from __future__ import annotations
 
 import ast
+import json
 import math
 import pathlib
+from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 from alembic.config import Config
@@ -60,12 +63,16 @@ MEASURED_CONSTANTS = (
     "MARGINED_MS_PER_REPAIR_ROW",
     "MARGINED_MS_PER_SCAN_STMT",
     "MARGINED_MS_COVERAGE_ASSERT",
-    # The backfill's OWN game_sessions work. PROVISIONAL until
-    # g-b-size-derive-backfill-terms times them directly, but declared, positive
-    # and load-bearing now: the scan budget and the atomic projection both charge
-    # them, and a zero would price a growing relation at nothing.
+    # The backfill's OWN game_sessions work. The convergence count is PROVISIONAL
+    # until g-b-size-derive-backfill-terms times it directly, but declared,
+    # positive and load-bearing now: the scan budget and the atomic projection both
+    # charge it, and a zero would price a growing relation at nothing.
     "MARGINED_MS_BACKFILL_REMAINING",
-    "MARGINED_MS_BACKFILL_SELECT_SWEEP",
+    # The selection sweep, as TWO constants rather than one scalar: a relation
+    # component in ms and a per-page component in µs. There is no scalar here on
+    # purpose — a scalar is what something would go on to price a sweep with.
+    "MARGINED_MS_BACKFILL_SWEEP_SCAN",
+    "MARGINED_US_BACKFILL_SWEEP_PER_PAGE",
     "SCAN_STMT_TIMEOUT_MS",
     "MAX_SINGLE_SESSION_COMPUTE_MS",
     "TEARDOWN_ALLOWANCE_MS",
@@ -214,26 +221,39 @@ def test_scan_stmt_timeout_must_cover_the_coverage_assertion_specifically():
     )
 
 
+def _budget(**kw):
+    """The import-time shape: the declared worst-case page count unless overridden."""
+    kw.setdefault("pages", mod.IMPORT_WORST_CASE_SWEEP_PAGES)
+    return mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, **kw
+    )
+
+
 def test_scan_budget_fits_the_revision_deadline():
     """Every scan-bearing statement a run can issue, charged against one clock.
 
     Checked at IMPORT in the revision, so a ``session_moves`` large enough that
     the scans alone cannot fit the wall clock fails when the revision loads
     instead of exhausting ``MAX_PASSES`` and raising a misleading
-    non-convergence error 900 seconds later.
+    non-convergence error 900 seconds later. The sweep is charged at the DECLARED
+    worst case — the whole sized relation stale at the smallest admitted batch —
+    because module load has no population and no resolved batch size.
     """
-    budget = mod._scan_budget_ms(mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT)
+    budget = _budget()
     assert budget == (
         (2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT
         + mod.MARGINED_MS_COVERAGE_ASSERT
         + mod.MAX_PASSES
-        * (mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING)
+        * (
+            mod.backfill_sweep_ms(pages=mod.IMPORT_WORST_CASE_SWEEP_PAGES)
+            + mod.MARGINED_MS_BACKFILL_REMAINING
+        )
     )
     assert budget < mod.REVISION_DEADLINE_S * 1000
 
 
 def test_scan_budget_charges_the_backfills_own_game_sessions_work():
-    """The last term is MANDATORY, and a budget without it is an underestimate.
+    """The last group is MANDATORY, and a budget without it is an underestimate.
 
     The backfill's keyset SELECTION SWEEP and ``BACKFILL_REMAINING_SQL`` both
     filter ``game_sessions`` on ``player_accuracy_algo_version IS NULL OR < 1``,
@@ -244,42 +264,149 @@ def test_scan_budget_charges_the_backfills_own_game_sessions_work():
     A budget that counted only the ``session_moves`` detectors and the coverage
     assertion priced that relation-scaled work at zero.
     """
-    with_terms = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT
-    )
-    without_terms = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, 0, 0
+    with_terms = _budget()
+    without_terms = _budget(
+        margined_ms_backfill_sweep_scan=0,
+        margined_us_backfill_sweep_per_page=0,
+        margined_ms_backfill_remaining=0,
     )
     assert with_terms > without_terms
     assert with_terms - without_terms == mod.MAX_PASSES * (
-        mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING
+        mod.backfill_sweep_ms(pages=mod.IMPORT_WORST_CASE_SWEEP_PAGES)
+        + mod.MARGINED_MS_BACKFILL_REMAINING
+    )
+
+
+def test_scan_budget_moves_with_the_page_count():
+    """The defect this bead exists to fix, at the budget end.
+
+    Same constants, same relations, same populations — only the batch size
+    differs, and it moves the sweep's page count by a factor of
+    ``MAX_BATCH_SIZE``. A budget that could not see that charged the same number
+    for 7 pages and for 6,001.
+    """
+    n_stale = mod.SIZED_TOTAL_ROWS
+    at_min = _budget(
+        pages=mod.backfill_sweep_pages(n_stale=n_stale, batch_size=mod.MIN_ADMITTED_BATCH)
+    )
+    at_max = _budget(
+        pages=mod.backfill_sweep_pages(n_stale=n_stale, batch_size=mod.MAX_BATCH_SIZE)
+    )
+    assert at_min > at_max
+    assert at_min - at_max == pytest.approx(
+        mod.MAX_PASSES
+        * mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE
+        / 1000
+        * (
+            mod.backfill_sweep_pages(n_stale=n_stale, batch_size=mod.MIN_ADMITTED_BATCH)
+            - mod.backfill_sweep_pages(n_stale=n_stale, batch_size=mod.MAX_BATCH_SIZE)
+        )
     )
 
 
 def test_scan_budget_scales_each_relations_terms_by_its_own_growth_factor():
     """``session_moves`` terms by ``G_moves``, ``game_sessions`` terms by
-    ``G_sessions`` — including BOTH backfill terms.
+    ``G_sessions`` — and, inside the sweep, the SCAN component ONLY.
 
     Growing only one relation must move only that relation's terms. A budget that
     scaled the ``session_moves`` detectors and left the backfill's own
     ``game_sessions`` sweep at its frozen value would be blind to exactly the
     growth that a correctly-stamped version-1 row produces.
+
+    The load-bearing half is the second assertion: ``g_sessions`` reaches the
+    sweep's relation-scan component and STOPS. The per-page term is statement
+    startup, which a larger relation does not make more expensive, so a future
+    "simplification" that multiplies the whole sweep by ``g_sessions`` fails here
+    — asserted as an exact difference rather than an inequality, because the
+    over-charging version is also strictly larger and an inequality would pass.
     """
-    base = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT
-    )
-    moves_only = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, g_moves=2.0
-    )
-    sessions_only = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, g_sessions=2.0
-    )
+    base = _budget()
+    moves_only = _budget(g_moves=2.0)
+    sessions_only = _budget(g_sessions=2.0)
     assert moves_only - base == (2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT
-    assert sessions_only - base == (
+    assert sessions_only - base == pytest.approx(
         mod.MARGINED_MS_COVERAGE_ASSERT
         + mod.MAX_PASSES
-        * (mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING)
+        * (mod.MARGINED_MS_BACKFILL_SWEEP_SCAN + mod.MARGINED_MS_BACKFILL_REMAINING)
     )
+    # And explicitly NOT the whole sweep: doubling g_sessions must not double the
+    # per-page contribution.
+    doubled_whole_sweep = (
+        mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE * mod.IMPORT_WORST_CASE_SWEEP_PAGES / 1000
+    )
+    assert sessions_only - base != pytest.approx(
+        mod.MARGINED_MS_COVERAGE_ASSERT
+        + mod.MAX_PASSES
+        * (
+            mod.MARGINED_MS_BACKFILL_SWEEP_SCAN
+            + doubled_whole_sweep
+            + mod.MARGINED_MS_BACKFILL_REMAINING
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# The sweep model: the page formula, the µs unit, and the frozen pair against
+# the evidence it was fitted to.
+# ---------------------------------------------------------------------------
+
+
+def test_sweep_pages_formula():
+    """``ceil(n_stale / batch_size) + 1``, with the two boundaries that bite.
+
+    The ``+1`` is the empty page that terminates the sweep. ``n_stale = 0`` is ONE
+    page and never zero — a run with nothing to backfill still issues the first
+    page, gets nothing back and stops — and the import-time worst case is the whole
+    sized relation at the smallest admitted batch.
+    """
+    assert mod.backfill_sweep_pages(n_stale=0, batch_size=mod.MAX_BATCH_SIZE) == 1
+    assert mod.backfill_sweep_pages(n_stale=0, batch_size=mod.MIN_ADMITTED_BATCH) == 1
+    assert mod.backfill_sweep_pages(n_stale=1, batch_size=mod.MAX_BATCH_SIZE) == 2
+    assert mod.backfill_sweep_pages(n_stale=1, batch_size=mod.MIN_ADMITTED_BATCH) == 2
+    assert mod.backfill_sweep_pages(n_stale=999, batch_size=500) == 3
+    assert mod.backfill_sweep_pages(n_stale=1000, batch_size=500) == 3
+    assert mod.backfill_sweep_pages(n_stale=1001, batch_size=500) == 4
+    assert (
+        mod.backfill_sweep_pages(
+            n_stale=mod.SIZED_TOTAL_ROWS, batch_size=mod.MIN_ADMITTED_BATCH
+        )
+        == mod.SIZED_TOTAL_ROWS + 1
+        == mod.IMPORT_WORST_CASE_SWEEP_PAGES
+    )
+
+
+def test_sweep_per_page_term_is_denominated_in_microseconds():
+    """The µs analogue of the teardown-per-row unit pin.
+
+    The measured slope is ~0.52 ms/page. Rounding a sub-millisecond slope up to an
+    integer millisecond nearly doubles it and manufactures ~2.9 s of phantom stall
+    at the 6,001-page worst case, which is enough to reject atomic runs that are
+    fine. ``backfill_sweep_ms`` divides by 1000 at exactly one call site, and this
+    is what makes a "tidy-up" into milliseconds fail loudly: a value of 518
+    contributes 0.518 ms per page, not 518.
+    """
+    assert mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE > 100  # sub-ms, so µs-denominated
+    one_page = mod.backfill_sweep_ms(pages=1, scan_ms=0, per_page_us=518)
+    assert one_page == pytest.approx(0.518)
+    assert mod.backfill_sweep_ms(pages=1000, scan_ms=0, per_page_us=518) == pytest.approx(518.0)
+    # And the scan component is NOT divided by 1000: it is already milliseconds.
+    assert mod.backfill_sweep_ms(pages=0, scan_ms=72, per_page_us=518) == pytest.approx(72.0)
+
+
+def test_sweep_scan_component_takes_g_sessions_and_the_per_page_component_does_not():
+    """The split, pinned at the function that applies it.
+
+    The scan component is a relation read and scales with ``game_sessions``
+    exactly as every other ``game_sessions`` term does. The per-page component is
+    statement startup — parse, plan, execute, round-trip — and is indifferent to
+    relation size. Applying ``g_sessions`` to it over-charges; applying nothing to
+    the scan component under-charges.
+    """
+    pages = 1_000
+    base = mod.backfill_sweep_ms(pages=pages)
+    grown = mod.backfill_sweep_ms(pages=pages, g_sessions=2.0)
+    assert grown - base == pytest.approx(mod.MARGINED_MS_BACKFILL_SWEEP_SCAN)
+    assert grown != pytest.approx(2 * base)
 
 
 def test_runner_pass_limits_do_not_exceed_the_charged_pass_bound():
@@ -542,11 +669,11 @@ def _measurement(**over):
             "soundness_assert": {"max_ms": 110.0},
             "repair_population_count": {"max_ms": 115.0},
             "coverage_assert": {"max_ms": 60.0},
-            # The backfill's OWN game_sessions work, priced by its own two
-            # constants and scaled by r_sessions — NOT part of "the maximum across
-            # the four complete session_moves statements".
+            # The backfill's convergence count: one statement per PASS, priced by
+            # its own constant and scaled by r_sessions — NOT part of "the maximum
+            # across the four complete session_moves statements". The SWEEP is not
+            # here at all: it is a domain, and it arrives as its own measurement.
             "backfill_remaining": {"max_ms": 70.0},
-            "backfill_select_sweep": {"max_ms": 90.0, "pages": 3},
         },
         "teardown_point": "full",
         "validated_in_run": True,
@@ -606,6 +733,49 @@ def _batch_measurement(
     }
 
 
+def _sweep_point(pages, max_ms, *, batch_size=None, retained=True, run="D", trials=None):
+    """One sweep-domain point.
+
+    ``max_ms`` is a STRING on purpose. The fit refuses a raw binary float — by the
+    time one exists the decimal a producer wrote is already gone — so a fixture
+    that writes ``155.0007`` as a Python float is testing a path the shipped
+    intake does not have.
+    """
+    n = trials if trials is not None else (harness.MIN_SWEEP_TRIALS if retained else 3)
+    pt = {
+        "run": run,
+        "batch_size": batch_size,
+        "pages": pages,
+        "trials_per_point": n,
+        "raw_trials_retained": retained,
+        "max_ms": max_ms,
+    }
+    if retained:
+        # The maximum LAST, over n-1 smaller trials, so max(trials_ms) is the
+        # recorded maximum and the fit is re-derivable from the trials themselves.
+        low = str(Decimal(max_ms) / 2)
+        pt["trials_ms"] = [low] * (n - 1) + [max_ms]
+    return pt
+
+
+#: A two-point sweep domain whose LP solution is exact and easy to state:
+#: ``A + b = 10.1`` and ``A + 11b = 11.1`` give ``b = 0.1``, ``A = 10.0``.
+_SWEEP_DEFAULT_POINTS = [_sweep_point(1, "10.1"), _sweep_point(11, "11.1")]
+
+
+def _sweep_domain(points=None, *, dimensions=None, **over):
+    base = {
+        "kind": "sweep_domain",
+        "artifact": "synthetic-sweep-domain",
+        "sessions_synthesized": False,
+        "dimensions_before": dimensions or _measurement()["dimensions_before"],
+        "populations_before": {"n_stale": 1000},
+        "points": list(points if points is not None else _SWEEP_DEFAULT_POINTS),
+    }
+    base.update(over)
+    return base
+
+
 def _probe(scope, unlock_max, *, trials=harness.MIN_CANCEL_TRIALS, rows_locked=100_000):
     return {
         "kind": "cancel_probe",
@@ -639,6 +809,7 @@ def _complete(*extra):
         _batch_measurement(500, 400.0),
         _probe("batch", 10.0),
         _probe("atomic", 20.0),
+        _sweep_domain(),
         *extra,
     ]
 
@@ -665,15 +836,20 @@ def test_scan_terms_survive_a_run_where_both_populations_are_zero():
     assert out["projected_ms"]["T_repair_prod"] == 0.0
     assert out["constants"]["MARGINED_MS_PER_SCAN_STMT"] > 0
     assert out["constants"]["MARGINED_MS_COVERAGE_ASSERT"] > 0
-    assert out["constants"]["MARGINED_MS_BACKFILL_SELECT_SWEEP"] > 0
+    assert out["constants"]["MARGINED_MS_BACKFILL_SWEEP_SCAN"] > 0
+    assert out["constants"]["MARGINED_US_BACKFILL_SWEEP_PER_PAGE"] > 0
     assert out["constants"]["MARGINED_MS_BACKFILL_REMAINING"] > 0
+    # N_stale = 0 is ONE sweep page — the empty-teardown shape — so the sweep is
+    # still CHARGED and still nonzero: A + b x 1 = 10.0 + 0.1.
+    assert out["projected_ms"]["T_backfill_sweep_pages_prod"] == 1
+    assert out["projected_ms"]["T_backfill_sweep_prod"] == pytest.approx(10.1)
     # Three session_moves scans under lock, the coverage assertion, the backfill's
     # own selection sweep and convergence count, and the teardown floor are the
     # WHOLE stall on this run — and not one of them is zero.
     assert out["decision_1"]["T_stall_prod_ms"] == pytest.approx(
         mod.ATOMIC_SCANS_UNDER_LOCK * 120.0
         + 60.0
-        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * 90.0
+        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * 10.1
         + mod.BACKFILL_REMAINING_UNDER_LOCK * 70.0
         + 40.0
     )
@@ -718,6 +894,7 @@ def test_teardown_allowance_takes_the_larger_of_commit_and_cancel_to_unlock():
             _batch_measurement(500, 1200.0, commit_ms=30.0),
             _probe("batch", 250.0),
             _probe("atomic", 250.0),
+            _sweep_domain(),
         ],
         None,
     )
@@ -737,6 +914,7 @@ def test_teardown_allowance_covers_the_repair_phases_commits_too():
             _batch_measurement(500, 400.0, commit_ms=1.0, repair_commit_ms=100.0),
             _probe("batch", 2.0),
             _probe("atomic", 2.0),
+            _sweep_domain(),
         ],
         None,
     )
@@ -778,7 +956,8 @@ def test_derivation_rejects_an_under_trialled_cancel_probe():
 def test_derivation_combines_repeated_probes_of_one_scope_by_maximum():
     out = harness.derive(
         [_measurement(), _empty_point(), _batch_measurement(500, 400.0),
-         _probe("batch", 10.0), _probe("batch", 77.0), _probe("atomic", 80.0)],
+         _probe("batch", 10.0), _probe("batch", 77.0), _probe("atomic", 80.0),
+         _sweep_domain()],
         None,
     )
     assert out["projected_ms"]["max_batch_cancel_to_unlock_ms_observed"] == 77.0
@@ -800,6 +979,7 @@ def test_derivation_rejects_a_batch_probe_smaller_than_the_largest_admitted_batc
                 _batch_measurement(500, 400.0, repair_size=2000, max_repair_batch_ms=100.0),
                 _probe("batch", 10.0, rows_locked=500),
                 _probe("atomic", 20.0),
+                _sweep_domain(),
             ],
             None,
         )
@@ -875,7 +1055,8 @@ def test_derivation_rejects_an_atomic_probe_smaller_than_the_transaction_it_boun
     with pytest.raises(SystemExit, match="smaller transaction"):
         harness.derive(
             [_measurement(), _empty_point(), _batch_measurement(500, 400.0),
-             _probe("batch", 10.0), _probe("atomic", 20.0, rows_locked=5)],
+             _probe("batch", 10.0), _probe("atomic", 20.0, rows_locked=5),
+             _sweep_domain()],
             None,
         )
 
@@ -889,6 +1070,7 @@ def test_batch_size_is_bounded_by_what_was_actually_demonstrated():
         _batch_measurement(4000, 2000.0),  # 3 * 2000 = 6000 > 5000: fails
         _probe("batch", 10.0),
         _probe("atomic", 20.0),
+        _sweep_domain(),
     ]
     out = harness.derive(measurements, None)
     assert out["batch_sizing"]["B_tested"] == 500
@@ -912,6 +1094,7 @@ def test_tested_size_is_the_page_actually_executed_not_the_limit_requested():
             _batch_measurement(4000, 400.0, rows=120, repair_size=301, repair_rows=300),
             _probe("batch", 10.0),
             _probe("atomic", 20.0),
+            _sweep_domain(),
         ],
         None,
     )
@@ -935,6 +1118,7 @@ def test_derivation_fails_when_no_batch_candidate_passed_rather_than_using_the_f
                 _batch_measurement(4000, 9_000.0),  # 3 * 9000 > 5000
                 _probe("batch", 10.0),
                 _probe("atomic", 20.0),
+                _sweep_domain(),
             ],
             None,
         )
@@ -974,7 +1158,11 @@ def test_relation_growth_scales_the_scan_terms_and_nothing_else():
         == base["constants"]["MARGINED_MS_PER_REPAIR_ROW"]
     )
     # The backfill's own terms scan game_sessions, which did NOT grow here.
-    for name in ("MARGINED_MS_BACKFILL_SELECT_SWEEP", "MARGINED_MS_BACKFILL_REMAINING"):
+    for name in (
+        "MARGINED_MS_BACKFILL_SWEEP_SCAN",
+        "MARGINED_US_BACKFILL_SWEEP_PER_PAGE",
+        "MARGINED_MS_BACKFILL_REMAINING",
+    ):
         assert grown["constants"][name] == base["constants"][name], name
 
 
@@ -1000,15 +1188,33 @@ def test_relation_growth_of_game_sessions_alone_scales_the_backfills_own_terms()
     grown = harness.derive([m] + _complete()[1:], prod)
     assert grown["scaling"]["r_sessions"] == 2.0
     assert grown["scaling"]["r_moves"] == 1.0
-    for name in (
-        "MARGINED_MS_COVERAGE_ASSERT",
-        "MARGINED_MS_BACKFILL_SELECT_SWEEP",
-        "MARGINED_MS_BACKFILL_REMAINING",
-    ):
+    for name in ("MARGINED_MS_COVERAGE_ASSERT", "MARGINED_MS_BACKFILL_REMAINING"):
         assert grown["constants"][name] == 2 * base["constants"][name], name
     assert (
         grown["constants"]["MARGINED_MS_PER_SCAN_STMT"]
         == base["constants"]["MARGINED_MS_PER_SCAN_STMT"]
+    )
+    # The SWEEP splits, and this is the whole point of splitting it. A bigger
+    # game_sessions means a bigger relation WALK, so the scan coefficient doubles;
+    # it does not make STARTING a statement more expensive, so the per-page slope
+    # is bit-for-bit unchanged. The doubling is exact rather than approximate
+    # because the fit is solved in frozen-basis coordinates: substituting
+    # A' = A / N_copy leaves the LP in (A', b) identical, so the solution moves by
+    # exactly N_copy on A and by nothing at all on b.
+    assert grown["projected_ms"]["sweep_scan_coeff_frozen_basis_ms"] == pytest.approx(
+        2 * base["projected_ms"]["sweep_scan_coeff_frozen_basis_ms"]
+    )
+    assert (
+        grown["projected_ms"]["sweep_envelope_per_page_ms_exact"]
+        == base["projected_ms"]["sweep_envelope_per_page_ms_exact"]
+    )
+    assert (
+        grown["constants"]["MARGINED_MS_BACKFILL_SWEEP_SCAN"]
+        == 2 * base["constants"]["MARGINED_MS_BACKFILL_SWEEP_SCAN"]
+    )
+    assert (
+        grown["constants"]["MARGINED_US_BACKFILL_SWEEP_PER_PAGE"]
+        == base["constants"]["MARGINED_US_BACKFILL_SWEEP_PER_PAGE"]
     )
 
 
@@ -1027,21 +1233,26 @@ def test_decision_1_rejects_atomic_when_only_the_backfills_own_terms_breach():
                  "repair_population_count"):
         m["scans"][name] = {"max_ms": 1.0}
     m["scans"]["coverage_assert"] = {"max_ms": 1.0}
-    m["scans"]["backfill_select_sweep"] = {"max_ms": 6_000.0, "pages": 3}
     m["scans"]["backfill_remaining"] = {"max_ms": 6_000.0}
+    # The sweep arrives as a DOMAIN now, not a scalar scan entry: two points whose
+    # LP solution is a ~6 s relation walk plus a 0.01 ms/page slope.
+    expensive_sweep = _sweep_domain([_sweep_point(1, "6000.0"), _sweep_point(11, "6000.1")])
+    free_sweep = _sweep_domain([_sweep_point(1, "0.0"), _sweep_point(11, "0.0")])
     prod = {
         "dimensions": m["dimensions_before"],
         "populations": {"n_stale": 1, "m_moves": 60, "n_broken_audit": 0, "n_repair": 0},
     }
-    out = harness.derive([m] + _complete()[1:], prod)
+    rest = [x for x in _complete()[1:] if x.get("kind") != "sweep_domain"]
+    out = harness.derive([m] + rest + [expensive_sweep], prod)
     assert out["projected_ms"]["T_repair_prod"] == 0.0
     assert out["decision_1"]["verdict"] == "batch"
     # And the reason really is those two terms: zeroing them admits the same run.
     without = dict(m)
     without["scans"] = dict(m["scans"])
-    without["scans"]["backfill_select_sweep"] = {"max_ms": 0.0, "pages": 3}
     without["scans"]["backfill_remaining"] = {"max_ms": 0.0}
-    assert harness.derive([without] + _complete()[1:], prod)["decision_1"]["verdict"] == "atomic"
+    assert (
+        harness.derive([without] + rest + [free_sweep], prod)["decision_1"]["verdict"] == "atomic"
+    )
 
 
 def test_decision_1_charges_every_term_of_the_stall():
@@ -1058,7 +1269,7 @@ def test_decision_1_charges_every_term_of_the_stall():
         + p["T_repair_prod"]
         + mod.ATOMIC_SCANS_UNDER_LOCK * p["T_scan_stmt_prod"]
         + p["T_coverage_assert_prod"]
-        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * p["T_backfill_select_sweep_prod"]
+        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * p["T_backfill_sweep_prod"]
         + mod.BACKFILL_REMAINING_UNDER_LOCK * p["T_backfill_remaining_prod"]
         + p["T_atomic_teardown_floor_prod"]
         + p["T_atomic_teardown_per_row_prod"] * (1000 + 10)
@@ -1068,6 +1279,28 @@ def test_decision_1_charges_every_term_of_the_stall():
     assert out["decision_1"]["margined_stall_ms"] == pytest.approx(
         harness.MARGIN * out["decision_1"]["T_stall_prod_ms"]
     )
+
+
+def test_decision_1_reports_both_ends_of_the_admitted_batch_range():
+    """A verdict is a property of a CONFIGURATION, not of a database.
+
+    The headline verdict is at ``DEFAULT_BATCH_SIZE``, the configuration a deploy
+    actually runs. ``MIN_ADMITTED_BATCH`` is reported beside it, because the sweep
+    is ``ceil(N_stale / batch_size) + 1`` pages and a verdict that flips between
+    the two ends of the range an operator may set is a fact they need BEFORE
+    choosing an override, not after.
+    """
+    out = harness.derive(_complete(), None)["decision_1"]
+    assert out["batch_size_assumed"] == 500  # min(B_formula 555, B_tested 500)
+    assert out["batch_size_min_admitted"] == mod.MIN_ADMITTED_BATCH == 1
+    # 1,000 stale rows: 3 pages at the default, 1,001 at the floor.
+    assert out["sweep_pages"] == 3
+    assert out["sweep_pages_min_batch"] == 1_001
+    assert out["T_stall_prod_ms_min_batch"] > out["T_stall_prod_ms"]
+    assert out["margined_stall_ms_min_batch"] == pytest.approx(
+        harness.MARGIN * out["T_stall_prod_ms_min_batch"]
+    )
+    assert out["verdict_min_batch"] in {"atomic", "batch"}
 
 
 def test_decision_1_rejects_atomic_when_only_the_scan_terms_breach_the_bound():
@@ -1166,6 +1399,434 @@ def test_production_zero_populations_do_not_project_the_snapshots_row_work():
 
 
 # ---------------------------------------------------------------------------
+# The sweep envelope: the LP, its bases, its intake, and the frozen pair against
+# the evidence on disk.
+# ---------------------------------------------------------------------------
+
+_SWEEP_ARTIFACT = _BACKEND_DIR.parent / "docs" / "sizing" / "sweep_batch_domain_20260725.json"
+
+#: The basis the shipped constants are frozen against — the revision's own
+#: ``SIZED_*``, not any measuring copy's.
+_FROZEN_BASIS = {
+    "total_rows": mod.SIZED_TOTAL_ROWS,
+    "sessions_bytes": mod.SIZED_SESSIONS_BYTES,
+}
+
+
+def _shipped_sweep_artifacts() -> list[tuple[str, dict]]:
+    """Every sweep-domain artifact on disk, through the EXACT-decimal intake."""
+    paths = sorted(_SWEEP_ARTIFACT.parent.glob("sweep_*.json"))
+    assert paths, f"no sweep-domain artifact under {_SWEEP_ARTIFACT.parent}"
+    return [(p.name, harness._load_measurement_json(str(p))) for p in paths]
+
+
+def _shipped_sweep_points() -> list[harness.SweepPoint]:
+    out = []
+    for name, doc in _shipped_sweep_artifacts():
+        out.extend(harness.sweep_points(doc, _FROZEN_BASIS, artifact=name))
+    return out
+
+
+def test_shipped_sweep_artifact_matches_the_derive_schema():
+    """The migrated artifact validates, and nothing was lost migrating it.
+
+    It predates the schema ``derive`` requires: keyed by top-level ``runs`` and
+    ``dimensions_of_this_copy``, with no ``kind`` and no ``dimensions_before``.
+    Offered as it stood it would have matched nothing, and the run carrying the
+    only retained trials on record would have been invisible.
+    """
+    doc = harness._load_measurement_json(str(_SWEEP_ARTIFACT))
+    assert doc["kind"] == "sweep_domain"
+    assert doc["sessions_synthesized"] is False
+    points = harness.sweep_points(doc, _FROZEN_BASIS, artifact=_SWEEP_ARTIFACT.name)
+
+    # Both runs survived, with their retention flags intact.
+    assert len(points) == 24
+    assert {p.run for p in points} == {"B", "C"}
+    assert all(not p.steers for p in points if p.run == "B")
+    assert all(p.steers for p in points if p.run == "C")
+    assert {p.trials for p in points if p.run == "B"} == {3}
+    assert {p.trials for p in points if p.run == "C"} == {7}
+
+    # The copy's basis, exact and agreeing with its own recorded factor.
+    n_copy = harness.sweep_copy_growth_factor(
+        doc["dimensions_before"], _FROZEN_BASIS, artifact="shipped"
+    )
+    assert n_copy == Fraction(1222, 661)
+    assert float(n_copy) == pytest.approx(
+        float(doc["frozen_basis"]["growth_factor_for_this_copy"])
+    )
+
+    # The record of why a least-squares fit is not a cost model is still there.
+    assert "withdrawn" in doc["fits"]
+    assert "4.101 + 0.15424 * pages" in doc["fits"]["withdrawn"]["line"]
+
+
+def test_frozen_sweep_model_matches_the_published_envelope():
+    """The derivation is REPRODUCIBLE from the evidence on disk.
+
+    Which is exactly what the withdrawn OLS line was not: it was computed over
+    twelve maxima, published beside an eight-row table, copied into the bead as
+    eleven, and its raw trials had not been kept — so no reader could re-derive
+    it, and the two published forms disagreed.
+    """
+    fit = harness.solve_sweep_envelope(_shipped_sweep_points())
+    assert mod.MARGINED_MS_BACKFILL_SWEEP_SCAN == math.ceil(harness.MARGIN * fit["a"])
+    assert mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE == math.ceil(
+        harness.MARGIN * fit["b"] * 1000
+    )
+    # Exact rationals, not floats: the vertex is picked at the last digits.
+    assert fit["a"] == Fraction(16_170_721_723, 677_525_000)
+    assert fit["b"] == Fraction(1_414_007, 8_200_000)
+    # The line TOUCHES its worst points, which is what "least conservative" means
+    # — and one of them is run B's, the only evidence at 4 pages.
+    active = {(c["run"], c["pages"]) for c in fit["active_constraints"]}
+    assert active == {("B", 4), ("C", 824)}
+    # And it is less conservative than the shifted-OLS envelope it replaces
+    # (103.31 ms of over-charge over the same points).
+    assert fit["sum_overcharge_ms"] == pytest.approx(89.771466, abs=1e-5)
+
+
+def test_frozen_sweep_model_covers_every_retained_measurement():
+    """The invariant, carried as a test rather than as a table.
+
+    For every measured point, de-normalized back onto the copy it actually ran on,
+    the SHIPPED integers still cover ``3x`` what was measured there. True by
+    construction — the LP covers every point in frozen-basis coordinates and both
+    literals are ``ceil``-ed UP from ``MARGIN x`` the solution — which is the
+    reason to assert it: a frozen model whose margined value drops below 3x a
+    measurement it was fitted to has silently stopped being conservative, and
+    nothing else in the revision would notice.
+
+    Ranges over every point of every artifact on disk, each through ITS OWN
+    ``N_copy``. A second measuring copy does not get a second invariant.
+    """
+    points = _shipped_sweep_points()
+    assert points
+    slacks = []
+    for p in points:
+        # backfill_sweep_ms at the point's own basis: g_sessions is 1 at the frozen
+        # basis, so carrying the model back to the copy divides the SCAN component
+        # by N_copy and leaves the per-page component alone.
+        modelled = (
+            mod.MARGINED_MS_BACKFILL_SWEEP_SCAN / float(p.n_copy)
+            + mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE * p.pages / 1000
+        )
+        required = harness.MARGIN * float(p.max_ms)
+        assert modelled >= required, (p.artifact, p.run, p.pages, modelled, required)
+        slacks.append((modelled - required, p.run, p.pages))
+    # The two tightest points are the ones the LP made active — run C at 824 pages
+    # and run B's outlier at 4 — so the margin is genuinely being spent on
+    # variance rather than on fit error.
+    slacks.sort()
+    assert {(run, pages) for _, run, pages in slacks[:2]} == {("C", 824), ("B", 4)}
+
+
+def test_measured_sweep_domain_is_declared_and_its_extrapolation_is_bounded():
+    """What is measured, and what is assumed, stated where the constant lives.
+
+    The measured domain reaches 1,647 pages. The import-time budget evaluates
+    6,001 and the atomic rejection boundary sits near 5,137, so everything between
+    is LINEAR EXTRAPOLATION — the upper-envelope construction says nothing there.
+    An undeclared extrapolation reads as evidence, so the gap and the word are
+    both required to be in the constant's own docstring.
+    """
+    measured_max_pages = max(p.pages for p in _shipped_sweep_points())
+    assert measured_max_pages == 1_647
+    assert measured_max_pages < mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
+
+    source = pathlib.Path(mod.__file__).read_text()
+    tree = ast.parse(source)
+    # The comment block immediately above the constant is its docstring by the
+    # `#:` convention this revision uses throughout, so the declaration is looked
+    # for in the source rather than in `__doc__`.
+    assert "MARGINED_US_BACKFILL_SWEEP_PER_PAGE = " in source
+    declaration = source.split("MARGINED_US_BACKFILL_SWEEP_PER_PAGE = ")[0]
+    assert "EXTRAPOLATION" in declaration
+    assert f"{measured_max_pages:,}" in declaration
+    assert "IMPORT_WORST_CASE_SWEEP_PAGES" in declaration
+    assert isinstance(tree, ast.Module)  # the source parsed; the split is over real code
+
+
+def test_legacy_maxima_constrain_the_fit_without_steering_it():
+    """A published maximum is a measurement, and a bound has to cover it.
+
+    Trial count decides whether a point may STEER a fit, never whether the bound
+    may sit below a number a host actually produced. Run B's 3-trial points carry
+    no retained trials, so they are accepted, land in the coverage set only — and
+    ``(4 pages, 13.60 ms)`` is nonetheless an ACTIVE constraint of the shipped
+    solution, and the only evidence at that page count.
+    """
+    points = _shipped_sweep_points()
+    with_b = harness.solve_sweep_envelope(points)
+    assert with_b["coverage_points"] == 24
+    assert with_b["objective_points"] == 12
+    assert any(c["run"] == "B" and not c["steers"] for c in with_b["active_constraints"])
+
+    # Dropping run B changes the solution — the proof that it constrains rather
+    # than decorates.
+    without_b = harness.solve_sweep_envelope([p for p in points if p.run != "B"])
+    assert (without_b["a"], without_b["b"]) != (with_b["a"], with_b["b"])
+    assert without_b["a"] < with_b["a"]
+
+
+def test_under_trialled_objective_run_is_refused():
+    """The floor is scoped to evidence that STEERS the fit.
+
+    A point claiming retained trials with fewer than ``MIN_SWEEP_TRIALS`` of them
+    is a hard failure naming the point and the floor. The SAME point with
+    ``raw_trials_retained: false`` is accepted as coverage-only — because refusing
+    it outright would discard the only measurement at 4 pages and let the shipped
+    bound sit below a maximum a host actually produced.
+    """
+    thin = _sweep_point(5, "20.0", trials=harness.MIN_SWEEP_TRIALS - 1)
+    with pytest.raises(SystemExit, match=f"MIN_SWEEP_TRIALS \\({harness.MIN_SWEEP_TRIALS}\\)"):
+        harness.sweep_points(
+            _sweep_domain(_SWEEP_DEFAULT_POINTS + [thin]), _FROZEN_BASIS, artifact="thin"
+        )
+    coverage_only = dict(thin, raw_trials_retained=False)
+    coverage_only.pop("trials_ms")
+    points = harness.sweep_points(
+        _sweep_domain(_SWEEP_DEFAULT_POINTS + [coverage_only]), _FROZEN_BASIS, artifact="ok"
+    )
+    assert [p.steers for p in points] == [True, True, False]
+
+
+def test_lp_takes_the_A_zero_boundary_when_no_pair_intersection_is_feasible():
+    """Both axes are load-bearing vertices, not defensive padding.
+
+    With points at (10 pages, 1.0 ms) and (1000 pages, 1000.0 ms) the single
+    pair-intersection has ``A < 0``. A solver that only enumerated pair
+    intersections and the ``b = 0`` boundary would return the flat line at an
+    over-charge of 999 ms and call it "least conservative"; the true optimum is
+    ``(A = 0, b = 1)`` at 9 ms.
+    """
+    points = harness.sweep_points(
+        _sweep_domain([_sweep_point(10, "1.0"), _sweep_point(1000, "1000.0")]),
+        _measurement()["dimensions_before"],  # N_copy = 1
+        artifact="axis",
+    )
+    fit = harness.solve_sweep_envelope(points)
+    assert (fit["a"], fit["b"]) == (Fraction(0), Fraction(1))
+    assert fit["sum_overcharge_ms"] == pytest.approx(9.0)
+
+
+def test_lp_takes_the_b_zero_boundary_when_the_tie_break_prefers_a_flat_line():
+    """The mirror image: one point, two vertices, identical over-charge.
+
+    With a single measurement every line through it is equally conservative, so
+    the tie-break decides — and it picks the SMALLER SLOPE, i.e. the flat line,
+    rather than a per-page term one point cannot possibly evidence.
+    """
+    points = harness.sweep_points(
+        _sweep_domain([_sweep_point(10, "5.0")]),
+        _measurement()["dimensions_before"],
+        artifact="flat",
+    )
+    fit = harness.solve_sweep_envelope(points)
+    assert (fit["a"], fit["b"]) == (Fraction(5), Fraction(0))
+    assert fit["sum_overcharge_ms"] == pytest.approx(0.0)
+
+
+def test_sweep_fit_combines_two_copies_on_their_own_bases():
+    """The failure mode the per-point ``N_copy`` exists to make impossible.
+
+    Two copies of the same relation at different sizes. Their points are only
+    jointly satisfiable in FROZEN-BASIS coordinates, because the leaner copy
+    (``N_copy = 2``) is the one carrying the expensive measurements — and the
+    leanest copy is always the one demanding the largest factor.
+
+    Fitting raw ``(a, b)`` across both and multiplying ``a`` by ONE shared factor
+    afterwards prices every point through whichever copy happened to be chosen,
+    and here that BREACHES the very measurement it was fitted to.
+    """
+    frozen = {"total_rows": 6000, "sessions_bytes": 12_000_000}
+    lean = _sweep_domain(  # N_copy = 2
+        [_sweep_point(1, "30.0"), _sweep_point(101, "40.0")],
+        dimensions={"total_rows": 3000, "sessions_bytes": 6_000_000},
+    )
+    bloated = _sweep_domain(  # N_copy = 1
+        [_sweep_point(1, "10.0"), _sweep_point(101, "20.0")],
+        dimensions={"total_rows": 6000, "sessions_bytes": 12_000_000},
+    )
+    points = harness.sweep_points(lean, frozen, artifact="lean") + harness.sweep_points(
+        bloated, frozen, artifact="bloated"
+    )
+    assert {float(p.n_copy) for p in points} == {1.0, 2.0}
+
+    fit = harness.solve_sweep_envelope(points)
+    assert fit["a"] == Fraction(299, 5)  # 59.8
+    assert fit["b"] == Fraction(1, 10)
+    # Every point covered through ITS OWN basis.
+    for p in points:
+        assert fit["a"] / p.n_copy + fit["b"] * p.pages >= p.max_ms, (p.artifact, p.pages)
+
+    # The counterfactual: the same LP solved basis-blind gives a raw intercept of
+    # 29.9, and carrying it across with the BLOATED copy's factor of 1 leaves the
+    # lean copy's 30.0 ms point uncovered by more than half.
+    blind = harness.solve_sweep_envelope([p._replace(n_copy=Fraction(1)) for p in points])
+    shared_basis_a = blind["a"] * Fraction(1)
+    assert shared_basis_a == Fraction(299, 10)  # 29.9
+    lean_point = next(p for p in points if p.artifact == "lean" and p.pages == 1)
+    assert shared_basis_a / lean_point.n_copy + blind["b"] * 1 < lean_point.max_ms
+
+
+def test_derive_parses_measurement_decimals_exactly():
+    """A decimal timing must reach the fit as the number it was written as.
+
+    ``155.0007`` has no exact binary float. A plain ``json.loads`` turns it into
+    the nearest one BEFORE anything downstream can see it, and
+    ``Fraction(<that float>)`` is then the exact value of a different number — at
+    precisely the digits where the LP picks between vertices, and where a 68 ns
+    transcription error has already broken one published bound on this data.
+    """
+    doc = harness._load_measurement_json(str(_SWEEP_ARTIFACT))
+    points = harness.sweep_points(doc, _FROZEN_BASIS, artifact="exact")
+    binding = next(p for p in points if p.pages == 824 and p.run == "C")
+    assert binding.max_ms == Fraction(Decimal("155.0007"))
+    assert binding.max_ms != Fraction(155.0007)  # what a plain loader would produce
+
+    # Re-reading the same file reproduces the same solution, bit for bit.
+    again = harness.sweep_points(
+        harness._load_measurement_json(str(_SWEEP_ARTIFACT)), _FROZEN_BASIS, artifact="exact"
+    )
+    first, second = harness.solve_sweep_envelope(points), harness.solve_sweep_envelope(again)
+    assert (first["a"], first["b"]) == (second["a"], second["b"])
+    assert first["active_constraints"] == second["active_constraints"]
+
+    # And the plain loader is refused rather than silently accepted.
+    plain = json.loads(_SWEEP_ARTIFACT.read_text())
+    with pytest.raises(SystemExit, match="_load_measurement_json"):
+        harness.sweep_points(plain, _FROZEN_BASIS, artifact="plain")
+
+
+def test_derive_requires_a_sweep_domain_and_accepts_several():
+    """Zero is a hard failure; more than one is the expected shape."""
+    without = [m for m in _complete() if m.get("kind") != "sweep_domain"]
+    with pytest.raises(SystemExit, match="--mode sweep-domain"):
+        harness.derive(without, None)
+
+    # Two artifacts, each its own basis, both entering the same fit.
+    second = _sweep_domain(
+        [_sweep_point(3, "10.5", run="E"), _sweep_point(203, "31.0", run="E")],
+        dimensions={"total_rows": 500, "sessions_bytes": 1_000_000},
+        artifact="second-copy",
+    )
+    out = harness.derive(without + [_sweep_domain(), second], None)
+    assert out["projected_ms"]["sweep_domain_points"] == 4
+    bases = {b["artifact"]: b for b in out["projected_ms"]["sweep_copy_growth_factors"]}
+    assert set(bases) == {"synthetic-sweep-domain", "second-copy"}
+    assert bases["synthetic-sweep-domain"]["N_copy_exact"] == "1"
+    assert bases["second-copy"]["N_copy_exact"] == "2"
+
+
+def test_derive_rejects_a_row_cloned_copy_offered_as_anything_but_a_sweep_domain():
+    """Clones carry no ``session_moves`` rows.
+
+    So a copy grown by ``--synthesize-sessions`` can price the sweep and nothing
+    else: every ``session_moves``-scaled term and the whole repair population on
+    it are meaningless.
+    """
+    m = _measurement(sessions_synthesized=True)
+    with pytest.raises(SystemExit, match="sessions_synthesized"):
+        harness.derive([m] + _complete()[1:], None)
+    # The same flag on the sweep domain itself is exactly what it is for.
+    harness.derive(
+        [x for x in _complete() if x.get("kind") != "sweep_domain"]
+        + [_sweep_domain(sessions_synthesized=True)],
+        None,
+    )
+
+
+def test_derive_names_the_migration_rather_than_finding_zero_artifacts():
+    """The pre-schema shape matches nothing, and silence is the wrong failure.
+
+    Offered as it stood, the one artifact carrying retained trials would have been
+    invisible and the derivation would have reported "no sweep-domain
+    measurement" about a file that is nothing but a sweep domain.
+    """
+    legacy = {
+        "what": "the pre-migration shape",
+        "dimensions_of_this_copy": {"n_stale": 1646, "g_sessions": 4184},
+        "runs": [{"id": "B", "points": []}],
+    }
+    with pytest.raises(SystemExit, match="pre-schema shape"):
+        harness.derive(_complete() + [legacy], None)
+
+
+def test_derive_reports_the_extrapolation_gap_in_its_own_output():
+    """The measured ceiling beside the page count the budget evaluates.
+
+    Stated in the emitted JSON rather than only in prose, because the budget is
+    read from the JSON and the prose is not.
+    """
+    out = harness.derive(_complete(), None)["invariants"]
+    gap = out["sweep_domain_max_pages_vs_import_worst_case"]
+    assert gap["measured_max_pages"] == 11  # the synthetic domain's largest point
+    assert gap["import_worst_case_pages"] == 1_001  # 1,000 sized rows at batch 1
+    assert gap["extrapolated"] is True
+    assert out["sweep_envelope_covers_every_measured_point"] is True
+    assert out["scan_budget_sweep_pages"] == 1_001
+
+
+def test_sweep_batch_size_list_is_deduplicated_and_range_checked():
+    """``MAX_BATCH_SIZE`` is DERIVED, so an explicit duplicate of it is reachable.
+
+    Measuring one point twice would enter the fit as two constraints at the same
+    page count, double-weighting one host reading in the objective.
+    """
+    assert mod.MAX_BATCH_SIZE == 1_000
+    assert harness.resolve_sweep_batch_sizes([1000, 1, mod.MAX_BATCH_SIZE, 1]) == [1, 1000]
+    assert harness.resolve_sweep_batch_sizes(None) == sorted(
+        set(harness.DEFAULT_SWEEP_BATCH_SIZES)
+    )
+    with pytest.raises(SystemExit, match="resolve_batch_size admits"):
+        harness.resolve_sweep_batch_sizes([mod.MAX_BATCH_SIZE + 1])
+    with pytest.raises(SystemExit, match="resolve_batch_size admits"):
+        harness.resolve_sweep_batch_sizes([mod.MIN_ADMITTED_BATCH - 1])
+
+
+def test_sweep_generation_refuses_a_point_whose_trials_disagree_on_the_page_count():
+    """A fit point is a PAIR, and both halves must come from the same sweep.
+
+    Taking ``max(walked)`` and ``max(durations)`` independently builds a point no
+    trial ever produced — the largest page count from one trial beside the slowest
+    time from another. That is not merely imprecise: a higher page count with a
+    lower cost RELAXES ``A / N + b x pages >= max_ms``, so the fictitious pair
+    under-constrains the bound, in the one direction a bound must not move.
+
+    Refused rather than averaged or majority-voted. Nothing mutates during an
+    unlocked sweep, so a spread means a concurrent writer on a copy that is
+    supposed to be disposable — and the per-trial counts are not retained in the
+    artifact, so this is the only place it could ever be seen.
+    """
+    assert harness.agreed_sweep_pages([9, 9, 9], formula=9, batch_size=5) == 9
+    with pytest.raises(SystemExit, match="population moved under it"):
+        harness.agreed_sweep_pages([9, 10, 9], formula=9, batch_size=5)
+
+
+def test_sweep_generation_refuses_a_page_count_the_formula_did_not_predict():
+    """The formula is what every consumer prices from, so a disagreement is not
+    local to the point that found it: the atomic projection and the import-time
+    budget are both derived from ``ceil(n / b) + 1``, and if the runner's real
+    paging differs then both are wrong by the same amount."""
+    with pytest.raises(SystemExit, match="backfill_sweep_pages predicts"):
+        harness.agreed_sweep_pages([10, 10, 10], formula=9, batch_size=5)
+
+
+def test_sweep_domain_refuses_an_under_trialled_run_at_generation():
+    """Enforced where the evidence is PRODUCED, not only where it is consumed.
+
+    Everything the harness emits from here on is objective-eligible; the
+    coverage-only path exists for the one legacy artifact that predates the rule.
+    """
+    with pytest.raises(SystemExit, match=str(harness.MIN_SWEEP_TRIALS)):
+        harness.run_sweep_domain(
+            None, batch_sizes=[1], trials=harness.MIN_SWEEP_TRIALS - 1, synthesized=False
+        )
+
+
+# ---------------------------------------------------------------------------
 # Provenance. A measured constant whose input was never recorded is
 # unfalsifiable, and the runbook is the only place those inputs live.
 # ---------------------------------------------------------------------------
@@ -1202,6 +1863,13 @@ def test_every_frozen_constant_is_named_in_the_runbook(name):
         "R_tested",
         # The execution-mode verdict is executable, not advisory.
         "GHOSTREPLAY_ACCURACY_BACKFILL_MODE",
+        # The sweep is FITTED rather than read off a maximum, so its provenance is
+        # the fit: both coefficients, the measured page ceiling the extrapolation
+        # starts from, and the basis every point was carried on.
+        "sweep_scan_coeff_frozen_basis_ms",
+        "sweep_envelope_per_page_ms",
+        "sweep_domain_max_pages",
+        "sweep_copy_growth_factors",
     ],
 )
 def test_runbook_records_the_measured_inputs(marker):

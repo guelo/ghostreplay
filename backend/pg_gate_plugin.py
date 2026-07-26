@@ -217,6 +217,25 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_runtime.py::test_pg_one_scan_per_pass_not_one_per_batch",
     "test_release_b_pg_runtime.py::"
     "test_pg_backfill_issues_one_selection_sweep_and_one_convergence_count_per_pass",
+    # The sweep model (g-b-sweep-batch-cost). The page formula against the runner's
+    # ACTUAL paging, the frozen pair against a real sweep, and — the one that has to
+    # be here rather than merely exist — the ENDPOINT GATE. The measured domain
+    # stops at 1,647 pages while the import-time budget evaluates 6,001, so
+    # everything between is linear extrapolation; that test executes the endpoint
+    # and checks the extrapolation's LINEARITY assumption on whatever host runs it,
+    # by comparing that host's beyond-domain per-page slope against its own
+    # in-domain one. It does NOT make the extrapolation a measured claim about the
+    # shipped constants — the fixture is a small relation of clones, so it is
+    # neither production-width nor production-sized, and g-b-sweep-endpoint-measure
+    # still owns that. What it rules out is the one way the extrapolation could be
+    # wrong that is testable without a production-shaped copy, and an extrapolation
+    # gate that silently stops being collected is the failure that matters.
+    "test_release_b_pg_runtime.py::test_pg_sweep_page_count_matches_the_model",
+    "test_release_b_pg_runtime.py::test_pg_frozen_sweep_model_covers_a_live_sweep",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_synthesize_sessions_establishes_the_stale_population_it_promises",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count",
     # The materialization's transaction contract is MODE-SPLIT, and the one
     # invariant both modes share is that it takes no row lock of its own.
     "test_release_b_pg_runtime.py::"

@@ -138,13 +138,24 @@ Deviations from the plan, stated rather than hidden
   nullable, but the "runner never reads a statement constant directly" rule
   applies to the per-batch runner too, so its statements must be reachable
   through the bundle.
-- ``MARGINED_MS_BACKFILL_SELECT_SWEEP`` and ``MARGINED_MS_BACKFILL_REMAINING``
-  are marked PROVISIONAL: the sizing derivation that produced every other
-  measured constant predates the discovery that the backfill's OWN
-  ``game_sessions`` work is relation-scaled, so it never timed those two
-  statements directly. They are derived from that same run's recorded
-  ``game_sessions`` scan measurement — see their docstrings — and
-  g-b-size-derive-backfill-terms re-measures them.
+- ``MARGINED_MS_BACKFILL_REMAINING`` is marked PROVISIONAL: the sizing derivation
+  that produced every other measured constant predates the discovery that the
+  backfill's OWN ``game_sessions`` work is relation-scaled, so it never timed
+  that statement directly. It is derived from that same run's recorded
+  ``game_sessions`` scan measurement — see its docstring — and
+  g-b-size-derive-backfill-terms re-measures it.
+- The selection SWEEP is not a scalar. It is
+  ``MARGINED_MS_BACKFILL_SWEEP_SCAN * G_sessions +
+  MARGINED_US_BACKFILL_SWEEP_PER_PAGE * pages / 1000``, evaluated by
+  :func:`backfill_sweep_ms` over the page count :func:`backfill_sweep_pages`
+  derives from the LIVE population and the RESOLVED batch size, because
+  ``GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`` moves that page count by a factor of
+  ``MAX_BATCH_SIZE`` and the measured cost across that domain spans 42x
+  (g-b-sweep-batch-cost).
+- **The model is measured to 1,647 pages and LINEARLY EXTRAPOLATED beyond it.**
+  The import-time worst case evaluates 6,001 pages, and nothing between those two
+  numbers has been measured. See ``MARGINED_US_BACKFILL_SWEEP_PER_PAGE``'s
+  docstring; the endpoint measurement is g-b-sweep-endpoint-measure.
 
 Both keyset sweeps use the plan's first-page/later-page statement pair, and that
 is not interchangeable with the two shortcuts it looks like. A sentinel minimum
@@ -401,22 +412,65 @@ MARGINED_MS_COVERAGE_ASSERT = 6
 #: the sized dimensions, so this takes the same ceil(3 * 1.74) = 6.
 MARGINED_MS_BACKFILL_REMAINING = 6
 
-#: PROVISIONAL (g-b-size-derive-backfill-terms).
+#: The RELATION-SCAN component of one full backfill selection SWEEP — every
+#: SELECT_BATCH_* page of one pass together — x3, in MILLISECONDS.
 #:
-#: One full backfill selection SWEEP — every SELECT_BATCH_* page of one pass
-#: together — x3. Each page walks primary-key order applying the same unindexed
-#: version predicate, so a sweep touches ~all of game_sessions and costs
-#: O(G_sessions) rather than O(N_stale), for the same reason as
-#: MARGINED_MS_BACKFILL_REMAINING above.
+#: The sweep is priced by TWO constants because it is two costs that scale with
+#: two different things, and a single scalar cannot see either of them. THIS one
+#: is the keyset walk of game_sessions under the unindexed version predicate.
+#: PostgreSQL serves that walk from the PRIMARY KEY with a filter, so the relation
+#: is read about once IN TOTAL across a sweep rather than once per page — which is
+#: why it is a relation term and not a per-page one, and why the earlier
+#: pages x scan derivation over-priced it by the page count. Being a relation
+#: read, it scales with G_sessions exactly as every other game_sessions term does.
 #:
-#: Provisional derivation, from the recorded run rather than a direct timing:
-#: a sweep at the sized dimensions is ceil(SIZED_TOTAL_ROWS / MAX_BATCH_SIZE) + 1
-#: = 7 pages (the +1 is the empty page that terminates the sweep), and each page
-#: is priced at a WHOLE game_sessions scan — the worst case for an unindexed
-#: filter — using the recorded 1.74 ms coverage-scan measurement:
-#: ceil(3 * 7 * 1.74) = 37. Pricing every page at a full scan is deliberately
-#: conservative; a direct measurement can only lower it.
-MARGINED_MS_BACKFILL_SELECT_SWEEP = 37
+#: Stated AT THE FROZEN BASIS (SIZED_TOTAL_ROWS / SIZED_SESSIONS_BYTES). Every
+#: measurement enters the fit divided by the growth factor of the copy IT ran on,
+#: inside the fit and per point, never multiplied by one shared factor afterwards:
+#: the sizing copies share a row count but their game_sessions relations differ by
+#: 26%, so a shared factor silently under-charges the least bloated copy.
+#:
+#: Frozen as ceil(3 * A) where A is the scan coefficient of the least conservative
+#: line that COVERS EVERY MEASURED MAXIMUM on record — a 2-variable LP solved
+#: exactly in frozen-basis coordinates, not a least-squares fit, because a
+#: regression through a set of maxima sits below some of them and tripling its
+#: coefficients then spends the margin covering fit error instead of variance.
+#: A = 23.867343… ms; ceil(3 * A) = 72. See docs/release_b_runbook.md §7.
+MARGINED_MS_BACKFILL_SWEEP_SCAN = 72
+
+#: The PER-PAGE component of the same sweep, x3, in MICROSECONDS.
+#:
+#: Statement startup: parse, plan, execute, round-trip. It scales with the PAGE
+#: COUNT and is indifferent to relation size, so it takes NEITHER growth factor.
+#: Growth in game_sessions raises the cost of WALKING it — which is
+#: MARGINED_MS_BACKFILL_SWEEP_SCAN's job — and does not raise the cost of starting
+#: a statement. Multiplying this term by G_sessions over-charges; leaving the scan
+#: component unscaled under-charges. :func:`backfill_sweep_ms` is where that split
+#: is applied, and a constant test pins it.
+#:
+#: Denominated in µs for the same reason as MARGINED_US_ATOMIC_TEARDOWN_PER_ROW:
+#: the measured slope is ~0.52 ms/page, and rounding a sub-millisecond slope up to
+#: an integer millisecond nearly doubles it and manufactures ~2.9 s of phantom
+#: stall at the 6,001-page worst case. :func:`backfill_sweep_ms` divides it by
+#: 1000 at exactly one call site; a constant test pins that, so a "tidy-up" into
+#: milliseconds fails loudly rather than inflating every projection by three
+#: orders of magnitude. Frozen as ceil(3 * b * 1000) with b = 0.172439… ms/page.
+#:
+#: EXTRAPOLATION, NAMED AS ONE. The measured sweep domain reaches 1,647 pages
+#: (docs/sizing/sweep_batch_domain_20260725.json). The import-time budget
+#: evaluates IMPORT_WORST_CASE_SWEEP_PAGES = 6,001 and the atomic rejection
+#: boundary sits near 5,137, so everything past 1,647 pages is LINEAR
+#: EXTRAPOLATION and an ASSUMPTION rather than evidence: the LP covers the points
+#: it was given and says nothing beyond them. Every figure that depends on the
+#: unmeasured range is labelled assumption-dependent in the runbook, and
+#: g-b-sweep-endpoint-measure measures the endpoint on a copy sized to the frozen
+#: basis. Until it lands, test_release_b_pg_runtime.py's endpoint gate narrows the
+#: assumption without discharging it: it executes 6,001 pages and checks that the
+#: per-page slope PAST 1,647 matches the slope inside it ON THAT HOST, so a
+#: nonlinearity in the extrapolated range fails. It cannot speak for the frozen
+#: numbers, because its relation is a fixture of clones rather than a
+#: production-shaped copy.
+MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518
 
 #: The per-statement cap for EVERY scan-bearing statement: the repair population
 #: count, REPAIR_POPULATE_SQL, REPAIR_REMAINING_SQL, SOUNDNESS_ASSERT_SQL, the
@@ -522,12 +576,67 @@ def _admitted_batch_size(margined_ms_per_row: int, tested: int, *, constant: str
     return min(MAX_BATCH_MS // margined_ms_per_row, tested)
 
 
+def backfill_sweep_pages(*, n_stale: int, batch_size: int) -> int:
+    """How many SELECT_BATCH_* pages one backfill selection sweep executes.
+
+    ``ceil(n_stale / batch_size) + 1``. The ``+1`` is the EMPTY page that
+    terminates the sweep: :meth:`_Runner._backfill_pass` loops until
+    ``_select_page`` returns nothing, so the last page of every sweep selects zero
+    rows and still costs a statement.
+
+    EXACT, not an estimate, in the case the atomic projection prices: atomic
+    selection takes no ``SKIP LOCKED``, so nothing is transiently skipped and one
+    pass drains the whole population in exactly this many pages.
+
+    ``n_stale = 0`` is ONE page, never zero. A run with nothing to backfill still
+    executes the sweep — it issues the first page, gets nothing, and stops — and a
+    zero here would price that statement at nothing.
+
+    Integer ceil-division rather than ``math.ceil(n / b)``: the float form loses
+    exactness above 2^53 and this feeds a frozen budget.
+    """
+    if n_stale <= 0:
+        return 1
+    return -(-n_stale // batch_size) + 1
+
+
+def backfill_sweep_ms(
+    *,
+    pages: int,
+    g_sessions: float = 1.0,
+    scan_ms: int = MARGINED_MS_BACKFILL_SWEEP_SCAN,
+    per_page_us: int = MARGINED_US_BACKFILL_SWEEP_PER_PAGE,
+) -> float:
+    """One full selection sweep, priced from its PAGE COUNT.
+
+    Two components that scale with two different things and MUST NOT share a
+    factor. ``g_sessions`` multiplies the relation-scan component and NOTHING
+    ELSE: the per-page term is statement startup, which a larger relation does not
+    make more expensive. See both constants' docstrings.
+
+    The per-page term is in MICROSECONDS and is divided by 1000 exactly HERE — the
+    one call site, so there is one place for a constant test to pin.
+
+    Returns a float. There is no run-time ceiling: the rounding-up happens once,
+    at freeze time, per component, which is what keeps both frozen literals
+    integers.
+
+    ``scan_ms`` / ``per_page_us`` are injectable for the same reason
+    :func:`_scan_budget_ms` takes its constants as arguments — so the sizing
+    harness prices with the pair it has just derived instead of restating the
+    formula and drifting from it.
+    """
+    return scan_ms * g_sessions + per_page_us * pages / 1000
+
+
 def _scan_budget_ms(
     margined_ms_per_scan_stmt: int,
     margined_ms_coverage_assert: int,
-    margined_ms_backfill_select_sweep: int = MARGINED_MS_BACKFILL_SELECT_SWEEP,
+    margined_ms_backfill_sweep_scan: int = MARGINED_MS_BACKFILL_SWEEP_SCAN,
+    margined_us_backfill_sweep_per_page: int = MARGINED_US_BACKFILL_SWEEP_PER_PAGE,
     margined_ms_backfill_remaining: int = MARGINED_MS_BACKFILL_REMAINING,
     *,
+    pages: int,
     g_moves: float = 1.0,
     g_sessions: float = 1.0,
 ) -> float:
@@ -548,6 +657,15 @@ def _scan_budget_ms(
       passes. A budget that counted only the session_moves detectors and the
       coverage assertion priced the backfill's own relation-scaled work at zero.
 
+    ``pages`` is KEYWORD-ONLY AND HAS NO DEFAULT, deliberately. The sweep costs
+    ``ceil(n_stale / batch_size) + 1`` statement startups plus one relation walk,
+    and ``GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`` moves that count by a factor of
+    MAX_BATCH_SIZE. A caller that does not say what page count it is budgeting for
+    is exactly the bug g-b-sweep-batch-cost exists to fix, so it cannot compile
+    rather than silently pricing the wrong configuration. Note that ``g_sessions``
+    reaches the sweep's SCAN component and MARGINED_MS_BACKFILL_REMAINING, and
+    stops short of the per-page term — see :func:`backfill_sweep_ms`.
+
     The one game_sessions scan NOT charged here is the pre-flight STALE
     population count, which is one extra BACKFILL_REMAINING_SQL beyond the
     MAX_PASSES this formula prices. It is absorbed by the 3x margin already
@@ -562,8 +680,15 @@ def _scan_budget_ms(
         (2 * MAX_PASSES + 2) * margined_ms_per_scan_stmt * g_moves
         + margined_ms_coverage_assert * g_sessions
         + MAX_PASSES
-        * (margined_ms_backfill_select_sweep + margined_ms_backfill_remaining)
-        * g_sessions
+        * (
+            backfill_sweep_ms(
+                pages=pages,
+                g_sessions=g_sessions,
+                scan_ms=margined_ms_backfill_sweep_scan,
+                per_page_us=margined_us_backfill_sweep_per_page,
+            )
+            + margined_ms_backfill_remaining * g_sessions
+        )
     )
 
 
@@ -590,23 +715,43 @@ EST_MAX_LOCK_HOLD_MS = MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS
 MAX_BATCH_SIZE = _admitted_batch_size(
     MARGINED_MS_PER_ROW, B_TESTED, constant="MARGINED_MS_PER_ROW"
 )
+#: The smallest batch an override may request. Behaviourally identical to the
+#: literal ``1`` :func:`resolve_batch_size` used to compare against, but the sweep
+#: is priced from ``ceil(n_stale / batch_size) + 1`` and the import-time worst case
+#: DIVIDES BY THIS — so the floor stops being a magic number buried in a
+#: comparison and becomes the thing the budget is derived from.
+MIN_ADMITTED_BATCH = 1
 DEFAULT_BATCH_SIZE = MAX_BATCH_SIZE
 REPAIR_BATCH_SIZE = _admitted_batch_size(
     MARGINED_MS_PER_REPAIR_ROW, R_TESTED, constant="MARGINED_MS_PER_REPAIR_ROW"
+)
+
+#: The DECLARED worst case the import-time scan budget is charged at. Module load
+#: has no database, no population and no resolved batch size, so it prices the
+#: largest sweep the shipped runtime can be asked for: the whole sized relation
+#: stale, at the smallest admitted batch. The runtime check re-derives this from
+#: the LIVE population and the RESOLVED batch size instead.
+IMPORT_WORST_CASE_SWEEP_PAGES = backfill_sweep_pages(
+    n_stale=SIZED_TOTAL_ROWS, batch_size=MIN_ADMITTED_BATCH
 )
 
 # The scan-budget invariant, over frozen literals. A relation large enough that
 # the scans ALONE cannot fit the revision's wall clock fails loudly HERE instead
 # of exhausting MAX_PASSES and raising a misleading non-convergence error 900
 # seconds later. The RUNTIME form of this check, over the LIVE relation
-# dimensions, runs before the first row lock in BOTH modes.
-if _scan_budget_ms(MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT) >= (
-    REVISION_DEADLINE_S * 1000
-):
+# dimensions AND the live page count, runs before the first row lock in BOTH modes.
+if _scan_budget_ms(
+    MARGINED_MS_PER_SCAN_STMT,
+    MARGINED_MS_COVERAGE_ASSERT,
+    pages=IMPORT_WORST_CASE_SWEEP_PAGES,
+) >= (REVISION_DEADLINE_S * 1000):
     raise MigrationError(
         "20260719_01 scan budget "
-        f"{_scan_budget_ms(MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT):.0f}ms "
-        f"does not fit REVISION_DEADLINE_S ({REVISION_DEADLINE_S}s); re-size before deploying"
+        f"{_scan_budget_ms(MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT, pages=IMPORT_WORST_CASE_SWEEP_PAGES):.0f}ms "
+        f"at {IMPORT_WORST_CASE_SWEEP_PAGES} sweep pages "
+        f"(n_stale=SIZED_TOTAL_ROWS={SIZED_TOTAL_ROWS} batch_size=MIN_ADMITTED_BATCH="
+        f"{MIN_ADMITTED_BATCH}) does not fit REVISION_DEADLINE_S ({REVISION_DEADLINE_S}s); "
+        "re-size before deploying"
     )
 
 # Per-phase pass bounds, per MODE.
@@ -1200,7 +1345,14 @@ def resolve_batch_size() -> int:
 
     An UNBOUNDED override would defeat the per-batch deadline by admitting a
     batch that cannot finish inside it, so the range is exactly
-    ``1..MAX_BATCH_SIZE``. There is no repair-size override.
+    ``MIN_ADMITTED_BATCH..MAX_BATCH_SIZE``. There is no repair-size override.
+
+    The floor stays at 1. The selection sweep costs
+    ``ceil(n_stale / batch_size) + 1`` pages, so ``batch_size = 1`` is by far the
+    most expensive configuration this admits — but the import-time budget fits it
+    with ~814 s of headroom, so nothing argues for raising the floor. What the low
+    end DOES do is move the atomic stall projection, which is why every consumer
+    of that projection now takes the resolved size rather than assuming one.
     """
     raw = os.environ.get(ENV_BATCH)
     if raw is None:
@@ -1209,8 +1361,10 @@ def resolve_batch_size() -> int:
         size = int(raw.strip())
     except ValueError as exc:
         raise MigrationError(f"{ENV_BATCH}={raw!r} is not an integer") from exc
-    if not 1 <= size <= MAX_BATCH_SIZE:
-        raise MigrationError(f"{ENV_BATCH}={raw!r} is outside 1..{MAX_BATCH_SIZE}")
+    if not MIN_ADMITTED_BATCH <= size <= MAX_BATCH_SIZE:
+        raise MigrationError(
+            f"{ENV_BATCH}={raw!r} is outside {MIN_ADMITTED_BATCH}..{MAX_BATCH_SIZE}"
+        )
     return size
 
 
@@ -1613,7 +1767,12 @@ def atomic_teardown_reserve_ms(*, n_stale: int, n_repair: int) -> float:
 
 
 def project_atomic_stall_ms(
-    *, n_stale: int, n_repair: int, g_moves: float = 1.0, g_sessions: float = 1.0
+    *,
+    n_stale: int,
+    n_repair: int,
+    batch_size: int,
+    g_moves: float = 1.0,
+    g_sessions: float = 1.0,
 ) -> float:
     """The FULL projected atomic writer stall — mutation, scans and teardown alike.
 
@@ -1640,15 +1799,29 @@ def project_atomic_stall_ms(
     O(G_sessions) and not O(N_stale) — a correctly-stamped row RAISES their cost
     while leaving ``N_stale`` unchanged.
 
+    ``batch_size`` is REQUIRED, with no default, because the sweep is
+    ``ceil(n_stale / batch_size) + 1`` pages and the shipped runtime admits any
+    size in ``MIN_ADMITTED_BATCH..MAX_BATCH_SIZE``. A defaulted batch size would
+    let a call site price the sweep at a page count the run will not execute,
+    which is precisely the shipped bug g-b-sweep-batch-cost fixes: an admission
+    projection blind to its own dominant variable cannot refuse an inadmissible
+    configuration, and its verdicts become a property of the relation size rather
+    than of the check.
+
     The GROWTH FACTORS are what make the scan terms honest between sizing and
-    deploy, for the reason given in :func:`probe_growth`.
+    deploy, for the reason given in :func:`probe_growth` — and ``g_sessions``
+    reaches the sweep's SCAN component only, per :func:`backfill_sweep_ms`.
     """
     return (
         n_stale * MARGINED_MS_PER_ROW
         + n_repair * MARGINED_MS_PER_REPAIR_ROW
         + ATOMIC_SCANS_UNDER_LOCK * MARGINED_MS_PER_SCAN_STMT * g_moves
         + MARGINED_MS_COVERAGE_ASSERT * g_sessions
-        + BACKFILL_SELECT_SWEEPS_UNDER_LOCK * MARGINED_MS_BACKFILL_SELECT_SWEEP * g_sessions
+        + BACKFILL_SELECT_SWEEPS_UNDER_LOCK
+        * backfill_sweep_ms(
+            pages=backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size),
+            g_sessions=g_sessions,
+        )
         + BACKFILL_REMAINING_UNDER_LOCK * MARGINED_MS_BACKFILL_REMAINING * g_sessions
         + atomic_teardown_reserve_ms(n_stale=n_stale, n_repair=n_repair)
     )
@@ -1698,7 +1871,13 @@ BATCH_ENV = _ModeEnv(
 
 
 def bind_mode(
-    dialect: str, *, n_stale: int, n_repair: int, g_moves: float, g_sessions: float
+    dialect: str,
+    *,
+    n_stale: int,
+    n_repair: int,
+    batch_size: int,
+    g_moves: float,
+    g_sessions: float,
 ) -> _ModeEnv:
     """APPLY the parsed mode per dialect and per population.
 
@@ -1718,8 +1897,9 @@ def bind_mode(
        never a silent atomic run.
     4. ``atomic`` on PostgreSQL: the full stall projection must fit
        ``MAX_WRITER_STALL_MS``, with the scan terms rescaled to the relations as
-       they are NOW rather than as sizing found them, and the residual work
-       budget must be positive.
+       they are NOW rather than as sizing found them, the SELECTION SWEEP priced
+       at the page count the RESOLVED ``batch_size`` actually produces, and the
+       residual work budget must be positive.
     5. ``batch``: admitted by the zero-batch and scan-budget invariants; no stall
        projection is needed, because no batch holds a row lock across another
        batch and no set-wide scan holds one at all.
@@ -1751,7 +1931,11 @@ def bind_mode(
         return BATCH_ENV
 
     projected = project_atomic_stall_ms(
-        n_stale=n_stale, n_repair=n_repair, g_moves=g_moves, g_sessions=g_sessions
+        n_stale=n_stale,
+        n_repair=n_repair,
+        batch_size=batch_size,
+        g_moves=g_moves,
+        g_sessions=g_sessions,
     )
     reserve = atomic_teardown_reserve_ms(n_stale=n_stale, n_repair=n_repair)
     work_budget = MAX_WRITER_STALL_MS - reserve
@@ -1766,24 +1950,31 @@ def bind_mode(
         raise MigrationError(
             f"{ENV_MODE}=atomic is inadmissible: projected writer stall {projected:.0f}ms "
             f"exceeds MAX_WRITER_STALL_MS ({MAX_WRITER_STALL_MS}ms) at "
-            f"n_stale={n_stale} n_repair={n_repair} g_moves={g_moves:.3f} "
+            f"n_stale={n_stale} n_repair={n_repair} batch_size={batch_size} "
+            f"pages={backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size)} "
+            f"g_moves={g_moves:.3f} "
             f"g_sessions={g_sessions:.3f} (live relations against SIZED_MOVES_BYTES="
             f"{SIZED_MOVES_BYTES} SIZED_M_TOTAL={SIZED_M_TOTAL} SIZED_SESSIONS_BYTES="
             f"{SIZED_SESSIONS_BYTES} SIZED_TOTAL_ROWS={SIZED_TOTAL_ROWS}); "
+            f"a larger {ENV_BATCH} lowers the sweep's page count — "
             f"run per-batch mode — see {RUNBOOK}"
         )
     logger.info(
         "20260719_01: atomic admitted projected_stall_ms=%.0f teardown_reserve_ms=%.0f "
-        "work_budget_ms=%.0f max_stall_ms=%d",
+        "work_budget_ms=%.0f max_stall_ms=%d batch_size=%d sweep_pages=%d",
         projected,
         reserve,
         work_budget,
         MAX_WRITER_STALL_MS,
+        batch_size,
+        backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size),
     )
     return ATOMIC_ENV
 
 
-def assert_runtime_scan_budget(*, g_moves: float, g_sessions: float) -> None:
+def assert_runtime_scan_budget(
+    *, n_stale: int, batch_size: int, g_moves: float, g_sessions: float
+) -> None:
     """The scan-budget invariant again, over the LIVE relations, in BOTH modes.
 
     A literal check at import cannot see that the relations grew after sizing,
@@ -1791,10 +1982,18 @@ def assert_runtime_scan_budget(*, g_moves: float, g_sessions: float) -> None:
     correctly-stamped version-1 rows that leave ``N_stale`` untouched — breaks the
     batch runner's clock exactly as an outgrown ``session_moves`` does. Batch mode
     has no stall projection to catch that, so this is the check that does.
+
+    ``n_stale`` and ``batch_size`` are required for the same reason: the import
+    check prices the sweep at the DECLARED worst case
+    (``IMPORT_WORST_CASE_SWEEP_PAGES``), and this one prices it at what the run is
+    actually about to execute. A live population past the sized basis combined
+    with a small override is reachable and is exactly what a literal check misses.
     """
+    pages = backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size)
     budget = _scan_budget_ms(
         MARGINED_MS_PER_SCAN_STMT,
         MARGINED_MS_COVERAGE_ASSERT,
+        pages=pages,
         g_moves=g_moves,
         g_sessions=g_sessions,
     )
@@ -1802,9 +2001,11 @@ def assert_runtime_scan_budget(*, g_moves: float, g_sessions: float) -> None:
     if budget >= limit:
         raise MigrationError(
             f"20260719_01 live scan budget {budget:.0f}ms does not fit REVISION_DEADLINE_S "
-            f"({REVISION_DEADLINE_S}s) at g_moves={g_moves:.3f} g_sessions={g_sessions:.3f}; "
-            f"the relations have outgrown their sizing — re-size before deploying "
-            f"(see {RUNBOOK})"
+            f"({REVISION_DEADLINE_S}s) at g_moves={g_moves:.3f} g_sessions={g_sessions:.3f} "
+            f"n_stale={n_stale} batch_size={batch_size} sweep_pages={pages}; "
+            f"the relations have outgrown their sizing, or {ENV_BATCH} is small enough that "
+            f"the sweep's page count alone does not fit — re-size, or raise {ENV_BATCH}, "
+            f"before deploying (see {RUNBOOK})"
         )
 
 
@@ -1878,6 +2079,7 @@ def stall_for(
     env: "_ModeEnv",
     n_stale: int,
     n_repair: int,
+    batch_size: int,
     g_moves: float,
     g_sessions: float,
 ) -> _AtomicStall | None:
@@ -1896,6 +2098,12 @@ def stall_for(
     writer-stall measurements, able to fail an upgrade that was doing nothing
     wrong, and would report an ``observed_atomic_stall_ms`` for a hold that is not
     a row lock — a stall measurement of a writer that does not exist.
+
+    ``batch_size`` is required and threaded into the projection because this is a
+    DUPLICATE of the admission projection :func:`bind_mode` already made, reported
+    to ``migration_stall_probe`` as ``projected_stall_ms``. Leaving it on a
+    signature that could not see the batch size would have the probe classify the
+    observed stall against a projection the admission check never made.
     """
     if env.per_batch or bundle.dialect != "postgresql":
         return None
@@ -1904,7 +2112,11 @@ def stall_for(
         n_stale=n_stale,
         n_repair=n_repair,
         projected_ms=project_atomic_stall_ms(
-            n_stale=n_stale, n_repair=n_repair, g_moves=g_moves, g_sessions=g_sessions
+            n_stale=n_stale,
+            n_repair=n_repair,
+            batch_size=batch_size,
+            g_moves=g_moves,
+            g_sessions=g_sessions,
         ),
     )
 
@@ -2656,11 +2868,17 @@ def upgrade() -> None:
         conn, bundle.repair_population_count, clock, lock_wait_ms=ATOMIC_LOCK_WAIT_MS
     )
     g_moves, g_sessions, dims = probe_growth(conn, bundle, clock)
+    # batch_size and the page count it implies are part of the deploy record: they
+    # are what the sweep was priced at, and an operator reading a rejection needs
+    # to see the knob that produced it.
+    sweep_pages = backfill_sweep_pages(n_stale=n_stale, batch_size=batch_size)
     logger.info(
-        "20260719_01: n_stale=%d n_repair=%d g_moves=%.3f g_sessions=%.3f live=%s "
-        "sized=%s dialect=%s",
+        "20260719_01: n_stale=%d n_repair=%d batch_size=%d sweep_pages=%d g_moves=%.3f "
+        "g_sessions=%.3f live=%s sized=%s dialect=%s",
         n_stale,
         n_repair,
+        batch_size,
+        sweep_pages,
         g_moves,
         g_sessions,
         dims,
@@ -2673,11 +2891,14 @@ def upgrade() -> None:
         bundle.dialect,
     )
     # The runtime scan-budget recheck, in BOTH modes, before the first row lock.
-    assert_runtime_scan_budget(g_moves=g_moves, g_sessions=g_sessions)
+    assert_runtime_scan_budget(
+        n_stale=n_stale, batch_size=batch_size, g_moves=g_moves, g_sessions=g_sessions
+    )
     env = bind_mode(
         bundle.dialect,
         n_stale=n_stale,
         n_repair=n_repair,
+        batch_size=batch_size,
         g_moves=g_moves,
         g_sessions=g_sessions,
     )
@@ -2710,6 +2931,7 @@ def upgrade() -> None:
         env=env,
         n_stale=n_stale,
         n_repair=n_repair,
+        batch_size=batch_size,
         g_moves=g_moves,
         g_sessions=g_sessions,
     )

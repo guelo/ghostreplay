@@ -405,10 +405,11 @@ file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 | `MARGINED_MS_PER_SCAN_STMT` | 521 | `ceil(3 * 173.49)` |
 | `MARGINED_MS_COVERAGE_ASSERT` | 6 | `ceil(3 * 1.74)` |
 | `MARGINED_MS_BACKFILL_REMAINING` | 6 | **PROVISIONAL** — `ceil(3 * 1.74)`, from the recorded `COVERAGE_ASSERT_SQL` measurement (see below) |
-| `MARGINED_MS_BACKFILL_SELECT_SWEEP` | 37 | **PROVISIONAL** — `ceil(3 * 7 pages * 1.74)`, same recorded measurement (see below) |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | `ceil(3 * 23.867343)` — the relation-scan coefficient of the covering LP over the sweep domain, **at the frozen basis**. Milliseconds. §7. |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | `ceil(3 * 0.172440 * 1000)` — the per-page slope of the same LP. **Microseconds**, divided by 1000 in `backfill_sweep_ms`. §7. |
 | `BACKFILL_SELECT_SWEEPS_UNDER_LOCK` | 1 | structural per-pass count (atomic backfill converges in one unlocked-selection pass) |
 | `BACKFILL_REMAINING_UNDER_LOCK` | 1 | structural per-pass count (same argument) |
-| `SCAN_STMT_TIMEOUT_MS` | 521 | `max(521, 6, 6)` — the maximum over **every** statement it is armed on: the four complete `session_moves` scans (which already include `REPAIR_REMAINING_SQL`), the coverage assertion, **and `BACKFILL_REMAINING_SQL`** via `MARGINED_MS_BACKFILL_REMAINING`. The two convergence scans are priced by *different* terms — the repair one by `MARGINED_MS_PER_SCAN_STMT`/`G_moves`, the backfill one by `MARGINED_MS_BACKFILL_REMAINING`/`G_sessions` — and only the latter needed adding. `MARGINED_MS_BACKFILL_SELECT_SWEEP` is deliberately absent: each page of the sweep is armed by the mode's batch cap, so the sweep constant prices a multi-statement unit no single armed value has to cover. |
+| `SCAN_STMT_TIMEOUT_MS` | 521 | `max(521, 6, 6)` — the maximum over **every** statement it is armed on: the four complete `session_moves` scans (which already include `REPAIR_REMAINING_SQL`), the coverage assertion, **and `BACKFILL_REMAINING_SQL`** via `MARGINED_MS_BACKFILL_REMAINING`. The two convergence scans are priced by *different* terms — the repair one by `MARGINED_MS_PER_SCAN_STMT`/`G_moves`, the backfill one by `MARGINED_MS_BACKFILL_REMAINING`/`G_sessions` — and only the latter needed adding. **Neither** sweep component is in that maximum: each page of the sweep is armed by the mode's batch cap, so the two sweep constants price a multi-statement unit no single armed value has to cover — the scan component is a relation walk spread across every page rather than the cost of any one of them, and the per-page component is a per-statement slope in microseconds. |
 | `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | `ceil(3 * 26.28)` |
 | `TEARDOWN_ALLOWANCE_MS` | 7 | `ceil(3 * max(1.408 commit, 2.230 cancel-to-unlock))` — **cancel-to-unlock won** |
 | `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | `ceil(3 * 0.646)` (empty-population point, own restore) |
@@ -429,9 +430,9 @@ the design requires: the backfill *term* drops out of Decision 1 while the
 *constant* stays declared, because the runtime guard multiplies it by the **live**
 count.
 
-### The two PROVISIONAL backfill terms
+### The backfill's own `game_sessions` terms (one PROVISIONAL, one replaced)
 
-`MARGINED_MS_BACKFILL_SELECT_SWEEP` and `MARGINED_MS_BACKFILL_REMAINING` price the
+The backfill's selection sweep and `MARGINED_MS_BACKFILL_REMAINING` price the
 backfill's **own** `game_sessions` work: its keyset selection sweep (all
 `SELECT_BATCH_*` pages of one pass) and `BACKFILL_REMAINING_SQL`. Both filter
 `game_sessions` on `player_accuracy_algo_version IS NULL OR < 1`, a predicate **no
@@ -449,7 +450,7 @@ shape against the same relation:
 
 - `MARGINED_MS_BACKFILL_REMAINING = ceil(3 * 1.74) = 6` — a count over
   `game_sessions` on an unindexed predicate, i.e. the coverage assertion's shape.
-- `MARGINED_MS_BACKFILL_SELECT_SWEEP = ceil(3 * 7 * 1.74) = 37` — a sweep at the
+- the sweep scalar, `ceil(3 * 7 * 1.74) = 37` — a sweep at the
   sized dimensions is `ceil(6000 / 1000) + 1 = 7` pages (the `+1` is the empty page
   that terminates it), and **each page is priced at a whole `game_sessions`
   scan**, the worst case for an unindexed filter. Deliberately conservative: a
@@ -463,12 +464,13 @@ shape against the same relation:
   > overestimates by the page count, so the direction happened to hold here — but
   > it held for a reason the derivation did not state and had never measured.
 
-`scripts/size_accuracy_backfill.py` now measures both directly
-(`backfill_remaining` and `backfill_select_sweep` in `time_scan_statements`, and
-`--derive` emits both constants), so the next sizing run produces measured values.
-`g-b-size-derive-backfill-terms` owns that re-measurement, and sizing
-qualification may adjust the numbers and rerun this bead's gates — an adjusted
-*number* is expected refinement, not a structural change.
+`scripts/size_accuracy_backfill.py` measures the convergence count directly
+(`backfill_remaining` in `time_scan_statements`). The sweep is not a scan-statement
+timing at all and is no longer measured there: it is a **domain**, produced by
+`--mode sweep-domain` and fitted in `--derive`. `g-b-size-derive-backfill-terms`
+owns the convergence count's re-measurement, and sizing qualification may adjust
+the number and rerun this bead's gates — an adjusted *number* is expected
+refinement, not a structural change.
 
 **Measured 2026-07-25 against the production restore; see §7.** An earlier
 version of this paragraph concluded the opposite — that the restore "cannot
@@ -489,11 +491,18 @@ reason to *normalize* the result, which §7 does, not a reason not to measure.
 
 Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 6` is now
 **qualified** — the worst of seven measurements, each normalized on the basis of
-the copy it ran on, is exactly 6. `MARGINED_MS_BACKFILL_SELECT_SWEEP = 37` stays
-**PROVISIONAL**, but the label now means something specific and worse than "not
-yet measured": measurement showed a **scalar cannot price this statement at all**,
-because its cost depends on the operator-chosen batch size and the runtime admits
-batch sizes down to 1. `g-b-sweep-batch-cost` (P1) replaces it.
+the copy it ran on, is exactly 6.
+
+The sweep scalar did not survive that measurement. The label "PROVISIONAL" came to
+mean something specific and worse than "not yet measured": a **scalar cannot price
+this statement at all**, because its cost depends on the operator-chosen batch
+size and the runtime admits batch sizes down to `MIN_ADMITTED_BATCH = 1`.
+`g-b-sweep-batch-cost` (P1) **deleted** `MARGINED_MS_BACKFILL_SELECT_SWEEP` and
+replaced it with the two-component model of §7:
+`MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` ms on the relation and
+`MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` µs per page, evaluated by
+`backfill_sweep_ms` over the page count `backfill_sweep_pages` derives from the
+live population and the resolved batch size.
 
 `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` is denominated in **microseconds** on
 purpose. The measured slope is 0.000575 ms/row; rounded up to an integer
@@ -524,10 +533,18 @@ whole population.
 |---|---|---|---|
 | Zero-batch, backfill: `MARGINED_MS_PER_ROW <= MAX_BATCH_MS` | 5 | 5,000 | ✅ |
 | Zero-batch, repair: `MARGINED_MS_PER_REPAIR_ROW <= MAX_BATCH_MS` | 2 | 5,000 | ✅ |
-| Scan budget: `(2*20 + 2) * 521 + 6 + 20 * (37 + 6)` | 22,748 ms | 900,000 ms | ✅ |
+| Scan budget: `(2*20 + 2) * 521 + 6 + 20 * (sweep(6001 pages) + 6)` | 85,618 ms | 900,000 ms | ✅ |
 | `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` | 5,007 | 30,000 | ✅ |
 | `BATCH_LOCK_WAIT_MS < MAX_BATCH_MS` | 1,000 | 5,000 | ✅ |
 | `SCAN_STMT_TIMEOUT_MS >= max(per_scan_stmt, coverage, backfill_remaining)` | 521 | 521 | ✅ |
+
+The scan budget charges the sweep at the **declared worst case** —
+`IMPORT_WORST_CASE_SWEEP_PAGES = ceil(SIZED_TOTAL_ROWS / MIN_ADMITTED_BATCH) + 1
+= 6,001` pages — because module load has no database, no population and no
+resolved batch size. `assert_runtime_scan_budget` re-derives it from the live
+`N_stale` and the resolved `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` before the first
+row lock, which is the only check that sees a live population past the sized basis
+combined with a small override.
 
 `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` is arithmetic over frozen
 literals. It proves that the *estimate* fits the budget and **nothing more** — a
@@ -708,16 +725,16 @@ frozen.
 | `BACKFILL_REMAINING_SQL` (`N_stale` = 1,646) | 5 | 1.07 | 0.96 | 4 | 6 |
 | selection sweep, worst case (below) | 5 | 4.86 | 4.17 | 15 | 37 |
 
-**Both provisional values are conservative here by measurement rather than by
-assumption** — but by less than the raw columns suggest, because a timing has to
-be carried onto the frozen basis before it can be compared to a frozen constant.
-Normalized on the basis of the copy each ran on (see "Normalizing to the frozen
-basis" below): `MARGINED_MS_BACKFILL_REMAINING` by **3.58x**
-(`6 / (1.147 x 1.46172)`), `MARGINED_MS_BACKFILL_SELECT_SWEEP` by **4.12x**
+**Both values were conservative here by measurement rather than by assumption**
+— but by less than the raw columns suggest, because a timing has to be carried
+onto the frozen basis before it can be compared to a frozen constant. Normalized
+on the basis of the copy each ran on (see "Normalizing to the frozen basis"
+below): `MARGINED_MS_BACKFILL_REMAINING` by **3.58x**
+(`6 / (1.147 x 1.46172)`), the sweep scalar by **4.12x**
 (`37 / (4.86 x 1.84871)`) — not the 3.6x and ~5x an unnormalized reading gives.
-For the sweep, read "here" strictly: the row above is one page size, and the
-constant is breached at others, including at page size 100 once enough trials are
-run. See the domain measurement two sections down.
+For the sweep, read "here" strictly: the row above is ONE page size, and the
+scalar is breached at others, including at page size 100 once enough trials are
+run. That is what retired it; see the domain measurement two sections down.
 
 ### The sweep does not re-scan the relation once per page
 
@@ -853,50 +870,138 @@ had landed. Both directions are the same phenomenon: a maximum over few trials i
 whatever the host happened to do, so a 3-trial maximum is an estimate of a bound
 and not a bound.
 
+### The shipped fit: a covering LP, in frozen-basis coordinates
+
 OLS over these maxima gives `5.9466 + 0.170443 x pages`, which under-predicts its
-own worst measurement by 8.61 ms. Shifting the intercept up by exactly that
-residual yields a line covering every measured maximum by construction:
+own worst measurement by 8.61 ms. An earlier draft repaired that by shifting the
+intercept up by exactly that residual — `14.5556 + 0.170444 x pages` — which does
+cover every point, but is the crudest construction that does: it inherits OLS's
+slope wholesale and over-charges by 103.31 ms across run C. **That shifted
+envelope is superseded.** What ships is the *least conservative* line covering
+every measured maximum: a two-variable LP, solved exactly.
 
 ```
-sweep_ms(pages) <= 14.5556 + 0.170444 x pages
+minimize   sum over the OBJECTIVE points of (A / N_copy(i) + b x pages(i) - max_ms(i))
+subject to A / N_copy(i) + b x pages(i) >= max_ms(i)   for every point in the COVERAGE set
+           A >= 0, b >= 0
 ```
 
-**Both coefficients are rounded UP** from the stored
-`14.555555580170807 + 0.1704431364318315`, and that is not cosmetic. The
-construction makes the line *touch* its worst point — at 824 pages the envelope
-equals the measurement exactly — so rounding either coefficient to display
-precision in the normal, nearest direction pushes the line below the point it was
-built to cover. Printed as `0.170443` it yields 155.000632 against a measured
-155.0007: a bound broken by 68 nanoseconds, entirely by transcription. A bound's
-coefficients round one way only.
+`A` is the relation-scan coefficient **at the frozen basis** and `b` the per-page
+slope. The fit is **not** raw-then-scaled: each point carries its own
+`N_copy(i)` *inside* the fit, so measurements taken on different copies enter on
+their own bases. Fitting raw `(a, b)` across several copies and multiplying `a`
+by one shared factor afterwards prices every point through whichever copy's
+dimensions happened to be chosen — the basis error the section below exists to
+prevent.
 
-| Pages | Measured max | Envelope | `ceil(3 x envelope)` | `ceil(3 x max)` |
-|---|---|---|---|---|
-| 1,647 | 282.25 | 295.28 | 886 | 847 |
-| 824 | 155.00 | 155.00 | 466 | 466 |
-| 331 | 64.07 | 70.97 | 213 | 193 |
-| 166 | 32.95 | 42.85 | 129 | 99 |
-| 67 | 16.16 | 25.98 | 78 | 49 |
-| 34 | 10.37 | 20.35 | 62 | 32 |
-| 18 | 6.94 | 17.62 | 53 | 21 |
-| 8 | 6.57 | 15.92 | 48 | 20 |
-| 5 | 5.61 | 15.41 | 47 | 17 |
-| 4 | 4.94 | 15.24 | 46 | 15 |
-| 3 | 12.75 | 15.07 | 46 | 39 |
-| 2 | 3.66 | 14.90 | 45 | 11 |
+**Coverage set** — every measured maximum on record, every run, every
+sweep-domain artifact, *including* run B's 3-trial points. A published maximum is
+a measurement and a bound has to cover it. "A 3-trial maximum is an estimate of a
+bound, not a bound" is a reason not to let it *steer* a fit; it is never a licence
+to sit below a number the host actually produced. Run B is not a formality here:
+`(4 pages, 13.60 ms)` is an **active constraint** of the shipped solution and the
+only evidence at that page count.
 
-`envelope(pages_i) >= max_i` holds at every point, and therefore so does
-`ceil(3 x envelope(pages_i)) >= ceil(3 x max_i)`. **That pair of columns is the
-invariant `g-b-sweep-batch-cost` has to carry as a test rather than as a table**:
-a frozen two-component model whose margined value drops below `3x` a measurement
-it was fitted to has silently stopped being conservative, and nothing else in the
-revision would notice.
+**Objective set** — only points whose per-trial timings are retained
+(`raw_trials_retained: true`), i.e. run C's twelve. Run B's maxima cannot be
+audited or re-derived, so they constrain the fit without steering it. The
+objective is summed in each point's own measurement coordinates, so a point is not
+weighted by how far its copy sits from the frozen basis.
 
-This envelope is **evidence for that bead, not a value to freeze**. It is fitted
-to one host, one PostgreSQL, one relation shape and twelve points; shifting an
-OLS intercept is the crudest construction that satisfies the constraint, and it
-inherits OLS's slope wholesale. A constrained fit that minimizes conservatism
-subject to covering every point is the bead's to choose.
+**Solver** — the objective's coefficients are strictly positive, so the optimum is
+at a vertex, and the vertices come in three families: every pair of coverage
+constraints made tight (an exact 2x2, `det = 1/N₁ x p₂ - 1/N₂ x p₁`, degenerate
+pairs skipped), the `b = 0` boundary, and the `A = 0` boundary. Both axes are
+load-bearing rather than defensive padding — with points at `(10, 1.0)` and
+`(1000, 1000.0)` the single pair-intersection has `A < 0`, and a solver without
+the `A = 0` boundary returns the flat line at an over-charge of 999 ms instead of
+the true optimum `(A = 0, b = 1)` at 9 ms. `fractions.Fraction` throughout,
+including `N_copy(i)` (a ratio of *integer* dimensions), so the solution is exact
+and reproducible bit for bit from the retained JSON.
+
+Over runs B + C on `gr_p1_sweep`, `N_copy = 1222/661`:
+
+```
+A = 23.867343231615 ms      (exact 16170721723/677525000)   scan, at the frozen basis
+b =  0.172439878049 ms/page (exact 1414007/8200000)
+A / N_copy = 12.910240 ms — what the scan term costs on gr_p1_sweep itself
+published, rounded up:  A <= 23.8674 ms,  b <= 0.172440 ms/page
+active constraints:     (4 pages, 13.60 ms, run B)  and  (824 pages, 155.0007 ms, run C)
+sum over-charge over run C: 89.77 ms   (the withdrawn shifted-OLS envelope: 103.31 ms)
+```
+
+**Both coefficients round UP**, always, and that is not cosmetic. The
+construction makes the line *touch* its worst point, so rounding to display
+precision in the normal, nearest direction pushes it below the very measurement
+it was built to cover. The shifted envelope printed as `0.170443` yielded
+155.000632 against a measured 155.0007: a bound broken by 68 nanoseconds, entirely
+by transcription. The same trap applies when the frozen literals are written into
+the revision, and the per-component `ceil` below is what closes it.
+
+`--derive` re-runs this LP over whatever sweep-domain artifacts it is given and
+emits `sweep_scan_coeff_frozen_basis_ms`, `sweep_envelope_per_page_ms`,
+`sweep_envelope_active_constraints`, `sweep_envelope_sum_overcharge_ms`,
+`sweep_domain_points`, `sweep_domain_max_pages` and `sweep_copy_growth_factors` —
+one entry per artifact, with that copy's dimensions beside it, so no reader has to
+guess which basis a point was normalized on. Measurement JSON is read through one
+intake with `parse_float=Decimal`: a plain `json.loads` turns `155.0007` into the
+nearest binary float *before* the fit can see it, and `Fraction` of that float is
+the exact value of a different number — at precisely the digits where the LP picks
+between vertices.
+
+### Freezing the two components: units, margin, ceiling
+
+| | Decision | Why |
+|---|---|---|
+| Units | `MARGINED_MS_BACKFILL_SWEEP_SCAN` in **ms**; `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` in **µs**, divided by 1000 at one call site | The per-page term is ~0.52 ms. Rounding a sub-millisecond slope up to an integer millisecond nearly doubles it and manufactures ~2.9 s of phantom stall at the 6,001-page worst case. Same convention and same reasoning as `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW`, and pinned by a constant test for the same reason. |
+| Margin and ceiling | **Per component, at freeze time, margin before ceiling** | A single ceiling on the margined *total* can only be applied once a page count exists, i.e. at run time — which would leave the frozen literals as floats, breaking the "every frozen constant is a positive int" contract and hiding which component the rounding landed on. Per-component ceilings keep both literals integer and auditable against their own measurement, and each rounds up. The cost is bounded and stated: under 1 ms on the scan component, under 1 µs/page. |
+| Growth factor at run time | `g_sessions` multiplies the **scan component only** | The scan component is a relation read. The per-page component is statement startup — parse, plan, execute, round-trip — and a larger relation does not make starting a statement more expensive. Applying `g_sessions` there over-charges; applying nothing to the scan component under-charges. |
+
+```
+MARGINED_MS_BACKFILL_SWEEP_SCAN     = ceil(3 x 23.867343231615)        = ceil(71.602030)  = 72   # ms
+MARGINED_US_BACKFILL_SWEEP_PER_PAGE = ceil(3 x 0.172439878049 x 1000)  = ceil(517.319634) = 518  # µs
+```
+
+There is **no run-time ceiling**: `backfill_sweep_ms` returns a float, like every
+other term in `project_atomic_stall_ms` and `_scan_budget_ms`.
+
+### The invariant, carried as a test rather than as a table
+
+For every measured point *i*, de-normalized back onto the copy it actually ran on:
+
+```
+MARGINED_MS_BACKFILL_SWEEP_SCAN / N_copy(i)
+    + MARGINED_US_BACKFILL_SWEEP_PER_PAGE x p_i / 1000  >=  3 x max_i
+```
+
+It holds by construction — the LP covers every point in frozen-basis coordinates
+and both literals are `ceil`-ed *up* from `3 x` the solution — which is exactly
+why it is worth asserting: **a frozen model whose margined value drops below `3x`
+a measurement it was fitted to has silently stopped being conservative, and
+nothing else in the revision would notice.** At the shipped constants the two
+tightest slacks are **0.776 ms** at 824 pages (run C) and **0.218 ms** at 4 pages
+(run B's outlier) — the same two points the LP made active, which is the sign that
+the margin is being spent on variance rather than on fit error.
+
+Carried by
+`test_release_b_sizing.py::test_frozen_sweep_model_covers_every_retained_measurement`,
+which ranges over every point of every sweep-domain artifact on disk, each with
+its own `N_copy(i)`. A second measuring copy does not get a second invariant.
+`test_frozen_sweep_model_matches_the_published_envelope` re-runs the LP from the
+retained trials and asserts the frozen literals — the derivation is reproducible
+from the evidence on disk, which is precisely what the withdrawn OLS line was not.
+
+**The `3x` belongs to those two and to nowhere else.** It holds by construction
+for the *fitted* points, so asserting it is a tripwire on the freezing arithmetic.
+Asserting it of a **live** sweep is a different claim entirely: dividing the
+margined model by 3 leaves the raw fit — coefficients measured on another machine,
+carrying no margin — and demands it cover the running host's worst reading. That is
+the zero-margin cross-host comparison the endpoint gate's own history rules out, so
+`test_pg_frozen_sweep_model_covers_a_live_sweep` asserts what a live sweep can
+carry: `margined_model >= observed`, the margin left for host variance. It was
+written with the `3x` and caught doing it — passing alone and failing under
+full-gate load, budgeting ~24 ms for a two-page sweep on a relation the test drains
+in 0.4 s unloaded.
 
 ### Normalizing to the frozen basis
 
@@ -904,6 +1009,31 @@ The shipped constants are frozen against `SIZED_TOTAL_ROWS = 6,000` and
 `SIZED_SESSIONS_BYTES = 10,010,624`. Bringing a measurement onto that basis uses
 the growth factor the runtime itself uses, `max(rows ratio, bytes ratio)` — with
 the ratios taken against **the copy the measurement actually ran on**.
+
+**`N_copy` is not `G_sessions`, and neither substitutes for the other.** They are
+two different quantities pointing in two different directions, and confusing them
+is the single easiest way to under-charge a scan term:
+
+| | `N_copy` (freeze time) | `G_sessions` (run time) |
+|---|---|---|
+| Definition | `max(1, SIZED_rows / copy_rows, SIZED_SESSIONS_BYTES / copy_bytes)` | `_growth_factor(live relation vs the frozen basis)` |
+| Direction | measurement copy → frozen basis | frozen basis → live relation |
+| Value for `gr_p1_sweep` | **1222/661** = 1.848714… | — |
+| Value *at* the frozen basis | — | **1.0** |
+| Where it lives | inside the LP, as each point's own divisor | applied at every runtime call site |
+| Applies to | the scan component only | the scan component only |
+
+`N_copy(i)` is a ratio of **integer** dimensions, so it is exactly rational and
+the fit stays exact end to end. It is a **per-point** quantity: points measured on
+different copies carry different `N_copy(i)`, which is the whole reason the LP is
+solved in frozen-basis coordinates rather than scaled after the fact.
+
+`gr_p1_sweep` is *smaller* than the frozen basis, so its timings must be scaled
+**up** by 1.848714… to state what they would have cost at the basis the constants
+are frozen against. At that basis the live `G_sessions` is exactly 1 — so
+`G_sessions` can never supply that normalization; it prices growth *beyond* the
+basis and nothing else. The per-page component takes **neither** factor beyond the
+3x margin.
 
 That last clause is not pedantry. All seven sizing copies hold the same 4,184
 sessions, and their `game_sessions` relations differ by 26%:
@@ -957,10 +1087,10 @@ worst of seven independent measurements, each normalized on its own basis, is
 exactly 6. It carries no page-count term, and nothing in `g-b-sweep-batch-cost`
 touches it.
 
-**`MARGINED_MS_BACKFILL_SELECT_SWEEP`** — every sweep run was on `gr_p1_sweep`,
-growth **1.84871**:
+**The scalar that was there** — `MARGINED_MS_BACKFILL_SELECT_SWEEP = 37`, now
+deleted. Every sweep run was on `gr_p1_sweep`, growth **1.84871**:
 
-| Source | Pages | Max (ms) | `ceil(3 x max x 1.84871)` | vs frozen 37 |
+| Source | Pages | Max (ms) | `ceil(3 x max x 1.84871)` | vs the scalar 37 |
 |---|---|---|---|---|
 | run A, 5 trials, page size 100 | 18 | 6.46 | 36 | ✅ within, by 1 ms |
 | run B, 3 trials, page size 100 | 18 | 5.96 | 34 | ✅ within |
@@ -970,114 +1100,233 @@ growth **1.84871**:
 | run B, 3 trials, page size 1 | 1,647 | 257.05 | 1,426 | ❌ breached |
 | **run C, 7 trials, page size 1** | 1,647 | **282.25** | **1,566** | ❌ breached |
 
-**This retires the "qualified for page sizes ≥ 100" carve-out.** Two errors were
+**This retired the "qualified for page sizes ≥ 100" carve-out.** Two errors were
 propping it up. The basis error above: with `gr_p1_sweep`'s own 5,414,912 bytes
 the factor is 1.84871, not 1.62933, which alone moves run A from 32 to 36 — one
 millisecond of headroom rather than five. And three trials: run C's seven trials
-put the same page size at 39. So the sweep constant is not qualified at *any*
-page size that has been measured with enough trials to estimate a maximum. It is
-not "qualified over part of its domain"; it is unqualified, and the domain
-finding is about *how badly*, not *whether*.
+put the same page size at 39. So the scalar was not qualified at *any* page size
+measured with enough trials to estimate a maximum. It was not "qualified over part
+of its domain"; it was unqualified, and the domain finding was about *how badly*,
+not *whether*.
 
-**37 still stays**, for the reason it always did — a scalar cannot be repaired by
-choosing a different scalar. There is no single value that is honest at page
-size 1 and not absurd at page size 646; the measured range spans 42x.
-`g-b-sweep-batch-cost` replaces the term with a model rather than re-picking the
-scalar, and this table is its acceptance evidence.
+**It was deleted rather than re-picked**, because a scalar cannot be repaired by
+choosing a different scalar: there is no single value honest at page size 1 and
+not absurd at page size 646, and the measured range spans 42x. Deleted rather than
+kept at some value, too — a scalar left in the module is a scalar something will
+go on to price a sweep with. `g-b-sweep-batch-cost` replaced it with
+`MARGINED_MS_BACKFILL_SWEEP_SCAN` + `MARGINED_US_BACKFILL_SWEEP_PER_PAGE`, and
+this table is that bead's acceptance evidence.
 
-### How bad is this, actually
+### How bad was it, and what the model changes
 
-The two consumers answer this very differently, and they have to be worked
-separately. At the worst reachable configuration — `MIN_ADMITTED_BATCH = 1`,
-`SIZED_TOTAL_ROWS = 6,000`, so `ceil(6000/1) + 1 = 6,001` pages — the envelope
-prices the sweep at `14.5556 x 1.848714… + 0.170444 x 6001` = 1049.74 ms,
-margined `ceil(3 x 1049.74)` = **3,150 ms**.
+Every figure below is **final** — computed from the shipped
+`MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` and
+`MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518`, with the units, margin and ceiling
+placement decided above. An earlier version of this section carried a caveat block
+saying they were provisional on exactly those decisions; the decisions are made
+and the caveat is retired.
 
-> **Every exact figure in this section is provisional on a decision that has not
-> been made.** They all assume the two components are frozen as **floats** with a
-> **single** ceiling applied to the margined total. Freeze the scan component as
-> integer milliseconds (27) and the per-page component as integer microseconds
-> (171) — which is what `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` already establishes
-> as this revision's convention for sub-millisecond slopes — and every number
-> below moves:
->
-> | | float, one ceil | int ms + int µs |
-> |---|---|---|
-> | sweep at 6,001 pages | 3,150 ms | 3,160 ms |
-> | atomic projection at `N_stale` = 6,000 | 34.739 s | 34.749 s |
-> | first `N_stale` rejected | 5,141 | 5,139 |
-> | false-admission band | 5,141 … 5,674 | 5,139 … 5,674 |
-> | import-time budget | 85.008 s | 85.208 s |
-> | import breach at `SIZED_TOTAL_ROWS` ≥ | 85,694 | 85,415 |
->
-> The *shape* of every conclusion survives either choice — that is why they are
-> stated as conclusions. The digits do not. `g-b-sweep-batch-cost` must fix the
-> unit of each component, whether the ceiling is per-component or applied once to
-> the margined total, and whether the 3x margin multiplies before or after, and
-> only then publish exact budgets and thresholds.
+**Every row beyond 1,647 pages carries the extrapolation declared two subsections
+down.** That is a different reservation and it is not retired.
 
-Note what is and is not scaled there. Only the **scan component** carries
-`g_sessions`; the per-page component is statement startup and is indifferent to
-relation size. The revision's current line
-(`BACKFILL_SELECT_SWEEPS_UNDER_LOCK * MARGINED_MS_BACKFILL_SELECT_SWEEP * g_sessions`,
-`20260719_01:1646`) multiplies the *whole* scalar by `g_sessions`, which the
-two-component model must not inherit.
+At the worst reachable configuration — `MIN_ADMITTED_BATCH = 1`,
+`SIZED_TOTAL_ROWS = 6,000`, so `ceil(6000/1) + 1 = 6,001` pages, growth factors
+1 — the model prices the sweep at `72 x 1.0 + 518 x 6001 / 1000` = **3,180.518
+ms**. Note what is and is not scaled there: only the **scan component** carries
+`g_sessions`. The per-page component is statement startup and is indifferent to
+relation size. The deleted scalar's line multiplied the *whole* term by
+`g_sessions`, and the two-component model deliberately does not inherit that.
 
 **Import-time scan budget** — comfortable:
 
 | | Charged | Bound |
 |---|---|---|
-| today | `42x521 + 6 + 20x(37+6)` = 22.748 s | |
-| with the model | `42x521 + 6 + 20x(3150+6)` = **85.008 s** | `REVISION_DEADLINE_S` = 900 s |
+| the deleted scalar | `42x521 + 6 + 20x(37+6)` = 22.748 s | |
+| the model, at 6,001 pages | `42x521 + 6 + 20x(3180.518+6)` = **85.618 s** | `REVISION_DEADLINE_S` = 900 s |
 
-815 s of headroom; it would take `SIZED_TOTAL_ROWS` at or above 85,694 to breach
-(85,415 under the integer-unit freeze — see the caveat above). An
-earlier version of this section asserted the opposite — that `MAX_PASSES` sweeps
-at batch size 1 could not fit the revision deadline — which was written without
-doing the multiplication. Nothing here forces raising the minimum admitted batch
-size, and `resolve_batch_size`'s `1..MAX_BATCH_SIZE` range should be left alone
-unless some other measurement argues against it.
+**814.4 s of headroom**; it takes `SIZED_TOTAL_ROWS` at or above **84,609** to
+breach. An earlier version of this section asserted the opposite — that
+`MAX_PASSES` sweeps at batch size 1 could not fit the revision deadline — which
+was written without doing the multiplication. **Nothing here forces raising the
+minimum admitted batch size**, and `resolve_batch_size`'s
+`MIN_ADMITTED_BATCH..MAX_BATCH_SIZE` range is left alone.
 
-**Atomic stall projection** — this is where the constant actually bites, and an
+**Atomic stall projection** — this is where the term actually bites, and an
 earlier version of this section got it wrong by comparing the sweep *contribution*
-against the whole 30 s bound. `project_atomic_stall_ms` (`20260719_01:1646`) is
-seven terms, not one: per-stale-row and per-repair-row mutation, three
-`session_moves` scans, the coverage assertion, the sweep, the convergence count,
-and the teardown reserve. At `N_stale = 6,000`, `N_repair = 0`, growth factors 1:
+against the whole 30 s bound. `project_atomic_stall_ms` is seven terms, not one:
+per-stale-row and per-repair-row mutation, three `session_moves` scans, the
+coverage assertion, the sweep, the convergence count, and the teardown reserve. At
+`N_stale = 6,000`, `N_repair = 0`, growth factors 1:
 
 | Sweep term | Full projection | vs `MAX_WRITER_STALL_MS` = 30 s |
 |---|---|---|
-| scalar 37 ms | 31.626 s | rejects |
-| model 3,150 ms | **34.739 s** | rejects, by more |
+| the deleted scalar, 37 ms | 31.626 s | rejects |
+| model at `DEFAULT_BATCH_SIZE` (7 pages) | 31.665 s | rejects |
+| model at `MIN_ADMITTED_BATCH` (6,001 pages) | **34.770 s** | rejects, by more |
 
-Both reject at 6,000, so the interesting quantity is not a single point but where
-each *starts* rejecting. Sweeping `N_stale` under the same favourable assumptions:
+All three reject at 6,000, so the interesting quantity is not a single point but
+where each *starts* rejecting. Sweeping `N_stale` under the same favourable
+assumptions:
 
 | | First `N_stale` rejected |
 |---|---|
-| with the model | **5,141** |
-| with the scalar 37 | **5,675** |
+| model at `MIN_ADMITTED_BATCH` = 1 | **5,136** |
+| model at `DEFAULT_BATCH_SIZE` = 1,000 | **5,668** |
+| the deleted scalar 37 | **5,675** |
 
-**`5,141 … 5,674` is the false-admission band** — populations that atomic mode
-admits today and would refuse once the sweep is priced correctly. That is the
-honest P1 impact, and it sits just below the frozen `SIZED_TOTAL_ROWS = 6,000`.
-The ~58,511 figure an earlier version of this table carried is only where the
-sweep term *alone* reaches 30 s; it is not an atomic-projection threshold and
-should not be read as one.
+**The false-admission band is `5,136 … 5,674` at `batch_size = 1`** — populations
+atomic mode admitted before this bead and refuses now — **narrowing to
+`5,668 … 5,674` at the default batch.** That it is a *function of batch size* is
+the whole point: the band exists because a scalar cannot see the variable that
+moves it, and it sits just below the frozen `SIZED_TOTAL_ROWS = 6,000`. The
+~58,511 figure an earlier version of this table carried is only where the sweep
+term *alone* reaches 30 s; it is not an atomic-projection threshold and should not
+be read as one.
 
-So the severity is: the import-time budget has ample room, the atomic projection
-does not, and the reason to fix this is not an impending failure but that **an
-admission projection whose dominant variable is missing from it cannot refuse an
-inadmissible configuration.** Its verdicts today are a property of the current
-relation size, not of the check.
+So the severity was never an impending failure. It was that **an admission
+projection whose dominant variable is missing from it cannot refuse an
+inadmissible configuration** — its verdicts were a property of the current
+relation size rather than of the check. Refusing the populations in the band is
+the fix working, not a regression to mitigate.
 
-Two arithmetic notes for whoever picks that up. `ceil(3 x 257.05 x 1.629333…) =
-ceil(1256.4604) = 1257`; the **1,256** this table read before was a slip, and is
-superseded by the 1,426 above in any case. And carry ratios unrounded into the
-`ceil`: `10010624 / 6144000 = 1.629333…`, and writing it as `1.6292` rounds the
-growth factor *down*, against the one direction it exists to protect. A factor
-rounded down and then `ceil`-ed can only under-charge; the ceiling has to be the
-last operation.
+Two arithmetic notes, kept because both errors are easy to repeat.
+`ceil(3 x 257.05 x 1.629333…) = ceil(1256.4604) = 1257`; the **1,256** an earlier
+version of this section read was a slip, and is superseded by the 1,426 above in
+any case. And carry ratios unrounded into the `ceil`:
+`10010624 / 6144000 = 1.629333…`, and writing it as `1.6292` rounds the growth
+factor *down*, against the one direction it exists to protect. A factor rounded
+down and then `ceil`-ed can only under-charge; the ceiling has to be last.
+
+### The sweep domain beyond the measured range
+
+**The measured domain reaches 1,647 pages. The import-time budget evaluates 6,001
+and the atomic rejection boundary sits near 5,137.** Everything between is
+**linear extrapolation** — the LP covers the points it was given and says nothing
+past them — and every figure in the section above that depends on the unmeasured
+range is assumption-dependent for that reason.
+
+The primary remedy in the plan for this bead was a second sweep-domain artifact:
+`gr_p2_sweep6000`, a fresh restore of `ghostreplay-20260724T101501Z.dump` grown to
+`SIZED_TOTAL_ROWS = 6,000` ended-visible rows, every one stale, swept at
+`MIN_ADMITTED_BATCH` for exactly the 6,001 pages the worst case evaluates. **That
+copy could not be produced: the 2026-07-24 dump is no longer on disk, and the
+18.4 cluster the Phase 1 copies lived in is gone.** So the fallback applies —
+the extrapolation is declared as an **assumption** rather than as evidence, in the
+constants' docstrings, here, and in `SPEC.md`, and the endpoint measurement is
+filed as `g-b-sweep-endpoint-measure`, blocking Phase 3 qualification.
+
+What *was* measured, on a different host and at fixture scale, is the thing the
+extrapolation actually claims: **linearity in page count out to the endpoint.**
+6,000 cloned ended-visible rows, all stale, swept five times at each of eight
+batch sizes, maxima:
+
+| Batch size | Pages | Max (ms) | Marginal µs/page vs the next row |
+|---|---|---|---|
+| 1 | 6,001 | 1,026.05 | 175.7 |
+| 2 | 3,001 | 498.99 | 161.9 |
+| 5 | 1,201 | 207.52 | 41.4 |
+| 10 | 601 | 182.67 | 259.5 |
+| 25 | 241 | 89.25 | 377.5 |
+| 100 | 61 | 21.30 | 165.0 |
+| 500 | 13 | 13.38 | — (host outlier at 7 pages) |
+| 1,000 | 7 | 39.27 | — |
+
+End to end, 6,001 pages against 7: **164.6 µs/page**, against a fitted `b` of
+172.4 µs/page and a frozen margined slope of 518 µs/page. The per-segment column
+is noisy — a maximum over five trials on a laptop is — but it does not trend
+upward with page count, which is the claim. **The slope does not degrade at the
+endpoint on this host.**
+
+That noise is worth naming rather than excusing: 41.4 next to 259.5 next to 377.5
+is what subtracting *independently sampled maxima* produces, and it is precisely
+why the test below does **not** compute its slopes this way. This table is
+recorded as the manual probe it was.
+
+This is a linearity check and nothing more, and it deliberately does **not** enter
+the LP. The copy's rows are clones of small seeded fixtures rather than production
+sessions, so its `game_sessions` relation is neither production-width nor
+production-sized; normalizing its timings by `SIZED_SESSIONS_BYTES / <its bytes>`
+would inflate the scan coefficient by a factor with no measurement behind it. A
+timing may only be normalized by the basis of the copy it ran on, and this copy's
+basis is not one the scan component can be stated against.
+
+It is carried as a **test** rather than as this table:
+`test_release_b_pg_runtime.py::test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count`
+grows the fixture the same way, sweeps the same eight batch sizes, and compares
+**this host against itself** — the slope of each segment *beyond* 1,647 pages
+against a reference slope measured *inside* it, with `MARGIN` as the tolerance.
+Nothing in that comparison is a frozen constant, which is the point: three earlier
+forms failed, and the first two failed by comparing this host to one.
+
+| Form | Why it fails as a linearity test |
+|---|---|
+| `model(6001) >= 3 x observed` | The model IS 3x a fit, so this reduces to `fitted_slope >= this host's slope` — two machines, zero margin. Written first; flipped between passing and failing on repeated runs of the same fixture. |
+| `marginal_slope <= 518 µs/page` | The same defect one step removed. A perfectly linear host at 600 µs per statement fails it; a genuinely nonlinear host under 518 passes. |
+| one marginal slope over 1,201 → 6,001 | Averages a late spike away over 4,800 pages — and a late spike is the shape a failure of linearity would actually take. |
+| segmented, but subtracting per-point **maxima** | Segmenting the interval does not make the arithmetic a slope. Each maximum came from an unrelated trial, so one slow reading at a segment's low end *suppresses* that segment, and one in the reference range *inflates* the budget — both errors point the same way, toward passing a real late nonlinearity. |
+| paired and median-reduced, but always swept in the **same order** | Position-in-round is then perfectly confounded with page count. Pairing and medians cannot remove it: it is the same bias in every round, not noise, so repeating the run — or the whole gate — does not average it away. |
+
+So the sweeps are **interleaved** — all eight batch sizes, one warm-up round
+discarded, six rounds retained — and every slope subtracts two readings **from the
+same round**, then takes the **median** over rounds. Pairing makes each slope
+describe one machine state; the median makes it immune to a single outlier on
+either side. Segments narrower than 500 pages are excluded outright: at 6 pages
+apart, per-trial noise *is* the numerator.
+
+The order **reverses every round** (boustrophedon), deterministically rather than
+by shuffling, so the run stays reproducible and pairing is untouched — every size
+still runs exactly once per round. With an *even* number of retained rounds each
+size occupies each end equally often, so all of them share one mean position and a
+monotone within-round drift cancels in the median instead of accumulating. The
+helper asserts that balance (`rounds` even, summed positions identical across
+sizes) rather than claiming it in prose.
+
+That correction was not cosmetic: fixing the order had visibly moved the readings.
+Under a fixed ascending order the in-domain reference measured 126–135 µs/page and
+the 3,001 → 6,001 segment 120–138; balanced, they read 117–122 and 107–116. The
+spread between segments narrowed from ~9% to ~4% of the reference.
+
+The beyond-domain side is then checked **segment by segment** (1,201 → 3,001 and
+3,001 → 6,001). The in-domain reference pools every in-domain pair at least 500
+pages wide, across all rounds, and takes the median of the pool — under the linear
+model each such pair estimates the same per-page cost, since the fixed per-sweep
+overhead cancels in a difference, so pooling is more data for one quantity rather
+than an average of several. Median rather than maximum, because a maximum over
+pairs is the inflated reference the row above describes.
+
+Absolute coverage is a **separate** assertion, against the frozen pair rather than
+against this host, and it uses the **worst** round at 6,001 pages: coverage is a
+claim about the tail, a slope is not.
+
+Observed across four consecutive runs on this host:
+
+| | run 1 | run 2 | run 3 | run 4 |
+|---|---|---|---|---|
+| in-domain reference (µs/page) | 121.9 | 116.9 | 120.9 | 121.9 |
+| 1,201 → 3,001 (µs/page) | 115.5 | 120.9 | 119.5 | 118.9 |
+| 3,001 → 6,001 (µs/page) | 116.2 | 113.1 | 107.3 | 112.0 |
+| endpoint worst round (ms) | 941.69 | 751.28 | 707.32 | 718.02 |
+
+Every beyond-domain median lands within ~4% of the in-domain reference against a
+tolerance of 3x, and the endpoint's worst round is covered by a modelled 3,180.52
+ms. Worth recording how much tighter this is than the earlier max-subtracting form
+managed on the same machine — 163.7 / 177.1 µs/page against a 403 µs/page budget.
+Pairing, the median and the balanced order removed noise and bias; they did not
+add slack. The headroom above is a property of the host, not of the sampling.
+
+**What this does not establish.** Linearity *on this host*, on a fixture of clones.
+It does not convert the extrapolation into evidence for the frozen pair, and the
+constants' docstrings, `SPEC.md` and the gate manifest all say so; production-shaped
+endpoint coverage remains an assumption owned by `g-b-sweep-endpoint-measure`.
+
+The test is pinned in `pg_gate_plugin.REQUIRED_PG_GATE_TESTS`, because an
+extrapolation gate that silently stops being collected is the failure that
+matters, and so is
+`test_pg_synthesize_sessions_establishes_the_stale_population_it_promises` — the
+endpoint is only the endpoint if the population really is `SIZED_TOTAL_ROWS`
+stale rows, and `--synthesize-sessions` targets that population directly
+(cloning against the ended-visible predicate, not `count(*)`, and stamping
+originals as well as clones) rather than leaving it to a separate flag.
 
 ### Full derived table, and why it is *not* frozen
 
@@ -1095,7 +1344,8 @@ qualification bead, **not** applied to the revision:
 | `MARGINED_MS_PER_SCAN_STMT` | 521 | 164 |
 | `MARGINED_MS_COVERAGE_ASSERT` | 6 | 4 |
 | `MARGINED_MS_BACKFILL_REMAINING` | 6 | 4 |
-| `MARGINED_MS_BACKFILL_SELECT_SWEEP` | 37 | 9 *(2-page artifact; 15 worst case)* |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | 72 — fitted from the sweep domain on this restore, so this row is not a second reading of the same thing |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | 518 — likewise |
 | `SCAN_STMT_TIMEOUT_MS` | 521 | 164 |
 | `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | 68 |
 | `TEARDOWN_ALLOWANCE_MS` | 7 | 7 |
