@@ -127,7 +127,7 @@ describe("DrillSetupPanel", () => {
       screen.queryByRole("slider", { name: /fine-tune strictness/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByText(/choose how strict — this decides when the drill ends/i),
+      screen.getByText(/pick a strictness to start/i),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
   });

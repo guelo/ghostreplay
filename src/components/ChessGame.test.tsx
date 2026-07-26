@@ -1968,7 +1968,7 @@ describe("ChessGame characterization safeguards", () => {
     // the localStorage 50 pre-selects a tier — the panel opens unset and Start
     // is gated until the user picks one.
     expect(
-      screen.getByText(/choose how strict — this decides when the drill ends/i),
+      screen.getByText(/pick a strictness to start/i),
     ).toBeInTheDocument();
     for (const name of [/^strict$/i, /^standard$/i, /^lenient$/i]) {
       expect(screen.getByRole("button", { name })).toHaveAttribute(
@@ -2010,7 +2010,7 @@ describe("ChessGame characterization safeguards", () => {
       );
     }
     expect(
-      screen.getByText(/choose how strict — this decides when the drill ends/i),
+      screen.getByText(/pick a strictness to start/i),
     ).toBeInTheDocument();
 
     localStorage.removeItem("ghostreplay_drill_prefs");

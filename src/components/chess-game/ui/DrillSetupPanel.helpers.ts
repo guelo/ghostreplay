@@ -38,18 +38,13 @@ export function bandForCp(cp: number) {
   return STRICTNESS_TIERS.find((t) => t.tier === strictnessFromCp(cp))!;
 }
 
-function pawnEquivalent(cp: number): string {
-  if (cp === 25) return "¼";
-  if (cp === 50) return "½";
-  if (cp >= 32 && cp <= 34) return "⅓";
-  return (cp / 100).toFixed(2).replace(/0$/, "");
-}
-
+// Kept to one short line: the label renders in a ~180px column on mobile, so
+// anything past ~24 chars wraps and pushes the fine-tune slider out of view.
 export function strictnessStopCopy(cp: number): string {
   // cp=0 has exact-best semantics: non-best moves fail even when eval noise
   // resolves to 0cp loss, so "loses more than 0 cp" would be wrong.
   if (cp === 0) {
-    return "Drill ends on any move worse than the engine's best — perfect play required.";
+    return "Best move only";
   }
-  return `Drill ends when a move loses more than ${cp} cp (≈ ${pawnEquivalent(cp)} pawn) vs. the engine's best.`;
+  return `Ends at −${cp} cp`;
 }

@@ -8909,9 +8909,10 @@
     font-size: 0.9rem;
     font-weight: 600;
     color: var(--text-primary);
-    /* Two lines reserved: the dynamic stop-condition copy wraps at panel
-       width, and unset → set must not shift the layout below. */
-    min-height: 2.5rem;
+    /* One line reserved: both the unset prompt and the stop-condition copy are
+       kept short enough to fit the ~180px control column on mobile, so unset →
+       set must not shift the layout below. */
+    min-height: 1.25rem;
     display: block;
     margin-top: 0.4rem;
 }

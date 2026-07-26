@@ -153,7 +153,7 @@ const DrillSetupPanel = ({
           </div>
           <span className="strictness-label" id="strictness-stop-copy">
             {strictnessCp == null
-              ? "Choose how strict — this decides when the drill ends."
+              ? "Pick a strictness to start"
               : strictnessStopCopy(strictnessCp)}
           </span>
           {strictnessCp != null && (

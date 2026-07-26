@@ -117,13 +117,13 @@ describe("StartPanel", () => {
     const props = { ...baseProps(), isDrillMode: true, seedOpening: registered };
     const { rerender } = render(<StartPanel {...props} />);
     expect(
-      screen.getByText(/choose how strict — this decides when the drill ends/i),
+      screen.getByText(/pick a strictness to start/i),
     ).toBeInTheDocument();
 
     // 45 cp lands in the Lenient band; the prevStrictness ref must resync from
     // a null draft to the numeric seed.
     rerender(<StartPanel {...props} seedStrictnessCp={45} />);
-    expect(screen.getByText(/loses more than 45 cp/i)).toBeInTheDocument();
+    expect(screen.getByText(/45 cp/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^lenient$/i })).toHaveAttribute(
       "aria-pressed",
       "true",
