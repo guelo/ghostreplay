@@ -853,7 +853,12 @@ comparable *within* the browser tier — without changing the authority barrier.
   legacy-client games would dominate, and never per-run counts, which would re-weight
   by upload frequency. That rollup was built to be the `browser-game-v1` retirement
   criterion; it never became one — the retirement below needed no adoption gate at all,
-  so this measures the fleet without authorizing anything. Finality comes from a
+  so this measures the fleet without authorizing anything. The Railway log adapter
+  that read this bit for the gate was DELETED with the gate (g-bgv1-report-fate); its
+  hard part — how completely Railway logs can be retrieved, which loss modes are
+  detectable and which two are irreducibly fail-open — is preserved in
+  [`docs/railway-log-query-completeness.md`](docs/railway-log-query-completeness.md)
+  and applies to any future log-based measurement. Finality comes from a
   dedicated `session_final` field that OR-folds the client's `terminal_action` through
   the scheduler entry, NOT from `run_opportunity`: the revert upload also sets
   `recompute_opportunity=True`, and a client predating g-y90g sets it on every mid-game
