@@ -519,10 +519,16 @@ def test_cp_only_canonical_replaces_browser_game_with_mate_global_strip():
 
 
 def test_dominant_incoming_missing_non_mate_field_still_kept():
-    """Exclusion is scoped to mate fields: a missing NON-mate field still blocks."""
-    values = _agree(_V2_CORE)
-    existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
-    incoming = _browser_analysis_multipv(_V2_CORE - {"best_line_uci"}, RESOLVER_COMPLETE_V2, values=values)
+    """Exclusion is scoped to mate fields: a missing NON-mate field still blocks.
+
+    ``best_move_san`` is the projector-reachable veto shape: no contract validates
+    it, so a row can drop it and still project as contract-satisfied. (``best_line_uci``
+    cannot be dropped — both resolver validators require a multi-move PV, so a
+    line-less row is never contract-satisfied and never reaches Rule 5.)
+    """
+    fields = _V2_CORE - {"best_move_san"}
+    existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=_agree(_V2_CORE))
+    incoming = _browser_analysis_multipv(fields, RESOLVER_COMPLETE_V2, values=_agree(fields))
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
