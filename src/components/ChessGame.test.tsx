@@ -1169,7 +1169,10 @@ describe("ChessGame characterization safeguards", () => {
     // path — which requires drillState === "abandoned" — must still light up.
     // Driving the REAL Analyze flow is the point; a hand-seeded "abandoned"
     // store cannot prove the transition.
-    mockCoordinator.waitForAnalysis.mockResolvedValue(null);
+    // handleAnalyzeDrill discards this value — only resolve-vs-reject matters
+    // (a reject would set the "Analysis unavailable" warning). Resolve with a
+    // typed benign result rather than null, which the signature forbids.
+    mockCoordinator.waitForAnalysis.mockResolvedValue(benignResult(0, "e2e4"));
     await driveOffRouteFail();
     act(() => {
       // A real drill carries strictness; the reviewed-return guard requires it.
