@@ -13,6 +13,7 @@ import uuid
 import pytest
 
 from app.analysis_profiles import BROWSER_GAME_V2_PROFILE_ID, BROWSER_PROFILE_ID
+from app.fen import normalize_fen
 from app.models import AnalysisCache, SessionMove
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -75,6 +76,43 @@ def cache_row(db_session, uci="e2e4", fen_before=STARTING_FEN):
     )
 
 
+# --- cache-write observability -------------------------------------------------
+#
+# Two INFO lines describe one upload's cache side effect, and asserting on them is
+# how a test distinguishes "the writer refused this row" from "the row never got
+# there". POST /moves returns 200 either way, deliberately, so a status code
+# proves neither.
+
+
+def _cache_write_line(caplog):
+    """``app.api.session``'s per-upload summary: the counts around the write."""
+    return next(
+        r.getMessage()
+        for r in caplog.records
+        if "side_effect=analysis_cache_write" in r.getMessage()
+    )
+
+
+def _batch_verdict_line(caplog):
+    """``analysis_cache_repo``'s per-batch verdict tally, e.g. ``1 rows ->
+    incompatible_keep=1``. Emitted only when the writer actually ran, so its
+    presence alone proves the candidate reached the writer."""
+    return next(
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("analysis_cache batch: ")
+    )
+
+
+def _written(line):
+    """(cache_row_count, cache_rows_written) off the log line; None when absent."""
+    fields = dict(
+        part.split("=", 1) for part in line.split() if "=" in part
+    )
+    got = fields.get("cache_rows_written")
+    return fields["cache_row_count"], (None if got is None else got)
+
+
 # --- stamping ------------------------------------------------------------------
 
 
@@ -101,16 +139,42 @@ def test_valid_provenance_stamps_browser_game_v2_with_dynamic_columns(
     assert row.analyzer_protocol_version == "browser-analyzer-v1"
 
 
-def test_absent_provenance_keeps_the_legacy_v1_stamp(
-    client, auth_headers, create_game_session, db_session
+def test_absent_provenance_stores_no_cache_row_but_still_uploads(
+    client, auth_headers, create_game_session, db_session, caplog
 ):
-    session_id = create_game_session(user_id=123, player_color="white")
-    assert post_moves(client, auth_headers, session_id, [move()]).status_code == 200
+    """The contract INVERTED at g-bgv1-cutover: an absent-provenance upload used to
+    mint a browser-game-v1 row, but v1 is retired, so the batch writer refuses the
+    row with INACTIVE_PROFILE_KEEP.
 
-    row = cache_row(db_session)
-    assert row.analysis_profile_id == BROWSER_PROFILE_ID
-    assert row.search_limit_value is None
-    assert row.engine_build is None
+    Retirement must stay INVISIBLE to a legacy client: the upload is still 200 and
+    the player's own moves still persist. Only the cache evidence is declined —
+    an all-None v1 row is UNKNOWN strength and would occupy its key against every
+    future v2 upload forever (policy D7.1).
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        response = post_moves(client, auth_headers, session_id, [move()])
+    assert response.status_code == 200
+    assert response.json()["moves_inserted"] == 1
+
+    # No cache row: the declared v1 profile is inactive.
+    assert cache_row(db_session) is None
+    # The player's own move still persists — the upload is not failed closed.
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == uuid.UUID(session_id))
+        .count()
+        == 1
+    )
+    # The legacy client stays legible in the log; the counters are unchanged by
+    # retirement (they classify the CLAIM, not what the writer did with it).
+    line = next(
+        r.getMessage()
+        for r in caplog.records
+        if "side_effect=analysis_cache_write" in r.getMessage()
+    )
+    assert "session_provenance=legacy" in line
+    assert "provenance_absent=1" in line
 
 
 def test_malformed_provenance_drops_only_that_row_from_the_cache(
@@ -380,18 +444,51 @@ def test_a_shallower_later_upload_does_not_discard_the_stronger_row(
     assert cache_row(db_session).search_limit_value == 20
 
 
-def test_a_dynamic_upload_does_not_reclaim_a_legacy_row(
-    client, auth_headers, create_game_session, db_session
+def test_a_dynamic_upload_does_not_reclaim_a_stranded_v1_row(
+    client, auth_headers, create_game_session, db_session, caplog
 ):
-    # An all-None v1 row is UNKNOWN strength, not weak: depth alone must not
-    # replace it. (This is exactly why the v1 write-retirement cutover exists.)
-    first = create_game_session(user_id=123, player_color="white")
-    post_moves(client, auth_headers, first, [move()])
+    """An all-None v1 row is UNKNOWN strength, not weak: depth alone must not
+    replace it (policy D7.1).
+
+    Since g-bgv1-cutover the premise can no longer be created through the API — an
+    absent-provenance upload stores nothing — so the historical row is seeded
+    directly. Rows like it are STRANDED in production, which is exactly why the
+    not-reclaimed guarantee still has to hold: browser-game-v2 has no ``dominates``
+    edge over v1, so it is stopped at Rule 5 as INCOMPATIBLE.
+    """
+    # A replica of what an absent-provenance upload minted before the cutover:
+    # profile browser-game-v1, minimal-played-eval-v1, every identity column NULL.
+    db_session.add(
+        AnalysisCache(
+            fen_before=STARTING_FEN,
+            normalized_fen_before=normalize_fen(STARTING_FEN),
+            move_uci="e2e4",
+            move_san="e4",
+            played_eval=20,
+            best_eval=20,
+            eval_delta=0,
+            classification="best",
+            source="game",
+            analysis_profile_id=BROWSER_PROFILE_ID,
+            evidence_contract_id="minimal-played-eval-v1",
+        )
+    )
+    db_session.commit()
 
     second = create_game_session(user_id=456, player_color="white")
-    post_moves(
-        client, auth_headers, second, [move(provenance=provenance(20))], user_id=456
-    )
+    with caplog.at_level(logging.INFO):
+        assert post_moves(
+            client, auth_headers, second, [move(provenance=provenance(20))], user_id=456
+        ).status_code == 200
+
+    # The v2 candidate REACHED the comparator and lost there. Without this the test
+    # would still pass if a regression dropped the candidate before the writer —
+    # the seeded row would sit untouched and /moves would still answer 200, exactly
+    # as it does for a malformed claim (test_malformed_provenance_drops_only_that_
+    # row_from_the_cache). So pin the whole path: one row submitted, the comparator
+    # ran and returned INCOMPATIBLE, and nothing was written.
+    assert _written(_cache_write_line(caplog)) == ("1", "0")
+    assert "incompatible_keep=1" in _batch_verdict_line(caplog)
 
     db_session.expire_all()
     row = cache_row(db_session)
@@ -507,14 +604,6 @@ def test_a_synthetic_terminal_row_cannot_fabricate_a_live_overlay_operand(
 CLIENT_ID = "7f3e4d2a-1b2c-4d5e-8f90-abcdef123456"
 
 
-def _cache_write_line(caplog):
-    return next(
-        r.getMessage()
-        for r in caplog.records
-        if "side_effect=analysis_cache_write" in r.getMessage()
-    )
-
-
 @pytest.mark.parametrize(
     "body_extra,expected",
     [
@@ -550,3 +639,84 @@ def test_session_final_tracks_terminal_action_not_run_opportunity(
     # the leading space so this cannot be satisfied by `session_final=True`.
     assert " final=True" in line
     assert "kind=final" in line
+
+
+# --- cache_row_count vs cache_rows_written (g-bgv1-cutover) --------------------
+#
+# Since browser-game-v1 retired, "submitted to the writer" and "written by the
+# writer" are different numbers, and the pair is the only thing that distinguishes
+# "wrote nothing" from "was asked for nothing". These pin both.
+
+
+def test_legacy_upload_is_submitted_but_writes_nothing(
+    client, auth_headers, create_game_session, caplog
+):
+    """A provenance-less client still gets 200; its row is refused, so submitted=1
+    but written=0. This is the whole retirement in one log line."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, [move()]).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "0")
+
+
+def test_v2_upload_writes_its_row(
+    client, auth_headers, create_game_session, caplog
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        assert post_moves(
+            client, auth_headers, session_id, [move(provenance=provenance(17))]
+        ).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "1")
+
+
+def test_identical_v2_reupload_is_submitted_but_writes_nothing(
+    client, auth_headers, create_game_session, caplog
+):
+    """An idempotent re-upload is ACCEPTED (the stored row already is this evidence)
+    but mutates nothing, so it must not be counted as a write — the distinction
+    between _EVIDENCE_ACCEPTED_REASONS and _ROW_MUTATING_REASONS."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    payload = [move(provenance=provenance(17))]
+    assert post_moves(client, auth_headers, session_id, payload).status_code == 200
+    caplog.clear()  # else _cache_write_line finds the FIRST upload's new_key line
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, payload).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "0")
+
+
+def test_fully_filtered_batch_reports_zero_over_zero(
+    client, auth_headers, create_game_session, caplog
+):
+    """Nothing reached the writer, so both are 0 — never a missing field, which is
+    reserved for "the writer raised and the count is unknown"."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    no_eval = move(
+        eval_cp=None, best_move_eval_cp=None, eval_delta=None, classification=None
+    )
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, [no_eval]).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("0", "0")
+
+
+def test_raising_writer_reports_submitted_but_omits_written(
+    client, auth_headers, create_game_session, caplog, monkeypatch
+):
+    """A writer that raises wrote an UNKNOWN number of rows. cache_row_count stays
+    (g-dckw needs the cohort even on failure) but cache_rows_written must be ABSENT
+    rather than 0, which would claim we know it wrote nothing."""
+    import app.api.session as session_mod
+
+    def boom(db, rows):
+        raise RuntimeError("simulated writer failure")
+
+    monkeypatch.setattr(session_mod, "write_analysis_cache_rows", boom)
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(RuntimeError):
+            post_moves(
+                client, auth_headers, session_id, [move(provenance=provenance(17))]
+            )
+    line = _cache_write_line(caplog)
+    assert _written(line) == ("1", None)
+    assert "status=error" in line

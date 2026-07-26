@@ -3,11 +3,12 @@
 The matrix is every ``(existing row, incoming row)`` pair across a fixed set of
 archetypes, plus the missing-key (insert) column, recorded as the
 ``(Decision, Reason)`` pair :func:`decide_analysis_cache_replacement` returns.
-It exists to prove that the two evidence-policy refactors —
-``g-reuse-d21-search`` (comparator reroute, ``declared_profile_inactive`` gate,
-``browser-analysis-v1`` retirement, ``browser-analysis-multipv-v2``) and
-``g-mk1d`` (``CacheRow.metadata``, Rule 2a measured strength, comparator steps
-4-5) — moved NOTHING except the cells that were announced.
+It exists to prove that the evidence-policy refactors — ``g-reuse-d21-search``
+(comparator reroute, ``declared_profile_inactive`` gate, ``browser-analysis-v1``
+retirement, ``browser-analysis-multipv-v2``), ``g-mk1d`` (``CacheRow.metadata``,
+Rule 2a measured strength, comparator steps 4-5), and ``g-bgv1-cutover``
+(``browser-game-v1`` retirement) — moved NOTHING except the cells that were
+announced: a valid incoming row on a RETIRED profile, and nothing else.
 
 This one file is the SINGLE source of truth for the archetype spec: the parity
 test loads it by path so the goldens and the assertions can never describe two

@@ -847,29 +847,54 @@ comparable *within* the browser tier — without changing the authority barrier.
   `provenance_valid` / `provenance_absent` / `provenance_malformed` (the operational
   health signal) plus a length-independent per-run `session_provenance` bit
   (`v2` | `legacy` | `mixed_malformed` | `none`, malformed dominating). The
-  browser-game-v1 retirement criterion reads only the latter, rolled up by
+  session-grain adoption measurement reads only the latter, rolled up by
   `app/browser_provenance_metrics.session_v2_adoption` to ONE verdict per DISTINCT
   session (its latest FINAL run) — never the row counts, which a few long
   legacy-client games would dominate, and never per-run counts, which would re-weight
-  by upload frequency. Finality comes from a dedicated `session_final` field that
-  OR-folds the client's `terminal_action` through the scheduler entry, NOT from
-  `run_opportunity`: the revert upload also sets `recompute_opportunity=True`, and a
-  client predating g-y90g sets it on every mid-game upload, so reusing it would score
-  abandoned and reverted sessions as complete. The pre-existing `final`/`kind` fields
-  on the same log line keep their `run_opportunity` meaning — they are g-dckw's
-  LATENCY cohort, and redefining them would silently re-cohort a live metric.
+  by upload frequency. That rollup was built to be the `browser-game-v1` retirement
+  criterion; it never became one — the retirement below needed no adoption gate at all,
+  so this measures the fleet without authorizing anything. The Railway log adapter
+  that read this bit for the gate was DELETED with the gate (g-bgv1-report-fate); its
+  hard part — how completely Railway logs can be retrieved, which loss modes are
+  detectable and which two are irreducibly fail-open — is preserved in
+  [`docs/railway-log-query-completeness.md`](docs/railway-log-query-completeness.md)
+  and applies to any future log-based measurement. Finality comes from a
+  dedicated `session_final` field that OR-folds the client's `terminal_action` through
+  the scheduler entry, NOT from `run_opportunity`: the revert upload also sets
+  `recompute_opportunity=True`, and a client predating g-y90g sets it on every mid-game
+  upload, so reusing it would score abandoned and reverted sessions as complete. The
+  pre-existing `final`/`kind` fields on the same log line keep their `run_opportunity`
+  meaning — they are g-dckw's LATENCY cohort, and redefining them would silently
+  re-cohort a live metric.
   Sessions with no final run are excluded from the ratio but COUNTED into
   `sessions_without_final`, because that exclusion is not neutral: a client too old to
   send `terminal_action` is also too old to send provenance, so silently dropping
   those sessions inflates the adoption fraction toward 1.0 exactly when the legacy
-  fleet is largest. A large `sessions_without_final` invalidates the gate.
-- **`browser-game-v1` stays ACTIVE for writes during rollout**; v2 is purely additive.
-  Retiring v1 writes before the deployed fleet reliably stamps valid v2 provenance
-  would fail-close older clients' uploads and drop their evidence. The known cost is
-  explicit: while v1 stays active, stale clients keep seeding all-`None` rows that no
-  v2 search can ever replace by depth, and they persist until they regenerate on
-  revisit. The `active=False` flip and the decision on the stranded rows are the
-  linked follow-up `g-bgv1-cutover`.
+  fleet is largest. A large `sessions_without_final` invalidates the fraction.
+- **`browser-game-v1` is RETIRED for writes (`active=False`, g-bgv1-cutover).** v2
+  shipped purely additively first; v1 was then flipped unconditionally, with NO adoption
+  gate. A gate looked necessary by analogy with `browser-analysis-v1`, whose ENDPOINT
+  producer discriminator fails a stale client closed — but v1 is written from a
+  different path, `upsert_session_moves` → `_upsert_analysis_cache`, which has no
+  producer discriminator at all. There an inactive declared profile is refused by the
+  batch writer (`declared_profile_inactive` ⇒ `INACTIVE_PROFILE_KEEP`) WITHOUT raising:
+  a legacy client's upload still returns 200, its `session_moves` rows still persist,
+  and its own eval/classification display is unaffected. Nothing fails closed, so
+  retirement was never gated on fleet adoption. The cost is a deliberate trade, not
+  free: a refused row carried a real played eval that `tree_eval` tiers 3-4 could have
+  shown, but an all-`None` v1 row is UNKNOWN strength and therefore INCOMPARABLE to
+  every v2 row (D7.1), so every one it wrote would occupy its key against every future
+  v2 upload forever. A blank card today beats a key no browser game can improve.
+- **The stranded v1 rows are KEPT, not purged.** Rows already stored keep
+  `identity_verified` (the manifest digest excludes `active`/`dominates`), and the
+  `tree_eval` tier 3-4 fallback is trust-based rather than active-based — so retirement
+  does not stop stored v1 evals from being read. Nor are they permanently unimprovable:
+  `browser-analysis-multipv-v2` is active and DOES dominate v1, so an authoritative run
+  correctively replaces such a row in place, at its own key, whenever it reaches the
+  position. A purge would therefore delete live evidence to free keys that are already
+  reclaimable — D7.2's opportunistic-only stance holds for these rows. Identity backfill
+  stays rejected: their provenance was never recorded, so stamping one would fabricate
+  it.
 - **REQUIRES_COMPARISON overlay.** `browser-game-v2` holds `DISPLAY_OVERLAY` under a
   third `OVERLAY_MODE`: it re-labels a played move only when provably STRONGER than a
   LIVE operand, via the SAME `compare_row_strength` that governs storage — so what the

@@ -15,9 +15,9 @@ from app.analysis_cache_repo import (
 )
 from app.database_url import _normalize_postgres_scheme
 from app.analysis_profiles import (
-    BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
     IDENTITY_FIELDS,
+    JEFFML_PROFILE_ID,
     get_profile,
 )
 from app.evidence_contracts import MINIMAL_PLAYED_EVAL, RESOLVER_COMPLETE
@@ -35,14 +35,20 @@ def file_db(tmp_path):
     engine.dispose()
 
 
-def _browser_row(played_eval=20):
+def _passive_row(played_eval=20):
+    """A writable non-authoritative row. The profile is a carrier for the writer
+    mechanics under test (batching, chunking, locking, dedupe), not the subject —
+    it only has to be ACTIVE, non-authoritative, not replacement-eligible, and
+    all-``None`` identity. browser-game-v1 filled that role until g-bgv1-cutover
+    retired it; jeffml-scores-v1 carries the same flags and is a real registry
+    entry, so it also resolves inside CROSS_PROC_SCRIPT's subprocess."""
     return {
         "fen_before": FEN,
         "move_uci": "e2e4",
         "move_san": "e4",
         "played_eval": played_eval,
         "source": "game",
-        "analysis_profile_id": BROWSER_PROFILE_ID,
+        "analysis_profile_id": JEFFML_PROFILE_ID,
         "evidence_contract_id": MINIMAL_PLAYED_EVAL,
     }
 
@@ -66,12 +72,12 @@ def _seed(Factory, row):
 def test_insert_new_key(file_db):
     _, Factory = file_db
     s = Factory()
-    write_analysis_cache_rows(s, [_browser_row()])
+    write_analysis_cache_rows(s, [_passive_row()])
     s.close()
     s2 = Factory()
     row = s2.query(AnalysisCache).one()
     assert row.played_eval == 20
-    assert row.analysis_profile_id == BROWSER_PROFILE_ID
+    assert row.analysis_profile_id == JEFFML_PROFILE_ID
     s2.close()
 
 
@@ -93,7 +99,7 @@ def test_game_does_not_downgrade_canonical(file_db):
     _seed(Factory, canonical)
 
     s = Factory()
-    write_analysis_cache_rows(s, [_browser_row(played_eval=999)])
+    write_analysis_cache_rows(s, [_passive_row(played_eval=999)])
     s.close()
 
     s2 = Factory()
@@ -114,7 +120,7 @@ def test_game_does_not_downgrade_legacy(file_db):
         "source": "precomputed",  # legacy: no profile metadata
     })
     s = Factory()
-    write_analysis_cache_rows(s, [_browser_row(played_eval=999)])
+    write_analysis_cache_rows(s, [_passive_row(played_eval=999)])
     s.close()
     s2 = Factory()
     row = s2.query(AnalysisCache).one()
@@ -156,8 +162,8 @@ def test_authoritative_reclaims_legacy(file_db):
 
 def test_duplicate_conflict_in_batch_rejected(file_db):
     _, Factory = file_db
-    a = _browser_row(played_eval=20)
-    b = _browser_row(played_eval=50)  # same key, conflicting played_eval
+    a = _passive_row(played_eval=20)
+    b = _passive_row(played_eval=50)  # same key, conflicting played_eval
     s = Factory()
     results = write_analysis_cache_rows(s, [a, b])
     s.close()
@@ -175,7 +181,7 @@ def test_concurrent_writes_same_key_no_error(file_db):
     def worker(val):
         try:
             s = Factory()
-            write_analysis_cache_rows(s, [_browser_row(played_eval=val)])
+            write_analysis_cache_rows(s, [_passive_row(played_eval=val)])
             s.close()
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -188,7 +194,7 @@ def test_concurrent_writes_same_key_no_error(file_db):
 
     assert not errors
     s2 = Factory()
-    # Exactly one row; first writer wins (browser is insert-missing-only).
+    # Exactly one row; first writer wins (a passive row is insert-missing-only).
     assert s2.query(AnalysisCache).count() == 1
     s2.close()
 
@@ -198,7 +204,7 @@ def test_shared_engine_not_put_into_immediate_mode(file_db):
     which would make ordinary read-only sessions take write reservations."""
     engine, Factory = file_db
     s = Factory()
-    write_analysis_cache_rows(s, [_browser_row()])
+    write_analysis_cache_rows(s, [_passive_row()])
     s.close()
 
     # pysqlite's isolation_level on the shared engine must remain its default
@@ -214,9 +220,9 @@ def test_comparable_contract_rows_collapse_to_most_complete(file_db):
     """Same producer, comparable contracts (minimal vs resolver-complete) collapse
     to the most-complete row instead of being rejected as a conflict."""
     _, Factory = file_db
-    minimal = {**_browser_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
+    minimal = {**_passive_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
     complete = {
-        **_browser_row(played_eval=20),
+        **_passive_row(played_eval=20),
         "best_move_uci": "e2e4", "best_move_san": "e4",
         "best_line_uci": "e2e4 e7e5", "classification": "best", "eval_delta": 0,
         "evidence_contract_id": RESOLVER_COMPLETE,
@@ -240,10 +246,10 @@ def test_comparable_contract_rows_collapse_to_most_complete(file_db):
 def test_invalid_richer_duplicate_does_not_suppress_valid(file_db):
     """A valid minimal row + an invalid (incomplete) resolver-complete row in the
     same batch stores the valid evidence rather than nothing."""
-    valid_minimal = {**_browser_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
+    valid_minimal = {**_passive_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
     # resolver-complete claim but missing the multi-move PV -> contract invalid.
     invalid_richer = {
-        **_browser_row(played_eval=20),
+        **_passive_row(played_eval=20),
         "best_move_uci": "e2e4", "best_move_san": "e4",
         "classification": "best", "eval_delta": 0,
         "evidence_contract_id": RESOLVER_COMPLETE,  # no best_line_uci => invalid
@@ -264,15 +270,15 @@ def test_invalid_richer_duplicate_does_not_suppress_valid(file_db):
 
 
 def test_identity_invalid_duplicate_does_not_suppress_valid(file_db):
-    """A valid browser row + an identical row carrying contradictory identity
+    """A valid passive row + an identical row carrying contradictory identity
     metadata stores the valid one (not DUPLICATE_CONFLICT) in both orderings."""
-    valid = {**_browser_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
-    # Same key/producer-ish, but claims browser-game-v1 with bogus engine metadata
-    # -> identity does not verify -> invalid.
+    valid = {**_passive_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
+    # Same key/producer, but claims an all-None-identity profile while carrying
+    # bogus engine metadata -> identity does not verify -> invalid.
     identity_bad = {
-        **_browser_row(played_eval=20),
+        **_passive_row(played_eval=20),
         "evidence_contract_id": MINIMAL_PLAYED_EVAL,
-        "engine_build": "bogus-build-for-browser-profile",
+        "engine_build": "bogus-build-for-all-none-identity-profile",
     }
     for batch in ([valid, identity_bad], [identity_bad, valid]):
         engine = create_engine("sqlite://")
@@ -406,8 +412,8 @@ def test_active_successor_profile_row_inserts(file_db):
 def test_dedupe_rejects_differing_source(file_db):
     """Equal evidence but differing provenance is ambiguous -> reject the key."""
     from app.analysis_cache_policy import Reason
-    a = {**_browser_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
-    b = {**_browser_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL,
+    a = {**_passive_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL}
+    b = {**_passive_row(played_eval=20), "evidence_contract_id": MINIMAL_PLAYED_EVAL,
          "source": "jeffml-scores"}
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -427,9 +433,9 @@ def test_dedupe_order_independent_incomparable_fields(file_db):
     from app.analysis_cache_policy import Reason
 
     def rows(order):
-        a = {**_browser_row(played_eval=20), "best_eval": 5,
+        a = {**_passive_row(played_eval=20), "best_eval": 5,
              "evidence_contract_id": MINIMAL_PLAYED_EVAL}
-        b = {**_browser_row(played_eval=20), "eval_delta": 0,
+        b = {**_passive_row(played_eval=20), "eval_delta": 0,
              "evidence_contract_id": MINIMAL_PLAYED_EVAL}
         return [a, b] if order else [b, a]
 
@@ -453,7 +459,7 @@ sys.path.insert(0, {backend!r})
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.analysis_cache_repo import write_analysis_cache_rows
-from app.analysis_profiles import BROWSER_PROFILE_ID
+from app.analysis_profiles import JEFFML_PROFILE_ID
 from app.evidence_contracts import MINIMAL_PLAYED_EVAL
 
 engine = create_engine("sqlite:///{db}")
@@ -461,7 +467,7 @@ F = sessionmaker(bind=engine)
 row = {{
     "fen_before": "{fen}", "move_uci": "e2e4", "move_san": "e4",
     "played_eval": int(sys.argv[1]), "source": "game",
-    "analysis_profile_id": BROWSER_PROFILE_ID,
+    "analysis_profile_id": JEFFML_PROFILE_ID,
     "evidence_contract_id": MINIMAL_PLAYED_EVAL,
 }}
 barrier = float(sys.argv[2])
@@ -515,7 +521,7 @@ def test_unsupported_dialect_rejected(monkeypatch, file_db):
     monkeypatch.setattr(s, "get_bind", lambda: FakeBind())
     monkeypatch.setattr(s, "in_transaction", lambda: False)
     with pytest.raises(UnsupportedDialectError):
-        write_analysis_cache_rows(s, [_browser_row()])
+        write_analysis_cache_rows(s, [_passive_row()])
     s.close()
 
 
@@ -581,7 +587,7 @@ def pg_db():
 
 
 @pg_required
-def test_pg_insert_then_browser_keeps_canonical(pg_db):
+def test_pg_insert_then_passive_keeps_canonical(pg_db):
     """Exercises the PG batch path: ON CONFLICT insert + FOR UPDATE comparator."""
     _, Factory = pg_db
     s = Factory()
@@ -594,9 +600,9 @@ def test_pg_insert_then_browser_keeps_canonical(pg_db):
     write_analysis_cache_rows(s, [canonical])
     s.close()
 
-    # Browser row for the same key must be kept out (non-authoritative).
+    # A passive row for the same key must be kept out (non-authoritative).
     s = Factory()
-    write_analysis_cache_rows(s, [_browser_row(played_eval=999)])
+    write_analysis_cache_rows(s, [_passive_row(played_eval=999)])
     s.close()
 
     s2 = Factory()
@@ -614,7 +620,7 @@ def test_pg_concurrent_inserts_single_row(pg_db):
     def worker(val):
         try:
             s = Factory()
-            write_analysis_cache_rows(s, [_browser_row(played_eval=val)])
+            write_analysis_cache_rows(s, [_passive_row(played_eval=val)])
             s.close()
         except Exception as e:  # noqa: BLE001
             errors.append(e)
@@ -738,7 +744,7 @@ def test_pg_concurrent_overlapping_batches_correct_final_state(pg_db, monkeypatc
     _, Factory = pg_db
     keys = [f"cpos-{i}" for i in range(20)]
     batches = [
-        [{**_browser_row(played_eval=val), "fen_before": k} for k in keys]
+        [{**_passive_row(played_eval=val), "fen_before": k} for k in keys]
         for val in (10, 20, 30, 40)
     ]
 
@@ -768,7 +774,7 @@ def test_pg_concurrent_mixed_signature_batches_correct_final_state(pg_db, monkey
     def batch(swap):
         out = []
         for i, k in enumerate(keys):
-            row = {**_browser_row(played_eval=20), "fen_before": k}
+            row = {**_passive_row(played_eval=20), "fen_before": k}
             if (i % 2 == 0) ^ swap:
                 row["best_eval"] = 5  # extra column -> different insert signature
             out.append(row)
@@ -867,7 +873,7 @@ def test_pg_toctou_delete_then_recovery_insert_new_key(pg_db, monkeypatch):
 
     _, Factory = pg_db
     K = "toctou-a"
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})  # prior committed row
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": K})  # prior committed row
 
     real_lock = repo._lock_existing
     writer_at_lock = threading.Event()
@@ -887,7 +893,7 @@ def test_pg_toctou_delete_then_recovery_insert_new_key(pg_db, monkeypatch):
 
     # W's incoming value (777) differs from the seed (20), so a stored 777 proves
     # the recovery insert wrote W's incoming row rather than a leftover of the seed.
-    writer = _Writer(Factory, [{**_browser_row(played_eval=777), "fen_before": K}]).start()
+    writer = _Writer(Factory, [{**_passive_row(played_eval=777), "fen_before": K}]).start()
 
     assert writer_at_lock.wait(timeout=_TOCTOU_WAIT), "writer never reached the lock seam"
     _delete_committed(Factory, K)   # H: real committed delete, now visible to W
@@ -920,7 +926,7 @@ def test_pg_toctou_recreate_before_recovery_keeps_competitor(pg_db, monkeypatch)
 
     _, Factory = pg_db
     K = "toctou-b"
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})  # prior committed row
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": K})  # prior committed row
 
     real_lock = repo._lock_existing
     real_insert = repo._insert_missing
@@ -950,9 +956,9 @@ def test_pg_toctou_recreate_before_recovery_keeps_competitor(pg_db, monkeypatch)
     monkeypatch.setattr(repo, "_lock_existing", seamed_lock)
     monkeypatch.setattr(repo, "_insert_missing", seamed_insert)
 
-    # W's incoming is NON-authoritative (browser); re-decided against H's
+    # W's incoming is NON-authoritative (passive); re-decided against H's
     # authoritative recreated row this is a deterministic NON_AUTHORITATIVE_KEEP.
-    writer = _Writer(Factory, [{**_browser_row(played_eval=999), "fen_before": K}]).start()
+    writer = _Writer(Factory, [{**_passive_row(played_eval=999), "fen_before": K}]).start()
 
     # Phase 1: writer must observe absence -> H commits the DELETE alone.
     assert writer_at_lock.wait(timeout=_TOCTOU_WAIT), "writer never reached the lock seam"
@@ -1001,7 +1007,7 @@ def test_pg_transient_error_after_partial_write_rolls_back_then_retries(
     _, Factory = pg_db
     K = "txn-c-existing"  # pre-existing -> conflicts on insert
     N = "txn-c-new"       # genuinely new -> attempt 1 really INSERTs it (uncommitted)
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": K})
 
     real_lock = repo._lock_existing
     calls = {"lock": 0}
@@ -1039,8 +1045,8 @@ def test_pg_transient_error_after_partial_write_rolls_back_then_retries(
     results = write_analysis_cache_rows(
         s,
         [
-            {**_browser_row(played_eval=20), "fen_before": K},
-            {**_browser_row(played_eval=20), "fen_before": N},
+            {**_passive_row(played_eval=20), "fen_before": K},
+            {**_passive_row(played_eval=20), "fen_before": N},
         ],
     )
     s.close()
@@ -1069,7 +1075,7 @@ def test_clean_session_precondition(file_db):
     s = Factory()
     s.execute(__import__("sqlalchemy").text("SELECT 1"))  # opens a transaction
     with pytest.raises(RuntimeError):
-        write_analysis_cache_rows(s, [_browser_row()])
+        write_analysis_cache_rows(s, [_passive_row()])
     s.rollback()
     s.close()
 
@@ -1200,7 +1206,7 @@ def _run_verdict_matrix(Factory):
     from app.analysis_cache_policy import Reason
 
     # Seed pre-existing rows for the keys whose verdict depends on an incumbent.
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": "k2"})   # idempotent
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": "k2"})   # idempotent
     _seed(Factory, _canonical_full("k3"))                                  # non-auth keep
     _seed(Factory, {"fen_before": "k4", "move_uci": "e2e4", "move_san": "e4",
                     "played_eval": 5, "source": "jeffml-scores"})          # legacy -> replace
@@ -1208,15 +1214,15 @@ def _run_verdict_matrix(Factory):
     _seed(Factory, _canonical_full("k6", played_eval=10))                  # merge conflict keep
 
     batch = [
-        {**_browser_row(played_eval=20), "fen_before": "k1"},                       # NEW_KEY
-        {**_browser_row(played_eval=20), "fen_before": "k2"},                       # SAME_PROFILE_IDEMPOTENT
-        {**_browser_row(played_eval=999), "fen_before": "k3"},                      # NON_AUTHORITATIVE_KEEP
+        {**_passive_row(played_eval=20), "fen_before": "k1"},                       # NEW_KEY
+        {**_passive_row(played_eval=20), "fen_before": "k2"},                       # SAME_PROFILE_IDEMPOTENT
+        {**_passive_row(played_eval=999), "fen_before": "k3"},                      # NON_AUTHORITATIVE_KEEP
         _canonical_full("k4"),                                                      # LEGACY_REPLACED_BY_AUTH
         _canonical_full("k5", best_eval_mate=3),                                    # SAME_PROFILE_SUPERSET_MERGE
         _canonical_full("k6", played_eval=20),                                      # MERGE_CONFLICT_KEEP
         _canonical_full("k7", engine_build="WRONG-not-canonical"),                  # INVALID_INCOMING_KEEP
-        {**_browser_row(played_eval=20), "fen_before": "k8"},                       # DUPLICATE_CONFLICT (a)
-        {**_browser_row(played_eval=50), "fen_before": "k8"},                       # DUPLICATE_CONFLICT (b)
+        {**_passive_row(played_eval=20), "fen_before": "k8"},                       # DUPLICATE_CONFLICT (a)
+        {**_passive_row(played_eval=50), "fen_before": "k8"},                       # DUPLICATE_CONFLICT (b)
     ]
 
     s = Factory()
@@ -1240,9 +1246,9 @@ def _run_verdict_matrix(Factory):
     by_fen = {r.fen_before: r for r in s2.query(AnalysisCache).all()}
     assert set(by_fen) == {"k1", "k2", "k3", "k4", "k5", "k6"}  # k7/k8 never stored
     assert by_fen["k1"].played_eval == 20
-    assert by_fen["k1"].analysis_profile_id == BROWSER_PROFILE_ID
+    assert by_fen["k1"].analysis_profile_id == JEFFML_PROFILE_ID
     assert by_fen["k2"].played_eval == 20                        # unchanged
-    assert by_fen["k2"].analysis_profile_id == BROWSER_PROFILE_ID
+    assert by_fen["k2"].analysis_profile_id == JEFFML_PROFILE_ID
     assert by_fen["k3"].analysis_profile_id == CANONICAL_PROFILE_ID  # not downgraded
     assert by_fen["k3"].played_eval == 10
     assert by_fen["k4"].analysis_profile_id == CANONICAL_PROFILE_ID  # replaced
@@ -1270,7 +1276,7 @@ def test_large_batch_chunks_insert_and_select(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     F = sessionmaker(bind=engine)
-    rows = _distinct_browser_rows(37)  # forces multiple insert chunks
+    rows = _distinct_passive_rows(37)  # forces multiple insert chunks
 
     with _statement_counter(engine) as counts:
         s = F(); results = write_analysis_cache_rows(s, rows); s.close()  # all fresh
@@ -1296,7 +1302,7 @@ def test_vanished_row_recovered_when_no_competitor(file_db, monkeypatch):
     from app.analysis_cache_policy import Reason
 
     _, Factory = file_db
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": "vanish"})
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": "vanish"})
 
     real_lock = repo._lock_existing
     calls = {"n": 0}
@@ -1314,7 +1320,7 @@ def test_vanished_row_recovered_when_no_competitor(file_db, monkeypatch):
 
     s = Factory()
     results = write_analysis_cache_rows(
-        s, [{**_browser_row(played_eval=20), "fen_before": "vanish"}]
+        s, [{**_passive_row(played_eval=20), "fen_before": "vanish"}]
     )
     s.close()
 
@@ -1335,7 +1341,7 @@ def test_vanished_row_reresolved_against_concurrent_recreate(file_db, monkeypatc
     from app.analysis_cache_policy import Reason
 
     _, Factory = file_db
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": "vanish"})
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": "vanish"})
 
     real_lock = repo._lock_existing
     calls = {"n": 0}
@@ -1357,7 +1363,7 @@ def test_vanished_row_reresolved_against_concurrent_recreate(file_db, monkeypatc
 
     s = Factory()
     results = write_analysis_cache_rows(
-        s, [{**_browser_row(played_eval=999), "fen_before": "vanish"}]
+        s, [{**_passive_row(played_eval=999), "fen_before": "vanish"}]
     )
     s.close()
 
@@ -1381,7 +1387,7 @@ def test_toctou_exhaustion_reports_recovery_aborted_not_new_key(
 
     monkeypatch.setattr(repo, "_MAX_TOCTOU_PASSES", 1)
     _, Factory = file_db
-    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": "vanish"})
+    _seed(Factory, {**_passive_row(played_eval=20), "fen_before": "vanish"})
 
     calls = {"n": 0}
 
@@ -1403,7 +1409,7 @@ def test_toctou_exhaustion_reports_recovery_aborted_not_new_key(
     with caplog.at_level(logging.WARNING, logger="analysis_cache_repo"):
         s = Factory()
         results = write_analysis_cache_rows(
-            s, [{**_browser_row(played_eval=999), "fen_before": "vanish"}]
+            s, [{**_passive_row(played_eval=999), "fen_before": "vanish"}]
         )
         s.close()
 
@@ -1648,9 +1654,9 @@ def _statement_counter(engine):
         event.remove(engine, "before_cursor_execute", _rec)
 
 
-def _distinct_browser_rows(n):
+def _distinct_passive_rows(n):
     # Distinct keys; single (fixed) present-column signature -> one INSERT run.
-    return [{**_browser_row(played_eval=20), "fen_before": f"pos-{i}"} for i in range(n)]
+    return [{**_passive_row(played_eval=20), "fen_before": f"pos-{i}"} for i in range(n)]
 
 
 def _assert_idempotent_constant(engine, Factory, n):
@@ -1658,7 +1664,7 @@ def _assert_idempotent_constant(engine, Factory, n):
     assert the re-upload is a constant 1 INSERT + 1 SELECT + 0 UPDATE (every row
     idempotent-KEEP), independent of N. Shared by the PG and SQLite contracts so
     the two can't silently diverge."""
-    rows = _distinct_browser_rows(n)
+    rows = _distinct_passive_rows(n)
     s = Factory(); write_analysis_cache_rows(s, rows); s.close()  # seed fresh
 
     with _statement_counter(engine) as counts:

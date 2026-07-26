@@ -13,6 +13,26 @@ from app.models import AnalysisCache, GameSession, PositionAnalysisRow, SessionM
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_E4_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
+# Valid per-row browser-game-v2 DYNAMIC provenance (g-mk1d §2.2). An upload
+# carrying it is stamped browser-game-v2 and actually stores a cache row; an
+# upload without it declares the retired browser-game-v1 (g-bgv1-cutover) and the
+# batch writer refuses the row with INACTIVE_PROFILE_KEEP. The tests below are
+# about what a stored browser row does — eval flipping, mate/best_line round
+# trips, non-authoritative stamping — so they need the row to exist, and v2 is
+# non-authoritative exactly as v1 was.
+BROWSER_V2_PROVENANCE = {
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "search_limit_type": "depth",
+    "search_limit_value": 17,
+    "threads": 1,
+    "hash_mb": 128,
+}
+
 
 def _seed_cache(db_session, entries: list[dict]) -> None:
     for entry in entries:
@@ -157,6 +177,7 @@ def test_session_moves_with_cache_fields_populates_cache(
                     "fen_before": STARTING_FEN,
                     "move_uci": "e2e4",
                     "best_move_uci": "e2e4",
+                    "provenance": BROWSER_V2_PROVENANCE,
                 },
             ]
         },
@@ -201,6 +222,7 @@ def test_session_moves_black_eval_flipped_for_cache(
                     "fen_before": AFTER_E4_FEN,
                     "move_uci": "e7e5",
                     "best_move_uci": "e7e5",
+                    "provenance": BROWSER_V2_PROVENANCE,
                 },
             ]
         },
@@ -244,6 +266,7 @@ def test_session_moves_mate_round_trips_through_cache_and_lookup(
                     "fen_before": AFTER_E4_FEN,
                     "move_uci": "d8h4",
                     "best_move_uci": "d8h4",
+                    "provenance": BROWSER_V2_PROVENANCE,
                 },
             ]
         },
@@ -330,6 +353,7 @@ def test_session_moves_active_drill_populates_cache(
                     "fen_before": STARTING_FEN,
                     "move_uci": "e2e4",
                     "best_move_uci": "e2e4",
+                    "provenance": BROWSER_V2_PROVENANCE,
                 },
             ]
         },
@@ -535,6 +559,7 @@ def test_best_line_uci_round_trips_through_cache_and_lookup(
                     "move_uci": "e2e4",
                     "best_move_uci": "e2e4",
                     "best_line_uci": ["e2e4", "e7e5", "g1f3"],
+                    "provenance": BROWSER_V2_PROVENANCE,
                 },
             ]
         },
@@ -655,13 +680,14 @@ def test_browser_upload_stamps_non_authoritative_metadata(
             "best_move_eval_cp": 20, "eval_delta": 0, "classification": "best",
             "fen_before": STARTING_FEN, "move_uci": "e2e4", "best_move_uci": "e2e4",
             "best_line_uci": ["e2e4", "e7e5"],
+            "provenance": BROWSER_V2_PROVENANCE,
         }]},
         headers=auth_headers(user_id=123),
     )
     cached = db_session.query(AnalysisCache).filter(
         AnalysisCache.fen_before == STARTING_FEN, AnalysisCache.move_uci == "e2e4",
     ).first()
-    assert cached.analysis_profile_id == "browser-game-v1"
+    assert cached.analysis_profile_id == "browser-game-v2"
     assert cached.evidence_contract_id == "resolver-complete-v1"
 
     lookup = client.post(
@@ -670,7 +696,7 @@ def test_browser_upload_stamps_non_authoritative_metadata(
         headers=auth_headers(user_id=123),
     )
     result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
-    assert result["analysis_profile_id"] == "browser-game-v1"
+    assert result["analysis_profile_id"] == "browser-game-v2"
     assert result["source"] == "game"
     assert result["authoritative"] is False
 
@@ -790,6 +816,7 @@ def test_trust_false_when_not_authoritative(
             "best_move_eval_cp": 20, "eval_delta": 0, "classification": "best",
             "fen_before": STARTING_FEN, "move_uci": "e2e4", "best_move_uci": "e2e4",
             "best_line_uci": ["e2e4", "e7e5"],
+            "provenance": BROWSER_V2_PROVENANCE,
         }]},
         headers=auth_headers(user_id=123),
     )
