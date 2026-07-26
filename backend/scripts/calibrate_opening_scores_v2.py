@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import ctypes
 import errno
 import hashlib
 import importlib.metadata
@@ -39,6 +40,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import dataclasses
@@ -138,6 +140,44 @@ COHORT_PROVENANCE_DIGEST_ENV = "GHOSTREPLAY_COHORT_PROVENANCE_SHA256"
 _MOUNTED_PROVENANCE_DIGEST: str | None = (
     os.environ.get(COHORT_PROVENANCE_DIGEST_ENV, "").strip().lower() or None
 )
+
+# The OS boundary (g-release-os-boundary). The launcher seals every executable input onto a
+# read-only volume and names the mechanism here; the volume's content digest and the revision
+# it was checked out from come with it.
+#
+# NONE OF THESE THREE IS A GATE, and that is the design rather than an omission. An env var
+# says what a launcher CLAIMS, and check_execution_boundary() instead MEASURES the filesystem
+# this process is running on — which for a read-only mount is a direct, unforgeable answer
+# (ST_RDONLY), unlike a sandbox profile that a process genuinely cannot detect from inside.
+# So these are RECORDED on the cohort, and the flag is minted from the measurement.
+#
+# Read once at the top for the same reason as _LAUNCHER_SCORER_DIGEST: values whose only
+# meaning is "my launcher set this before I existed" must be inherited, never read later from
+# an os.environ some code inside this process could have written.
+RELEASE_BOUNDARY_ENV = "GHOSTREPLAY_RELEASE_BOUNDARY"
+RUNTIME_IMAGE_DIGEST_ENV = "GHOSTREPLAY_RUNTIME_IMAGE_SHA256"
+SEALED_REVISION_ENV = "GHOSTREPLAY_SEALED_REVISION"
+# The working trees a private path must not land in, measured by the launcher on the HOST
+# before the volume existed. Read once, at import, for the reason above and one more: this is
+# the only governance input this process cannot re-derive honestly for itself, because the
+# derivation goes through git and git answers through a writable administrative directory.
+# See _forbidden_root_identities.
+SEALED_FORBIDDEN_ROOTS_ENV = "GHOSTREPLAY_SEALED_FORBIDDEN_ROOTS"
+
+_RELEASE_BOUNDARY: str | None = os.environ.get(RELEASE_BOUNDARY_ENV, "").strip() or None
+_SEALED_FORBIDDEN_ROOTS_RAW: str | None = (
+    os.environ.get(SEALED_FORBIDDEN_ROOTS_ENV, "").strip() or None
+)
+_RUNTIME_IMAGE_SHA256: str | None = (
+    os.environ.get(RUNTIME_IMAGE_DIGEST_ENV, "").strip().lower() or None
+)
+_SEALED_REVISION: str | None = os.environ.get(SEALED_REVISION_ENV, "").strip().lower() or None
+
+# /usr/lib and /System are the dyld shared cache on the SIGNED SYSTEM VOLUME: sealed by the
+# OS, not writable even by root, and not present as ordinary files at all. They are the one
+# thing the boundary accepts host-provided — the OS BUILD is recorded on the cohort instead,
+# so "which /usr/lib" stays answerable afterwards. Mirrored in the launcher, pinned by a test.
+SEALED_SYSTEM_PREFIXES = ("/usr/lib/", "/System/")
 
 
 def _bytecode_cache_state() -> dict[str, str]:
@@ -3319,6 +3359,222 @@ class ScorerImportOriginError(ScorerSourceUnstableError):
     ScorerSourceUnstableError: the running code is not the named code."""
 
 
+class BoundaryUnverifiedError(ScorerSourceUnstableError):
+    """This run is not inside the OS boundary a release requires (g-release-os-boundary):
+    something it executes sits on a filesystem a same-uid process can still write. Same
+    family as ScorerSourceUnstableError, and for the same reason — the code that ran is not
+    provably the code the digest names, because it was never held still."""
+
+
+def _mount_is_read_only(path: str | Path) -> bool:
+    """Whether ``path``'s filesystem is mounted READ-ONLY.
+
+    THE WHOLE GATE RESTS ON THIS ONE SYSCALL, so it is worth saying why it is allowed to.
+    Every other candidate boundary is invisible from inside the process it confines: a
+    sandbox profile, a seccomp filter, and a dropped uid all leave a program unable to answer
+    "am I confined?" except by trying something and seeing what happens. g-release-os-boundary
+    was filed assuming that, and therefore assuming the boundary would have to be asserted by
+    a launcher through an environment variable the scorer could only take on faith.
+
+    A read-only MOUNT is different in kind. ST_RDONLY is the kernel's own answer about the
+    filesystem this process is actually reading from, it cannot be set by the process being
+    asked about, and it is enforced against every process at every uid — a write returns
+    EROFS even after a chmod that appears to succeed. So the release gate is a MEASUREMENT
+    the scorer takes, not a promise the launcher makes, and forging the attestation variables
+    buys nothing.
+
+    Missing path => False, never an exception: absence of evidence is not evidence of a
+    boundary, and this is the one place a permissive failure would be silently fatal.
+    """
+    try:
+        return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
+def _device_of(path: str | Path) -> int | None:
+    """``st_dev`` for ``path``, or None if it cannot be stated. Never raises."""
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+def _sealed_device() -> int | None:
+    """The device of the volume THIS module was loaded from — the sealed one, by construction.
+
+    DERIVED, NEVER TOLD, for the same reason _sealed_run_from_self derives its layout: a
+    launcher-supplied "the sealed volume is device N" could be aimed at any device by anything
+    that shapes the environment. ``__file__`` is the one fact this process holds that the code
+    doing the checking is itself made of.
+    """
+    return _device_of(Path(__file__).resolve())
+
+
+def _on_sealed_volume(path: str | Path, device: int) -> bool:
+    """Read-only AND on the sealed volume — both, because read-only alone is not enough.
+
+    THE GAP THIS CLOSES. ST_RDONLY says the filesystem under this path is mounted read-only.
+    It does NOT say it is the filesystem that runtime_image_sha256 covers. Any other attached
+    read-only image satisfies it — a second DMG, a mounted installer, a network share — and
+    bytes there are outside the digest entirely, so a module imported from one would execute
+    inside a run whose attestation does not describe it. Worse, this launcher unlinks the
+    backing file of ITS image and nothing else's: another attached image may still have a
+    writable backing file on disk, which makes even its read-only-ness weaker than it reads.
+
+    So the rule is identity, not property: the sealed device is the only acceptable answer,
+    and the signed system volume is the only exemption (SEALED_SYSTEM_PREFIXES), taken
+    host-provided by decision with the OS build recorded.
+    """
+    return _mount_is_read_only(path) and _device_of(path) == device
+
+
+def _loaded_native_images() -> tuple[str, ...]:
+    """Every Mach-O image dyld has loaded into this process, in load order.
+
+    THE ANSWER TO THE HALF-SEALED RUN. The digest binds .py source; a sealed volume binds the
+    interpreter and the dependency tree; neither says anything about which DYLIBS the process
+    ended up mapping. That gap is not hypothetical here — the interpreter references
+    libpython and libintl by ABSOLUTE PATH into ~/.pyenv and /opt/homebrew, so a copy of the
+    prefix onto the read-only volume still executes mutable host code until DYLD_LIBRARY_PATH
+    redirects it, and dyld silently drops DYLD_* variables for a restricted binary.
+
+    Rather than trusting the redirect, ask dyld what it actually loaded. This is why the
+    launcher's static closure is allowed to be best-effort: anything it missed shows up here.
+
+    Empty tuple off macOS or if libSystem will not answer — the caller treats "could not
+    enumerate" as "not verified", never as "nothing foreign".
+    """
+    if sys.platform != "darwin":
+        return ()
+    try:
+        libc = ctypes.CDLL(None)
+        libc._dyld_image_count.restype = ctypes.c_uint32
+        libc._dyld_get_image_name.restype = ctypes.c_char_p
+        libc._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+        return tuple(
+            os.fsdecode(libc._dyld_get_image_name(index))
+            for index in range(libc._dyld_image_count())
+        )
+    except Exception:
+        return ()
+
+
+def _os_build() -> str | None:
+    """The OS build whose sealed system volume supplied /usr/lib and /System.
+
+    The boundary accepts exactly one thing host-provided, and this is how that stays an
+    honest statement rather than a shrug: the libraries in the dyld shared cache are not
+    hashed by anything here, so the record names WHICH build they came from. A result
+    produced against a since-patched libSystem is then a question someone can actually ask
+    six months later, instead of a gap in the account.
+
+    None off macOS, and no build string if sw_vers will not answer — recorded as unknown
+    rather than guessed.
+    """
+    if sys.platform != "darwin":
+        return None
+    build = ""
+    try:
+        out = subprocess.run(["/usr/bin/sw_vers", "-buildVersion"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            build = out.stdout.strip()
+    except Exception:
+        build = ""
+    release = platform.mac_ver()[0] or platform.release()
+    return f"macOS {release} ({build})" if build else f"macOS {release}"
+
+
+def check_execution_boundary() -> str | None:
+    """Fail closed unless everything this process executes is on a read-only filesystem.
+
+    Returns the mechanism name, or None when NO boundary was declared. The two outcomes are
+    deliberately different, and the difference is the same one the launcher digest already
+    draws:
+
+    * NO BOUNDARY DECLARED is not an error. A dev run, a test, and a deliberate
+      ``--no-boundary`` run legitimately have none, and making that fatal would put the
+      scorer out of reach of everything except releases. It is RECORDED instead —
+      ``scorer_source_verified_preexec`` stays False and the release gate refuses it.
+    * DECLARED BUT NOT MEASURABLE raises. A launcher said it sealed this run and the kernel
+      disagrees: either the boundary was never established, or the volume was detached or
+      remounted underneath a run that is still going. Neither is an ordinary unverified run,
+      and continuing on the assumption that it is would launder a broken boundary into a
+      merely-unverified result.
+
+    THE RELEASE PRECONDITION (g-release-os-boundary), and the answer to the hazard that made
+    that bead blocking: a concurrent ``pip install`` into a shared venv changes the code this
+    interpreter runs without touching the tree, the manifest, or the digest. A source fence
+    cannot see that. Neither can a boundary drawn around the checkout alone. So the check is
+    over the whole execution input — the checkout, the interpreter, the standard library,
+    every imported module, and every native image dyld mapped.
+
+    FOUR MEASUREMENTS, all of them of THIS process, and all of them against THE SEALED VOLUME
+    rather than merely against read-only-ness (_on_sealed_volume explains why the weaker test
+    let unhashed bytes through):
+
+    1. Every manifest source file is on the sealed volume. This is the one the bead is
+       literally about: a same-uid process cannot change-and-revert what the kernel will not
+       let it write.
+    2. Every module in sys.modules that came from a file is on the sealed volume. Catches a
+       dependency imported from outside the sealed tree — the pip-install hazard, positively.
+    3. The interpreter and the standard library are on the sealed volume.
+    4. Every loaded Mach-O image is either on the sealed volume or under the signed system
+       volume (SEALED_SYSTEM_PREFIXES). Catches the dylib that the launcher's static closure
+       missed, and catches DYLD_LIBRARY_PATH having been stripped.
+
+    WHAT IT DOES NOT CLAIM. That the sealed bytes are the RIGHT bytes — scorer_source_digest
+    and runtime_image_sha256 say which bytes they were. That /usr/lib is honest — it is the
+    signed system volume, taken host-provided by decision, with the OS build recorded. That a
+    determined same-uid process cannot ``hdiutil detach`` the volume — it can, and the run
+    dies loudly rather than continuing on unsealed code, which is why this runs again at the
+    close fence rather than only at the start.
+    """
+    if _RELEASE_BOUNDARY is None:
+        return None
+    device = _sealed_device()
+    if device is None:
+        raise BoundaryUnverifiedError(
+            "could not identify the volume this scorer was loaded from, so nothing can be "
+            "shown to be on it — 'could not tell' is not 'sealed'"
+        )
+    unsealed: list[str] = []
+    for rel in SCORER_SOURCE_FILES:
+        if not _on_sealed_volume(_REPO_ROOT / rel, device):
+            unsealed.append(f"manifest source {rel}")
+    for name, module in sorted(sys.modules.items()):
+        origin = getattr(module, "__file__", None)
+        if origin and not _on_sealed_volume(origin, device):
+            unsealed.append(f"imported module {name} ({origin})")
+    for path, what in ((sys.executable, "the interpreter"),
+                       (sysconfig.get_paths()["stdlib"], "the standard library")):
+        if not _on_sealed_volume(path, device):
+            unsealed.append(f"{what} ({path})")
+    images = _loaded_native_images()
+    if not images:
+        raise BoundaryUnverifiedError(
+            "could not enumerate the native images this process loaded, so the boundary "
+            "cannot be verified — 'could not tell' is not 'nothing foreign'"
+        )
+    for image in images:
+        if image.startswith(SEALED_SYSTEM_PREFIXES) or _on_sealed_volume(image, device):
+            continue
+        unsealed.append(f"loaded native image {image}")
+    if unsealed:
+        listed = "\n  ".join(sorted(set(unsealed))[:20])
+        raise BoundaryUnverifiedError(
+            "these are executed by this run but are NOT on the sealed volume — either the "
+            "filesystem under them is writable, where a same-uid process can still change "
+            "them, or it is a different read-only volume, whose bytes runtime_image_sha256 "
+            "does not describe:\n  "
+            f"{listed}\n"
+            "The run is not sealed, so its digest is not proven to name the code that ran. "
+            "Re-run under backend/scripts/release_calibration.sh without --no-boundary."
+        )
+    return _RELEASE_BOUNDARY
+
+
 def check_scorer_import_origins(modules: Mapping[str, object] | None = None) -> None:
     """Fail closed unless every bound manifest app.* module came from _REPO_ROOT.
 
@@ -3405,20 +3661,40 @@ def require_preexec_verified_source(bound: object) -> None:
     of anything broader, and do not let its scope creep. True means exactly:
 
         the bytes named by SCORER_SOURCE_FILES were hashed before this interpreter existed,
-        they still hash the same from inside the run, and the modules bound from them declare
-        an origin inside that tree.
+        they still hash the same from inside the run, the modules bound from them declare an
+        origin inside that tree, AND everything this process executed — that tree, the
+        interpreter, the standard library, every imported module, and every native image dyld
+        loaded — sat on ONE read-only volume, the same one ``runtime_image_sha256`` names,
+        from before the hash until after the last score.
 
-    That is MANIFEST-SOURCE PROVENANCE. It is NOT an attestation of the complete code that
-    produced the result, and it never has been. Outside its scope, all unhashed: the
-    interpreter, the standard library, and every installed dependency — a `pip install` into
-    a shared venv changes what runs without touching the tree or the digest. Also outside it:
-    anything that rebinds an attribute after import (the launcher's -I -S denies the routine
-    way in, it does not make the runtime honest), and a same-uid write to the checkout, which
-    only an OS boundary can prevent.
+    "The same one" is load-bearing and was not free: read-only ALONE is satisfied by any other
+    attached image, and bytes there are outside the runtime digest entirely, so a module
+    imported from one would run inside an attestation that does not describe it.
 
-    Those residuals are g-release-os-boundary's. If that bead ever makes the boundary
-    mandatory for release gating, this docstring is where the widened claim gets earned —
-    by pointing at the mechanism that earns it, not by quietly dropping this paragraph.
+    The second half is g-release-os-boundary, and it is what let this paragraph shrink. It
+    used to end by naming three things True did NOT cover: the interpreter, the stdlib, and
+    the installed dependencies (a `pip install` into a shared venv changes what runs without
+    touching the tree or the digest), plus a same-uid write to the checkout that only an OS
+    boundary could prevent. All four are now inside the boundary — the run executes from a
+    read-only volume carrying its own copy of each — and the claim is earned by a MEASUREMENT
+    the scorer takes of its own filesystem (check_execution_boundary), not by a launcher's
+    assertion. Forging the attestation environment variables buys nothing; ST_RDONLY is the
+    kernel's answer, not the caller's.
+
+    STILL OUTSIDE, and named rather than dropped:
+
+    * The signed system volume — /usr/lib and /System, the dyld shared cache. Host-provided
+      by decision, with ``os_build`` recorded on the cohort so which build is answerable.
+    * Anything that rebinds an attribute after import. The launcher's -I -S denies the
+      routine way in; it does not make the runtime honest.
+    * git's administrative directory, which stays in the origin's mutable .git — so
+      ``source_revision`` and ``source_dirty_paths`` are AUDIT fields, not attestations.
+      ``sealed_revision`` is the one the launcher resolved before the checkout existed.
+    * A same-uid process can still `hdiutil detach` the volume. That breaks the run loudly
+      (the close-fence boundary check refuses) rather than corrupting it quietly.
+    * A hostile OPERATOR, who can commit the change and seal it like anything else. This
+      whole line of work defends against ACCIDENT and CONCURRENCY on a machine that also runs
+      editors, agents, and package installs — never against the person running the release.
     """
     verified = bound.scorer_source_verified_preexec  # AttributeError = fail closed
     if verified is not True:
@@ -3837,6 +4113,27 @@ class ScoredCalibrationCohort:
     provenance_record_sha256: str  # SHA-256 over the on-disk provenance-record bytes
     runtime_python: str  # platform.python_version()
     runtime_chess_version: str  # chess.__version__
+    # The OS boundary this run was sealed inside, or None (g-release-os-boundary).
+    #
+    # runtime_image_sha256 is what runtime_python and runtime_chess_version could never be.
+    # Those are version STRINGS: they record what the runtime called itself, and two builds
+    # of "3.12.7" with different patches, or the same dependency rebuilt against a different
+    # libssl, agree on every character. This is a digest over the actual BYTES of the
+    # read-only volume the run executed from — interpreter, stdlib, dependencies, dylibs,
+    # checkout and artifact — taken by sealed code, from inside, over content the kernel was
+    # refusing writes to.
+    #
+    # os_build is the other half of the honest answer: /usr/lib and /System stay
+    # host-provided (the signed system volume), so the OS build is RECORDED rather than
+    # sealed. Naming what is outside the boundary is the point.
+    execution_boundary: str | None
+    runtime_image_sha256: str | None
+    os_build: str | None
+    # The revision the launcher resolved in the ORIGIN repo before the checkout existed.
+    # Distinct from source_revision, which comes from git INSIDE the run: git's
+    # administrative directory stays outside the boundary, so nothing it says from in there
+    # is sealed. This one is.
+    sealed_revision: str | None
     config_fingerprints: Mapping[GridCell, str]  # _cfg_fp(cell) per required cell
     required_cells: frozenset[GridCell]
     manifest_pair_ids: frozenset[str]
@@ -4008,6 +4305,7 @@ def _build_selection_inputs(
             "scorer moved while Python was compiling it — the code that would score is not "
             "the code that was approved"
         )
+    boundary: str | None = None
     if launcher_digest is not None:
         # The digest binds SOURCE bytes, but the interpreter runs BYTECODE. Matching source
         # is not enough: a stale .pyc CPython still considers valid would execute other code
@@ -4017,7 +4315,19 @@ def _build_selection_inputs(
         # from another checkout is fresh, matches its own source, and is still not the code
         # this digest names.
         check_scorer_import_origins()
-    preexec_verified = launcher_digest is not None
+        # ...and none of the above speaks for whether the bytes could still MOVE. Source
+        # matching, bytecode freshness and import origins are all statements about a moment;
+        # they are re-taken at the close fence precisely because nothing above stops a
+        # same-uid process editing the tree between the two reads. The boundary is what makes
+        # that impossible rather than merely detectable, and it covers what no digest here
+        # reaches at all — the interpreter, the stdlib, the installed dependencies, and the
+        # dylibs. A release requires it (g-release-os-boundary).
+        boundary = check_execution_boundary()
+    # BOTH, not either. The launcher digest closes the compile window; the boundary holds the
+    # bytes still and widens the guarantee past the manifest to the runtime that executes it.
+    # A run with the digest but no boundary is the PRE-BOUNDARY release path, and it stamps
+    # False now — deliberately, so everything downstream refuses what used to be accepted.
+    preexec_verified = launcher_digest is not None and boundary is not None
 
     # Load BOTH byte strings from disk (unavailable -> fail closed, never live-select) and
     # run the split load guard. The load guard reads as_of FROM the validated header.
@@ -4115,6 +4425,13 @@ def _build_selection_inputs(
         provenance_record_sha256=hashlib.sha256(provenance_bytes).hexdigest(),
         runtime_python=platform.python_version(),
         runtime_chess_version=chess.__version__,
+        execution_boundary=boundary,
+        # Only meaningful alongside a verified boundary, and only recorded there: outside one
+        # these values would be an inherited environment variable describing a volume that
+        # was never mounted, sitting in the record next to scores it says nothing about.
+        runtime_image_sha256=_RUNTIME_IMAGE_SHA256 if boundary is not None else None,
+        os_build=_os_build() if boundary is not None else None,
+        sealed_revision=_SEALED_REVISION if boundary is not None else None,
         config_fingerprints={cell: _cfg_fp(cell) for cell in required_cells},
         required_cells=frozenset(required_cells),
         manifest_pair_ids=manifest_pair_ids,
@@ -4150,6 +4467,21 @@ def _build_selection_inputs(
             "scorer source changed DURING the run "
             f"({fenced_digest[:12]} -> {final_digest[:12]}): these scores were produced by "
             "code that no longer matches the tree — nothing is stamped, re-run"
+        )
+
+    # --- boundary fence (close) ------------------------------------------------------
+    # The bead this closes asks for immutability THROUGH CHILD EXIT, not at the hash moment,
+    # and the fence above is exactly why: it exists because a mid-run edit is possible, and a
+    # boundary verified only at startup would be a boundary anyone could remove at second one
+    # of a run that lasts minutes. `hdiutil detach` is available to this uid the whole time.
+    # So the same measurement is taken again after the last score, and a boundary that was
+    # claimed at the start must still be there — the run fails rather than reporting scores
+    # produced partly inside it and partly outside.
+    if boundary is not None and check_execution_boundary() != boundary:
+        raise BoundaryUnverifiedError(
+            f"the {boundary} boundary was established at the start of this run but is no "
+            "longer in place after the last score: something detached or remounted the "
+            "volume mid-run, so these scores are not all provably from sealed code"
         )
 
     return SelectionInputs(cohort=cohort, diagnostics=diagnostics)
@@ -4496,6 +4828,51 @@ def _private_path_forbidden_roots() -> tuple[Path, ...]:
     return tuple(sorted(roots))
 
 
+def _sealed_forbidden_root_floor() -> set[tuple[int, int]]:
+    """The host-measured working-tree identities the launcher handed this process, or empty.
+
+    WHAT IT IS FOR. ``_private_path_forbidden_roots`` asks git, and under the boundary git
+    answers through the origin's administrative directory — which stays writable and outside
+    the boundary by construction, and is therefore the one input to this rule that a same-uid
+    process can still change while the run is live. Editing ``<admin>/commondir`` makes git
+    name a different repository: the origin checkout leaves the set, and a private result may
+    then be written into the real working tree. Reproduced with the sealed ``.git`` file and
+    the administrative inode both unchanged, so nothing the volume verifies could see it.
+
+    REQUIRED UNDER THE BOUNDARY, absent everywhere else. A sealed run without a floor would be
+    deciding this question with only the thing that can be edited, so it refuses. An unsealed
+    dev run has no launcher to measure one and keeps the git derivation on its own; it also
+    stamps ``scorer_source_verified_preexec=False``, so it can never be spent on a release.
+
+    A MALFORMED value refuses rather than being ignored: "I could not read the floor" is not
+    "there is no floor".
+    """
+    if _SEALED_FORBIDDEN_ROOTS_RAW is None:
+        if _RELEASE_BOUNDARY is not None:
+            raise CaptureGovernanceError(
+                "this run is under the release boundary but carries no sealed forbidden-root "
+                "set, so the private-path rule would rest entirely on what git says from "
+                "inside the volume — which an edit to the origin's administrative directory "
+                "changes while the run is live. Refusing the path."
+            )
+        return set()
+    try:
+        parsed = json.loads(_SEALED_FORBIDDEN_ROOTS_RAW)
+        floor = {(int(dev), int(ino)) for dev, ino in parsed}
+    except (TypeError, ValueError) as exc:
+        raise CaptureGovernanceError(
+            f"the sealed forbidden-root set is not a list of (device, inode) pairs "
+            f"({type(exc).__name__}); the private-path rule cannot be evaluated against a "
+            "floor nobody can read, so the path is refused."
+        ) from None
+    if not floor:
+        raise CaptureGovernanceError(
+            "the sealed forbidden-root set is empty, which would forbid no working tree at "
+            "all; the path is refused rather than evaluated against nothing."
+        )
+    return floor
+
+
 def _path_identity(path: Path) -> tuple[int, int] | None:
     """``(st_dev, st_ino)`` for ``path``, or None if it does not exist.
 
@@ -4514,6 +4891,36 @@ def _path_identity(path: Path) -> tuple[int, int] | None:
             f"({type(exc).__name__}); the path is refused rather than accepted unchecked."
         ) from None
     return (stat.st_dev, stat.st_ino)
+
+
+def _forbidden_root_identities() -> set[tuple[int, int]]:
+    """Every working tree a private path must not land in, as ``(st_dev, st_ino)``.
+
+    THE UNION OF TWO ANSWERS, because they fail in opposite directions and neither covers the
+    other. The SEALED FLOOR was measured on the host before the volume existed and cannot be
+    edited afterwards, so nothing that happens during the run can take a tree out of it — that
+    is the attack it exists for. GIT is asked live, so a worktree registered after the seal is
+    still caught, which a frozen set alone would miss. Taking both means a mid-run edit can
+    only ever ADD to what is refused.
+
+    FAILS CLOSED on either side: git that cannot answer refuses (see
+    ``_private_path_forbidden_roots``), a floor that cannot be read refuses, and a set that
+    ends up empty refuses rather than accepting a path no tree was compared against.
+    """
+    forbidden = _sealed_forbidden_root_floor()
+    forbidden.update(
+        identity
+        for identity in (_path_identity(root) for root in _private_path_forbidden_roots())
+        if identity is not None
+    )
+    if not forbidden:
+        # git named working trees and NONE of them is on disk. That is not a clean bill of
+        # health, it is an unusable answer, and the fallback would be "accept".
+        raise CaptureGovernanceError(
+            "none of the working trees git listed could be identified on disk, so the "
+            "private-path rule cannot be evaluated and the path is refused."
+        )
+    return forbidden
 
 
 def _refuse_repo_interior_path(path: Path, *, option: str) -> Path:
@@ -4556,18 +4963,7 @@ def _refuse_repo_interior_path(path: Path, *, option: str) -> Path:
             "place, or a valid destination refused. Pass the full path to the private store."
         )
     resolved = Path(path).resolve()
-    forbidden = {
-        identity
-        for identity in (_path_identity(root) for root in _private_path_forbidden_roots())
-        if identity is not None
-    }
-    if not forbidden:
-        # git named working trees and NONE of them is on disk. That is not a clean bill of
-        # health, it is an unusable answer, and the fallback would be "accept".
-        raise CaptureGovernanceError(
-            "none of the working trees git listed could be identified on disk, so the "
-            "private-path rule cannot be evaluated and the path is refused."
-        )
+    forbidden = _forbidden_root_identities()
     for candidate in (resolved, *resolved.parents):
         if _path_identity(candidate) in forbidden:
             raise CaptureGovernanceError(
@@ -4577,6 +4973,54 @@ def _refuse_repo_interior_path(path: Path, *, option: str) -> Path:
                 "invariant)."
             )
     return resolved
+
+
+def _open_judged_output_parent(resolved: Path) -> int:
+    """Open the directory a private result will be published into, and judge THAT DIRECTORY.
+
+    THE HOLE THIS CLOSES. ``_refuse_repo_interior_path`` judges a PATH, and the publication
+    then reached that path by NAME — three times (create the temp, link it, unlink it), long
+    after the judgement, with a full scoring run in between. Replacing the validated parent
+    directory with a symlink into a checkout during that window published the private result
+    inside the checkout, past a rule whose entire purpose is to keep it out. Reproduced against
+    the code before this existed.
+
+    A NAME IS SOMETHING ELSE CAN REPOINT; A DESCRIPTOR IS THE DIRECTORY. This is the same move
+    the launcher makes for ``--artifact`` (_hold_artifact), for the same reason, in the other
+    direction: there an input judged at one moment must be the file read at another, here an
+    output judged at one moment must be the directory written at another.
+
+    ``O_NOFOLLOW`` because the path handed in is already fully resolved — no component of it is
+    a symlink, unless one BECAME a symlink after the resolution, which is precisely the case
+    being refused. ``O_DIRECTORY`` because a file where a directory was judged is the same
+    substitution wearing different clothes.
+
+    The identity is then re-checked against the forbidden roots, by descriptor: the path walk
+    said "this name was not inside a checkout", and this says "the directory now held is not
+    inside one either". Both, because they answer at different moments and only one of them can
+    still be true when the bytes land.
+
+    WHAT IT DOES NOT COVER, said plainly: if the judged directory is itself MOVED into a
+    checkout afterwards, the descriptor follows it, and the result lands inside. No descriptor
+    can prevent that — it is the same directory, and it is where the operator pointed. The rule
+    this closes is substitution of the destination, not relocation of it.
+
+    The OSError from a missing, non-directory or symlinked parent is left to the caller: that
+    is an argument refusal (exit 2) and its wording belongs beside the other ones.
+    """
+    fd = os.open(resolved.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) in _forbidden_root_identities():
+            raise CaptureGovernanceError(
+                "--result-output's parent directory is INSIDE a repository working tree; "
+                "release outputs hold production-derived private data and must land at an "
+                "access-controlled path OUTSIDE every checkout (governance invariant)."
+            )
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _refuse_repo_interior_output(output: Path) -> Path:
@@ -4815,15 +5259,23 @@ def _log_stale_temps(final_path: Path) -> None:
         )
 
 
-def _write_private_temp(final_path: Path, data: bytes) -> Path:
+def _write_private_temp(final_path: Path, data: bytes, *, dir_fd: int | None = None) -> Path:
     """Write ``data`` to a private, exclusive temp in the SAME directory as ``final_path``
     (so os.replace is same-filesystem and atomic), mode 0600 AT CREATION (never briefly
     group/world-readable under a normal umask), name unguessable from the pid alone
-    (<final>.tmp-<pid>-<token>), flushed + fsynced before the rename."""
+    (<final>.tmp-<pid>-<token>), flushed + fsynced before the rename.
+
+    WITH ``dir_fd``, the temp is created RELATIVE TO THAT DESCRIPTOR and the leading directories
+    of ``final_path`` are used for nothing but the message. That is the difference between
+    writing into the directory that was judged and writing into whatever the name means by the
+    time the write happens — see _open_judged_output_parent. The returned Path still spells the
+    full location, because it is what the caller reports and unlinks.
+    """
     token = secrets.token_hex(8)
     temp_path = final_path.with_name(f"{final_path.name}.tmp-{os.getpid()}-{token}")
     try:
-        fd = os.open(str(temp_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        fd = os.open(temp_path.name if dir_fd is not None else str(temp_path),
+                     os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, dir_fd=dir_fd)
     except OSError as exc:
         raise CapturePublicationError(
             f"cannot create the private temp beside {final_path.name!r}: {exc.strerror}."
@@ -4835,7 +5287,9 @@ def _write_private_temp(final_path: Path, data: bytes) -> Path:
             os.fsync(handle.fileno())
     except BaseException as exc:
         with contextlib.suppress(OSError):
-            os.unlink(temp_path)
+            # Relative to the same descriptor it was created under, or the cleanup would chase
+            # the name into whatever the write was just protected from.
+            os.unlink(temp_path.name if dir_fd is not None else temp_path, dir_fd=dir_fd)
         # ENOSPC/EIO/EDQUOT land here. Nothing was published (the final path is untouched),
         # so this is a clean typed refusal — but only if the OSError does not escape with
         # its filename attached.
@@ -5232,6 +5686,13 @@ class WinnerBinding:
     provenance_record_sha256: str
     runtime_python: str
     runtime_chess_version: str
+    # The runtime attestation travels with the winner for the same reason the digest does:
+    # Phase 3 revalidates before applying, and "the same Python version" is not the same
+    # claim as "the same runtime". See ScoredCalibrationCohort for what each field is worth.
+    execution_boundary: str | None
+    runtime_image_sha256: str | None
+    os_build: str | None
+    sealed_revision: str | None
     source_revision: str | None
     source_dirty_paths: tuple[str, ...]
     model_version: str
@@ -5259,6 +5720,10 @@ def build_winner_binding(
         provenance_record_sha256=cohort.provenance_record_sha256,
         runtime_python=cohort.runtime_python,
         runtime_chess_version=cohort.runtime_chess_version,
+        execution_boundary=cohort.execution_boundary,
+        runtime_image_sha256=cohort.runtime_image_sha256,
+        os_build=cohort.os_build,
+        sealed_revision=cohort.sealed_revision,
         source_revision=cohort.source_revision,
         source_dirty_paths=cohort.source_dirty_paths,
         model_version=cohort.model_version,
@@ -5903,6 +6368,13 @@ def _check_wrapper_types(inputs: SelectionInputs) -> None:
         "provenance_record_sha256", "runtime_python", "runtime_chess_version",
     ):
         _require_str(getattr(cohort, name), f"cohort.{name}")
+    # Optional in the type but NOT optional in a verified run: check 1(a) requires all four
+    # to be present whenever scorer_source_verified_preexec is True. They are None on the
+    # unverified dev path, which is the only path allowed to carry no boundary.
+    for name in ("execution_boundary", "runtime_image_sha256", "os_build", "sealed_revision"):
+        value = getattr(cohort, name)
+        if value is not None:
+            _require_str(value, f"cohort.{name}")
     # The diagnostics binding stamps are compared in check 1(c); a str SUBCLASS overriding
     # __eq__ would satisfy those comparisons against anything, so exact-type them HERE.
     for name in ("model_version", "scorer_contract_id"):
@@ -5964,6 +6436,30 @@ def _check_runtime_and_provenance(inputs: SelectionInputs, arms: tuple[Arm, ...]
         raise SelectionBindingError(
             f"binding: runtime_chess_version {cohort.runtime_chess_version!r} != "
             f"chess {chess.__version__!r}"
+        )
+    # The runtime attestation is all-or-nothing with the verified flag. A cohort claiming a
+    # sealed run must say WHICH boundary, over WHICH bytes, on WHICH OS build, from WHICH
+    # revision — a True flag with a blank attestation would be exactly the "trust me" record
+    # this bead replaced with a measurement.
+    if cohort.scorer_source_verified_preexec:
+        for name in ("execution_boundary", "runtime_image_sha256", "os_build",
+                     "sealed_revision"):
+            if not getattr(cohort, name):
+                raise SelectionBindingError(
+                    f"binding: cohort.{name} is missing on a cohort carrying "
+                    "scorer_source_verified_preexec=True — a verified run is a SEALED run "
+                    "(g-release-os-boundary) and must name what sealed it"
+                )
+        if cohort.runtime_image_sha256 != _RUNTIME_IMAGE_SHA256:
+            raise SelectionBindingError(
+                f"binding: runtime_image_sha256 {cohort.runtime_image_sha256!r} != the volume "
+                f"this interpreter is running from {_RUNTIME_IMAGE_SHA256!r}"
+            )
+    elif cohort.execution_boundary is not None:
+        raise SelectionBindingError(
+            "binding: cohort names an execution_boundary but carries "
+            "scorer_source_verified_preexec=False — the boundary is a precondition of the "
+            "flag, so this pairing cannot arise from a real run"
         )
     # (b) provenance invariants.
     if prov.release_guard_opening_key != RELEASE_GUARD_OPENING_KEY:
@@ -6858,7 +7354,7 @@ def serialize_full(result: SelectionResult) -> str:
 
 # --- The redacted stdout summary: an EXACT allowlist, validated key-set by key-set -------
 
-# Sixteen keys, ENUMERATED rather than derived, so a field ADDED to WinnerBinding fails
+# Twenty keys, ENUMERATED rather than derived, so a field ADDED to WinnerBinding fails
 # test_winner_binding_key_tuple_matches_the_dataclass instead of silently escaping the
 # allowlist (or silently vanishing from the summary).
 _SUMMARY_BINDING_KEYS: tuple[str, ...] = (
@@ -6869,6 +7365,10 @@ _SUMMARY_BINDING_KEYS: tuple[str, ...] = (
     "provenance_record_sha256",
     "runtime_python",
     "runtime_chess_version",
+    "execution_boundary",
+    "runtime_image_sha256",
+    "os_build",
+    "sealed_revision",
     "source_revision",
     "source_dirty_paths",
     "model_version",
@@ -7141,6 +7641,30 @@ def _validate_summary_binding(binding: object) -> dict:
                           "winner_binding.scorer_source_verified_preexec")
     for key in ("runtime_python", "runtime_chess_version"):
         _require_pattern(obj[key], _RUNTIME_VERSION_RE, f"winner_binding.{key}")
+    # The runtime attestation, in the same all-or-nothing shape the cohort binding enforces:
+    # a summary claiming a verified winner has to name what sealed it, and one that does not
+    # must not carry a boundary it never had.
+    verified = obj["scorer_source_verified_preexec"]
+    if verified:
+        _require_pattern(obj["runtime_image_sha256"], _SHA256_RE,
+                         "winner_binding.runtime_image_sha256")
+        _require_pattern(obj["sealed_revision"], _REVISION_RE,
+                         "winner_binding.sealed_revision")
+        for key in ("execution_boundary", "os_build"):
+            if not isinstance(obj[key], str) or not obj[key].strip():
+                raise SummarySchemaError(
+                    f"winner_binding.{key} must be a non-empty string on a winner carrying "
+                    "scorer_source_verified_preexec=true"
+                )
+    else:
+        for key in ("execution_boundary", "runtime_image_sha256", "os_build",
+                    "sealed_revision"):
+            if obj[key] is not None:
+                raise SummarySchemaError(
+                    f"winner_binding.{key} is set on a winner carrying "
+                    "scorer_source_verified_preexec=false — the boundary is a precondition "
+                    "of the flag, so this pairing cannot arise from a real run"
+                )
     if obj["source_revision"] is not None:
         _require_pattern(obj["source_revision"], _REVISION_RE, "winner_binding.source_revision")
     dirty = obj["source_dirty_paths"]
@@ -7291,7 +7815,7 @@ def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> 
     _require_summary_bool(b1["cutoffs_collided"], "b1_reference.cutoffs_collided")
 
 
-def publish_no_clobber(dumped: str, final_path: Path) -> None:
+def publish_no_clobber(dumped: str, final_path: Path, *, dir_fd: int | None = None) -> None:
     """Publish the private result with ``os.link``, which fails EEXIST rather than replacing.
 
     ``os.replace`` is deliberately NOT used here, and the difference from capture is the
@@ -7302,13 +7826,23 @@ def publish_no_clobber(dumped: str, final_path: Path) -> None:
     The temp goes through ``_write_private_temp`` (O_CREAT|O_EXCL, 0600 at creation,
     unguessable name, flush + fsync) and is unlinked whether the link succeeds or not, so no
     failure leaves private bytes lying beside the destination.
+
+    ``dir_fd`` IS THE DESTINATION, when given, and the path is only its name. Every step —
+    create, link, unlink — happens relative to the directory that was judged, so the whole
+    publication lands there no matter what the pathname resolves to by now. Without it this
+    reached the destination by NAME three times, minutes after the name was validated, and
+    replacing the validated parent with a symlink into a checkout in between published the
+    private result inside the checkout. Reproduced before this argument existed. See
+    _open_judged_output_parent.
     """
-    temp_path = _write_private_temp(final_path, dumped.encode("utf-8"))
+    temp_path = _write_private_temp(final_path, dumped.encode("utf-8"), dir_fd=dir_fd)
+    source, destination = ((temp_path.name, final_path.name) if dir_fd is not None
+                           else (temp_path, final_path))
     try:
-        os.link(temp_path, final_path)
+        os.link(source, destination, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     finally:
         with contextlib.suppress(OSError):
-            os.unlink(temp_path)
+            os.unlink(source, dir_fd=dir_fd)
 
 
 def _path_redactor(paths: Sequence[str]) -> Callable[[str], str]:
@@ -7847,6 +8381,9 @@ def _run_select_release(args: argparse.Namespace) -> int:
     # Which side of the run an OSError came from. Reading the artifact is an INPUT rejection
     # (4); writing the result is an OUTPUT failure (5).
     stage = "input"
+    # Held from the moment the destination is judged until the result is published, because
+    # everything between them takes minutes and the judgement was about a NAME.
+    parent_fd: int | None = None
     try:
         # Both paths validated BEFORE any scoring work, artifact then result.
         artifact_path = _refuse_repo_interior_path(Path(args.artifact), option="--artifact")
@@ -7855,11 +8392,15 @@ def _run_select_release(args: argparse.Namespace) -> int:
         )
         if not artifact_path.is_file():
             return refuse(2, "--artifact must name an existing regular file.")
-        if not result_path.parent.is_dir():
-            # The CLI does not create it: creating directories under a private store is the
+        try:
+            # OPENED HERE, not at publication time, and held for the rest of the run. The CLI
+            # does not create the directory: creating directories under a private store is the
             # operator's decision, not a side effect of a release run.
+            parent_fd = _open_judged_output_parent(result_path)
+        except OSError:
             return refuse(
-                2, "--result-output's parent directory must exist and be a directory."
+                2, "--result-output's parent directory must exist, be a directory, and not "
+                   "be a symlink."
             )
 
         mounted_digest = require_mounted_provenance()          # trust gate 1
@@ -7898,7 +8439,7 @@ def _run_select_release(args: argparse.Namespace) -> int:
             raise SummarySchemaError(type(exc).__name__) from exc
 
         stage = "output"
-        publish_no_clobber(dumped, result_path)
+        publish_no_clobber(dumped, result_path, dir_fd=parent_fd)
         # ONLY after the link succeeds, and stdout carries NOTHING ELSE.
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0 if result.winner is not None else 1
@@ -7947,6 +8488,9 @@ def _run_select_release(args: argparse.Namespace) -> int:
                          "nothing was published and nothing was printed.")
     except Exception as exc:  # the catch-all: NEVER a traceback, NEVER str(exc)
         return refuse(6, f"unexpected {type(exc).__name__}")
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
 
 
 def main(argv: list[str] | None = None, *, session_factory=None):

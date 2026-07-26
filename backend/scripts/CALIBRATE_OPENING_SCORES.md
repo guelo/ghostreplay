@@ -279,13 +279,37 @@ scored against whatever versions the system happened to carry. Set `GHOSTREPLAY_
 override explicitly. The child inherits that interpreter, and its dependency paths are
 derived from that interpreter's venv.
 
-The launcher checks out `--rev` (default `HEAD`) into a throwaway `git worktree`
-under a private temp dir, marks the files named by `SCORER_SOURCE_FILES` read-only
-(`0444`), hashes them from *that* tree, and only then execs the interpreter with the
-digest in `GHOSTREPLAY_SCORER_SOURCE_DIGEST` plus an empty, write-disabled bytecode
-cache. The rest of the checkout stays writable — the run legitimately writes there
-(`app.opening_graph` caches its ~30s build under `backend/.opening_graph_cache`), and
-those bytes are not what the digest binds.
+The launcher checks out `--rev` (default `HEAD`) into a private temp dir, stages the whole
+execution input beside it, builds a disk image, and **attaches it read-only** — then unlinks
+the backing file, because an attached `.dmg` is still writable by this uid and would be a
+second, writable path to every sealed byte. Only then does it hash anything.
+
+What is on the volume: the checkout, the interpreter, the standard library and `lib-dynload`,
+the installed dependencies, the frozen cohort artifact, and every non-Apple dylib in the
+closure. The last of those is not padding — `otool -L` shows the interpreter references
+`libpython` and `libintl` by *absolute path* into `~/.pyenv` and `/opt/homebrew`, so copying
+the prefix alone would still execute mutable host code until `DYLD_LIBRARY_PATH` redirects it.
+The dependencies are on the volume for the reason that made this mandatory: a concurrent
+`pip install` changes what runs without touching the tree, the manifest, or the digest.
+
+The digests are then computed by a **second launcher process** running *from the volume, on
+the volume's interpreter* (`--inner`). The outer process is host code on a host interpreter,
+so a digest it computed would be a statement made by mutable code about bytes that were still
+writable when it read them. Computed inside, the window between the hash and the child's
+import is not narrowed — it is gone.
+
+Everything the run may write is enumerated, and none of it is on the volume: the bytecode
+cache (empty, write-disabled), the child's `TMPDIR`, and the operator's `--result-output`.
+`backend/.opening_graph_cache` is **not** in that set: the cache is a pickle validated by a
+version and two mtimes, i.e. a mutable scoring input and an unpickle of a file any same-uid
+process can write, so a sealed run rebuilds the graph instead. That costs nothing new — a
+release run always checked out a fresh worktree, where the gitignored cache was never present.
+
+`--no-boundary` runs the old path (exclusive worktree, `0444` on the hashed files, no volume)
+for dev and report runs, and on platforms with no mechanism. It stamps
+`scorer_source_verified_preexec=False`, so no release will accept its output. The launcher
+**refuses to start** a boundaryless run unless that flag is passed explicitly; only macOS has
+a mechanism today.
 
 Both interpreters run without site initialisation, and both halves are required:
 
@@ -321,36 +345,135 @@ All three halves matter and none can be replaced by in-process code:
   imports before any of its statements run, so an edit landing in that window
   leaves old code executing while every in-process read agrees on the new bytes.
   Only a hash taken before the process existed catches it.
-* **The checkout is isolated from the shared tree.** A private-path worktree with its
-  hashed files marked `0444` is what defends against change-and-revert, and what makes
-  the digest a claim about a *tree* rather than a *moment*. The working tree — written
-  continuously by editors, builds, and other agents — cannot give you this.
+* **The checkout is isolated from the shared tree**, which is what makes the digest a claim
+  about a *tree* rather than a *moment*. The working tree — written continuously by editors,
+  builds, and other agents — cannot give you this. *How* it is isolated is the difference
+  between the two paths, and it is the whole of `g-release-os-boundary`: a release run puts
+  it on a read-only volume, and `--no-boundary` falls back to `0444` on the hashed files.
 * **Nothing auto-executes before the scorer.** The two points above are about bytes on
   disk; `-S` is about code that never touches the tree at all.
 
-Be precise about what this is worth. `0700` excludes other *users*, not other processes
-running as you; `0444` stops an accidental write, not a deliberate one, since this uid can
-chmod it back; and `git worktree list` publishes the path for the duration of the run. The
-interpreter, the standard library, and every installed dependency are **unhashed** — the
-digest binds `SCORER_SOURCE_FILES` and nothing else, and no check inside the run can audit
-the runtime it is already executing inside. `check_scorer_import_origins()` reads
-`__file__`, which reports where a module was *loaded from*, not what its attributes hold
-now, so it catches a misconfigured path or the wrong checkout — not a hostile loader.
+**Be precise about what the `--no-boundary` path is worth**, because it is weaker on every
+axis and it is the reason the boundary was made mandatory. `0700` excludes other *users*, not
+other processes running as you; `0444` stops an accidental write, not a deliberate one, since
+this uid can chmod it back; and `git worktree list` publishes the path for the duration of the
+run. The interpreter, the standard library, and every installed dependency are **unhashed** —
+the digest binds `SCORER_SOURCE_FILES` and nothing else, so a concurrent `pip install` changes
+the code that runs without moving the digest at all. `check_scorer_import_origins()` reads
+`__file__`, which reports where a module was *loaded from*, not what its attributes hold now,
+so it catches a misconfigured path or the wrong checkout — not a hostile loader. This is why
+`--no-boundary` stamps `scorer_source_verified_preexec=False` and no release will take it. The
+next section describes what a release run gets instead.
 
-Taken together: this removes the ambient hazard, which is the realistic one on a machine
-that also runs editors, agents, and instrumentation. It is not an airtight boundary, and it
-is no defence at all against a hostile operator, who can simply commit the change. A literal
-"no other writer" guarantee needs an OS boundary (container, sandbox, separate uid) around
-the whole run, which the launcher does not provide — see bead `g-release-os-boundary`.
+### What the boundary does and does not cover
 
-A run under the launcher stamps `scorer_source_verified_preexec=True` on its
-cohort and winner binding. A bare `python backend/scripts/calibrate_opening_scores_v2.py`
-run stamps `False` — that is normal and correct for dev and test, and the script
-stays fully usable that way. The refusal lives at the release boundary:
-`require_preexec_verified_source()` rejects anything carrying `False`, because
-`scorer_source_digest` is then fenced over source bytes but not proven to name the
-code that actually ran. Because the worktree comes from a commit, uncommitted edits
-can never reach a release run.
+A same-uid write to any sealed byte returns `EROFS` — and still returns `EROFS` after a
+`chmod u+w` that appears to succeed, which is the clearest available statement that mode bits
+were never the mechanism. The scorer does not take the launcher's word for any of this: it
+**measures its own filesystem** (`check_execution_boundary()`), checking that every manifest
+file, every imported module, the interpreter, the stdlib, and every native image `dyld`
+actually loaded is on **the sealed volume** — not merely on some read-only mount, which any
+other attached image would satisfy while sitting outside `runtime_image_sha256` entirely. The
+volume is identified from the scorer's own `__file__`, so it cannot be aimed elsewhere.
+Forging the attestation environment variables buys nothing. The measurement is taken again
+after the last score, so a volume detached mid-run fails the run rather than passing quietly.
+
+Two more refusals guard the run, one on the way in and one at the freeze.
+
+`--artifact` is checked for the repo-interior governance rule **against the operator's own
+path**, because sealing rewrites the argument and the scorer downstream would only ever see
+the staged copy. The file is *opened before it is judged* and copied from that descriptor
+afterwards: a path checked at one moment and reopened at another is not reliably the same
+file, and the gap is wide — a worktree is added and a provenance record is mounted inside it.
+
+And once the image is built, attached, and its backing file unlinked, **everything on the
+volume is compared against the thing that says what it should be**. `cp -Rc` clones each file
+atomically but still *walks*, so an install landing mid-walk yields a hybrid runtime that is
+internally consistent per file and never existed as a whole; hashing it afterwards would name
+the hybrid precisely, which is the trap. The comparison is of content, not metadata — a
+same-size edit reverted with the mtime restored walks straight through anything weaker — and it
+is of the frozen bytes, not of the writable stage, so there is no window left after it. Each
+name is also checked to be a *file on the volume*: a symlink staged in place of one would be
+followed off the volume to whatever it points at, and compared equal to it.
+
+**What that comparison is worth depends on what it is compared against, and the two are not the
+same strength.** The checkout is compared against the **commit** — content-addressed, already
+written, out of reach of an editor saving into a working tree. The artifact is compared against
+the **descriptor** held open since before it was judged. The mounted provenance record is
+compared against a **digest of the bytes the launcher itself wrote**. Those three cover the
+code, the data, and the record naming the cohort, and for them the comparison settles it.
+
+The interpreter, the dependency roots and the dylib closure are compared against **live host
+trees**, which *can* detect the concurrent `pip install` or `brew upgrade` this exists for —
+whether it does depends on where the install lands relative to a walk that cannot be made
+atomic. It does not prove the volume is any single instant of those trees: the comparison walks,
+so a source that moves and moves back between two of its reads is not excluded. A whole-tree
+snapshot needs privileges the launcher deliberately does not require. That limit is stated here
+rather than worked around, and a test pins it so it cannot quietly become a claim again.
+
+**And matching bytes are not a closed boundary.** A symlink's content *is* its target string, so
+a link that matches its baseline exactly — committed, or copied out of the interpreter prefix —
+passes every comparison above and still lands wherever it says, leaving the volume with a name
+whose bytes are off it and stay writable for the whole run. So every link on the volume is
+required to *land* on the volume, on its device; relative links that stay inside are the common
+case and are untouched. One consequence is visible in the repository: a stray `.antigravitycli/`
+config symlinked into a home directory was tracked, and a sealed run refuses while it is, so it
+was removed and ignored.
+
+The sealed `.git` is bound too, and it is the one entry here whose reach is *governance* rather
+than bytes. It is a gitfile — it decides which repository git answers as from inside the
+checkout — and the private-path rule that keeps production-derived output out of every checkout
+was built from `git worktree list`. Repointed at another valid repository, the checkout still
+verified clean while the origin checkout vanished from that listing, which would have made the
+real working tree an acceptable destination. It is now required to name the run's own
+administrative entry, compared by `(st_dev, st_ino)`.
+
+**Binding the gitfile is not the same as trusting git, and it was not enough.** The
+administrative directory it names stays writable and outside the boundary, so editing
+`<admin>/commondir` repoints git with the sealed `.git` file and the admin inode both
+unchanged — and the origin checkout leaves the forbidden set exactly as before. So the set is
+no longer derived where it is used: the launcher measures every working tree on the **host**,
+before the volume exists, and hands the child that set as a **floor**
+(`GHOSTREPLAY_SEALED_FORBIDDEN_ROOTS`). The child still asks git and takes the union, so a
+worktree registered after the seal is caught by the live answer while no mid-run edit can
+shrink the set below what was measured. A sealed run that carries no floor refuses.
+
+**And the destination is held, not re-resolved.** `--result-output` is judged before any
+scoring work and was then reached by name — create the temp, link it, unlink it — minutes
+later. Replacing the validated parent directory with a symlink into a checkout in between
+published the private result inside the checkout. The parent is now opened when it is judged
+(`O_DIRECTORY|O_NOFOLLOW`), judged again by descriptor, and every step of the publication
+happens relative to it. What that does not cover, said plainly: if the judged directory is
+itself *moved* into a checkout afterwards, the descriptor follows it — that is relocation of
+the destination, not substitution of it, and no descriptor can prevent it.
+
+Outside the boundary, named rather than waved away:
+
+* **The signed system volume** (`/usr/lib`, `/System`) — sealed by the OS, not writable even
+  by root, taken host-provided by decision. The OS build is recorded as `os_build`.
+* **git's administrative directory**, which stays in the origin's mutable `.git`. Git keeps
+  working from inside the volume, but nothing it says there is an attestation:
+  `source_revision` and `source_dirty_paths` are audit fields. The sealed revision is the one
+  the launcher resolved before the checkout existed (`sealed_revision`). The volume's `.git` is
+  bound to this directory, so the *volume* cannot redirect git — and because the directory it
+  names is still writable, the private-path rule stopped depending on git's answer alone (the
+  host-measured floor above). What git says from inside can add to what is refused; it can no
+  longer subtract.
+* **`hdiutil detach`**, still available to this uid. It breaks the run loudly.
+* **A hostile operator**, who can commit the change and have it sealed like anything else.
+  This defends against accident and concurrency on a machine that also runs editors, agents,
+  and package installs — never against the person running the release.
+
+A run inside the boundary stamps `scorer_source_verified_preexec=True` on its cohort and
+winner binding, and binds `runtime_image_sha256`: a digest over the actual bytes of the volume,
+which is what `runtime_python` and `runtime_chess_version` could never be — two builds of
+`3.12.7` agree on every character of both. Everything else stamps `False`: a bare
+`python backend/scripts/calibrate_opening_scores_v2.py` run, and — since
+`g-release-os-boundary` — a `--no-boundary` launcher run too, even though it still computes a
+matching pre-exec digest. That is normal and correct for dev and test, and the script stays
+fully usable that way. The refusal lives at the release boundary:
+`require_preexec_verified_source()` rejects anything carrying `False`. Because the worktree
+comes from a commit, uncommitted edits can never reach a release run.
 
 ## g-xnv7 calibration decision
 

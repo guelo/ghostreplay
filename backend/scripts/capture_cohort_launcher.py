@@ -15,6 +15,15 @@ resolves relative to the executing checkout — a launcher-hosted capture would 
 a directory destroyed on exit). The child's clean-tree refusal over ``SCORER_SOURCE_FILES``
 is capture's (honestly weaker) substitute for the launcher's read-only exclusive checkout.
 
+AND THEREFORE NO OS BOUNDARY EITHER (g-release-os-boundary). ``launch()`` is reused without a
+``SealedRun``, because the boundary is a READ-ONLY VOLUME and the whole point of capture
+running here is that this tree must stay writable for the record it is about to produce. The
+asymmetry is real and worth stating plainly: capture's source guarantee is the pre-exec
+digest plus a clean-tree refusal, not the sealed-volume guarantee the consuming release run
+gets. What limits the damage is that capture's product is DATA — an artifact and a record,
+both hashed, both re-verified by the release run, which does run inside the boundary and
+which refuses a record whose bytes moved.
+
 USAGE
 -----
     backend/scripts/capture_cohort.sh --output PATH [--require-quiescent-epoch]

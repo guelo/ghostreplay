@@ -8,19 +8,24 @@ the in-process half is tested in test_calibrate_opening_scores.py.
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import app.opening_graph as opening_graph
 import scripts.calibrate_opening_scores_v2 as cal
 import scripts.release_calibration_launcher as launcher
 
@@ -592,16 +597,43 @@ def _run_probe(monkeypatch, tree: Path, scratch: Path, pycache: Path, command=No
 # the probe imports to build its artifact. Nothing else — see worktree_rev.
 _E2E_OVERLAY = (
     *cal.SCORER_SOURCE_FILES,
+    # The launcher itself, because g-release-os-boundary made it EXECUTE FROM THE CHECKOUT:
+    # the outer process re-execs release_calibration_launcher.py --inner off the sealed
+    # volume. It used to be correct to leave this out — "the launcher runs from the ORIGIN
+    # and only the checkout is exec'd" — and that sentence stopped being true the moment
+    # there were two launcher processes.
+    "backend/scripts/release_calibration_launcher.py",
     "backend/test_calibrate_opening_scores.py",
+    # ...and what THAT module imports. The overlay is a closure, not a list of files anyone
+    # edited: a checkout carrying the working-tree importer beside HEAD's imported module
+    # fails in the CHILD, where the traceback is a subprocess's and says nothing about why.
+    "backend/test_calibrate_selection.py",
     # Data files analysis_profiles.py reads at import; their ``dominates`` sets must
     # match evidence_policy.EDGES (g-reuse-d21-search added browser-analysis-multipv-v2).
     "backend/app/canonical_profiles/canonical-sf18-depth24-v1.json",
     "backend/app/canonical_profiles/canonical-sf18-depth24-linux-v1.json",
 )
 
+# Overlaid ABSENCES, kept apart from the bytes above because a deletion is a different fact and
+# folding it into that list made a test that reads every overlaid path try to read a file whose
+# whole point is that it is gone. HEAD tracks this path as a SYMLINK into a home directory
+# outside the repository (swept in by a `git add -A` in af02eac), so a sealed checkout of HEAD
+# carries a name whose bytes are off the volume — which the containment check refuses, correctly,
+# for every run. Removing it is part of this task, so the fixture's rev is HEAD without it.
+_E2E_OVERLAY_REMOVED = (
+    ".antigravitycli/71ef14de-fe59-4d58-aaa5-7fdde91a224c.json",
+)
 
-def _overlay_commit(repo_root: Path, rel_paths: Sequence[str], index_path: Path) -> str:
-    """A commit of HEAD with ``rel_paths`` replaced by their current working-tree bytes.
+
+def _overlay_commit(repo_root: Path, rel_paths: Sequence[str], index_path: Path, *,
+                    removed: Sequence[str] = ()) -> str:
+    """A commit of HEAD with ``rel_paths`` replaced by their current working-tree bytes, and
+    ``removed`` dropped.
+
+    ``removed`` is stated rather than inferred: ``git add`` on a path missing from the working
+    tree would stage the deletion too, but only as a side effect of it happening to be deleted
+    at the time, which is not a thing to build a fixture on. ``git rm --cached`` says it, and
+    says it in the throwaway index only.
 
     GIT_INDEX_FILE is what makes this safe to run against a tree other agents are working in:
     the staging happens in a throwaway index, so nothing here locks or mutates the shared one,
@@ -622,6 +654,8 @@ def _overlay_commit(repo_root: Path, rel_paths: Sequence[str], index_path: Path)
 
     git("read-tree", "HEAD")
     git("add", "--", *rel_paths)
+    if removed:
+        git("rm", "--cached", "--quiet", "--", *removed)
     tree = git("write-tree")
     return git("commit-tree", tree, "-p", "HEAD", "-m", "e2e: this task's inputs over HEAD")
 
@@ -653,6 +687,23 @@ class TestOverlayCommit:
         assert show(mine) == "WORKING = 2\n"      # my edit is what gets tested
         assert show(theirs) == "COMMITTED = 1\n"  # theirs cannot break or join my run
 
+    def test_a_removed_path_is_dropped_from_the_rev_and_left_in_the_working_tree(self, tmp_path):
+        """The overlay carries absences as well as bytes, and the removal is confined to the
+        throwaway index: the file the fixture drops is still in the working tree afterwards,
+        because deleting it there is the task's commit to make, not the fixture's."""
+        repo = _disposable_repo(tmp_path)
+        doomed = "backend/app/other.py"
+        (repo / doomed).write_text("COMMITTED = 1\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "seed other"], check=True, capture_output=True)
+        sha = _overlay_commit(repo, ["backend/app/fen.py"], tmp_path / "idx", removed=[doomed])
+        listed = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "--name-only", sha],
+                                capture_output=True, text=True, check=True).stdout.split()
+        assert doomed not in listed
+        assert "backend/app/fen.py" in listed
+        assert (repo / doomed).exists()
+
     def test_leaves_the_shared_index_and_working_tree_untouched(self, tmp_path):
         # The reason for GIT_INDEX_FILE. Staging into the real index would fight other agents
         # for the lock and stage their work as a side effect of running our tests.
@@ -679,17 +730,25 @@ def worktree_rev(tmp_path_factory) -> str:
     snapshot makes the fixture validate a combined state, or fail for reasons belonging to
     somebody else's task. Neither is a property of the code under review.
 
-    So: seed a TEMPORARY index from HEAD and stage only _E2E_OVERLAY into it. Everything else
-    in the checkout is HEAD's. The temp index matters as much as the selection — GIT_INDEX_FILE
+    So: seed a TEMPORARY index from HEAD, stage only _E2E_OVERLAY into it, and drop
+    _E2E_OVERLAY_REMOVED from it. Everything else in the checkout is HEAD's — and the removal
+    belongs here for the same reason the additions do: without it the fixture would seal a
+    checkout carrying a symlink off the volume, which the containment check refuses, so the
+    tests would fail on a path this task deletes rather than on anything under review. The temp
+    index matters as much as the selection — GIT_INDEX_FILE
     keeps this out of the shared index entirely, so nothing here locks or mutates state another
     agent is using, and `git stash create` is not an option for the same reason it looked
     attractive: it snapshots everyone's work, not ours.
 
-    The launcher itself is untracked and deliberately absent from the overlay. It costs
-    nothing: the launcher runs from the ORIGIN and only the checkout is exec'd.
+    The launcher is IN the overlay since g-release-os-boundary. It used to be deliberately
+    absent, on the reasoning that it runs from the ORIGIN and only the checkout is exec'd —
+    true until the sealed run gained an INNER launcher that executes from the volume. Left
+    out, every sealed test here would validate HEAD's launcher against the code under review,
+    and the mismatch surfaces as a refusal from a handshake check rather than as a diff.
     """
     return _overlay_commit(_REPO_ROOT, _E2E_OVERLAY,
-                           tmp_path_factory.mktemp("git-index") / "index")
+                           tmp_path_factory.mktemp("git-index") / "index",
+                           removed=_E2E_OVERLAY_REMOVED)
 
 
 class TestLaunchEndToEnd:
@@ -707,9 +766,13 @@ class TestLaunchEndToEnd:
         """
         with launcher.exclusive_checkout(_REPO_ROOT, worktree_rev) as tree:
             checked_out = {rel: (tree / rel).read_bytes() for rel in _E2E_OVERLAY}
+            still_there = [rel for rel in _E2E_OVERLAY_REMOVED if (tree / rel).is_symlink()
+                           or (tree / rel).exists()]
         stale = [rel for rel in _E2E_OVERLAY
                  if checked_out[rel] != (_REPO_ROOT / rel).read_bytes()]
         assert not stale, f"checkout carries committed, not working-tree, bytes for: {stale}"
+        # The overlaid ABSENCES, which the sealed run refuses the checkout over.
+        assert not still_there, f"checkout still carries paths this task removes: {still_there}"
 
     def test_the_checkout_is_head_outside_the_overlay(self, worktree_rev):
         """The other half of the fixture's contract, against the real repo. Note this can only
@@ -724,9 +787,21 @@ class TestLaunchEndToEnd:
         with launcher.exclusive_checkout(_REPO_ROOT, worktree_rev) as tree:
             assert (tree / outsider).read_bytes() == committed
 
-    def test_a_run_under_the_launcher_stamps_verified(self, tmp_path, monkeypatch, worktree_rev):
+    def test_the_pre_exec_digest_alone_no_longer_stamps_verified(self, tmp_path, monkeypatch,
+                                                                 worktree_rev):
+        """THE SEMANTIC CHANGE g-release-os-boundary made, pinned from the outside.
+
+        This exact run — real worktree, real pre-exec hash, real child — used to stamp True,
+        and that was the whole release path. It stamps False now, because the digest closes
+        the compile window but never held the bytes still, and it says nothing at all about
+        the interpreter or the installed dependencies that execute them. A `pip install` into
+        the shared venv moves what runs without moving the digest.
+
+        If this ever reverts to True, the boundary stopped being a precondition of the flag
+        and every downstream refusal that depends on it quietly stopped working.
+        """
         with launcher.exclusive_checkout(_REPO_ROOT, worktree_rev) as tree:
-            assert _run_probe(monkeypatch, tree, tmp_path, tmp_path / "pyc") == {"preexec": True}
+            assert _run_probe(monkeypatch, tree, tmp_path, tmp_path / "pyc") == {"preexec": False}
 
     def test_an_edit_between_the_hash_and_the_exec_fails_closed(self, tmp_path, monkeypatch,
                                                                 worktree_rev):
@@ -894,8 +969,14 @@ class TestCohortProvenanceMount:
         ]
 
     def test_main_mounts_only_when_asked(self, tmp_path, monkeypatch):
-        """The mount happens in main(), AFTER exclusive_checkout yields and BEFORE launch —
-        so the record's bytes are hashed while no child interpreter exists."""
+        """The mount happens AFTER exclusive_checkout yields and BEFORE launch — so the
+        record's bytes are hashed while no child interpreter exists.
+
+        Pinned on the --no-boundary path, which is where exclusive_checkout still lives after
+        g-release-os-boundary. The sealed path has the same ordering with a harder deadline
+        (the record must be staged before the image is built, or it would not be sealed at
+        all) and is pinned separately in TestSealedCheckoutOrdering.
+        """
         order = []
         seen = {}
 
@@ -918,12 +999,13 @@ class TestCohortProvenanceMount:
         monkeypatch.setattr(launcher, "mount_cohort_provenance", fake_mount)
         monkeypatch.setattr(launcher, "launch", fake_launch)
 
-        assert launcher.main(["--", "report"]) == 0
+        assert launcher.main(["--no-boundary", "--", "report"]) == 0
         assert order == ["checkout", "launch"]        # OFF is the correct default
         assert seen["digest"] is None
 
         order.clear()
-        assert launcher.main(["--mount-cohort-provenance", "--", "select-release"]) == 0
+        assert launcher.main(
+            ["--no-boundary", "--mount-cohort-provenance", "--", "select-release"]) == 0
         assert order == ["checkout", "mount", "launch"]
         assert seen["digest"] == "a" * 64
 
@@ -966,3 +1048,1587 @@ class TestCohortProvenanceMount:
         )
         assert launcher._worktree_registered(repo, odd) is True
         assert launcher._registration_gone(repo, odd) is False
+
+
+# ---------------------------------------------------------------------------
+# The OS boundary (g-release-os-boundary)
+#
+# The bead asked for an OS-enforced boundary such that a same-uid process cannot write the
+# hashed bytes for the duration of the run, and for a test that proves the denial comes from
+# the OS rather than from mode bits. That is TestReadOnlyVolume, and it is deliberately built
+# on a small synthetic image: the property under test belongs to the read-only MOUNT, not to
+# the release checkout, and asserting it on a 900MB volume would cost 30s to learn the same
+# thing.
+#
+# TestSealedCheckout pays that cost exactly once, module-scoped, for the acceptance case.
+# ---------------------------------------------------------------------------
+
+_MACOS_ONLY = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="hdiutil is macOS-only; _boundary_mechanism() returns None elsewhere and the "
+           "launcher refuses a release run without --no-boundary",
+)
+
+
+@contextmanager
+def _read_only_volume(tmp_path: Path, files: dict[str, str]):
+    """A small read-only volume, built the way the launcher builds its own.
+
+    Same mechanism, same flags, same unlink-after-attach — so what this proves about writes
+    is what holds for a release run, without staging 900MB to learn it.
+    """
+    stage = tmp_path / "vol-stage"
+    mount = tmp_path / "vol-mnt"
+    image = tmp_path / "vol.dmg"
+    mount.mkdir(parents=True, exist_ok=True)
+    for rel, text in files.items():
+        target = stage / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    subprocess.run(["hdiutil", "create", "-srcfolder", str(stage), "-format", "UDRO",
+                    "-volname", "boundary-test", "-quiet", str(image)], check=True)
+    subprocess.run(["hdiutil", "attach", "-readonly", "-nobrowse", "-owners", "off",
+                    "-mountpoint", str(mount), str(image)], check=True, capture_output=True)
+    image.unlink()
+    try:
+        yield mount
+    finally:
+        subprocess.run(["hdiutil", "detach", "-force", str(mount)], capture_output=True)
+
+
+class TestBoundaryConstants:
+    """The launcher and the scorer each keep their own copy of these, on purpose — the
+    launcher must not import the scorer, because importing it would compile the very code the
+    pre-exec digest exists to precede. Copies that can drift need a test that they have not."""
+
+    def test_the_env_var_names_mirror_the_scorers(self):
+        assert launcher.RELEASE_BOUNDARY_ENV == cal.RELEASE_BOUNDARY_ENV
+        assert launcher.RUNTIME_IMAGE_DIGEST_ENV == cal.RUNTIME_IMAGE_DIGEST_ENV
+        assert launcher.SEALED_REVISION_ENV == cal.SEALED_REVISION_ENV
+        # Drift here is not a missing value but a governance rule quietly evaluated against
+        # nothing: the child requires this variable under the boundary, so a launcher writing
+        # a different name refuses every sealed run.
+        assert launcher.SEALED_FORBIDDEN_ROOTS_ENV == cal.SEALED_FORBIDDEN_ROOTS_ENV
+
+    def test_the_sealed_system_prefixes_mirror_the_scorers(self):
+        # Drift here is silent and one-directional: a prefix the scorer accepts but the
+        # launcher does not stage is a dylib loaded from outside the boundary.
+        assert launcher.SEALED_SYSTEM_PREFIXES == cal.SEALED_SYSTEM_PREFIXES
+
+    def test_the_graph_cache_switch_mirrors_the_module_that_reads_it(self):
+        assert launcher.GRAPH_NO_DISK_CACHE_ENV == opening_graph.DISABLE_DISK_CACHE_ENV
+
+    def test_a_mechanism_exists_exactly_where_one_is_implemented(self):
+        expected = launcher.MACOS_MECHANISM if sys.platform == "darwin" else None
+        assert launcher._boundary_mechanism() == expected
+
+
+@_MACOS_ONLY
+class TestReadOnlyVolume:
+    """CRITERION 4: the denial is the OS's, not a mode bit's."""
+
+    def test_a_same_uid_write_is_denied_by_the_os(self, tmp_path):
+        with _read_only_volume(tmp_path, {"backend/app/fen.py": "SEALED = 1\n"}) as mount:
+            with pytest.raises(OSError) as exc:
+                (mount / "backend/app/fen.py").write_text("TAMPERED = 1\n")
+            assert exc.value.errno == errno.EROFS
+
+    def test_chmod_does_not_buy_the_owner_a_write(self, tmp_path):
+        """The precise failure of the pre-boundary design. exclusive_checkout marked the
+        hashed files 0444, and its own docstring said why that was not a boundary: the owner
+        reverts it. Here the chmod is allowed to APPEAR to succeed — and the write still
+        fails, because the kernel is refusing on behalf of the filesystem, not the inode."""
+        with _read_only_volume(tmp_path, {"f.py": "SEALED = 1\n"}) as mount:
+            target = mount / "f.py"
+            with contextlib.suppress(OSError):
+                target.chmod(0o666)
+            with pytest.raises(OSError) as exc:
+                target.write_text("TAMPERED = 1\n")
+            assert exc.value.errno == errno.EROFS
+            assert target.read_text() == "SEALED = 1\n"
+
+    def test_the_volume_outlives_its_backing_file(self, tmp_path):
+        """Why the launcher unlinks the image. An attached .dmg stays writable by this uid —
+        a second, WRITABLE path to every sealed byte — so it is removed as soon as the mount
+        exists. This pins that doing so does not cost us the mount."""
+        with _read_only_volume(tmp_path, {"f.py": "SEALED = 1\n"}) as mount:
+            assert not (tmp_path / "vol.dmg").exists()
+            assert (mount / "f.py").read_text() == "SEALED = 1\n"
+
+    def test_the_scorer_can_measure_the_boundary_from_inside(self, tmp_path):
+        """The property that let the release gate be a measurement instead of an attestation.
+        The bead assumed the scorer could not detect its own sandbox — true of a sandbox
+        profile, false of a read-only mount."""
+        with _read_only_volume(tmp_path, {"f.py": "SEALED = 1\n"}) as mount:
+            assert cal._mount_is_read_only(mount / "f.py") is True
+            assert cal._mount_is_read_only(tmp_path) is False
+            assert cal._mount_is_read_only(mount / "does-not-exist") is False
+
+
+@_MACOS_ONLY
+class TestCrossVolumeInputs:
+    """Read-only is a PROPERTY. The sealed volume is an IDENTITY, and only the second one is
+    what runtime_image_sha256 covers.
+
+    ST_RDONLY is satisfied by any attached read-only image — a second DMG, a mounted
+    installer, a network share. Bytes there are outside the digest entirely, so a module
+    imported from one would execute inside a run whose attestation does not describe it. And
+    the launcher unlinks the backing file of ITS image and nothing else's, so another attached
+    image may still have a writable backing file on disk: even its read-only-ness is weaker
+    than it reads.
+    """
+
+    def test_a_foreign_read_only_volume_passes_the_weak_test_and_fails_the_real_one(
+            self, tmp_path):
+        with _read_only_volume(tmp_path, {"m.py": "x = 1\n"}) as foreign:
+            intruder = foreign / "m.py"
+            assert cal._mount_is_read_only(intruder) is True
+            sealed_device = cal._device_of(tmp_path)
+            assert cal._device_of(intruder) != sealed_device
+            assert cal._on_sealed_volume(intruder, sealed_device) is False
+
+    def test_the_sealed_volumes_own_files_are_accepted(self, tmp_path):
+        with _read_only_volume(tmp_path, {"m.py": "x = 1\n"}) as mount:
+            device = cal._device_of(mount / "m.py")
+            assert cal._on_sealed_volume(mount / "m.py", device) is True
+
+    def test_a_writable_path_on_the_sealed_device_is_still_refused(self, tmp_path):
+        """Both halves are required: same device is not enough on its own."""
+        target = tmp_path / "m.py"
+        target.write_text("x = 1\n")
+        assert cal._on_sealed_volume(target, cal._device_of(target)) is False
+
+    def test_an_unidentifiable_volume_refuses_rather_than_verifying(self, monkeypatch):
+        """'Could not tell which volume this is' is not 'sealed'."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        monkeypatch.setattr(cal, "_sealed_device", lambda: None)
+        with pytest.raises(cal.BoundaryUnverifiedError, match="could not identify the volume"):
+            cal.check_execution_boundary()
+
+
+class TestBoundaryGate:
+    """The flag is minted from the MEASUREMENT, not from what the environment claims."""
+
+    def test_no_declared_boundary_is_recorded_not_raised(self, monkeypatch):
+        """A dev run, a test, and a deliberate --no-boundary run all land here. Making this
+        fatal would put the scorer out of reach of everything except releases."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", None)
+        assert cal.check_execution_boundary() is None
+
+    def test_a_declared_boundary_that_is_not_there_raises(self, monkeypatch):
+        """THE forgery case. Setting the attestation variable is exactly what an attacker —
+        or a broken launcher — would do, and it buys nothing: this process is running from a
+        writable checkout, and ST_RDONLY says so."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        with pytest.raises(cal.BoundaryUnverifiedError) as exc:
+            cal.check_execution_boundary()
+        assert "NOT on the sealed volume" in str(exc.value)
+
+    def test_an_unenumerable_process_is_not_read_as_a_clean_one(self, monkeypatch):
+        """Tri-state discipline, same as _worktree_registered: 'could not tell' must never
+        collapse into 'nothing foreign'. If dyld will not answer, the run is not verified."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        # _on_sealed_volume, not _mount_is_read_only: the check is identity AND read-only-ness,
+        # and this test is about dyld refusing to answer, not about either of those.
+        monkeypatch.setattr(cal, "_on_sealed_volume", lambda path, device: True)
+        monkeypatch.setattr(cal, "_loaded_native_images", lambda: ())
+        with pytest.raises(cal.BoundaryUnverifiedError) as exc:
+            cal.check_execution_boundary()
+        assert "could not enumerate" in str(exc.value)
+
+    def test_a_host_dylib_fails_an_otherwise_sealed_run(self, monkeypatch):
+        """The half-sealed run. Everything is on the read-only volume except one dylib the
+        launcher's static closure missed — which is exactly what happens to libpython and
+        libintl if DYLD_LIBRARY_PATH is dropped. The digest, the bytecode check and the
+        import origins would all still pass; only this catches it."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        monkeypatch.setattr(cal, "_on_sealed_volume",
+                            lambda path, device: not str(path).startswith("/opt/homebrew"))
+        monkeypatch.setattr(cal, "_loaded_native_images",
+                            lambda: ("/usr/lib/libSystem.B.dylib",
+                                     "/opt/homebrew/opt/gettext/lib/libintl.8.dylib"))
+        with pytest.raises(cal.BoundaryUnverifiedError) as exc:
+            cal.check_execution_boundary()
+        assert "libintl" in str(exc.value)
+
+    def test_the_signed_system_volume_is_accepted_and_recorded(self, monkeypatch):
+        """/usr/lib and /System stay host-provided by decision. The honesty is os_build."""
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        monkeypatch.setattr(cal, "_on_sealed_volume", lambda path, device: True)
+        monkeypatch.setattr(cal, "_loaded_native_images",
+                            lambda: ("/usr/lib/libSystem.B.dylib",
+                                     "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"))
+        assert cal.check_execution_boundary() == "macos-hdiutil-udro"
+
+
+class TestNoBoundaryOptOut:
+    def test_the_flag_parses_and_is_off_by_default(self):
+        assert launcher._parse_args([]).no_boundary is False
+        assert launcher._parse_args(["--no-boundary"]).no_boundary is True
+
+    def test_a_release_run_refuses_where_no_mechanism_exists(self, monkeypatch):
+        """Fail closed. A platform with no boundary does not get a quietly weaker release —
+        it gets no release, and an error that names the escape hatch and its consequence."""
+        monkeypatch.setattr(launcher, "_boundary_mechanism", lambda: None)
+        args = launcher._parse_args([])
+        with pytest.raises(launcher.LauncherError) as exc:
+            launcher._outer_main(args, _REPO_ROOT)
+        assert "--no-boundary" in str(exc.value)
+        assert "scorer_source_verified_preexec=False" in str(exc.value)
+
+
+class TestChildEnvBoundary:
+    """child_env is the only place the boundary variables are allowed to come from."""
+
+    def _sealed(self, tmp_path: Path) -> launcher.SealedRun:
+        return launcher.SealedRun(
+            mechanism=launcher.MACOS_MECHANISM, runtime_image_sha256="a" * 64,
+            revision="b" * 40, volume=tmp_path, dep_paths=(tmp_path / "deps",),
+            dylibs=tmp_path / "dylibs", scratch=tmp_path / "scratch",
+        )
+
+    def test_an_unsealed_run_never_inherits_a_boundary_claim(self, tmp_path, monkeypatch):
+        """Same rule, and same reason, as the cohort-provenance digest: SET or REMOVE. An
+        inherited GHOSTREPLAY_RELEASE_BOUNDARY would otherwise describe a volume that was
+        never mounted — and while the scorer would still refuse it (it measures), a run must
+        not be able to read a value no launcher wrote."""
+        for name in (launcher.RELEASE_BOUNDARY_ENV, launcher.RUNTIME_IMAGE_DIGEST_ENV,
+                     launcher.SEALED_REVISION_ENV, launcher.GRAPH_NO_DISK_CACHE_ENV):
+            monkeypatch.setenv(name, "inherited")
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc")
+        for name in (launcher.RELEASE_BOUNDARY_ENV, launcher.RUNTIME_IMAGE_DIGEST_ENV,
+                     launcher.SEALED_REVISION_ENV, launcher.GRAPH_NO_DISK_CACHE_ENV):
+            assert name not in env
+
+    def test_a_sealed_run_carries_the_attestation_and_the_redirect(self, tmp_path):
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc",
+                                 sealed=self._sealed(tmp_path))
+        assert env[launcher.RELEASE_BOUNDARY_ENV] == launcher.MACOS_MECHANISM
+        assert env[launcher.RUNTIME_IMAGE_DIGEST_ENV] == "a" * 64
+        assert env[launcher.SEALED_REVISION_ENV] == "b" * 40
+        assert env["DYLD_LIBRARY_PATH"] == str(tmp_path / "dylibs")
+        assert env["TMPDIR"] == str(tmp_path / "scratch")
+
+    def test_a_sealed_run_takes_its_deps_from_the_volume_not_the_host_venv(self, tmp_path):
+        """The pip-install hazard, closed at the source. Unsealed, PYTHONPATH is derived from
+        the interpreter's venv — the shared, writable one. Sealed, it is the volume's copy."""
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc",
+                                 sealed=self._sealed(tmp_path))
+        assert env["PYTHONPATH"] == str(tmp_path / "deps")
+
+    def test_a_sealed_run_takes_the_pickle_graph_cache_out_of_the_input_set(self, tmp_path):
+        """Not a performance switch. The cache is a pickle validated by (version, mtimes) and
+        nothing else — the one mutable scoring input a sealed run would otherwise keep, and
+        an unpickle of a file a same-uid process can write."""
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc",
+                                 sealed=self._sealed(tmp_path))
+        assert env[launcher.GRAPH_NO_DISK_CACHE_ENV] == "1"
+
+    def test_the_forbidden_root_floor_reaches_the_child(self, tmp_path):
+        """The one governance input the child cannot honestly derive for itself: its own
+        derivation goes through git, and git answers through a writable directory."""
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc",
+                                 sealed=self._sealed(tmp_path),
+                                 forbidden_roots=[(16, 42), (16, 7)])
+        assert json.loads(env[launcher.SEALED_FORBIDDEN_ROOTS_ENV]) == [[16, 7], [16, 42]]
+
+    def test_an_inherited_forbidden_root_floor_is_dropped(self, tmp_path, monkeypatch):
+        """SET or REMOVE, and this one has the sharpest edge: an inherited floor is a set of
+        inode numbers from another machine, another repository or another week, and every one
+        of them would be a root this run's private paths are compared against instead of the
+        real ones."""
+        monkeypatch.setenv(launcher.SEALED_FORBIDDEN_ROOTS_ENV, "[[1,2]]")
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc")
+        assert launcher.SEALED_FORBIDDEN_ROOTS_ENV not in env
+
+
+class TestForbiddenRootFloorProtocol:
+    """The floor is measured on the HOST and carried, because it cannot be re-derived inside.
+
+    The scorer's own derivation asks git, and under the boundary git answers through the
+    origin's administrative directory — which stays writable outside the boundary. Editing
+    <admin>/commondir repoints it while the sealed .git file and the admin inode are both
+    unchanged, and the origin checkout drops out of the set that keeps production-derived data
+    out of it. Reproduced against the code before this existed.
+    """
+
+    def test_the_host_measurement_names_every_working_tree(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        linked = tmp_path / "linked"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "--detach",
+                        str(linked)], check=True, capture_output=True)
+        identities = launcher._forbidden_root_identities(repo, what="--artifact")
+        for tree in (repo, linked):
+            info = tree.stat()
+            assert (info.st_dev, info.st_ino) in identities
+
+    def test_an_unlistable_repository_refuses_rather_than_returning_nothing(
+            self, tmp_path, monkeypatch):
+        """git answered the common directory and then failed to list the worktrees. That is not
+        'there are none' — the fallback would be a floor with the origin missing from it, which
+        is the failure this whole mechanism exists to prevent."""
+        repo = _disposable_repo(tmp_path)
+        monkeypatch.setattr(launcher, "_git", lambda *args: str(repo / ".git"))
+        monkeypatch.setattr(launcher.subprocess, "run",
+                            lambda *a, **k: SimpleNamespace(returncode=1, stdout=b"", stderr=b""))
+        with pytest.raises(launcher.LauncherError) as exc:
+            launcher._forbidden_root_identities(repo, what="--artifact")
+        assert "could not list the registered git worktrees" in str(exc.value)
+
+    @pytest.mark.parametrize("raw", [None, "", "[]", "not json", '[[1]]', '{"a": 1}'])
+    def test_the_inner_refuses_a_floor_it_cannot_use(self, raw):
+        """Including the empty string and None: 'the outer sent none' must not degrade into
+        'nothing is forbidden', which is the state the whole finding is about."""
+        with pytest.raises(launcher.LauncherError):
+            launcher._parse_forbidden_roots(raw)
+
+    def test_the_inner_reads_the_pairs_the_outer_wrote(self):
+        assert launcher._parse_forbidden_roots("[[16,42],[16,7]]") == [(16, 42), (16, 7)]
+
+    def test_the_outer_sends_the_floor_to_the_inner(self, tmp_path, monkeypatch):
+        """End of the wire: whatever the host measured is on the inner's command line, so an
+        inner that refuses without one (above) is never reached by a healthy run."""
+        seen: list[list[str]] = []
+        monkeypatch.setattr(launcher, "_boundary_mechanism", lambda: launcher.MACOS_MECHANISM)
+        monkeypatch.setattr(launcher, "_forbidden_root_identities",
+                            lambda repo_root, *, what: [(16, 42)])
+        volume = SimpleNamespace(
+            interpreter=tmp_path / "py", tree=tmp_path / "tree", revision="c" * 40,
+            mechanism=launcher.MACOS_MECHANISM, pycache=tmp_path / "pyc",
+            scratch=tmp_path / "scratch", mount=tmp_path / "mnt", provenance_digest=None,
+            script_args=(),
+        )
+        monkeypatch.setattr(launcher, "sealed_checkout",
+                            lambda *a, **k: contextlib.nullcontext(volume))
+        monkeypatch.setattr(launcher.subprocess, "run",
+                            lambda command, env=None: seen.append(command)
+                            or SimpleNamespace(returncode=0))
+        launcher._outer_main(launcher._parse_args([]), tmp_path / "repo")
+        command = seen[0]
+        assert json.loads(command[command.index("--forbidden-roots") + 1]) == [[16, 42]]
+
+
+class TestArtifactStaging:
+    """The frozen artifact is the release's other ground truth, and it used to be read live
+    from a writable private store while the run was in flight."""
+
+    def _staged(self, tmp_path, args):
+        """Stage through the real hold, because the descriptor is the point: _stage_artifact
+        no longer resolves a name and cannot be driven without one."""
+        repo = _disposable_repo(tmp_path)
+        stage, mount = tmp_path / "stage", tmp_path / "mnt"
+        with launcher._hold_artifact(repo, args) as artifact:
+            return stage, mount, launcher._stage_artifact(stage, mount, args, artifact)
+
+    def test_the_artifact_is_copied_in_and_the_argument_repointed(self, tmp_path):
+        source = tmp_path / "store" / "cohort.json"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b'{"frozen": true}')
+        stage, mount, args = self._staged(
+            tmp_path,
+            ["select-release", "--artifact", str(source), "--result-output", "/o"])
+        assert args == ("select-release", "--artifact", str(mount / "inputs" / "cohort.json"),
+                        "--result-output", "/o")
+        assert (stage / "inputs" / "cohort.json").read_bytes() == b'{"frozen": true}'
+
+    def test_the_equals_form_is_repointed_too(self, tmp_path):
+        """A release that ran against the unsealed original because of a spelling difference
+        is precisely the failure this exists to prevent."""
+        source = tmp_path / "cohort.json"
+        source.write_bytes(b"{}")
+        _, mount, args = self._staged(tmp_path, [f"--artifact={source}"])
+        assert args == (f"--artifact={mount / 'inputs' / 'cohort.json'}",)
+
+    def test_the_sealed_copy_is_named_after_the_resolved_file(self, tmp_path):
+        """A `latest` alias on a sealed volume would name the bytes something other than what
+        they are, in the one place whose whole job is naming bytes."""
+        real = tmp_path / "store" / "2026-07-01.json"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"{}")
+        alias = tmp_path / "store" / "latest.json"
+        alias.symlink_to(real)
+        stage, mount, args = self._staged(tmp_path, ["--artifact", str(alias)])
+        assert args == ("--artifact", str(mount / "inputs" / "2026-07-01.json"))
+        assert (stage / "inputs" / "2026-07-01.json").is_file()
+
+    def test_the_sealed_copy_keeps_the_source_mode(self, tmp_path):
+        """_require_sealed_bytes_are_their_sources compares it, so it has to be the mode of
+        the file that was judged and not whatever the umask produced."""
+        source = tmp_path / "cohort.json"
+        source.write_bytes(b"{}")
+        source.chmod(0o640)
+        stage, _, _ = self._staged(tmp_path, ["--artifact", str(source)])
+        assert (stage / "inputs" / "cohort.json").stat().st_mode & 0o777 == 0o640
+
+    def test_a_run_with_no_artifact_is_left_alone(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        with launcher._hold_artifact(repo, ["report", "--full"]) as artifact:
+            assert artifact is None
+            assert launcher._stage_artifact(tmp_path / "s", tmp_path / "m",
+                                            ["report", "--full"], artifact) == ("report", "--full")
+
+    def test_a_relative_artifact_refuses(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        with pytest.raises(launcher.LauncherError, match="ABSOLUTE"):
+            with launcher._hold_artifact(repo, ["--artifact", "relative/cohort.json"]):
+                pass
+
+    def test_a_missing_artifact_refuses_before_anything_is_staged(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        with pytest.raises(launcher.LauncherError, match="could not be opened"):
+            with launcher._hold_artifact(repo, ["--artifact", str(tmp_path / "absent.json")]):
+                pass
+
+    def test_a_directory_artifact_refuses(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        (tmp_path / "store").mkdir()
+        with pytest.raises(launcher.LauncherError, match="not a regular file"):
+            with launcher._hold_artifact(repo, ["--artifact", str(tmp_path / "store")]):
+                pass
+
+
+class TestArtifactGovernance:
+    """Sealing REWRITES --artifact, so the scorer downstream never sees the operator's path.
+
+    _refuse_repo_interior_path is the scorer's own governance rule: release inputs hold
+    production-derived private data and must not sit in a checkout, one `git add .` from being
+    committed. Under the boundary the child is handed <mount>/inputs/<name>, which is inside no
+    working tree and passes trivially — so the launcher's convenience silently disabled the
+    rule for every sealed run. These pin that the ORIGINAL is judged, before the copy — and
+    that the file judged is the file copied, which is a second and separate claim.
+    """
+
+    def _judge(self, repo: Path, args: Sequence[str]) -> None:
+        with launcher._hold_artifact(repo, args):
+            pass
+
+    def test_an_artifact_inside_the_repo_refuses(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        artifact = repo / "cohort.json"
+        artifact.write_bytes(b"{}")
+        with pytest.raises(launcher.LauncherError, match="INSIDE a repository working tree"):
+            self._judge(repo, ["select-release", "--artifact", str(artifact)])
+
+    def test_an_artifact_outside_every_checkout_is_accepted(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        artifact = tmp_path / "store" / "cohort.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_bytes(b"{}")
+        self._judge(repo, ["--artifact", str(artifact)])
+
+    def test_a_case_variant_spelling_does_not_launder_it(self, tmp_path):
+        """APFS is case-insensitive by default, so /repo/x and /REPO/x are ONE file that
+        compares unequal as a string. Identity is (st_dev, st_ino), not spelling."""
+        repo = _disposable_repo(tmp_path)
+        artifact = repo / "cohort.json"
+        artifact.write_bytes(b"{}")
+        swapped = Path(str(repo).swapcase()) / "cohort.json"
+        if not swapped.exists():
+            pytest.skip("filesystem is case-sensitive, so there is no variant to launder with")
+        with pytest.raises(launcher.LauncherError, match="INSIDE a repository working tree"):
+            self._judge(repo, [f"--artifact={swapped}"])
+
+    def test_a_symlink_from_outside_does_not_launder_it(self, tmp_path):
+        repo = _disposable_repo(tmp_path)
+        (repo / "cohort.json").write_bytes(b"{}")
+        link = tmp_path / "looks-external.json"
+        link.symlink_to(repo / "cohort.json")
+        with pytest.raises(launcher.LauncherError, match="INSIDE a repository working tree"):
+            self._judge(repo, ["--artifact", str(link)])
+
+    def test_retargeting_the_symlink_after_the_check_does_not_launder_it(self, tmp_path):
+        """The reproduction that broke the previous version. The check resolved the name and
+        _stage_artifact resolved it AGAIN to copy — with a worktree add and a provenance mount
+        in between — so an external symlink could pass and then be repointed at a repository
+        file, which was duly staged and sealed. Verified against that code before this landed.
+        """
+        repo = _disposable_repo(tmp_path)
+        (repo / "private.txt").write_bytes(b"bytes that live in a checkout")
+        real = tmp_path / "store" / "cohort.json"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(b"the artifact the operator named")
+        link = tmp_path / "latest.json"
+        link.symlink_to(real)
+        stage, mount = tmp_path / "stage", tmp_path / "mnt"
+        args = ["--artifact", str(link)]
+        with launcher._hold_artifact(repo, args) as artifact:
+            link.unlink()
+            link.symlink_to(repo / "private.txt")
+            staged = launcher._stage_artifact(stage, mount, args, artifact)
+        assert (stage / "inputs" / "cohort.json").read_bytes() == b"the artifact the operator named"
+        assert not (stage / "inputs" / "private.txt").exists()
+        assert staged == ("--artifact", str(mount / "inputs" / "cohort.json"))
+
+    def test_a_hard_linked_artifact_refuses(self, tmp_path):
+        """A second name for the same bytes can sit inside a checkout while the name given
+        here sits outside it, and no check of one path can see the other.
+
+        ELIGIBILITY, not a durable guarantee: nothing stops a link being created a moment
+        after this returns, and what defends the bytes is the held descriptor. Refusing a
+        multiply-named artifact costs hardlink-deduplicated stores and is worth it here on
+        exactly those terms.
+        """
+        repo = _disposable_repo(tmp_path)
+        inside = repo / "cohort.json"
+        inside.write_bytes(b"{}")
+        outside = tmp_path / "looks-external.json"
+        os.link(inside, outside)
+        with pytest.raises(launcher.LauncherError, match="hard links"):
+            self._judge(repo, ["--artifact", str(outside)])
+
+    def test_the_last_occurrence_is_the_one_judged(self, tmp_path):
+        """argparse takes the last --artifact. A checker reading the first and a stager
+        rewriting the last would disagree about which file the release ran against."""
+        repo = _disposable_repo(tmp_path)
+        outside = tmp_path / "ok.json"
+        outside.write_bytes(b"{}")
+        (repo / "cohort.json").write_bytes(b"{}")
+        with pytest.raises(launcher.LauncherError, match="INSIDE a repository working tree"):
+            self._judge(repo, ["--artifact", str(outside),
+                               "--artifact", str(repo / "cohort.json")])
+
+    def test_git_failing_refuses_rather_than_accepting(self, tmp_path, monkeypatch):
+        """'git could not tell us which trees exist' is not 'none of them'."""
+        repo = _disposable_repo(tmp_path)
+        artifact = tmp_path / "cohort.json"
+        artifact.write_bytes(b"{}")
+        real = subprocess.run
+
+        def fake(args, *rest, **kwargs):
+            if "worktree" in args:
+                return SimpleNamespace(returncode=128, stdout=b"", stderr=b"")
+            return real(args, *rest, **kwargs)
+
+        monkeypatch.setattr(launcher.subprocess, "run", fake)
+        with pytest.raises(launcher.LauncherError, match="could not list"):
+            self._judge(repo, ["--artifact", str(artifact)])
+
+    def test_sealed_checkout_refuses_before_it_creates_anything(self, tmp_path, monkeypatch):
+        """Before the temp parent, the worktree, or the stage — the whole point is that a
+        refused artifact is never copied anywhere."""
+        repo = _disposable_repo(tmp_path)
+        artifact = repo / "cohort.json"
+        artifact.write_bytes(b"{}")
+        monkeypatch.setattr(launcher.tempfile, "mkdtemp",
+                            lambda **kw: pytest.fail("staging started before the check"))
+        with pytest.raises(launcher.LauncherError, match="INSIDE a repository working tree"):
+            with launcher.sealed_checkout(repo, "HEAD", mount_provenance=False,
+                                          script_args=["--artifact", str(artifact)]):
+                pass
+
+
+class TestRuntimeDigestFraming:
+    """runtime_image_sha256 is what a winner is BOUND to, so it has to name its input.
+
+    The first version separated variable-length fields with NUL and nothing else, which is not
+    a unique encoding: a single file whose CONTENT spelled the delimiters fed the hash exactly
+    the stream two separate files did. A digest two different volumes can share is a number,
+    not an attestation.
+    """
+
+    def _volume(self, root: Path, entries: dict[str, bytes]) -> Path:
+        for rel, payload in entries.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            target.chmod(0o644)
+        return root
+
+    def test_content_cannot_impersonate_the_delimiters(self, tmp_path):
+        """The exact construction that collided: file `a` holding X\\0b\\0file:420\\0Y hashed
+        the same as files `a`->X and `b`->Y, both 0644 (420 decimal)."""
+        forged = self._volume(tmp_path / "forged", {"a": b"X\0b\0file:420\0Y"})
+        honest = self._volume(tmp_path / "honest", {"a": b"X", "b": b"Y"})
+        assert launcher.runtime_image_digest(forged) != launcher.runtime_image_digest(honest)
+
+    def test_moving_a_boundary_between_path_and_content_changes_the_digest(self, tmp_path):
+        """The general form: any two volumes that differ only in WHERE one field ends and the
+        next begins must not agree."""
+        left = self._volume(tmp_path / "left", {"ab": b"c"})
+        right = self._volume(tmp_path / "right", {"a": b"bc"})
+        assert launcher.runtime_image_digest(left) != launcher.runtime_image_digest(right)
+
+    def test_a_symlinked_directory_is_covered(self, tmp_path):
+        """os.walk lists a symlinked dir under dirnames and, with followlinks=False, never
+        descends — so a files-only walk did not hash it at all and its target was invisible."""
+        base = tmp_path / "base"
+        (base / "real").mkdir(parents=True)
+        (base / "real" / "f").write_bytes(b"x")
+        (base / "link").symlink_to("real")
+        before = launcher.runtime_image_digest(base)
+        (base / "link").unlink()
+        (base / "link").symlink_to("elsewhere")
+        assert launcher.runtime_image_digest(base) != before
+
+    def test_an_empty_directory_is_covered(self, tmp_path):
+        """Not inert on an import path: an empty directory is a namespace package, so its
+        presence changes what `import` resolves to."""
+        base = tmp_path / "base"
+        (base / "pkg").mkdir(parents=True)
+        before = launcher.runtime_image_digest(base)
+        (base / "pkg").rmdir()
+        assert launcher.runtime_image_digest(base) != before
+
+    def test_an_unhashable_node_type_refuses(self, tmp_path):
+        """Skipping it would put bytes on the volume the digest silently does not describe;
+        opening it would block this process forever."""
+        base = tmp_path / "base"
+        base.mkdir()
+        os.mkfifo(base / "pipe")
+        with pytest.raises(launcher.LauncherError, match="neither a regular file"):
+            launcher.runtime_image_digest(base)
+
+
+@contextlib.contextmanager
+def _sealed_world(tmp_path: Path, monkeypatch, *, with_artifact: bool = True,
+                  record: bytes | None = None,
+                  committed_links: Mapping[str, str] | None = None):
+    """A synthetic sealed volume, the live host trees it copied, and a REAL git repository
+    behind its checkout.
+
+    _require_sealed_bytes_are_their_sources only READS the mount, so an ordinary directory
+    stands in for one. Building a real 900MB image per case would cost half a minute each, and
+    the real thing is exercised end to end by the `sealed_volume` fixture below — which runs
+    this check for real on every module that uses it.
+
+    THE REPOSITORY IS NOT SCENERY. The sealed checkout is compared against the COMMIT, so the
+    baseline these cases exercise has to be a commit that exists; `git worktree add` builds the
+    mount's tree/ the same way sealed_checkout builds the stage's.
+    """
+    repo = tmp_path / "origin-repo"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "scorer.py").write_text("scored\n")
+    (repo / "pkg" / "run.sh").write_text("#!/bin/sh\n")
+    (repo / "pkg" / "run.sh").chmod(0o755)
+    # Committed symlinks: the case where the volume matches its baseline exactly and still has
+    # somewhere else to go. git records mode 120000 with the target as the blob's content.
+    for name, target in (committed_links or {}).items():
+        (repo / name).symlink_to(target)
+    for args in (["init", "-q"], ["add", "-A"], ["-c", "user.email=t@t", "-c", "user.name=t",
+                                                 "commit", "-qm", "seed"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    revision = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    host = tmp_path / "host"
+    prefix = host / "py" / "lib"
+    prefix.mkdir(parents=True)
+    (prefix / "os.py").write_text("stdlib")
+    deps = host / "site-packages"
+    (deps / "pkg").mkdir(parents=True)
+    (deps / "pkg" / "__init__.py").write_text("dep")
+    lib = host / "libfoo.dylib"
+    lib.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 32)
+    monkeypatch.setattr(launcher.sys, "base_prefix", str(host / "py"))
+
+    mount = tmp_path / "mnt"
+    mount.mkdir()
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", "-q",
+                    str(mount / "tree"), revision], check=True, capture_output=True)
+    # What the sealed .git has to name, asked of git the way sealed_checkout asks it.
+    admin = Path(subprocess.run(
+        ["git", "-C", str(mount / "tree"), "rev-parse", "--path-format=absolute", "--git-dir"],
+        check=True, capture_output=True, text=True).stdout.strip())
+    shutil.copytree(host / "py", mount / "py")
+    shutil.copytree(deps, mount / "deps" / "0")
+    (mount / "dylibs").mkdir()
+    shutil.copy2(lib, mount / "dylibs" / "libfoo.dylib")
+
+    record_digest = None
+    if record is not None:
+        mounted = launcher.manifest_path(mount / "tree", launcher.COHORT_PROVENANCE_REL)
+        mounted.parent.mkdir(parents=True, exist_ok=True)
+        mounted.write_bytes(record)
+        record_digest = hashlib.sha256(record).hexdigest()
+
+    artifact = None
+    fd = None
+    source = host / "store" / "cohort.json"
+    if with_artifact:
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b'{"frozen": true}')
+        (mount / "inputs").mkdir()
+        shutil.copy2(source, mount / "inputs" / "cohort.json")
+        fd = os.open(source, os.O_RDONLY)
+        artifact = launcher._HeldArtifact(index=1, fd=fd, resolved=source,
+                                          mode=source.stat().st_mode & 0o777)
+    try:
+        yield SimpleNamespace(
+            mount=mount, tree=mount / "tree", repo=repo, revision=revision,
+            prefix=host / "py", deps=deps, lib=lib, artifact_source=source,
+            record_digest=record_digest, admin=admin,
+            verify=lambda: launcher._require_sealed_bytes_are_their_sources(
+                mount, repo_root=repo, revision=revision, dep_paths=[deps],
+                dylib_sources={"libfoo.dylib": lib}, provenance_digest=record_digest,
+                artifact=artifact, admin=admin),
+        )
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _rewrite_in_place(path: Path, payload: bytes) -> None:
+    """Change the content and put the metadata back exactly: same size, same mtime, same inode.
+
+    This is the shape that defeated the first version of the check, which compared metadata
+    only. `os.utime` restores mtime_ns to the nanosecond.
+    """
+    before = path.stat()
+    assert len(payload) == before.st_size, "the point is that the size does not move"
+    path.write_bytes(payload)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+class TestStagingConsistency:
+    """`cp -Rc` clones each file atomically. It still WALKS.
+
+    A pip install landing mid-walk is copied ahead of the walk for some packages and behind it
+    for others, so the volume holds a hybrid: internally consistent per file, and a combination
+    that never existed. Hashing it afterwards names the hybrid precisely, which is the trap —
+    the digest looks like proof while describing a runtime nobody assembled.
+
+    Both halves of the fix are pinned here: the comparison is of CONTENT, so restoring metadata
+    does not hide an edit, and it is of the MOUNTED bytes, so nothing that happens to the
+    writable stage after the check can reach the volume.
+
+    These are the LIVE-baseline cases — the host trees, compared against themselves as they are
+    now. That catches the concurrent install this exists for, and it is a detector rather than a
+    proof; the limit is stated on the function and pinned by
+    test_a_source_moved_between_two_reads_is_not_detected below.
+    """
+
+    def test_a_volume_that_matches_its_sources_passes(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            world.verify()
+
+    def test_a_change_and_revert_with_the_mtime_restored_refuses(self, tmp_path, monkeypatch):
+        """THE case the metadata fingerprint could not see. Two same-size edits are staged and
+        then reverted with mtime_ns put back, so every byte of metadata agrees while the volume
+        holds A1/B1 and the source holds A0/B0. Reproduced against the old code first."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            staged = world.mount / "deps" / "0" / "pkg" / "__init__.py"
+            staged.write_text("hax")  # what a mid-staging edit would have left on the volume
+            _rewrite_in_place(world.deps / "pkg" / "__init__.py", b"dep")
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_dependency_rewritten_during_staging_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.deps / "pkg" / "__init__.py").write_text("dep = 2222")
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_package_appearing_during_staging_refuses(self, tmp_path, monkeypatch):
+        """The pip-install shape: nothing already staged was touched, and the volume is still
+        a hybrid because it predates the new package."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.deps / "new.py").write_text("y = 2")
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_dependency_deleted_during_staging_refuses(self, tmp_path, monkeypatch):
+        """Absence is a state. Treating a vanished path as 'nothing to compare' would make
+        deletion the one mutation that passed."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.deps / "pkg" / "__init__.py").unlink()
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_an_interpreter_rewritten_during_staging_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.prefix / "lib" / "os.py").write_text("stdlib, but not really")
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_dylib_rewritten_during_staging_refuses(self, tmp_path, monkeypatch):
+        """`brew upgrade gettext` is the same hazard as a pip install, one file wide."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            world.lib.write_bytes(b"\xcf\xfa\xed\xfe" + b"\1" * 32)
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_dylib_deleted_during_staging_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            world.lib.unlink()
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_the_checkout_is_covered_too(self, tmp_path, monkeypatch):
+        """It was not, the first time round: the checkout, the artifact and the mounted
+        provenance record were all absent from the set being checked. What it is checked
+        AGAINST has since changed too — see TestSealedCheckoutIsTheCommit."""
+        with _sealed_world(tmp_path, monkeypatch, with_artifact=False) as world:
+            (world.tree / "pkg" / "scorer.py").write_text("scored differently\n")
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_the_artifact_is_covered_too(self, tmp_path, monkeypatch):
+        """Compared against the held DESCRIPTOR, so a rewrite of the private store while the
+        image was being built cannot leave a torn artifact sealed and unnoticed."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            world.artifact_source.write_bytes(b'{"frozen": FAL}')
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_file_added_to_the_stage_after_the_copy_refuses(self, tmp_path, monkeypatch):
+        """The gap the per-subtree comparison alone would leave: bytes landing where no source
+        maps onto them would be sealed and put on the child's import path with nothing having
+        ever compared them to anything."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.mount / "sitecustomize.py").write_text("import os; os.system('...')")
+            with pytest.raises(launcher.LauncherError, match="UNEXPECTED"):
+                world.verify()
+
+    def test_an_extra_library_in_the_closure_refuses(self, tmp_path, monkeypatch):
+        """DYLD_LIBRARY_PATH resolves by leaf name, so an unexpected file here is a library
+        the child could load under a name the closure never vouched for."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.mount / "dylibs" / "libbar.dylib").write_bytes(b"\xcf\xfa\xed\xfe")
+            with pytest.raises(launcher.LauncherError, match="UNEXPECTED"):
+                world.verify()
+
+    def test_a_second_file_in_inputs_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.mount / "inputs" / "other.json").write_bytes(b"{}")
+            with pytest.raises(launcher.LauncherError, match="UNEXPECTED"):
+                world.verify()
+
+    def test_a_run_with_no_artifact_expects_no_inputs_directory(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch, with_artifact=False) as world:
+            world.verify()
+            (world.mount / "inputs").mkdir()
+            with pytest.raises(launcher.LauncherError, match="UNEXPECTED"):
+                world.verify()
+
+    def test_a_sealed_mode_change_refuses(self, tmp_path, monkeypatch):
+        """The mode is part of what the volume IS, and the digest a winner carries names it."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.mount / "dylibs" / "libfoo.dylib").chmod(0o600)
+            with pytest.raises(launcher.LauncherError,
+                               match="does not match what it is supposed to hold"):
+                world.verify()
+
+    def test_a_source_moved_between_two_reads_is_not_detected(self, tmp_path, monkeypatch):
+        """THE LIMIT, pinned so nobody re-derives the guarantee from the code and overstates it
+        again. An earlier docstring claimed a hybrid could not survive this comparison. It can:
+        the comparison WALKS, so a source that shows A1 while `a.py` is read, reverts, then
+        shows B1 while `b.py` is read matches at every instant the check looks, while the volume
+        holds an A1/B1 pair the source never held at once.
+
+        Nothing in user space fixes it — a whole-tree snapshot needs privileges this launcher
+        deliberately does not require, and a second pass is the same walk again. What was done
+        instead is to take the three things a release stands on OFF this baseline entirely: the
+        checkout is compared against the commit, the artifact against a held descriptor, the
+        record against a digest of the bytes this process wrote. This test asserts the weakness
+        that remains, so a future reader meets it as a decision rather than as a surprise.
+        """
+        with _sealed_world(tmp_path, monkeypatch, with_artifact=False) as world:
+            a, b = world.deps / "a.py", world.deps / "b.py"
+            a.write_text("A0")
+            b.write_text("B0")
+            shutil.copy2(a, world.mount / "deps" / "0" / "a.py")
+            shutil.copy2(b, world.mount / "deps" / "0" / "b.py")
+            (world.mount / "deps" / "0" / "a.py").write_text("A1")
+            (world.mount / "deps" / "0" / "b.py").write_text("B1")
+
+            def poke(path: Path, text: str) -> None:  # raw: write_text would re-enter the hook
+                fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
+                os.write(fd, text.encode())
+                os.close(fd)
+
+            real_open = Path.open
+
+            def racing_open(self, *args, **kwargs):
+                if self == a:
+                    poke(a, "A1")
+                if self == b:
+                    poke(a, "A0")
+                    poke(b, "B1")
+                return real_open(self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", racing_open)
+            world.verify()  # accepted, and this is the honest state of the guarantee
+            monkeypatch.undo()
+            assert (a.read_text(), b.read_text()) == ("A0", "B1")
+
+
+class TestSealedNamesAreSealedFiles:
+    """A name on the volume is not a file on the volume, and the difference was exploitable.
+
+    Every check reached the sealed side through `stat()` and `open()` on a path — both FOLLOW
+    symlinks — while the entry lists guarding them compared names only. A symlink staged in
+    place of a file was therefore found under the right name, followed off the volume to the
+    live host file, and compared equal to it, because it WAS it. The child would then have read
+    mutable off-volume bytes for the whole run while `runtime_image_sha256` recorded the link's
+    target string. Reproduced against the previous version for both directories that had it.
+    """
+
+    def test_an_artifact_symlinked_to_the_live_source_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            sealed = world.mount / "inputs" / "cohort.json"
+            sealed.unlink()
+            sealed.symlink_to(world.artifact_source)
+            with pytest.raises(launcher.LauncherError, match="symlink where a regular file"):
+                world.verify()
+
+    def test_a_dylib_symlinked_to_the_live_source_refuses(self, tmp_path, monkeypatch):
+        """The same shape one directory over, and it was not in the report. DYLD_LIBRARY_PATH
+        resolves by leaf name, so this one is loaded by dyld rather than read by the scorer."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            sealed = world.mount / "dylibs" / "libfoo.dylib"
+            sealed.unlink()
+            sealed.symlink_to(world.lib)
+            with pytest.raises(launcher.LauncherError, match="symlink where a regular file"):
+                world.verify()
+
+    def test_a_volume_root_entry_of_the_wrong_kind_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch, with_artifact=False) as world:
+            shutil.rmtree(world.mount / "dylibs")
+            (world.mount / "dylibs").symlink_to(tmp_path / "host")
+            with pytest.raises(launcher.LauncherError, match="symlink where a directory"):
+                world.verify()
+
+    def test_a_file_on_another_device_refuses(self, tmp_path):
+        """What O_NOFOLLOW cannot answer on its own: whether these bytes are on the volume the
+        kernel froze. Asserted against the helper because a second filesystem is not something
+        a test can conjure — the device is compared, so a wrong one refuses."""
+        target = tmp_path / "somewhere.json"
+        target.write_bytes(b"{}")
+        with pytest.raises(launcher.LauncherError, match="is on device"):
+            with launcher._sealed_file(target, device=-1, what="the sealed artifact"):
+                pass
+
+    def test_a_real_file_on_the_volume_is_read(self, tmp_path):
+        target = tmp_path / "here.json"
+        target.write_bytes(b'{"ok": 1}')
+        device = target.stat().st_dev
+        with launcher._sealed_file(target, device=device, what="x") as (fd, opened):
+            assert os.read(fd, 64) == b'{"ok": 1}'
+            assert opened.st_dev == device
+
+
+class TestSealedSymlinksStayOnTheVolume:
+    """Matching bytes are not a closed boundary.
+
+    A symlink's content IS its target string, so both comparisons that meet one do the right
+    thing and neither notices anything: `_tree_digest` and `_sealed_blob_id` hash the target and
+    never follow it, which means a link with the same target on both sides compares equal, and a
+    committed link matches its commit exactly. The volume is then verified, read-only, and
+    carries a name whose bytes are somewhere else and stay writable for the whole run.
+
+    Reproduced both ways against the previous version — committed, and copied out of the
+    interpreter prefix where nothing needs committing at all — and the second read through the
+    volume returned bytes written after the seal.
+    """
+
+    def test_a_committed_symlink_pointing_off_the_volume_refuses(self, tmp_path, monkeypatch):
+        outside = tmp_path / "outside" / "live.txt"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("host bytes\n")
+        with _sealed_world(tmp_path, monkeypatch,
+                           committed_links={"pkg/linked.txt": str(outside)}) as world:
+            assert (world.tree / "pkg" / "linked.txt").read_text() == "host bytes\n"
+            outside.write_text("changed after the seal\n")
+            assert (world.tree / "pkg" / "linked.txt").read_text() == "changed after the seal\n"
+            with pytest.raises(launcher.LauncherError, match="symlinks that leave it"):
+                world.verify()
+
+    def test_a_symlink_in_the_interpreter_prefix_pointing_off_the_volume_refuses(
+            self, tmp_path, monkeypatch):
+        """The case that needs no commit and no attacker: a prefix that is not self-contained
+        cannot be sealed by copying it, and the identical target on both sides is exactly why
+        the content comparison agrees."""
+        outside = tmp_path / "outside" / "libhost.py"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("host module\n")
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.prefix / "lib" / "escape.py").symlink_to(outside)
+            (world.mount / "py" / "lib" / "escape.py").symlink_to(outside)
+            with pytest.raises(launcher.LauncherError, match="symlinks that leave it"):
+                world.verify()
+
+    def test_a_relative_symlink_that_stays_inside_passes(self, tmp_path, monkeypatch):
+        """The common case, and the reason the rule is about where a link LANDS rather than
+        about links: the interpreter prefix is full of these and they mean the same thing on the
+        volume that they meant at the source."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.prefix / "lib" / "alias.py").symlink_to("os.py")
+            (world.mount / "py" / "lib" / "alias.py").symlink_to("os.py")
+            world.verify()
+
+    def test_a_link_that_lands_inside_the_volume_on_nothing_passes(self, tmp_path, monkeypatch):
+        """A dangling link INSIDE the volume is not a way out: the volume is read-only, so a
+        target that is absent now stays absent."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.prefix / "lib" / "gone.py").symlink_to("not-here.py")
+            (world.mount / "py" / "lib" / "gone.py").symlink_to("not-here.py")
+            world.verify()
+
+    def test_a_link_that_lands_outside_on_nothing_still_refuses(self, tmp_path, monkeypatch):
+        """Absent OUTSIDE is a different fact from absent inside, and the rule does not treat
+        them alike: nothing stops that path being created while the run is live, and the machine
+        this refuses on is not necessarily the machine the target exists on. The stray
+        `.antigravitycli/` link this check found in the repository was exactly that shape —
+        dangling here, and a live file in the home directory it names."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.prefix / "lib" / "gone.py").symlink_to(tmp_path / "outside" / "never.py")
+            (world.mount / "py" / "lib" / "gone.py").symlink_to(tmp_path / "outside" / "never.py")
+            with pytest.raises(launcher.LauncherError, match="symlinks that leave it"):
+                world.verify()
+
+    def test_the_audit_reports_every_escape_rather_than_the_first(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.mount / "py" / "a").symlink_to(tmp_path)
+            (world.mount / "deps" / "0" / "b").symlink_to("/etc")
+            escaping = launcher._require_symlinks_stay_on_the_volume(
+                world.mount, device=world.mount.stat().st_dev)
+            assert len(escaping) == 2, escaping
+
+
+class TestSealedCheckoutIsTheCommit:
+    """The sealed checkout is compared against the COMMIT, not against the staging copy.
+
+    The previous version digested the staging tree once git and the provenance mount had
+    finished and compared the volume against that. The baseline came out of a WRITABLE
+    directory, so an edit landing before that read was not caught — it was folded into the
+    value everything downstream compared against, while `sealed_revision` went on naming the
+    commit the operator asked for.
+
+    A commit cannot be edited by an editor saving a file: it is content-addressed and already
+    written. So each sealed file is hashed in git's own framing and compared to the object id
+    the commit lists — which also makes several things visible that no whole-tree digest of the
+    stage could ever have flagged, because the stage was its own baseline.
+    """
+
+    def test_a_checkout_matching_the_commit_passes(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            world.verify()
+
+    def test_an_edited_tracked_file_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / "pkg" / "scorer.py").write_text("scored\n# and one more thing\n")
+            with pytest.raises(launcher.LauncherError, match="does not hold the bytes"):
+                world.verify()
+
+    def test_a_file_the_commit_does_not_have_refuses(self, tmp_path, monkeypatch):
+        """The shape a stage-derived baseline was blindest to: an added file is in the digest
+        it is later compared against, so it agreed with itself."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / "pkg" / "sitecustomize.py").write_text("import os\n")
+            with pytest.raises(launcher.LauncherError, match="is not in"):
+                world.verify()
+
+    def test_a_missing_tracked_file_refuses(self, tmp_path, monkeypatch):
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / "pkg" / "scorer.py").unlink()
+            with pytest.raises(launcher.LauncherError, match="missing from the volume"):
+                world.verify()
+
+    def test_an_empty_directory_refuses(self, tmp_path, monkeypatch):
+        """Not pedantry: an empty directory on an import path is a namespace package, so its
+        presence changes what `import` resolves to without holding a single byte."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / "pkg" / "app").mkdir()
+            with pytest.raises(launcher.LauncherError, match="a directory .* does not have"):
+                world.verify()
+
+    def test_a_flipped_exec_bit_refuses(self, tmp_path, monkeypatch):
+        """The exec bit is the whole of what git records about a mode, so it is the whole of
+        what can be compared — and it is what decides whether a file can be run."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / "pkg" / "scorer.py").chmod(0o755)
+            with pytest.raises(launcher.LauncherError, match="is mode 100755"):
+                world.verify()
+
+    def test_a_tracked_file_replaced_by_a_symlink_refuses(self, tmp_path, monkeypatch):
+        """The link points INSIDE the volume on purpose: an escaping one is refused earlier, by
+        the containment audit, and this is here to pin the mode comparison itself — a file the
+        commit records as 100644 is not a link, wherever the link goes."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            scorer = world.tree / "pkg" / "scorer.py"
+            scorer.unlink()
+            scorer.symlink_to("run.sh")
+            with pytest.raises(launcher.LauncherError, match="is mode 120000"):
+                world.verify()
+
+    def test_the_git_file_is_allowed_and_has_to_name_this_runs_admin_directory(
+            self, tmp_path, monkeypatch):
+        """`git worktree add` leaves a .git file the commit does not contain, so it is permitted
+        — and it is a POINTER, so what it points at is checked."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            assert (world.tree / ".git").read_text().strip() == f"gitdir: {world.admin}"
+            world.verify()
+
+    def test_a_git_file_redirected_to_another_repository_refuses(self, tmp_path, monkeypatch):
+        """The reach this one has is not the checkout, it is GOVERNANCE. A gitfile decides which
+        repository git answers as from inside the volume, and the scorer builds its private-path
+        forbidden-root set from `git worktree list`. Reproduced against the previous version:
+        the checkout verified clean while the listing from the sealed tree named the OTHER
+        repository's worktrees and stopped naming the origin at all — so a production-derived
+        result written straight into the real checkout would have passed the rule that exists to
+        stop exactly that."""
+        other = tmp_path / "other-repo"
+        (other / "src").mkdir(parents=True)
+        (other / "src" / "x.py").write_text("x\n")
+        for args in (["init", "-q"], ["add", "-A"],
+                     ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "other"]):
+            subprocess.run(["git", "-C", str(other), *args], check=True, capture_output=True)
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / ".git").write_text(f"gitdir: {other / '.git'}\n")
+            listed = subprocess.run(
+                ["git", "-C", str(world.tree), "worktree", "list", "--porcelain"],
+                capture_output=True, text=True).stdout
+            assert str(world.repo) not in listed, "the redirect is what makes this worth checking"
+            with pytest.raises(launcher.LauncherError,
+                               match="administrative directory"):
+                world.verify()
+
+    def test_a_git_file_that_names_nothing_refuses(self, tmp_path, monkeypatch):
+        """Unparseable is not permission: anything this cannot read as a gitdir line is a
+        mismatch, not a pass."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / ".git").write_text("this is not a gitfile\n")
+            with pytest.raises(launcher.LauncherError, match="administrative directory"):
+                world.verify()
+
+    def test_a_deleted_git_file_refuses(self, tmp_path, monkeypatch):
+        """Permitted is not the same as optional. The absence check only ever looked at the
+        commit's own paths, so removing this passed — the entry the volume is allowed to carry
+        was never one the volume was required to carry."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            (world.tree / ".git").unlink()
+            with pytest.raises(launcher.LauncherError, match=r"\.git has to be on the volume"):
+                world.verify()
+
+    def test_a_deleted_provenance_record_refuses(self, tmp_path, monkeypatch):
+        """The same gap, on the entry that says which cohort the run is about."""
+        with _sealed_world(tmp_path, monkeypatch, record=b'{"cohort": "c1"}') as world:
+            launcher.manifest_path(world.tree, launcher.COHORT_PROVENANCE_REL).unlink()
+            with pytest.raises(launcher.LauncherError, match="has to be on the volume"):
+                world.verify()
+
+    def test_the_mounted_record_is_compared_against_what_the_launcher_wrote(
+            self, tmp_path, monkeypatch):
+        """The record is not in the commit — the whole point of mounting it is that approval
+        happens before it is committed. Its baseline is the digest mount_cohort_provenance
+        returned, which is bytes this process read and hashed rather than anything on disk."""
+        with _sealed_world(tmp_path, monkeypatch, record=b'{"cohort": "c1"}') as world:
+            world.verify()
+            launcher.manifest_path(world.tree, launcher.COHORT_PROVENANCE_REL).write_bytes(
+                b'{"cohort": "c2"}')
+            with pytest.raises(launcher.LauncherError, match="not the record the launcher"):
+                world.verify()
+
+    def test_an_unmounted_record_is_just_another_untracked_file(self, tmp_path, monkeypatch):
+        """Without --mount-cohort-provenance there is no record to vouch for one, so a file
+        appearing at that path is refused like any other."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            path = launcher.manifest_path(world.tree, launcher.COHORT_PROVENANCE_REL)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'{"cohort": "smuggled"}')
+            with pytest.raises(launcher.LauncherError, match="is not in"):
+                world.verify()
+
+    def test_a_submodule_entry_refuses_rather_than_being_skipped(self, tmp_path, monkeypatch):
+        """A gitlink is a second repository this launcher does not stage. Listing it as a blob
+        would be wrong and skipping it would leave a directory the check cannot describe."""
+        with _sealed_world(tmp_path, monkeypatch) as world:
+            subprocess.run(["git", "-C", str(world.repo), "update-index", "--add", "--cacheinfo",
+                            f"160000,{world.revision},vendor"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(world.repo), "-c", "user.email=t@t", "-c",
+                            "user.name=t", "commit", "-qm", "gitlink"], check=True,
+                           capture_output=True)
+            head = subprocess.run(["git", "-C", str(world.repo), "rev-parse", "HEAD"], check=True,
+                                  capture_output=True, text=True).stdout.strip()
+            with pytest.raises(launcher.LauncherError, match="git commit entry rather than"):
+                launcher._commit_blobs(world.repo, head)
+
+
+class TestSealedCheckoutOrdering:
+    """The staging order, pinned with fakes so it can be checked on any platform.
+
+    The ordering is not a style preference here. Everything the run reads has to be in the
+    stage BEFORE `hdiutil create` copies it, because after that the volume is immutable — a
+    provenance record mounted one step later would have nowhere to go but a read-only
+    filesystem, and an artifact staged one step later would simply not be in the image. And
+    the image file has to be unlinked immediately after attach, before anything is hashed,
+    because until it is gone there is a writable path to every byte the digest describes.
+    """
+
+    def _fake_out_the_world(self, monkeypatch, tmp_path, calls, recorded=None):
+        recorded = [] if recorded is None else recorded
+
+        def fake_git(*args):
+            if "rev-parse" in args:
+                return str(tmp_path / "admin")
+            if "add" in args:
+                # A real checkout contains a launcher, and sealed_checkout reads its
+                # INNER_PROTOCOL_VERSION before staging anything. Write one rather than
+                # stubbing the check out: that keeps the ordering assertions below honest
+                # about where the handshake sits.
+                tree = Path(args[args.index("--detach") + 1])
+                (tree / "backend/scripts").mkdir(parents=True, exist_ok=True)
+                (tree / launcher._LAUNCHER_REL).write_text(
+                    f"{launcher._PROTOCOL_NAME} = {launcher.INNER_PROTOCOL_VERSION}\n")
+            return ""
+
+        def fake_run(*args, what):
+            calls.append(args[1] if args[0] == "hdiutil" else args[0])
+            if args[0] == "hdiutil" and args[1] == "create":
+                Path(args[-1]).write_bytes(b"image")
+            if args[0] == "hdiutil" and args[1] == "attach":
+                mount = Path(args[args.index("-mountpoint") + 1])
+                interpreter = (mount / "py" / "bin" /
+                               f"python{sys.version_info.major}.{sys.version_info.minor}")
+                interpreter.parent.mkdir(parents=True, exist_ok=True)
+                interpreter.touch()
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        (tmp_path / "admin").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(launcher, "_resolve_revision", lambda repo, rev: "c" * 40)
+        monkeypatch.setattr(launcher, "_git", fake_git)
+        monkeypatch.setattr(launcher, "_run", fake_run)
+        monkeypatch.setattr(launcher, "_clone_tree",
+                            lambda src, dst: calls.append("clone") or dst.mkdir(parents=True))
+        # Returns leaf name -> source path, which the source comparison needs in order to say
+        # what each sealed library is a copy of; the fake stages nothing, so it reports nothing.
+        monkeypatch.setattr(launcher, "_stage_dylib_closure",
+                            lambda stage, dylibs: calls.append("dylibs") or {})
+
+        def fake_verify(mount, **kwargs):
+            calls.append("verify")
+            assert not (mount.parent / "release.dmg").exists(), (
+                "the sealed bytes were checked while a writable path to them still existed")
+            # The two baselines that are not on disk anywhere: the revision the run resolved
+            # before the checkout existed, and the digest of the record this process wrote.
+            # Passing either one wrongly would leave the checkout compared against nothing.
+            assert kwargs["revision"] == "c" * 40
+            # And the administrative entry the sealed .git has to name: THIS run's, taken from
+            # git after `worktree add` rather than assumed, so a repointed gitfile has something
+            # to be wrong against.
+            assert kwargs["admin"] == tmp_path / "admin"
+            recorded.append(kwargs["provenance_digest"])
+
+        monkeypatch.setattr(launcher, "_require_sealed_bytes_are_their_sources", fake_verify)
+        monkeypatch.setattr(launcher, "_require_read_only", lambda path, what: 0)
+        monkeypatch.setattr(launcher, "_detach_image", lambda mount: None)
+        monkeypatch.setattr(launcher, "_remove_worktree", lambda repo, tree: None)
+        monkeypatch.setattr(launcher, "mount_cohort_provenance",
+                            lambda repo, tree: calls.append(f"provenance:{tree.name}") or "a" * 64)
+        return recorded
+
+    def test_everything_is_staged_before_the_image_is_built(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=True,
+                                      script_args=()) as volume:
+            assert volume.provenance_digest == "a" * 64
+        assert calls.index("provenance:tree") < calls.index("create")
+        assert calls.index("clone") < calls.index("create")
+        assert calls.index("dylibs") < calls.index("create")
+        assert calls.index("create") < calls.index("attach")
+
+    def test_the_record_the_launcher_wrote_is_what_the_volume_is_checked_against(
+            self, tmp_path, monkeypatch):
+        """The mounted record is in no commit, so the only thing that can vouch for it is the
+        digest mount_cohort_provenance took of the bytes it wrote. Lose that on the way to the
+        check and the record becomes an untracked file the checkout comparison cannot place —
+        which fails closed, but only in production: no other test seals a real volume with a
+        record mounted."""
+        calls: list[str] = []
+        recorded = self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=True,
+                                      script_args=()):
+            pass
+        assert recorded == ["a" * 64]
+        assert calls.index("provenance:tree") < calls.index("create")
+
+    def test_a_run_without_a_record_says_so_rather_than_defaulting(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        recorded = self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()):
+            pass
+        assert recorded == [None]
+
+    def test_the_backing_image_is_unlinked_the_moment_it_is_attached(self, tmp_path, monkeypatch):
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()) as volume:
+            assert not (volume.parent / "release.dmg").exists()
+
+    def test_the_sealed_bytes_are_checked_against_their_sources_after_the_freeze(
+            self, tmp_path, monkeypatch):
+        """Order, not presence, is what was wrong before. The first version of this check
+        measured the writable stage and then handed that same stage to `hdiutil create`, so
+        everything it established was about a directory anything could rewrite in between. It
+        has to run on the mount, after attach, and after the backing file is gone — the fake
+        asserts that last part from inside."""
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()):
+            pass
+        assert calls.index("attach") < calls.index("verify")
+
+    def test_the_writable_staging_copy_is_gone_before_the_run(self, tmp_path, monkeypatch):
+        """Exactly one path to these bytes, and it is read-only. A surviving stage would be a
+        writable second copy of the whole checkout for the length of the run."""
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()) as volume:
+            assert not (volume.parent / "stage").exists()
+
+    def test_the_worktree_registration_is_repointed_at_the_mount(self, tmp_path, monkeypatch):
+        """git has to keep working from inside the volume: _private_path_forbidden_roots asks
+        it which working trees exist, and REFUSES a result path when it cannot answer. Left
+        pointing at the deleted stage, that gate would fail closed on every sealed run."""
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()) as volume:
+            recorded = (tmp_path / "admin" / "gitdir").read_text().strip()
+            assert recorded == str(volume.mount / "tree" / ".git")
+
+    def test_the_writable_set_is_outside_the_volume(self, tmp_path, monkeypatch):
+        """CRITERION 3. Everything the run may write is enumerated and none of it is on the
+        sealed volume: the bytecode cache and the child's scratch. The graph cache is NOT in
+        this list any more — a pickle nothing hashes has no business being a scoring input,
+        so the sealed run rebuilds instead (GRAPH_NO_DISK_CACHE_ENV)."""
+        calls: list[str] = []
+        self._fake_out_the_world(monkeypatch, tmp_path, calls)
+        with launcher.sealed_checkout(_REPO_ROOT, "HEAD", mount_provenance=False,
+                                      script_args=()) as volume:
+            for writable in (volume.pycache, volume.scratch):
+                assert writable.is_dir()
+                assert not writable.is_relative_to(volume.mount)
+                assert writable.is_relative_to(volume.parent)
+
+
+@contextlib.contextmanager
+def _private_store():
+    """A directory guaranteed to be outside every checkout — which `tmp_path` is not.
+
+    AGENTS.md points TMPDIR at backend/.tmp for unrelated reasons, so pytest's temp directories
+    can sit INSIDE this working tree, and the artifact governance rule refuses anything there.
+    Correctly: that is the rule. So the store is placed somewhere no checkout reaches, which on
+    the only platform this runs on is /private/tmp.
+    """
+    store = Path(tempfile.mkdtemp(prefix="ghostreplay-artifact-store-", dir="/private/tmp"))
+    try:
+        yield store
+    finally:
+        shutil.rmtree(store, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def sealed_volume(worktree_rev):
+    """ONE real sealed volume for the whole module: ~30s and ~900MB to build, because it
+    carries the interpreter, the dependency tree and the dylib closure as well as the
+    checkout. Module-scoped so the acceptance cases below share the cost.
+    """
+    if sys.platform != "darwin":
+        pytest.skip("no OS boundary mechanism on this platform")
+    with launcher.sealed_checkout(_REPO_ROOT, worktree_rev, mount_provenance=False,
+                                  script_args=()) as volume:
+        yield volume
+
+
+@_MACOS_ONLY
+class TestSealedCheckout:
+    """The acceptance cases, against a real sealed volume.
+
+    CRITERIA 1 and 4: a same-uid process cannot write the hashed bytes, and the denial is the
+    OS's. CRITERION 2: it holds for the duration, not just at hash time — the fixture is
+    module-scoped, so every test here runs against a volume that has been mounted since
+    before the first digest was taken.
+    """
+
+    def test_a_same_uid_process_cannot_write_a_hashed_file(self, sealed_volume):
+        target = sealed_volume.tree / "backend/app/fen.py"
+        assert target.is_file()
+        with contextlib.suppress(OSError):
+            target.chmod(0o666)          # the revert that defeated the 0444 design
+        with pytest.raises(OSError) as exc:
+            with target.open("ab") as handle:
+                handle.write(b"\n# landed after the hash\n")
+        assert exc.value.errno == errno.EROFS
+
+    def test_every_manifest_file_is_on_the_one_sealed_volume(self, sealed_volume):
+        """Read-only AND the same volume. Read-only alone is satisfied by any other attached
+        image, whose bytes runtime_image_sha256 does not cover."""
+        device = cal._device_of(sealed_volume.mount)
+        for rel in cal.SCORER_SOURCE_FILES:
+            assert cal._on_sealed_volume(sealed_volume.tree / rel, device), rel
+
+    def test_the_interpreter_and_the_deps_are_sealed_too(self, sealed_volume):
+        """The hazard that made this bead blocking. A boundary around the tree alone leaves a
+        concurrent `pip install` free to change what executes without touching the tree, the
+        manifest, or the digest."""
+        device = cal._device_of(sealed_volume.mount)
+        assert cal._on_sealed_volume(sealed_volume.interpreter, device)
+        deps = sorted((sealed_volume.mount / "deps").iterdir())
+        assert deps, "no dependency directory was sealed"
+        for dep in deps:
+            assert cal._on_sealed_volume(dep, device)
+        assert (sealed_volume.mount / "dylibs").is_dir()
+
+    def test_libpython_and_libintl_are_staged_rather_than_left_on_the_host(self, sealed_volume):
+        """The finding that shaped the design. `otool -L` shows the interpreter references
+        libpython and libintl by ABSOLUTE PATH into ~/.pyenv and /opt/homebrew, so a copy of
+        the prefix onto the volume still executes mutable host code until DYLD_LIBRARY_PATH
+        redirects it — which it can only do if the copies are there to redirect to."""
+        staged = {p.name for p in (sealed_volume.mount / "dylibs").iterdir()}
+        assert any(name.startswith("libpython") for name in staged), staged
+        assert any(name.startswith("libintl") for name in staged), staged
+
+    def test_a_sealed_run_carries_the_artifact_it_was_given(self, worktree_rev):
+        """The --artifact path end to end, and the only test that pins its wiring: judged from
+        an alias outside every checkout, copied from the HELD DESCRIPTOR, and compared against
+        that descriptor once the volume is frozen. Its own volume, because the shared fixture
+        deliberately seals no artifact and this needs an `inputs/` on the image."""
+        with _private_store() as store:
+            artifact = store / "cohort-frozen.json"
+            artifact.write_bytes(b'{"frozen": true, "rows": 12345}')
+            artifact.chmod(0o640)
+            alias = store / "latest.json"
+            alias.symlink_to(artifact)
+            with launcher.sealed_checkout(
+                    _REPO_ROOT, worktree_rev, mount_provenance=False,
+                    script_args=["select-release", "--artifact", str(alias)]) as volume:
+                sealed = volume.mount / "inputs" / "cohort-frozen.json"
+                assert volume.script_args == ("select-release", "--artifact", str(sealed))
+                assert sealed.read_bytes() == artifact.read_bytes()
+                assert sealed.stat().st_mode & 0o777 == 0o640
+                with pytest.raises(OSError) as exc:
+                    with sealed.open("ab") as handle:
+                        handle.write(b"\n")
+                assert exc.value.errno == errno.EROFS
+
+    def test_a_write_into_the_stage_before_the_freeze_refuses(self, worktree_rev, monkeypatch):
+        """The second half of the staging gap, against a real image. The first version of the
+        consistency check measured the writable stage and then handed that same still-writable
+        stage to `hdiutil create`, so anything landing in between was sealed unexamined. This
+        drops a file into exactly that window and requires the run to refuse it."""
+        real_run = launcher._run
+
+        def intercept(*args, what):
+            if args[0] == "hdiutil" and args[1] == "create":
+                stage = Path(args[args.index("-srcfolder") + 1])
+                (stage / "sitecustomize.py").write_text("# landed after every check\n")
+            return real_run(*args, what=what)
+
+        monkeypatch.setattr(launcher, "_run", intercept)
+        with pytest.raises(launcher.LauncherError, match="UNEXPECTED.*sitecustomize"):
+            with launcher.sealed_checkout(_REPO_ROOT, worktree_rev, mount_provenance=False,
+                                          script_args=()):
+                pass
+
+    def test_git_still_works_from_inside_the_volume(self, sealed_volume):
+        """Not a nicety: _private_path_forbidden_roots refuses a result path outright when
+        git cannot list the worktrees, so a sealed run with broken git could not write its
+        result at all."""
+        toplevel = subprocess.run(
+            ["git", "-C", str(sealed_volume.tree), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=15)
+        assert toplevel.returncode == 0, toplevel.stderr
+        assert Path(toplevel.stdout.strip()).resolve() == sealed_volume.tree.resolve()
+        listed = subprocess.run(["git", "-C", str(_REPO_ROOT), "worktree", "list"],
+                                capture_output=True, text=True, timeout=15)
+        assert str(sealed_volume.tree) in listed.stdout
+
+    def test_a_child_run_inside_the_volume_stamps_verified(self, sealed_volume, tmp_path):
+        """THE acceptance case, end to end: a real read-only volume, a real sealed
+        interpreter, the real scorer measuring its own filesystem, and the flag that the
+        release gate demands coming out True — for the first time under this design, since
+        the pre-exec digest alone now stamps False.
+        """
+        sealed = launcher.SealedRun(
+            mechanism=sealed_volume.mechanism,
+            runtime_image_sha256="a" * 64,   # the flag does not depend on its value
+            revision=sealed_volume.revision,
+            volume=sealed_volume.mount,
+            dep_paths=tuple(sorted((sealed_volume.mount / "deps").iterdir())),
+            dylibs=sealed_volume.mount / "dylibs",
+            scratch=tmp_path / "scratch",
+        )
+        (tmp_path / "scratch").mkdir()
+        result = tmp_path / "result.json"
+        env = launcher.child_env(sealed_volume.tree, launcher.manifest_digest(sealed_volume.tree),
+                                 tmp_path / "pyc", sealed=sealed)
+        proc = subprocess.run(
+            [str(sealed_volume.interpreter), "-S", "-c", _PROBE, str(tmp_path), str(result)],
+            cwd=str(sealed_volume.tree / "backend"), env=env,
+            capture_output=True, text=True, timeout=600,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(result.read_text()) == {"preexec": True}
+
+    def test_the_runtime_image_digest_covers_the_deps_not_just_the_tree(self, sealed_volume,
+                                                                       tmp_path):
+        """What runtime_python and runtime_chess_version could never say. Two builds of
+        '3.12.7' agree on every character of both; this moves when any byte on the volume
+        moves, which is why the winner binds it."""
+        digest = launcher.runtime_image_digest(sealed_volume.mount)
+        assert len(digest) == 64 and digest == launcher.runtime_image_digest(sealed_volume.mount)
+        copied = tmp_path / "copy"
+        shutil_copy = subprocess.run(["cp", "-R", str(sealed_volume.mount / "deps"), str(copied)],
+                                     capture_output=True)
+        assert shutil_copy.returncode == 0
+        target = next(p for p in copied.rglob("*.py") if p.is_file())
+        target.chmod(0o644)
+        target.write_bytes(target.read_bytes() + b"\n# moved\n")
+        assert launcher.runtime_image_digest(copied) != launcher.runtime_image_digest(
+            sealed_volume.mount / "deps")
+
+
+class TestInnerProtocolHandshake:
+    """The two launchers are not the same file: the outer one is whatever the operator
+    invoked, the inner one is the copy AT --rev. A new outer against an old rev used to die
+    with `unrecognized arguments: --inner --sealed-revision` from a program the operator did
+    not knowingly run — after paying ~30s to build the volume it then could not use. Found on
+    the first real end-to-end run, which is why this checks the checkout rather than trusting
+    that both halves are current.
+    """
+
+    def test_this_launcher_declares_the_version_it_speaks(self):
+        assert launcher.read_inner_protocol_version(_REPO_ROOT) == launcher.INNER_PROTOCOL_VERSION
+
+    def test_a_revision_predating_the_boundary_refuses_by_name(self, tmp_path):
+        tree = tmp_path / "old"
+        (tree / "backend/scripts").mkdir(parents=True)
+        (tree / launcher._LAUNCHER_REL).write_text("SCORER_SOURCE_FILES = ()\n")
+        assert launcher.read_inner_protocol_version(tree) is None
+        with pytest.raises(launcher.LauncherError) as exc:
+            launcher._require_compatible_inner(tree, "abc1234")
+        assert "predates the OS boundary" in str(exc.value)
+        assert "--no-boundary" in str(exc.value)   # names the way forward, not just the wall
+
+    def test_a_version_mismatch_refuses_before_the_volume_is_built(self, tmp_path):
+        tree = tmp_path / "future"
+        (tree / "backend/scripts").mkdir(parents=True)
+        (tree / launcher._LAUNCHER_REL).write_text(
+            f"{launcher._PROTOCOL_NAME}: int = {launcher.INNER_PROTOCOL_VERSION + 1}\n")
+        with pytest.raises(launcher.LauncherError, match="speaks"):
+            launcher._require_compatible_inner(tree, "def5678")
+
+    def test_the_version_is_read_by_parsing_never_by_importing(self, tmp_path):
+        """Importing the checked-out launcher would execute code from the revision inside the
+        process that is supposed to be vouching for it — one interpreter before the boundary
+        exists. So a checkout whose launcher raises on import is still readable."""
+        tree = tmp_path / "explosive"
+        (tree / "backend/scripts").mkdir(parents=True)
+        (tree / launcher._LAUNCHER_REL).write_text(
+            f"raise SystemExit('imported')\n{launcher._PROTOCOL_NAME} = 1\n")
+        assert launcher.read_inner_protocol_version(tree) == 1
