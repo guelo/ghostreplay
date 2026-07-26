@@ -8803,6 +8803,24 @@
     }
 }
 
+/*
+ * Phone-portrait squeeze. The mobile panel row above already packs the streak
+ * into a fixed 5.65rem slot (label + badge); below 500px that slot crowds the
+ * rating and opponent cells, so drop the "Streak" caption and shrink the slot
+ * to the badge alone (2.65rem, matching .perfect-streak-badge width above).
+ * The caption is aria-hidden — the accessible name lives on .perfect-streak's
+ * aria-label — so hiding it costs screen readers nothing.
+ */
+@media (max-width: 499px) {
+    .game-page .perfect-streak__label {
+        display: none;
+    }
+
+    .game-page .perfect-streak {
+        flex: 0 0 2.65rem;
+    }
+}
+
 .promotion-picker-backdrop {
     position: absolute;
     inset: 0;
