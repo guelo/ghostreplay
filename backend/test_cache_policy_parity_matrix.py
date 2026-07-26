@@ -6,14 +6,17 @@ missing-key insert column — pinned as the ``(Decision, Reason)`` pair
 against the SAME matrix captured from the pre-refactor baseline
 ``be002bfa09ccc95562ea1cfbf9cdb3a0c048597c``.
 
-The two refactors under test are ``g-reuse-d21-search`` (comparator reroute,
+The refactors under test are ``g-reuse-d21-search`` (comparator reroute,
 ``declared_profile_inactive`` gate, ``browser-analysis-v1`` retirement,
-``browser-analysis-multipv-v2``) and ``g-mk1d`` (``CacheRow.metadata``, Rule 2a
-measured strength, comparator steps 4-5). Exactly ONE behavior change was
-announced across both: a valid incoming ``browser-analysis-v1`` row is now
-refused storage (``keep`` / ``inactive_profile_keep``) whatever it meets. Every
-other baseline cell must be byte-identical, and the differing set must equal the
-announced predicate exactly — an EXTRA delta is a finding, not a golden refresh.
+``browser-analysis-multipv-v2``), ``g-mk1d`` (``CacheRow.metadata``, Rule 2a
+measured strength, comparator steps 4-5), and ``g-bgv1-cutover``
+(``browser-game-v1`` retirement). Exactly TWO behavior changes were announced
+across them, and they are the SAME change applied to two profiles: a valid
+incoming row on a RETIRED profile — ``browser-analysis-v1``, then
+``browser-game-v1`` — is now refused storage (``keep`` /
+``inactive_profile_keep``) whatever it meets. Every other baseline cell must be
+byte-identical, and the differing set must equal the announced predicate exactly
+— an EXTRA delta is a finding, not a golden refresh.
 
 The archetype spec lives once, in ``scripts/gen_cache_policy_matrix.py``, which
 this module loads by path; see that file's docstring for the capture procedure
@@ -118,11 +121,17 @@ PRE_REFACTOR_IDS = (
     "unverified_canonical",
 )
 
-# The single announced behavior change, as a literal count: 2 valid
-# browser-analysis-v1 incoming archetypes x 20 operands (19 existing + missing key).
-ANNOUNCED_DELTA_COUNT = 40
+# The announced behavior changes, as a literal count: 5 valid incoming archetypes
+# on a RETIRED profile x 20 operands (19 existing + missing key) = 100. That is 2
+# browser-analysis-v1 archetypes (40) plus 3 browser-game-v1 archetypes (60).
+ANNOUNCED_DELTA_COUNT = 100
 
-BROWSER_ANALYSIS_PROFILE = "browser-analysis-v1"
+# Profiles retired from WRITES. Their rows stay readable and keep their dominance
+# edges; only an INCOMING row on one of them is refused storage.
+RETIRED_PROFILES = frozenset({
+    "browser-analysis-v1",  # g-reuse-d21-search
+    "browser-game-v1",      # g-bgv1-cutover
+})
 
 
 def _load(path: Path) -> dict:
@@ -135,15 +144,18 @@ def _archetypes_by_id() -> dict:
 
 
 def _is_announced_retirement_delta(existing_id: str, incoming_id: str) -> bool:
-    """The one announced delta: a VALID incoming browser-analysis-v1 row.
+    """The announced deltas: a VALID incoming row on a RETIRED profile.
 
     Retirement refuses it storage whatever it meets — including the missing-key
-    insert column — so the predicate ignores ``existing`` entirely. An INVALID
-    browser-analysis-v1 row is deliberately excluded: the validity gate precedes
-    the inactive gate, so it kept ``invalid_incoming_keep`` in both trees.
+    insert column — so the predicate ignores ``existing`` entirely. An INVALID row
+    on a retired profile is deliberately excluded: the validity gate precedes the
+    inactive gate, so ``browser_analysis_invalid`` kept ``invalid_incoming_keep``
+    in both trees. All three browser-game-v1 archetypes happen to be valid, so the
+    conjunct excludes no browser-game cell — it is kept because it states the RULE
+    rather than the current archetype census.
     """
     incoming = _archetypes_by_id()[incoming_id]
-    if incoming.profile_id != BROWSER_ANALYSIS_PROFILE:
+    if incoming.profile_id not in RETIRED_PROFILES:
         return False
     return incoming.contract_satisfied and incoming.identity_verified
 

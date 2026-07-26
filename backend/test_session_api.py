@@ -22,6 +22,24 @@ from app.opening_score_scheduler import (
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
+# Valid per-row browser-game-v2 DYNAMIC provenance (g-mk1d §2.2). Uploads whose
+# subject is the analysis_cache row itself must carry it: an upload without
+# provenance declares the retired browser-game-v1 (g-bgv1-cutover) and the batch
+# writer refuses the row with INACTIVE_PROFILE_KEEP, so a cache assertion would
+# read the profile gate instead of the cohort/filtering contract under test.
+BROWSER_V2_PROVENANCE = {
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "search_limit_type": "depth",
+    "search_limit_value": 17,
+    "threads": 1,
+    "hash_mb": 128,
+}
+
 
 def test_session_moves_bulk_insert_success(client, auth_headers, create_game_session, db_session):
     session_id = create_game_session(user_id=123, player_color="white")
@@ -858,6 +876,9 @@ def test_synthetic_threefold_draw_skips_cache_but_unflagged_sparse_eval_caches(
             "fen_before": final_fen_before,
             "move_uci": "f6g8",
             "synthetic_terminal_eval": True,
+            # Valid provenance so the row is refused for being SYNTHETIC, not for
+            # declaring a retired profile.
+            "provenance": BROWSER_V2_PROVENANCE,
         }
     )
     upload = client.post(
@@ -904,6 +925,7 @@ def test_synthetic_threefold_draw_skips_cache_but_unflagged_sparse_eval_caches(
                     "fen_after": "fen-e4",
                     "move_uci": "e2e4",
                     "eval_cp": 20,
+                    "provenance": BROWSER_V2_PROVENANCE,
                 }
             ]
         },
@@ -1401,6 +1423,7 @@ def test_browser_cache_upload_persists_raw_delta_uncapped_but_capped_everywhere_
                     # RAW delta best - played = 10000 - (-20) = 10020 (> the 1000 cap).
                     "eval_delta": 10020,
                     "classification": "blunder",
+                    "provenance": BROWSER_V2_PROVENANCE,
                 }
             ]
         },

@@ -9,6 +9,7 @@ from app.analysis_profiles import (
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
     IDENTITY_FIELDS,
+    JEFFML_PROFILE_ID,
     get_profile,
 )
 from app.evidence_contracts import MINIMAL_PLAYED_EVAL
@@ -468,16 +469,21 @@ def test_writer_populates_normalized_fen_before(session):
                 "move_san": "Bc4",
                 "played_eval": 25,
                 "source": "game",
-                "analysis_profile_id": BROWSER_PROFILE_ID,
+                # The file's ONLY writer-path test, so the only one the active gate
+                # can refuse: browser-game-v1 is retired (g-bgv1-cutover) and would
+                # never reach the derived-column write. Every _seed row above stays
+                # on v1 on purpose — those pin that HISTORICAL v1 rows keep serving
+                # tiers 3-4, since the fallback is trust-based, not active-based.
+                "analysis_profile_id": JEFFML_PROFILE_ID,
                 "evidence_contract_id": MINIMAL_PLAYED_EVAL,
             }
         ],
     )
     row = session.query(AnalysisCache).one()
     assert row.normalized_fen_before == normalize_fen(POS_A)
-    # The row is a non-authoritative browser row. No trusted eval exists for this
+    # The row is a non-authoritative passive row. No trusted eval exists for this
     # position+move, so it resolves the clock-variant request via the untrusted
-    # normalized fallback (tier 4) — surfacing the browser played_eval rather than
+    # normalized fallback (tier 4) — surfacing the played_eval rather than
     # dropping it. (Trusted transposition resolution is covered by the fallback tests
     # above, which seed identity-bearing rows.)
     out = lookup_move_evals(session, [(POS_B, "f1c4")])

@@ -48,6 +48,26 @@ FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 RECORDABLE_FAILURE_THRESHOLD_CP = 50
 
+# Valid per-row browser-game-v2 DYNAMIC provenance (g-mk1d §2.2). The AC7
+# assertions below are about the display surface and the cache surface AGREEING,
+# which requires the upload to actually store a cache row. Without provenance the
+# upload declares the retired browser-game-v1 (g-bgv1-cutover) and the writer
+# refuses it with INACTIVE_PROFILE_KEEP, leaving nothing for /lookup to return.
+# browser-game-v2 is non-authoritative just as v1 was, so position_trusted stays
+# False and the suppressed position-grain best_eval is unchanged.
+BROWSER_V2_PROVENANCE = {
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "search_limit_type": "depth",
+    "search_limit_value": 17,
+    "threads": 1,
+    "hash_mb": 128,
+}
+
 _FIXTURE = Path(__file__).resolve().parent / "tests" / "fixtures" / "classification_vectors.json"
 
 
@@ -121,6 +141,7 @@ def _upload_move(client, auth_headers, session_id, *, best_eval, played_eval, cl
                     "best_move_eval_cp": best_eval,
                     "eval_delta": eval_delta,
                     "classification": classification,
+                    "provenance": BROWSER_V2_PROVENANCE,
                 }
             ]
         },

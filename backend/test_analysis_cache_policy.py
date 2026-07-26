@@ -63,13 +63,26 @@ def _browser(fields, contract=RESOLVER_COMPLETE, values=None):
     )
 
 
+def _passive(fields, contract=RESOLVER_COMPLETE, values=None):
+    """An ACTIVE profile carrying browser-game-v1's flags from before its retirement:
+    non-authoritative, not replacement-eligible, no ``dominates`` edge, all-``None``
+    identity (so ``identity_verified`` is trivially true).
+
+    Used wherever a test needs a generic passive INCOMING row: browser-game-v1 is
+    now inactive (g-bgv1-cutover) and every incoming v1 row is refused at the
+    active gate with ``INACTIVE_PROFILE_KEEP`` before any rule can be exercised.
+    """
+    return _row(profile=JEFFML_PROFILE_ID, contract=contract, verified=True,
+                fields=fields, values=values)
+
+
 def _legacy(fields, values=None):
     return _row(profile=None, contract=None, verified=False, fields=fields, values=values)
 
 
 # Rule 1 — missing key
 def test_insert_on_missing_key():
-    decision, reason = decide_analysis_cache_replacement(None, _browser({"played_eval"}, MINIMAL_PLAYED_EVAL))
+    decision, reason = decide_analysis_cache_replacement(None, _passive({"played_eval"}, MINIMAL_PLAYED_EVAL))
     assert decision is Decision.INSERT
     assert reason is Reason.NEW_KEY
 
@@ -87,19 +100,19 @@ def test_invalid_incoming_missing_key_kept():
     assert reason is Reason.INVALID_INCOMING_KEEP
 
 
-# Rule 3 — browser cannot replace canonical
-def test_browser_cannot_replace_canonical():
+# Rule 3 — a non-authoritative row cannot replace canonical
+def test_non_authoritative_cannot_replace_canonical():
     existing = _canonical({"best_move_uci", "best_line_uci", "classification", "eval_delta"})
-    incoming = _browser({"best_move_uci", "best_line_uci", "classification", "eval_delta"})
+    incoming = _passive({"best_move_uci", "best_line_uci", "classification", "eval_delta"})
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.NON_AUTHORITATIVE_KEEP
 
 
-# Rule 4 — browser cannot replace legacy
-def test_browser_cannot_replace_legacy():
+# Rule 4 — a non-authoritative row cannot reclaim legacy
+def test_non_authoritative_cannot_reclaim_legacy():
     existing = _legacy({"played_eval", "best_eval"})
-    incoming = _browser({"played_eval"}, MINIMAL_PLAYED_EVAL)
+    incoming = _passive({"played_eval"}, MINIMAL_PLAYED_EVAL)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.LEGACY_KEEP_NON_AUTH
@@ -152,10 +165,10 @@ def test_canonical_keeps_jeffml_when_it_would_drop_a_field():
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
 
 
-# Rule 2 — same profile idempotent for browser
-def test_same_browser_profile_idempotent():
-    existing = _browser({"played_eval"}, MINIMAL_PLAYED_EVAL)
-    incoming = _browser({"played_eval"}, MINIMAL_PLAYED_EVAL)
+# Rule 2 — same profile idempotent for a passive producer
+def test_same_passive_profile_idempotent():
+    existing = _passive({"played_eval"}, MINIMAL_PLAYED_EVAL)
+    incoming = _passive({"played_eval"}, MINIMAL_PLAYED_EVAL)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.SAME_PROFILE_IDEMPOTENT
@@ -362,13 +375,18 @@ def test_retired_analysis_incoming_missing_key_fails_closed():
     assert reason is Reason.INACTIVE_PROFILE_KEEP
 
 
-def test_browser_game_cannot_replace_browser_analysis_multipv():
+def test_non_eligible_incoming_stops_at_the_eligibility_gate():
     values = _agree(_V2_CORE)
     existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
-    incoming = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
+    incoming = _passive(_V2_CORE, RESOLVER_COMPLETE, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     # Stopped at the Rule 3 eligibility gate (existing is identified) — never
     # reaches Rule 5, so the reason is NON_AUTHORITATIVE_KEEP, not INCOMPATIBLE_KEEP.
+    # The incoming profile must be NON-replacement-eligible for this path: the
+    # eligible counterpart is test_browser_dynamic_policy.py's
+    # test_v2_and_visible_multipv_are_incomparable_both_ways, where a
+    # replacement-eligible browser-game-v2 clears this gate and is instead stopped
+    # at Rule 5 with INCOMPATIBLE_KEEP.
     assert decision is Decision.KEEP
     assert reason is Reason.NON_AUTHORITATIVE_KEEP
 
