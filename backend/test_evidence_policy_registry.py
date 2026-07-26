@@ -3,10 +3,15 @@
 ``app.evidence_policy._assert_registry_consistent`` runs at module import and is
 the only thing standing between a registry edit and a silently inconsistent
 policy: EDGES that reference a profile nobody registered, an EDGES/``dominates``
-pair that drifted apart, a capability granted to the retired (internally
-inconsistent) ``browser-analysis-v1`` protocol, or an authoritative profile
-quietly stripped of a capability. Each of those must raise, and one test proves
-the enforcement really happens AT IMPORT rather than only when called.
+pair that drifted apart, an ACTIVE-REQUIRED (non-``RETIREMENT_SURVIVING``)
+capability granted to a profile whose analyzer protocol is not internally
+consistent, a profile referencing an unregistered protocol, or an authoritative
+profile quietly stripped of a capability. Each of those must raise, and one test
+proves the enforcement really happens AT IMPORT rather than only when called.
+
+The capability rule is stated PROTOCOL-side and is independent of both authority
+and lifecycle: retirement is enforced at USE time by ``has_capability``, which the
+last section pins as the other half of the split.
 
 Two mechanisms, deliberately different:
 
@@ -40,9 +45,12 @@ from app.analysis_cache_policy import (
     project_cache_row,
 )
 from app.analysis_profiles import (
+    ANALYZER_PROTOCOL_VERSION,
     BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_ANALYSIS_PROFILE_ID,
+    BROWSER_ANALYZER_PROTOCOL_VERSION,
     BROWSER_PROFILE_ID,
+    BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION,
     CANONICAL_PROFILE_ID,
     JEFFML_PROFILE_ID,
     stamp_profile_full,
@@ -52,10 +60,13 @@ from app.evidence_policy import (
     ALL_CAPABILITIES,
     CAPABILITY_GRANTS,
     EDGES,
+    PROTOCOLS,
+    RETIREMENT_SURVIVING,
     Capability,
     Edge,
     EdgeKind,
     _assert_registry_consistent,
+    has_capability,
 )
 
 GHOST = "ghost-v9"
@@ -84,12 +95,26 @@ def _row(profile_id: str):
     )
 
 
-# Every capability the retired browser-analysis-v1 protocol may NOT hold: it is
-# granted exactly the retirement-surviving DISPLAY_OVERLAY and nothing else.
-NON_OVERLAY_CAPABILITIES = tuple(
+# The ACTIVE-REQUIRED half of the enum — every capability that does NOT survive
+# retirement, which is exactly the remainder the load rule keys on
+# (``grants - RETIREMENT_SURVIVING``). Derived from RETIREMENT_SURVIVING rather
+# than spelled out, so a capability added to either the enum or the surviving set
+# lands on the right axis without editing this test.
+ACTIVE_REQUIRED_CAPABILITIES = tuple(
     sorted(
-        (c for c in Capability if c is not Capability.DISPLAY_OVERLAY),
+        (c for c in Capability if c not in RETIREMENT_SURVIVING),
         key=lambda c: c.value,
+    )
+)
+
+# Derived, NOT literal — a future defective producer is covered automatically. The
+# values this reads are pinned by test_protocol_consistency_truth_table below, so a
+# flipped ``internally_consistent`` shrinks this matrix loudly rather than silently.
+INCONSISTENT_PROFILE_IDS = tuple(
+    sorted(
+        p.profile_id
+        for p in analysis_profiles.list_profiles()
+        if not PROTOCOLS[p.analyzer_protocol_version].internally_consistent
     )
 )
 
@@ -118,6 +143,50 @@ def _set_grants(monkeypatch, **overrides) -> None:
 
 def _set_profiles(monkeypatch, profiles) -> None:
     monkeypatch.setattr(evidence_policy, "list_profiles", lambda: tuple(profiles))
+
+
+# --- the two tables the capability rule reads --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [
+        (ANALYZER_PROTOCOL_VERSION, True),
+        (BROWSER_ANALYZER_PROTOCOL_VERSION, False),
+        (BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION, True),
+        (None, False),
+    ],
+    ids=["canonical", "hidden-browser", "visible-multipv", "unknown"],
+)
+def test_protocol_consistency_truth_table(version, expected):
+    # The precondition for the derived matrix below: it reads the same values the
+    # production rule trusts, so an accidental flip here would silently empty it.
+    assert PROTOCOLS[version].internally_consistent is expected
+
+
+def test_protocol_registry_has_exactly_the_pinned_protocols():
+    # A protocol added without a truth-table entry fails here rather than silently
+    # widening what may hold an active-required capability.
+    assert set(PROTOCOLS) == {
+        ANALYZER_PROTOCOL_VERSION,
+        BROWSER_ANALYZER_PROTOCOL_VERSION,
+        BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION,
+        None,
+    }
+
+
+def test_only_the_display_overlay_survives_retirement():
+    """The OTHER table the capability rule reads, pinned for the same reason.
+
+    ``RETIREMENT_SURVIVING`` is the subtrahend in BOTH production checks — the load
+    rule's ``grants - RETIREMENT_SURVIVING`` remainder and ``has_capability``'s
+    lifecycle disjunct — and ACTIVE_REQUIRED_CAPABILITIES derives from it. Widening
+    it would therefore shrink the matrix below in silence (a capability moved out of
+    the axis is a case that stops being tested, not a failure) while simultaneously
+    letting an INACTIVE profile exercise the newly-surviving capability at use time.
+    Pinned by value so that edit has to be deliberate.
+    """
+    assert RETIREMENT_SURVIVING == frozenset({Capability.DISPLAY_OVERLAY})
 
 
 # --- control -------------------------------------------------------------------
@@ -203,24 +272,80 @@ def test_unregistered_edge_endpoint_raises(monkeypatch, edge, expected):
 # --- capability grants ------------------------------------------------------------
 
 
+def test_the_inconsistent_protocol_matrix_is_not_empty():
+    # An empty matrix would make the parametrized test below vacuously green.
+    assert INCONSISTENT_PROFILE_IDS
+    assert ACTIVE_REQUIRED_CAPABILITIES
+
+
+@pytest.mark.parametrize("profile_id", INCONSISTENT_PROFILE_IDS)
 @pytest.mark.parametrize(
-    "capability", NON_OVERLAY_CAPABILITIES, ids=lambda c: c.value
+    "capability", ACTIVE_REQUIRED_CAPABILITIES, ids=lambda c: c.value
 )
-def test_browser_analysis_v1_may_not_hold_an_active_required_capability(
-    monkeypatch, capability
+def test_inconsistent_protocol_may_not_hold_an_active_required_capability(
+    monkeypatch, profile_id, capability
 ):
-    # Parametrized over EVERY non-overlay capability rather than a sample, so a
-    # capability added to the enum later is covered without editing this test.
+    # Both axes are DERIVED rather than sampled: every profile whose protocol is
+    # internally inconsistent, crossed with every capability that does not survive
+    # retirement. A new defective producer, or a new capability, is covered without
+    # editing this test.
     _set_grants(
         monkeypatch,
-        **{
-            BROWSER_ANALYSIS_PROFILE_ID: frozenset(
-                {Capability.DISPLAY_OVERLAY, capability}
-            )
-        },
+        **{profile_id: frozenset({Capability.DISPLAY_OVERLAY, capability})},
+    )
+    with pytest.raises(ValueError, match="uses internally inconsistent protocol"):
+        _assert_registry_consistent()
+
+
+@pytest.mark.parametrize("profile_id", INCONSISTENT_PROFILE_IDS)
+def test_overlay_only_grant_to_an_inconsistent_protocol_still_loads(
+    monkeypatch, profile_id
+):
+    # The negative control for the rule above: it keys on the active-required
+    # REMAINDER, not on "holds a grant at all", so a retirement-surviving grant to
+    # the very same profiles loads fine.
+    _set_grants(
+        monkeypatch, **{profile_id: frozenset({Capability.DISPLAY_OVERLAY})}
+    )
+    _assert_registry_consistent()
+
+
+def test_authoritative_profile_with_an_inconsistent_protocol_raises(monkeypatch):
+    """The rule fires INSIDE the authoritative branch too, not only beside it.
+
+    Every currently-inconsistent profile is non-authoritative, so without this the
+    check could sit under the old ``else:`` and the whole suite would still pass.
+    Only the protocol is mutated — canonical keeps ALL_CAPABILITIES and
+    ``active=True``, so the authoritative clause passes and the protocol clause is
+    the sole raiser. This is also the jointly-unsatisfiable case: an
+    authoritative-but-defective profile makes the registry unloadable, which is the
+    correct answer.
+    """
+    _set_profiles(
+        monkeypatch,
+        _with_profile(
+            CANONICAL_PROFILE_ID,
+            analyzer_protocol_version=BROWSER_ANALYZER_PROTOCOL_VERSION,
+        ),
+    )
+    with pytest.raises(ValueError, match="uses internally inconsistent protocol"):
+        _assert_registry_consistent()
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    [CANONICAL_PROFILE_ID, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID, JEFFML_PROFILE_ID],
+)
+def test_unknown_analyzer_protocol_fails_closed(monkeypatch, profile_id):
+    # Independent of BOTH authority and grant state: canonical is authoritative with
+    # all eight grants, browser-analysis-multipv-v2 non-authoritative with one, and
+    # jeffml holds none. All three must refuse to load.
+    _set_profiles(
+        monkeypatch,
+        _with_profile(profile_id, analyzer_protocol_version=GHOST),
     )
     with pytest.raises(
-        ValueError, match="browser-analysis-v1 may not hold an active-required"
+        ValueError, match="references an unknown analyzer protocol"
     ):
         _assert_registry_consistent()
 
@@ -244,28 +369,62 @@ def test_authoritative_profile_stripped_of_a_capability_raises(monkeypatch):
         _assert_registry_consistent()
 
 
-@pytest.mark.parametrize(
-    "profile_id", [BROWSER_PROFILE_ID, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID]
-)
-def test_grants_to_other_non_authoritative_profiles_are_not_load_blocked(
-    monkeypatch, profile_id
-):
-    """Pins a DELIBERATE boundary of the current rule, so nobody reads it as
-    universal.
+def test_read_grants_to_a_consistent_non_authoritative_protocol_load(monkeypatch):
+    """Pins the boundary on the permissive side: the rule caps protocols, not
+    non-authoritative profiles in general.
 
-    The active-required-capability rule is scoped to ``browser-analysis-v1`` — the
-    one protocol known to be internally inconsistent — NOT to non-authoritative
-    profiles in general. Granting a read/reuse capability to another
-    non-authoritative profile therefore loads fine today; the general
-    non-authoritative read-trust seam is g-v21l's, and generalizing the rule to
-    "any INACTIVE profile may hold only RETIREMENT_SURVIVING capabilities" would
-    be a production change, not a test edit.
+    ``browser-analysis-multipv-v2`` declares the internally consistent
+    ``browser-visible-multipv-v1``, so a read/reuse grant to it loads without
+    blocking — the seam g-v21l needs. ``browser-game-v1`` is NOT a case here: its
+    protocol is inconsistent, so the same grant now raises and is covered by the
+    matrix above.
     """
     _set_grants(
         monkeypatch,
-        **{profile_id: frozenset({Capability.DISPLAY_OVERLAY, Capability.POSITION_READ})},
+        **{
+            BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: frozenset(
+                {Capability.DISPLAY_OVERLAY, Capability.POSITION_READ}
+            )
+        },
     )
     _assert_registry_consistent()
+
+
+# --- lifecycle is enforced at USE time, not at load -------------------------------
+
+
+def test_inactive_consistent_profile_cannot_exercise_an_active_required_grant(
+    monkeypatch,
+):
+    """Load PERMITS what use DENIES — the two halves of the split invariant.
+
+    The witness must be a registry state the LOAD rule allows, so it uses the
+    internally CONSISTENT ``browser-analysis-multipv-v2`` flipped inactive; the
+    retired, inconsistent ``browser-analysis-v1`` would be rejected at load and
+    would prove nothing about lifecycle.
+
+    Two seams are patched because they are different lookups:
+    ``_assert_registry_consistent`` reads ``evidence_policy.list_profiles``, while
+    ``has_capability`` resolves lifecycle through ``evidence_policy.get_profile``.
+    """
+    profiles = _with_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID, active=False)
+    _set_profiles(monkeypatch, profiles)
+    by_id = {p.profile_id: p for p in profiles}
+    monkeypatch.setattr(evidence_policy, "get_profile", by_id.get)
+    _set_grants(
+        monkeypatch,
+        **{
+            BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: frozenset(
+                {Capability.DISPLAY_OVERLAY, Capability.POSITION_READ}
+            )
+        },
+    )
+
+    _assert_registry_consistent()  # LOAD permits: the protocol is consistent
+
+    row = _row(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert has_capability(row, Capability.POSITION_READ) is False  # USE denies
+    assert has_capability(row, Capability.DISPLAY_OVERLAY) is True  # surviving
 
 
 # --- enforcement AT IMPORT --------------------------------------------------------

@@ -682,6 +682,9 @@ class OverlayMode(Enum):
 # retirement-surviving DISPLAY_OVERLAY; browser-game / jeffml / legacy hold none.
 # The read/reuse call-site wiring for the other seven stays on
 # ``_effectively_authoritative`` until g-v21l; this bead wires only DISPLAY_OVERLAY.
+# The browser-game and browser-analysis-v1 caps are not a choice: their protocols
+# are internally inconsistent, so ``_assert_registry_consistent`` refuses to load a
+# grant beyond RETIREMENT_SURVIVING to any of them.
 CAPABILITY_GRANTS: dict[str, frozenset[Capability]] = {
     CANONICAL_PROFILE_ID: ALL_CAPABILITIES,
     CANONICAL_LINUX_PROFILE_ID: ALL_CAPABILITIES,
@@ -720,6 +723,10 @@ def has_capability(row: RowView, capability: Capability) -> bool:
     capability ∈ RETIREMENT_SURVIVING)``. ``effective_profile_id()`` already
     returns ``None`` unless the row is identity-verified, so a legacy/unidentified
     or profile-mismatched row holds nothing.
+
+    The lifecycle disjunct below is the ONLY lifecycle enforcement: the invariant
+    is split LOAD = protocol (:func:`_assert_registry_consistent`), USE = lifecycle
+    (here), so retirement is deliberately not duplicated into the load assertion.
     """
     profile_id = row.effective_profile_id()
     if profile_id is None:
@@ -769,16 +776,30 @@ def _assert_registry_consistent() -> None:
                 raise ValueError(
                     f"authoritative profile {pid!r} must hold all capabilities"
                 )
-        else:
-            # Non-authoritative profiles hold nothing unless explicitly granted;
-            # the internally-inconsistent retired browser-analysis-v1 may never
-            # hold an active-required (non-retirement-surviving) capability.
-            if pid == BROWSER_ANALYSIS_PROFILE_ID and not (
-                grants <= RETIREMENT_SURVIVING
-            ):
-                raise ValueError(
-                    "browser-analysis-v1 may not hold an active-required capability"
-                )
+        # Non-authoritative profiles hold nothing unless explicitly granted, and NO
+        # profile — whatever its authority or lifecycle state — may hold an
+        # ACTIVE-REQUIRED (non-retirement-surviving) capability unless its declared
+        # analyzer protocol is internally consistent. Stated over the PROTOCOL
+        # rather than a profile id because that is the actual reason
+        # browser-analysis-v1 was capped (g-kgiq): a protocol whose best/played
+        # facts can contradict each other cannot support read/reuse trust, and that
+        # does not change when the profile is retired or un-retired. DELIBERATELY
+        # outside the branch above, so a future authoritative-but-defective profile
+        # cannot escape it (such a profile makes the two rules jointly
+        # unsatisfiable — the registry is then unloadable, which is the correct
+        # answer).
+        protocol = PROTOCOLS.get(profile.analyzer_protocol_version)
+        if protocol is None:
+            raise ValueError(
+                f"profile {pid!r} references an unknown analyzer protocol"
+            )
+        active_required = grants - RETIREMENT_SURVIVING
+        if active_required and not protocol.internally_consistent:
+            raise ValueError(
+                f"profile {pid!r} uses internally inconsistent protocol "
+                f"{protocol.version!r} and may not hold active-required "
+                "capabilities"
+            )
 
 
 _assert_registry_consistent()

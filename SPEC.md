@@ -547,7 +547,9 @@ performs for arrows/lines. Key points:
   stored metadata match its claimed profile — one `verify_identity`, replacing five
   duplicated exact-equality checks; a per-profile `dynamic_fields` seam, filled by
   `browser-game-v2` in g-mk1d), *protocol* (is the producer internally consistent —
-  `PROTOCOLS`), *contract* (evidence shape — `evidence_contracts`), *comparison*
+  `PROTOCOLS`, whose `internally_consistent` flag now GATES capability grants at
+  registry load rather than merely documenting them), *contract* (evidence shape —
+  `evidence_contracts`), *comparison*
   (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
   and *capability* (which consumers may reuse a row — `has_capability`). Read/reuse
   grants beyond `DISPLAY_OVERLAY` (g-v21l) and the cross-grain authority rule (g-6xc3)
@@ -638,6 +640,16 @@ performs for arrows/lines. Key points:
   none. g-mk1d adds `browser-game-v2`, which holds `DISPLAY_OVERLAY` under the third
   mode `REQUIRES_COMPARISON` (below) — the ALWAYS-only `display_upgrade_eligible`
   predicate the one-row seam uses still excludes it.
+  A registry-load assertion states the grant precondition PROTOCOL-side rather than
+  per-profile: **holding any active-required (non-`RETIREMENT_SURVIVING`) capability
+  requires an internally consistent protocol.** So `browser-game-v1`,
+  `browser-game-v2` and the retired `browser-analysis-v1` (all `browser-analyzer-v1`
+  or no declared protocol) are capped at `DISPLAY_OVERLAY` whether active or retired,
+  while the internally consistent `browser-analysis-multipv-v2` may receive
+  read/reuse grants (the seam g-v21l needs); an unregistered
+  `analyzer_protocol_version` fails closed. Lifecycle is deliberately NOT part of
+  that rule — retirement is enforced at USE time by `has_capability`
+  (`profile.active` or capability ∈ `RETIREMENT_SURVIVING`).
 - **Exact-key model.** `SessionAnalysisMove` carries `fen_before` and `move_uci`.
   The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
   wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove
