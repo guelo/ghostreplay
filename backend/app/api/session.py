@@ -852,6 +852,32 @@ def _encoded_browser_provenance(move: SessionMoveInput) -> str | None:
     return json.dumps(fields.values, sort_keys=True, separators=(",", ":"))
 
 
+# Writer verdicts that actually TOUCHED the stored row — every Reason returned with
+# a ``Decision`` of INSERT / REPLACE / MERGE. Used for the ``cache_rows_written``
+# log field, which answers "how many rows did this upload write", NOT the endpoint's
+# "is the stored row now this evidence" (``_EVIDENCE_ACCEPTED_REASONS``).
+#
+# `same_profile_idempotent` is deliberately ABSENT: it is a ``Decision.KEEP`` and the
+# writer's replace/merge branch ends at "KEEP: nothing to write"
+# (analysis_cache_repo.py), so counting it would report a write for a re-upload that
+# changed nothing — exactly the overcount this field exists to remove.
+# `merge_conflict_keep` is likewise absent: it is reached INSIDE the MERGE branch
+# when the merge is refused, and stores nothing.
+_ROW_MUTATING_REASONS = frozenset(
+    {
+        Reason.NEW_KEY.value,  # INSERT
+        Reason.DOMINATES_REPLACE.value,  # REPLACE
+        Reason.PROTOCOL_CORRECTED_REPLACE.value,  # REPLACE
+        Reason.STRENGTH_REPLACE.value,  # REPLACE
+        # REPLACE, unreachable from a non-authoritative producer like this one, but
+        # included because the set is defined by DECISION, not by today's callers.
+        Reason.LEGACY_REPLACED_BY_AUTH.value,
+        Reason.SAME_PROFILE_SUPERSET_MERGE.value,  # MERGE
+        Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,  # MERGE
+    }
+)
+
+
 def _upsert_analysis_cache(
     db: Session,
     moves: list[SessionMoveInput],
@@ -861,12 +887,18 @@ def _upsert_analysis_cache(
     """Upsert browser-game analysis evidence into the global cache.
 
     Evals are converted from player-relative (as uploaded) to white-relative for
-    storage. Rows are stamped with the non-authoritative ``browser-game-v1``
-    profile (the upload contract carries no engine identity) and routed through
-    the shared quality-aware writer: game uploads INSERT evidence for keys that
-    have none and never replace existing canonical or legacy rows. Each row is
-    classified per-shape into the most specific browser-allowed contract; rows
-    matching no allowed contract are rejected (not stored).
+    storage. A row carrying valid client provenance is stamped ``browser-game-v2``;
+    one without is stamped the RETIRED ``browser-game-v1`` (g-bgv1-cutover) and is
+    therefore refused by the writer with ``INACTIVE_PROFILE_KEEP`` — the upload
+    still succeeds, it simply stores nothing. Rows are routed through the shared
+    quality-aware writer: game uploads INSERT evidence for keys that have none and
+    never replace existing canonical or legacy rows. Each row is classified
+    per-shape into the most specific browser-allowed contract; rows matching no
+    allowed contract are rejected (not stored).
+
+    The return value is the count SUBMITTED to the writer (g-dckw's latency cohort
+    key), which since the retirement is no longer the count written — see
+    ``cache_rows_written`` on the ``analysis_cache_write`` log line for that.
 
     Returns the number of rows actually handed to the writer (``len(cache_values)``
     after per-shape filtering) — the cohort key for the ``analysis_cache_write``
@@ -987,12 +1019,31 @@ def _upsert_analysis_cache(
         )
 
     if not cache_values:
+        # Nothing was submitted, so nothing was written. Stamped explicitly rather
+        # than left absent so the field's ABSENCE means exactly one thing: the
+        # writer raised and the written count is unknown.
+        if timing_fields is not None:
+            timing_fields["cache_rows_written"] = 0
         return 0
 
     # The shared helper owns its own transaction; ensure the caller session is
     # clean (no pending state on this connection) before delegating.
     db.commit()
-    write_analysis_cache_rows(db, cache_values)
+    results = write_analysis_cache_rows(db, cache_values)
+    # ``cache_row_count`` above is what we ASKED the writer to store; this is what
+    # it actually wrote. The two diverged the moment browser-game-v1 retired
+    # (g-bgv1-cutover): a legacy client's rows are refused with
+    # INACTIVE_PROFILE_KEEP, so the upload succeeds having written nothing, and a
+    # count of the batch would report writes that never happened. Stamped only on
+    # the success path — a raising writer wrote an UNKNOWN number of rows, and
+    # ``cache_row_count`` (stamped pre-write, g-dckw) remains the cohort key.
+    if timing_fields is not None:
+        timing_fields["cache_rows_written"] = sum(
+            1 for _, reason in results if reason.value in _ROW_MUTATING_REASONS
+        )
+    # The RETURN stays the pre-writer filtered count (g-dckw's cohort key, which
+    # must keep the same meaning across this change so latency buckets stay
+    # comparable). The honest post-write number is the log field above.
     return len(cache_values)
 
 
@@ -1026,8 +1077,19 @@ def _timed_side_effect(
     Any ``**extra`` fields render as ``key=value`` between ``move_count`` and
     ``elapsed_ms``. The context manager yields that mutable field dict so a body
     can stamp a value only known after it runs — e.g. the analysis-cache writer
-    stamps ``cache_row_count`` (the actual written-row count, the cohort key for
-    the g-dckw latency scrape) once it has filtered the upload down to real rows.
+    stamps ``cache_row_count`` once it has filtered the upload down to real rows.
+
+    ``cache_row_count`` is the count SUBMITTED to the writer, not the count it
+    stored, and it is the cohort key for the g-dckw latency scrape: it is stamped
+    BEFORE the write so a raising writer still buckets by the batch size it was
+    given rather than collapsing into the zero-row cohort. ``cache_rows_written``
+    is the honest post-write count: present whenever the cache side effect
+    completes successfully — including the zero-row path, which stamps ``0/0``
+    without calling the writer at all — and ABSENT only when a non-empty writer
+    call raises, because then the number of rows written is genuinely unknown. The
+    two differ by the rows the writer refused — since g-bgv1-cutover retired
+    browser-game-v1, a legacy client's whole batch is refused, so the pair is what
+    distinguishes "wrote nothing" from "was asked for nothing".
     """
     fields = dict(extra)
     start = time.perf_counter()
@@ -1838,6 +1900,11 @@ _EVIDENCE_PRODUCER_PROFILE = {
 # and the endpoint pre-writer reasons — leaves the stored row unchanged / unwritten,
 # so it yields no upgrade. `legacy_replaced_by_auth` cannot occur for a non-
 # authoritative profile and is therefore not accepted here.
+#
+# NOT the same question as ``_ROW_MUTATING_REASONS`` (which counts DB writes), and
+# the difference is deliberate: `same_profile_idempotent` belongs HERE, because the
+# stored row already IS this evidence and the endpoint can return it, but it is a
+# ``Decision.KEEP`` that writes nothing.
 _EVIDENCE_ACCEPTED_REASONS = frozenset(
     {
         Reason.NEW_KEY.value,

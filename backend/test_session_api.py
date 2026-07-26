@@ -1209,9 +1209,11 @@ def test_session_analysis_converted_drill_includes_drill_prefix_summary(
 
 def test_timed_side_effect_renders_extra_and_body_stamped_fields(caplog):
     """g-dckw: _timed_side_effect appends **extra fields and a body-stamped field
-    (cache_row_count, known only after the writer runs) between move_count and
-    elapsed_ms, so the analysis_cache_write line is cohortable on the actual
-    written-row count + upload finality rather than the overcounting move_count."""
+    (cache_row_count, known only after the upload is filtered) between move_count
+    and elapsed_ms, so the analysis_cache_write line is cohortable on the
+    submitted-row count + upload finality rather than the overcounting move_count.
+    That count is what was SUBMITTED to the writer, not what it wrote — see
+    cache_rows_written (g-bgv1-cutover) for the written count."""
     from app.api.session import _timed_side_effect
 
     sid = uuid.uuid4()
@@ -1245,9 +1247,10 @@ def test_timed_side_effect_renders_extra_and_body_stamped_fields(caplog):
     )
 
 
-def test_upsert_analysis_cache_returns_written_row_count():
+def test_upsert_analysis_cache_returns_submitted_row_count():
     """g-dckw cohort key: _upsert_analysis_cache returns len(cache_values) — the
-    rows the writer actually processes — NOT the uploaded move_count. Moves with
+    rows SUBMITTED to the writer — NOT the uploaded move_count, and NOT the count
+    the writer went on to store (g-bgv1-cutover; see cache_rows_written). Moves with
     no fen_before/move_uci or no eval are filtered before the writer, so the
     return undercounts move_count for those (why move_count can't bucket the
     latency cohort)."""

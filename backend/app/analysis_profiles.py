@@ -305,6 +305,36 @@ _BROWSER = Profile(
     analyzer_protocol_version=None,
     profile_manifest_digest=None,
     authoritative=False,
+    # RETIRED (g-bgv1-cutover): browser-game-v2 (g-mk1d) supersedes this profile
+    # with the SAME analysis method plus honest per-device identity, so there is no
+    # reason to keep minting all-``None`` rows whose strength is permanently
+    # UNKNOWN and therefore INCOMPARABLE to every v2 row (policy D7.1).
+    #
+    # Retirement is NOT gated on fleet adoption, because it does not fail a legacy
+    # client's upload closed. This profile is reached from ``upsert_session_moves``,
+    # which has no producer discriminator: the batch writer refuses the row with
+    # ``INACTIVE_PROFILE_KEEP`` and the upload still returns 200.
+    #
+    # The refused row is NOT worthless, and the trade is deliberate rather than free.
+    # A v1 row carries a real played eval, and ``tree_eval`` tiers 3-4 fall back to
+    # ANY untrusted row when no trusted eval exists, so declining it can leave an
+    # off-book card blank that would otherwise have shown a number. We accept that
+    # loss because the row is also PERMANENT: ``analysis_cache`` is one row per
+    # (fen_before, move_uci), an all-``None`` v1 row is UNKNOWN strength and so
+    # INCOMPARABLE to every v2 row (policy D7.1), and browser-game-v2 has no
+    # ``dominates`` edge over v1 — so each new v1 row would occupy its key against
+    # every future v2 upload forever. Only an authoritative producer
+    # (browser-analysis-multipv-v2, which DOES dominate v1) could ever displace it,
+    # and that path runs on demand rather than on every game. A blank card today
+    # beats a key no browser game can improve.
+    #
+    # Rows ALREADY stored are untouched: the manifest digest excludes ``active`` so
+    # they stay identity-verified, this profile grants no capabilities
+    # (evidence_policy.CAPABILITY_GRANTS) and is ``OverlayMode.NEVER``, and the
+    # tree_eval fallback above is trust-based rather than active-based — so existing
+    # v1 evals keep serving. browser-analysis-multipv-v2's ``dominates`` edge can
+    # still correctively replace them.
+    active=False,
 )
 
 _JEFFML = Profile(

@@ -550,3 +550,93 @@ def test_session_final_tracks_terminal_action_not_run_opportunity(
     # the leading space so this cannot be satisfied by `session_final=True`.
     assert " final=True" in line
     assert "kind=final" in line
+
+
+# --- cache_row_count vs cache_rows_written (g-bgv1-cutover) --------------------
+#
+# Since browser-game-v1 retired, "submitted to the writer" and "written by the
+# writer" are different numbers, and the pair is the only thing that distinguishes
+# "wrote nothing" from "was asked for nothing". These pin both.
+
+
+def _written(line):
+    """(cache_row_count, cache_rows_written) off the log line; None when absent."""
+    fields = dict(
+        part.split("=", 1) for part in line.split() if "=" in part
+    )
+    got = fields.get("cache_rows_written")
+    return fields["cache_row_count"], (None if got is None else got)
+
+
+def test_legacy_upload_is_submitted_but_writes_nothing(
+    client, auth_headers, create_game_session, caplog
+):
+    """A provenance-less client still gets 200; its row is refused, so submitted=1
+    but written=0. This is the whole retirement in one log line."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, [move()]).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "0")
+
+
+def test_v2_upload_writes_its_row(
+    client, auth_headers, create_game_session, caplog
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        assert post_moves(
+            client, auth_headers, session_id, [move(provenance=provenance(17))]
+        ).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "1")
+
+
+def test_identical_v2_reupload_is_submitted_but_writes_nothing(
+    client, auth_headers, create_game_session, caplog
+):
+    """An idempotent re-upload is ACCEPTED (the stored row already is this evidence)
+    but mutates nothing, so it must not be counted as a write — the distinction
+    between _EVIDENCE_ACCEPTED_REASONS and _ROW_MUTATING_REASONS."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    payload = [move(provenance=provenance(17))]
+    assert post_moves(client, auth_headers, session_id, payload).status_code == 200
+    caplog.clear()  # else _cache_write_line finds the FIRST upload's new_key line
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, payload).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("1", "0")
+
+
+def test_fully_filtered_batch_reports_zero_over_zero(
+    client, auth_headers, create_game_session, caplog
+):
+    """Nothing reached the writer, so both are 0 — never a missing field, which is
+    reserved for "the writer raised and the count is unknown"."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    no_eval = move(
+        eval_cp=None, best_move_eval_cp=None, eval_delta=None, classification=None
+    )
+    with caplog.at_level(logging.INFO):
+        assert post_moves(client, auth_headers, session_id, [no_eval]).status_code == 200
+    assert _written(_cache_write_line(caplog)) == ("0", "0")
+
+
+def test_raising_writer_reports_submitted_but_omits_written(
+    client, auth_headers, create_game_session, caplog, monkeypatch
+):
+    """A writer that raises wrote an UNKNOWN number of rows. cache_row_count stays
+    (g-dckw needs the cohort even on failure) but cache_rows_written must be ABSENT
+    rather than 0, which would claim we know it wrote nothing."""
+    import app.api.session as session_mod
+
+    def boom(db, rows):
+        raise RuntimeError("simulated writer failure")
+
+    monkeypatch.setattr(session_mod, "write_analysis_cache_rows", boom)
+    session_id = create_game_session(user_id=123, player_color="white")
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(RuntimeError):
+            post_moves(
+                client, auth_headers, session_id, [move(provenance=provenance(17))]
+            )
+    line = _cache_write_line(caplog)
+    assert _written(line) == ("1", None)
+    assert "status=error" in line
