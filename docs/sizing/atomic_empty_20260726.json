@@ -1,0 +1,211 @@
+{
+  "kind": "atomic",
+  "batch_size": 1000,
+  "repair_batch_size": 3000,
+  "dimensions_before": {
+    "total_rows": 4184,
+    "sessions_bytes": 5431296,
+    "m_total": 131676,
+    "moves_bytes": 45817856
+  },
+  "populations_before": {
+    "n_stale": 0,
+    "m_moves": 0,
+    "mean_plies_per_stale": null,
+    "n_broken_audit": 10,
+    "n_repair": 0
+  },
+  "dimensions_after": {
+    "total_rows": 4184,
+    "sessions_bytes": 5431296,
+    "m_total": 131676,
+    "moves_bytes": 45817856
+  },
+  "populations_after": {
+    "n_stale": 0,
+    "m_moves": 0,
+    "mean_plies_per_stale": null,
+    "n_broken_audit": 10,
+    "n_repair": 0
+  },
+  "scans": {
+    "repair_populate": {
+      "n": 5,
+      "cold_ms": 47.5342909921892,
+      "max_ms": 48.0690419790335,
+      "median_ms": 47.5342909921892
+    },
+    "repair_remaining": {
+      "n": 5,
+      "cold_ms": 47.795250022318214,
+      "max_ms": 48.09808300342411,
+      "median_ms": 47.795250022318214
+    },
+    "soundness_assert": {
+      "n": 5,
+      "cold_ms": 48.3452919870615,
+      "max_ms": 48.3452919870615,
+      "median_ms": 47.945667000021785
+    },
+    "repair_population_count": {
+      "n": 5,
+      "cold_ms": 48.15049999160692,
+      "max_ms": 48.42875001486391,
+      "median_ms": 48.11983398394659
+    },
+    "_diagnostic_bare_detector": {
+      "n": 5,
+      "cold_ms": 46.50145897176117,
+      "max_ms": 47.42145800264552,
+      "median_ms": 46.96125001646578
+    },
+    "coverage_assert": {
+      "n": 5,
+      "cold_ms": 1.0763339814729989,
+      "max_ms": 1.0763339814729989,
+      "median_ms": 0.5929170292802155
+    },
+    "backfill_remaining": {
+      "n": 5,
+      "cold_ms": 0.6340830004774034,
+      "max_ms": 0.6340830004774034,
+      "median_ms": 0.5932910135015845
+    }
+  },
+  "scan_stmt_max_ms": 48.42875001486391,
+  "scan_plan_inversion": false,
+  "teardown_point": "empty",
+  "validated_in_run": true,
+  "teardown": {
+    "label": "empty",
+    "stamped": 0,
+    "nulled": 0,
+    "n_mutated": 0,
+    "commit_ms": 1.1998749687336385,
+    "scans": {
+      "repair_populate": {
+        "n": 5,
+        "cold_ms": 47.5342909921892,
+        "max_ms": 48.0690419790335,
+        "median_ms": 47.5342909921892
+      },
+      "repair_remaining": {
+        "n": 5,
+        "cold_ms": 47.795250022318214,
+        "max_ms": 48.09808300342411,
+        "median_ms": 47.795250022318214
+      },
+      "soundness_assert": {
+        "n": 5,
+        "cold_ms": 48.3452919870615,
+        "max_ms": 48.3452919870615,
+        "median_ms": 47.945667000021785
+      },
+      "repair_population_count": {
+        "n": 5,
+        "cold_ms": 48.15049999160692,
+        "max_ms": 48.42875001486391,
+        "median_ms": 48.11983398394659
+      },
+      "_diagnostic_bare_detector": {
+        "n": 5,
+        "cold_ms": 46.50145897176117,
+        "max_ms": 47.42145800264552,
+        "median_ms": 46.96125001646578
+      },
+      "coverage_assert": {
+        "n": 5,
+        "cold_ms": 1.0763339814729989,
+        "max_ms": 1.0763339814729989,
+        "median_ms": 0.5929170292802155
+      },
+      "backfill_remaining": {
+        "n": 5,
+        "cold_ms": 0.6340830004774034,
+        "max_ms": 0.6340830004774034,
+        "median_ms": 0.5932910135015845
+      }
+    }
+  },
+  "timings": {
+    "atomic_commit_empty": {
+      "n": 1,
+      "max_ms": 1.1998749687336385,
+      "median_ms": 1.1998749687336385,
+      "min_ms": 1.1998749687336385,
+      "total_ms": 1.1998749687336385
+    },
+    "coverage_assert_inline": {
+      "n": 1,
+      "max_ms": 1.1395409819670022,
+      "median_ms": 1.1395409819670022,
+      "min_ms": 1.1395409819670022,
+      "total_ms": 1.1395409819670022
+    },
+    "repair_populate_inline": {
+      "n": 1,
+      "max_ms": 47.52933298004791,
+      "median_ms": 47.52933298004791,
+      "min_ms": 47.52933298004791,
+      "total_ms": 47.52933298004791
+    },
+    "select_batch": {
+      "n": 1,
+      "max_ms": 1.1395419714972377,
+      "median_ms": 1.1395419714972377,
+      "min_ms": 1.1395419714972377,
+      "total_ms": 1.1395419714972377
+    },
+    "soundness_assert_inline": {
+      "n": 1,
+      "max_ms": 47.684499993920326,
+      "median_ms": 47.684499993920326,
+      "min_ms": 47.684499993920326,
+      "total_ms": 47.684499993920326
+    },
+    "validate": {
+      "n": 1,
+      "max_ms": 0.9467080235481262,
+      "median_ms": 0.9467080235481262,
+      "min_ms": 0.9467080235481262,
+      "total_ms": 0.9467080235481262
+    }
+  },
+  "database": "gr_m_atomic_empty",
+  "server_version": "PostgreSQL 18.4 (Homebrew) on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.0.123.102), 64-bit",
+  "timing_basis": "post_synthesis",
+  "dimension_bases": {
+    "pre_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 4096000,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 0,
+        "m_moves": 0,
+        "mean_plies_per_stale": null,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    },
+    "post_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 5431296,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 0,
+        "m_moves": 0,
+        "mean_plies_per_stale": null,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    }
+  },
+  "synthesis": {
+    "stamped_rows": 1646,
+    "analyzed": true
+  }
+}

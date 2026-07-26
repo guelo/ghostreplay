@@ -1,0 +1,63 @@
+{
+  "kind": "cancel_probe",
+  "scope": "batch",
+  "batch_size": 1000,
+  "dimensions_before": {
+    "total_rows": 4184,
+    "sessions_bytes": 4096000,
+    "m_total": 131676,
+    "moves_bytes": 45817856
+  },
+  "populations_before": {
+    "n_stale": 0,
+    "m_moves": 0,
+    "mean_plies_per_stale": null,
+    "n_broken_audit": 10,
+    "n_repair": 0
+  },
+  "trials": 20,
+  "discarded": 0,
+  "rows_locked": 1000,
+  "cancel_to_unlock_ms": {
+    "max": 1.9620420061983168,
+    "median": 0.8727915119379759,
+    "min": 0.3652920131571591
+  },
+  "rollback_only_teardown_ms": {
+    "max": 0.18437497783452272,
+    "median": 0.08179200813174248
+  },
+  "database": "gr_m_probe_batch",
+  "server_version": "PostgreSQL 18.4 (Homebrew) on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.0.123.102), 64-bit",
+  "timing_basis": "post_synthesis",
+  "dimension_bases": {
+    "pre_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 4096000,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 0,
+        "m_moves": 0,
+        "mean_plies_per_stale": null,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    },
+    "post_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 4096000,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 0,
+        "m_moves": 0,
+        "mean_plies_per_stale": null,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,220 @@
+{
+  "kind": "batch",
+  "batch_size": 100,
+  "repair_batch_size": 200,
+  "stamped": 646,
+  "nulled": 1000,
+  "dimensions_before": {
+    "total_rows": 4184,
+    "sessions_bytes": 6144000,
+    "m_total": 130676,
+    "moves_bytes": 45817856
+  },
+  "populations_before": {
+    "n_stale": 646,
+    "m_moves": 43009,
+    "mean_plies_per_stale": 66.57739938080495,
+    "n_broken_audit": 1003,
+    "n_repair": 1000
+  },
+  "dimensions_after": {
+    "total_rows": 4184,
+    "sessions_bytes": 6758400,
+    "m_total": 130676,
+    "moves_bytes": 45817856
+  },
+  "populations_after": {
+    "n_stale": 0,
+    "m_moves": 0,
+    "mean_plies_per_stale": null,
+    "n_broken_audit": 1003,
+    "n_repair": 0
+  },
+  "scans": {
+    "repair_populate": {
+      "n": 5,
+      "cold_ms": 54.39670803025365,
+      "max_ms": 55.75241701444611,
+      "median_ms": 55.377791984938085
+    },
+    "repair_remaining": {
+      "n": 5,
+      "cold_ms": 53.149000043049455,
+      "max_ms": 53.563541965559125,
+      "median_ms": 53.325582994148135
+    },
+    "soundness_assert": {
+      "n": 5,
+      "cold_ms": 52.95841698534787,
+      "max_ms": 53.77779097761959,
+      "median_ms": 52.83625004813075
+    },
+    "repair_population_count": {
+      "n": 5,
+      "cold_ms": 52.84312495496124,
+      "max_ms": 54.348292003851384,
+      "median_ms": 52.84312495496124
+    },
+    "_diagnostic_bare_detector": {
+      "n": 5,
+      "cold_ms": 52.69395903451368,
+      "max_ms": 52.69395903451368,
+      "median_ms": 52.54454200621694
+    },
+    "coverage_assert": {
+      "n": 5,
+      "cold_ms": 1.2347089941613376,
+      "max_ms": 1.2347089941613376,
+      "median_ms": 0.8199170115403831
+    },
+    "backfill_remaining": {
+      "n": 5,
+      "cold_ms": 1.1941249831579626,
+      "max_ms": 1.1941249831579626,
+      "median_ms": 1.0042079957202077
+    }
+  },
+  "scan_stmt_max_ms": 55.75241701444611,
+  "scan_plan_inversion": false,
+  "timings": {
+    "batch_commit": {
+      "n": 7,
+      "max_ms": 0.760458002332598,
+      "median_ms": 0.3267500433139503,
+      "min_ms": 0.22983294911682606,
+      "total_ms": 3.133624035399407
+    },
+    "coverage_assert_inline": {
+      "n": 1,
+      "max_ms": 1.1762920184992254,
+      "median_ms": 1.1762920184992254,
+      "min_ms": 1.1762920184992254,
+      "total_ms": 1.1762920184992254
+    },
+    "guarded_update": {
+      "n": 7,
+      "max_ms": 2.4366669822484255,
+      "median_ms": 2.2400409798137844,
+      "min_ms": 1.0725829633884132,
+      "total_ms": 14.80629196157679
+    },
+    "load_moves": {
+      "n": 7,
+      "max_ms": 33.176459022797644,
+      "median_ms": 23.057958984281868,
+      "min_ms": 12.146708031650633,
+      "total_ms": 171.29958397708833
+    },
+    "repair_batch_commit": {
+      "n": 5,
+      "max_ms": 0.6116669974289834,
+      "median_ms": 0.270332966465503,
+      "min_ms": 0.1955829793587327,
+      "total_ms": 1.8669579876586795
+    },
+    "repair_per_candidate": {
+      "n": 1000,
+      "max_ms": 1.3782500172965229,
+      "median_ms": 0.3626870166044682,
+      "min_ms": 0.2793750027194619,
+      "total_ms": 388.70336214313284
+    },
+    "repair_populate_inline": {
+      "n": 1,
+      "max_ms": 53.72395797166973,
+      "median_ms": 53.72395797166973,
+      "min_ms": 53.72395797166973,
+      "total_ms": 53.72395797166973
+    },
+    "single_batch": {
+      "n": 7,
+      "max_ms": 162.7799579873681,
+      "median_ms": 156.96916700107977,
+      "min_ms": 68.67316702846438,
+      "total_ms": 1011.5020840312354
+    },
+    "single_batch_rows": {
+      "n": 7,
+      "max_ms": 100.0,
+      "median_ms": 100.0,
+      "min_ms": 46.0,
+      "total_ms": 646.0
+    },
+    "single_repair_batch": {
+      "n": 5,
+      "max_ms": 90.86495800875127,
+      "median_ms": 76.55129203340039,
+      "min_ms": 76.39254099922255,
+      "total_ms": 398.07041600579396
+    },
+    "single_repair_batch_rows": {
+      "n": 5,
+      "max_ms": 200.0,
+      "median_ms": 200.0,
+      "min_ms": 200.0,
+      "total_ms": 1000.0
+    },
+    "single_session_compute": {
+      "n": 646,
+      "max_ms": 10.847207973711193,
+      "median_ms": 1.0794584813993424,
+      "min_ms": 0.026291992980986834,
+      "total_ms": 808.9038461912423
+    },
+    "soundness_assert_inline": {
+      "n": 1,
+      "max_ms": 52.474374999292195,
+      "median_ms": 52.474374999292195,
+      "min_ms": 52.474374999292195,
+      "total_ms": 52.474374999292195
+    },
+    "validate": {
+      "n": 1,
+      "max_ms": 0.9110000100918114,
+      "median_ms": 0.9110000100918114,
+      "min_ms": 0.9110000100918114,
+      "total_ms": 0.9110000100918114
+    }
+  },
+  "database": "gr_m_batch_100",
+  "server_version": "PostgreSQL 18.4 (Homebrew) on aarch64-apple-darwin25.4.0, compiled by Apple clang version 21.0.0 (clang-2100.0.123.102), 64-bit",
+  "timing_basis": "post_synthesis",
+  "dimension_bases": {
+    "pre_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 4096000,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 0,
+        "m_moves": 0,
+        "mean_plies_per_stale": null,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    },
+    "post_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 6144000,
+      "m_total": 130676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 646,
+        "m_moves": 43009,
+        "mean_plies_per_stale": 66.57739938080495,
+        "n_broken_audit": 1003,
+        "n_repair": 1000
+      }
+    }
+  },
+  "synthesis": {
+    "stale_rows": 1646,
+    "repair": {
+      "k_requested": 1000,
+      "k_corrupted": 1000
+    },
+    "analyzed": true
+  }
+}

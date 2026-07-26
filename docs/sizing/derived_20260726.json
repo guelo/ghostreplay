@@ -1,0 +1,497 @@
+{
+  "scaling": {
+    "full_restore": true,
+    "r_sessions": 1.0,
+    "r_moves": 1.0,
+    "snapshot_dimensions": {
+      "total_rows": 4184,
+      "sessions_bytes": 6144000,
+      "m_total": 130676,
+      "moves_bytes": 45817856
+    },
+    "production_dimensions": {
+      "total_rows": 4184,
+      "sessions_bytes": 6144000,
+      "m_total": 130676,
+      "moves_bytes": 45817856
+    },
+    "snapshot_populations": {
+      "n_stale": 646,
+      "m_moves": 43009,
+      "mean_plies_per_stale": "66.57739938080495",
+      "n_broken_audit": 1003,
+      "n_repair": 1000
+    },
+    "production_populations": {
+      "n_stale": 646,
+      "m_moves": 43009,
+      "mean_plies_per_stale": "66.57739938080495",
+      "n_broken_audit": 1003,
+      "n_repair": 1000
+    },
+    "frozen_basis": {
+      "source": "atomic snapshot docs/sizing/atomic_full_20260726.json",
+      "reading": "post_synthesis",
+      "dimensions": {
+        "total_rows": 4184,
+        "sessions_bytes": 6144000,
+        "m_total": 130676,
+        "moves_bytes": 45817856
+      }
+    },
+    "measurement_bases": [
+      {
+        "artifact": "docs/sizing/atomic_full_20260726.json",
+        "kind": "atomic",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 6144000,
+          "m_total": 130676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 2048000,
+          "m_total": -1000,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/atomic_empty_20260726.json",
+        "kind": "atomic",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 5431296,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 1335296,
+          "m_total": 0,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/batch_b100_r200_20260726.json",
+        "kind": "batch",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 6144000,
+          "m_total": 130676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 2048000,
+          "m_total": -1000,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/batch_b250_r500_20260726.json",
+        "kind": "batch",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 6144000,
+          "m_total": 130676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 2048000,
+          "m_total": -1000,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/batch_b500_r1000_20260726.json",
+        "kind": "batch",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 6144000,
+          "m_total": 130676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 2048000,
+          "m_total": -1000,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/batch_b1000_r2000_20260726.json",
+        "kind": "batch",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 6144000,
+          "m_total": 130676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 2048000,
+          "m_total": -1000,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/cancel_probe_batch_20260726.json",
+        "kind": "cancel_probe",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 0,
+          "m_total": 0,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/cancel_probe_atomic_20260726.json",
+        "kind": "cancel_probe",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "measured",
+        "pre_synthesis_recorded": true,
+        "pre_synthesis_dimensions": {
+          "total_rows": 4184,
+          "sessions_bytes": 4096000,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "synthesis_delta": {
+          "total_rows": 0,
+          "sessions_bytes": 0,
+          "m_total": 0,
+          "moves_bytes": 0
+        }
+      },
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_20260725.json",
+        "kind": "sweep_domain",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 4184,
+          "sessions_bytes": 5414912,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "not_recorded_legacy",
+        "pre_synthesis_recorded": false,
+        "pre_synthesis_dimensions": null,
+        "synthesis_delta": null
+      },
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_endpoint_20260725.json",
+        "kind": "sweep_domain",
+        "timing_basis": "post_synthesis",
+        "timings_paired_with": {
+          "total_rows": 8538,
+          "sessions_bytes": 14008320,
+          "m_total": 131676,
+          "moves_bytes": 45817856
+        },
+        "pre_synthesis_status": "not_recorded_legacy",
+        "pre_synthesis_recorded": false,
+        "pre_synthesis_dimensions": null,
+        "synthesis_delta": null
+      }
+    ]
+  },
+  "projected_ms": {
+    "T_backfill_prod": 989.5816551870666,
+    "T_repair_prod": 359.7914765123278,
+    "T_repair_per_candidate_snap": 0.3597914765123278,
+    "T_scan_stmt_snap": 56.81808403460309,
+    "T_scan_stmt_prod": 56.81808403460309,
+    "T_coverage_assert_snap": 1.291374966967851,
+    "T_coverage_assert_prod": 1.291374966967851,
+    "T_backfill_remaining_snap": 1.207208028063178,
+    "T_backfill_remaining_prod": 1.207208028063178,
+    "T_backfill_sweep_prod": 23.919770935458118,
+    "T_backfill_sweep_pages_prod": 2,
+    "sweep_scan_coeff_frozen_basis_ms": 23.592979310510103,
+    "sweep_scan_coeff_frozen_basis_ms_exact": "35354079496799386439/1498500000000000000",
+    "sweep_envelope_per_page_ms": 0.16339581247400786,
+    "sweep_envelope_per_page_ms_exact": "244848624992300761/1498500000000000000",
+    "sweep_envelope_active_constraints": [
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_endpoint_20260725.json",
+        "run": "",
+        "batch_size": 1,
+        "pages": 6001,
+        "max_ms": 1004.1312499670312,
+        "steers": true
+      },
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_endpoint_20260725.json",
+        "run": "",
+        "batch_size": 1000,
+        "pages": 7,
+        "max_ms": 24.736749997828156,
+        "steers": true
+      }
+    ],
+    "sweep_envelope_sum_overcharge_ms": 238.3702804264261,
+    "sweep_domain_points": 34,
+    "sweep_domain_objective_points": 22,
+    "sweep_domain_max_pages": 6001,
+    "sweep_copy_growth_factors": [
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_20260725.json",
+        "sessions_synthesized": false,
+        "dimensions_before": {
+          "total_rows": 4184,
+          "sessions_bytes": 5414912,
+          "m_total": 131676,
+          "moves_bytes": 45817856,
+          "note": "These are POST-synthesis dimensions -- what the timed statements actually saw. Each timing must stay paired with them; substituting pre-synthesis dimensions without rebasing the timings is mismatched provenance.",
+          "sibling_copies_note": "The seven sizing copies share a source restore and a game_sessions row count (4,184) but are NOT identical data: gr_p1_atomic and gr_p1_b100/250/500/1000 ran stale+repair synthesis (130,676 moves, N_stale=646), gr_p1_sweep ran stale only (131,676 moves, N_stale=1,646), gr_p1_empty ran stamped (131,676 moves, N_stale=0). Their game_sessions relations read 5,414,912..6,848,512 bytes -- PARTLY dead tuples from rewrite and vacuum state, PARTLY a genuinely different post-synthesis relation. A timing may only be normalized by the basis of the copy it actually ran on."
+        },
+        "populations_before": {
+          "n_stale": 1646
+        },
+        "timing_basis": "post_synthesis",
+        "pre_synthesis_status": "not_recorded_legacy",
+        "pre_synthesis_recorded": false,
+        "synthesis_delta": null,
+        "N_copy": 1.13464447806354,
+        "N_copy_exact": "750/661",
+        "points": 24,
+        "objective_points": 12
+      },
+      {
+        "artifact": "docs/sizing/sweep_batch_domain_endpoint_20260725.json",
+        "sessions_synthesized": true,
+        "dimensions_before": {
+          "total_rows": 8538,
+          "sessions_bytes": 14008320,
+          "m_total": 131676,
+          "moves_bytes": 45817856,
+          "note": "POST-synthesis -- what the timed statements actually saw, and the basis this artifact's timings must stay paired with. m_total and moves_bytes are the restore's own: --synthesize-sessions adds no session_moves rows, so no timing here may be scaled by a session_moves ratio."
+        },
+        "populations_before": {
+          "n_stale": 6000,
+          "m_moves": 109376,
+          "mean_plies_per_stale": "18.229333333333333",
+          "n_broken_audit": 10,
+          "n_repair": 0
+        },
+        "timing_basis": "post_synthesis",
+        "pre_synthesis_status": "not_recorded_legacy",
+        "pre_synthesis_recorded": false,
+        "synthesis_delta": null,
+        "N_copy": 1.0,
+        "N_copy_exact": "1",
+        "points": 10,
+        "objective_points": 10
+      }
+    ],
+    "T_atomic_teardown_floor_prod": 1.1998749687336385,
+    "T_atomic_teardown_per_row_prod": 0.0007440005969437222,
+    "N_mut_snap": 1646,
+    "max_single_session_compute_ms_observed": 20.31849999912083,
+    "max_batch_commit_ms_observed": 0.760458002332598,
+    "max_batch_cancel_to_unlock_ms_observed": "1.9620420061983168",
+    "max_atomic_cancel_to_unlock_ms_observed": "2.424499951303005",
+    "batch_probe_trials": 20,
+    "batch_probe_rows_locked": 1000,
+    "atomic_probe_trials": 20,
+    "atomic_probe_rows_locked": 1646,
+    "per_row_snap_ms": 1.5318601473484004,
+    "plies_growth": 1.0
+  },
+  "constants": {
+    "SIZED_TOTAL_ROWS": 4184,
+    "SIZED_SESSIONS_BYTES": 6144000,
+    "SIZED_M_TOTAL": 130676,
+    "SIZED_MOVES_BYTES": 45817856,
+    "MARGINED_MS_PER_ROW": 5,
+    "MARGINED_MS_PER_REPAIR_ROW": 2,
+    "MARGINED_MS_PER_SCAN_STMT": 171,
+    "MARGINED_MS_COVERAGE_ASSERT": 4,
+    "MARGINED_MS_BACKFILL_REMAINING": 4,
+    "MARGINED_MS_BACKFILL_SWEEP_SCAN": 71,
+    "MARGINED_US_BACKFILL_SWEEP_PER_PAGE": 491,
+    "SCAN_STMT_TIMEOUT_MS": 171,
+    "MAX_SINGLE_SESSION_COMPUTE_MS": 61,
+    "TEARDOWN_ALLOWANCE_MS": 6,
+    "MARGINED_MS_ATOMIC_TEARDOWN_FIXED": 4,
+    "MARGINED_US_ATOMIC_TEARDOWN_PER_ROW": 3,
+    "MAX_BATCH_SIZE": 646,
+    "DEFAULT_BATCH_SIZE": 646,
+    "REPAIR_BATCH_SIZE": 1000,
+    "EST_MAX_LOCK_HOLD_MS": 5006
+  },
+  "batch_sizing": {
+    "B_formula": 1000,
+    "B_tested": 646,
+    "B_bound_by": "tested",
+    "backfill_candidates": [
+      {
+        "requested_size": 100,
+        "demonstrated_size": 100,
+        "observed_max_ms": "162.7799579873681",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 250,
+        "demonstrated_size": 250,
+        "observed_max_ms": "390.1444170041941",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 500,
+        "demonstrated_size": 500,
+        "observed_max_ms": "771.1197910248302",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 1000,
+        "demonstrated_size": 646,
+        "observed_max_ms": "960.8577920007519",
+        "passes_3x": true,
+        "reached_requested_size": false
+      }
+    ],
+    "R_formula": 2500,
+    "R_tested": 1000,
+    "R_bound_by": "tested",
+    "repair_candidates": [
+      {
+        "requested_size": 200,
+        "demonstrated_size": 200,
+        "observed_max_ms": "90.86495800875127",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 500,
+        "demonstrated_size": 500,
+        "observed_max_ms": "206.17308298824355",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 1000,
+        "demonstrated_size": 1000,
+        "observed_max_ms": "465.1966670062393",
+        "passes_3x": true,
+        "reached_requested_size": true
+      },
+      {
+        "requested_size": 2000,
+        "demonstrated_size": 1000,
+        "observed_max_ms": "383.466207946185",
+        "passes_3x": true,
+        "reached_requested_size": false
+      }
+    ]
+  },
+  "invariants": {
+    "zero_batch_backfill_ok": true,
+    "zero_batch_repair_ok": true,
+    "est_lock_hold_fits": true,
+    "scan_budget_ms": 49782.7,
+    "scan_budget_limit_ms": 900000,
+    "scan_budget_ok": true,
+    "scan_budget_sweep_pages": 4185,
+    "sweep_envelope_covers_every_measured_point": true,
+    "sweep_domain_max_pages_vs_import_worst_case": {
+      "measured_max_pages": 6001,
+      "import_worst_case_pages": 4185,
+      "extrapolated": false
+    }
+  },
+  "decision_1": {
+    "batch_size_assumed": 646,
+    "T_stall_prod_ms": 1548.6702376849958,
+    "margined_stall_ms": 4646.010713054988,
+    "sweep_pages": 2,
+    "MAX_WRITER_STALL_MS": 30000,
+    "verdict": "atomic",
+    "GHOSTREPLAY_ACCURACY_BACKFILL_MODE": "atomic",
+    "batch_size_min_admitted": 1,
+    "T_stall_prod_ms_min_batch": 1654.060536730731,
+    "margined_stall_ms_min_batch": 4962.181610192193,
+    "sweep_pages_min_batch": 647,
+    "verdict_min_batch": "atomic"
+  }
+}

@@ -176,6 +176,25 @@ python -m scripts.size_accuracy_backfill --derive \
 Each batch candidate size needs its **own fresh copy**: the first run consumes
 the population.
 
+**Every `--out` file is evidence, and evidence gets committed.** A derivation
+whose inputs were not retained cannot be re-executed, so an error inside
+`derive()` is detectable only by re-reading the arithmetic in prose — which is
+the state §2 and §7 were left in, and what §8 exists to end. Retain every one,
+commit them under `docs/sizing/`, and name each one `<kind>_…_<date>.json` for
+the `kind` it declares: that directory is globbed by prefix (`sweep_*.json`
+selects the sweep domain), so a filename there is a selector rather than a label.
+The committed set and the command that consumes it are in
+[§8](#8-the-measurements-are-on-disk-g-b-size-measurement-json-2026-07-26).
+
+Every Phase 1 run — atomic, batch, cancel probe, sweep domain — reads the four
+dimensions **twice**: once before its synthesis block and once at the start of
+the measured pass. Both readings are written to its artifact under
+`dimension_bases`, alongside a `timing_basis` naming the one its timings are
+paired with, and Phase 2 refuses an artifact that carries neither. The pass
+reading is the basis; the earlier one is provenance, divided by nowhere. Why the
+two differ and what each is admissible for:
+[§7, the two dimension readings](#the-two-dimension-readings-g-b-size-harness-defects).
+
 ### What `--derive` refuses to do
 
 Phase 2 fails closed rather than substituting a default, because every one of
@@ -394,6 +413,28 @@ budget and a demonstration, and here the budget binds.
 Full restore assumed (`r_sessions = r_moves = 1.0`); no production dimensions
 file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 **3x** throughout.
+
+> **Which of these numbers has an artifact behind it.** Two do. Every other
+> measured constant in this section is a **transcription**: the §2 run's eight
+> measurement JSONs were never committed and its snapshot no longer exists, so the
+> arithmetic below can be re-read but not re-executed, and an error in it is
+> visible only by re-reading prose (`g-b-size-measurement-json`).
+>
+> | | Backed by | Re-derived by |
+> |---|---|---|
+> | `MARGINED_MS_BACKFILL_SWEEP_SCAN`, `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | `docs/sizing/sweep_*.json` | `test_frozen_sweep_model_matches_the_published_envelope` |
+> | everything else in this section | §2's tables only | nothing — no artifact to re-derive from |
+>
+> This is not a statement about whether the numbers are *right*. It is a statement
+> about what could catch them being wrong, and for the sweep pair that turned out
+> to matter twice: once when it retired the withdrawn OLS line, and once when it
+> was the only row of §7's derived table anything could check — which is how §8
+> found the two that were not.
+>
+> §8 commits a full measurement set for the **18.4 production restore** and makes
+> that derivation reproducible end to end. It does not make *these* literals
+> reproducible and nothing can: their fixture is gone. Re-freezing them from
+> committed evidence is `g-b-sizing-harness` (Phase 3).
 
 ### Policy bounds (chosen, not measured)
 
@@ -659,6 +700,15 @@ from-scratch environment will approach as it fills.
       production never did.
 - [ ] Record the health-window verdict and the final
       `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` for a from-scratch deploy.
+- [ ] **Commit every measurement `--derive` consumes**, and re-freeze the shipped
+      constants from that committed set rather than from a table. The artifacts
+      go in `docs/sizing/` alongside 2026-07-26's, as their own set and their own
+      `derived_…` rather than appended to that one, since a derivation's atomic
+      and batch timings have to come from a single fixture state.
+      §8 does this for the 18.4 production restore and it is the pattern to
+      follow, but it cannot reach §3's literals — their 15.18 snapshot is gone,
+      so only a re-freeze makes them reproducible. Until then §3's constants have
+      no artifact behind them and §3 says so (`g-b-size-measurement-json`).
 
 ---
 
@@ -716,6 +766,16 @@ sessions with no moves at all) are tracked separately in `g-acc-null-cohort`.
 **Owning bead:** `g-b-size-derive-backfill-terms`. This is the run that finally
 times `BACKFILL_REMAINING_SQL` and the selection sweep directly, instead of
 pricing them from the coverage assertion as §3 did.
+
+> **Which of this section's numbers has an artifact behind it.** The sweep
+> domains do — `docs/sizing/sweep_batch_domain_20260725.json` and
+> `…_endpoint_20260725.json`, which is why the fit, its vertex, its active
+> constraints and its coverage of every retained trial are all re-derived by
+> tests rather than read here. Everything else in §7 is a **transcription** of a
+> run whose copies were dropped and whose measurement JSONs were never retained:
+> the two directly-timed terms below, the atomic/batch/probe inputs, and the full
+> derived table. §8 re-measures the same fixture with every artifact committed,
+> and the first thing that comparison found was two wrong rows in that table.
 
 **Fixture.** The 2026-07-24 production dump, restored into a local Homebrew
 `postgresql@18` cluster — **18.4, production's exact major and minor** — with one
@@ -1433,6 +1493,16 @@ originals as well as clones) rather than leaving it to a separate flag.
 `--derive` over the eight measurements emits every constant. Recorded for the
 qualification bead, **not** applied to the revision:
 
+> **This table is a TRANSCRIPTION and cannot be regenerated.** None of the eight
+> measurements it was derived from was committed; the copies were dropped and the
+> run cannot be re-executed. §8 re-measures the same fixture, commits every
+> artifact, and finds two rows of this table wrong — the sweep pair below is at
+> the *shipped* basis while every other row is at this run's, and the scan
+> coefficient at this run's basis is 71 or 44, not 72. See
+> [what the artifacts caught](#what-the-artifacts-caught-two-mixed-basis-rows-in-7s-table).
+> Nothing frozen moved: the shipped pair is the LP at the shipped basis, and
+> always was.
+
 | Constant | §3 frozen (15.18) | This run (18.4) |
 |---|---|---|
 | `SIZED_TOTAL_ROWS` | 6,000 | 4,184 |
@@ -1444,8 +1514,8 @@ qualification bead, **not** applied to the revision:
 | `MARGINED_MS_PER_SCAN_STMT` | 521 | 164 |
 | `MARGINED_MS_COVERAGE_ASSERT` | 6 | 4 |
 | `MARGINED_MS_BACKFILL_REMAINING` | 6 | 4 |
-| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | 72 — fitted from the sweep domain on this restore, so this row is not a second reading of the same thing |
-| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | 518 — likewise |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | ~~72~~ — **wrong: the shipped value restated.** At this run's own basis the same evidence gives 71, or 44 from the baseline artifact alone (§8) |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | 518 — right, but by coincidence: `b` is basis-independent for the baseline-alone fit, so this *is* what the run emitted |
 | `SCAN_STMT_TIMEOUT_MS` | 521 | 164 |
 | `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | 68 |
 | `TEARDOWN_ALLOWANCE_MS` | 7 | 7 |
@@ -1602,3 +1672,262 @@ gets 100. Regression test:
 `test_release_b_pg_matrix.py::test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_present`,
 PostgreSQL-gated and pinned in the gate manifest. It fails against the previous
 SQL and passes against the fix.
+
+---
+
+## 8. The measurements are on disk (`g-b-size-measurement-json`, 2026-07-26)
+
+**Every derived constant above this line except the sweep pair was a
+transcription.** `--derive` consumes one JSON per Phase 1 run — eight for §7's
+derivation, ten for this one — and exactly two of them were ever committed: the
+sweep domains. So the sweep model was the only constant with a re-runnable path
+from evidence to literal, and §7's derivation as a whole could not be
+re-executed. The other rows of §3 and §7 were tables in a runbook with no
+artifact behind them, which is the same defect the withdrawn OLS line already
+suffered one level up: only the maxima had been kept, so nothing could be checked
+against its inputs.
+
+This is a claim about the DERIVED sizing constants, and only those. The
+admission gate, the backfill itself and the Phase 0 verification are executable
+and tested elsewhere; §§1–6 are not in question here.
+
+The measurement set below closes that for the derivation as a whole. It is a
+**new run**, not a recovery: the 2026-07-25 copies were dropped and the numbers
+in §7 above stay what they are, a transcription of a run whose inputs are gone.
+
+### What is committed
+
+| File | Kind | What it measures |
+|---|---|---|
+| [`docs/sizing/atomic_full_20260726.json`](sizing/atomic_full_20260726.json) | `atomic` | Phase 1a — the full teardown point, `N_mut_snap = 1,646` |
+| [`docs/sizing/atomic_empty_20260726.json`](sizing/atomic_empty_20260726.json) | `atomic` | Phase 1a' — the empty teardown point, own fresh copy, `VALIDATE` executed |
+| [`docs/sizing/batch_b100_r200_20260726.json`](sizing/batch_b100_r200_20260726.json) | `batch` | Phase 1b candidate, backfill 100 / repair 200 |
+| [`docs/sizing/batch_b250_r500_20260726.json`](sizing/batch_b250_r500_20260726.json) | `batch` | candidate, 250 / 500 |
+| [`docs/sizing/batch_b500_r1000_20260726.json`](sizing/batch_b500_r1000_20260726.json) | `batch` | candidate, 500 / 1,000 |
+| [`docs/sizing/batch_b1000_r2000_20260726.json`](sizing/batch_b1000_r2000_20260726.json) | `batch` | candidate, 1,000 / 2,000 — the fixture ceiling |
+| [`docs/sizing/cancel_probe_batch_20260726.json`](sizing/cancel_probe_batch_20260726.json) | `cancel_probe` | Phase 1c, **batch** scope, 1,000 rows locked |
+| [`docs/sizing/cancel_probe_atomic_20260726.json`](sizing/cancel_probe_atomic_20260726.json) | `cancel_probe` | Phase 1c, **atomic** scope, 1,646 rows locked |
+| [`docs/sizing/sweep_batch_domain_20260725.json`](sizing/sweep_batch_domain_20260725.json) | `sweep_domain` | `gr_p1_sweep`, §7 — unchanged |
+| [`docs/sizing/sweep_batch_domain_endpoint_20260725.json`](sizing/sweep_batch_domain_endpoint_20260725.json) | `sweep_domain` | `gr_p2_sweep6000`, §7 — unchanged |
+| [`docs/sizing/derived_20260726.json`](sizing/derived_20260726.json) | — | `--derive`'s own output over all ten |
+
+**A filename in `docs/sizing/` is a selector, not a label.** The sweep artifacts
+are chosen by globbing `sweep_*.json`, so a measurement whose name could match
+that glob without being a sweep domain would silently enter the fit. Every file
+there is named `<kind>_…_<date>.json` for the `kind` it declares, and
+`derived_…` is reserved for a derivation's output, which is not a measurement and
+carries no `kind`.
+`test_docs_sizing_holds_measurement_artifacts_named_for_their_kind` enforces that
+over **every** file in the directory, not just the ones this section lists: it
+refuses a name and a `kind` that disagree, refuses a name with no kind prefix at
+all, and refuses a `derived_…` file carrying a `kind`.
+
+Membership is the separate question, and the directory is not the answer to it.
+Which artifacts a derivation stands on is fixed by the table above, mirrored in
+the test as `_COMMITTED_DERIVATION_SET`; all the directory has to satisfy is that
+those files are still present. Adding artifacts is therefore expected and
+allowed — Phase 3 measures into this same directory — and they belong in a set
+and a `derived_…` of their own rather than appended to this one, because the
+atomic and batch timings of a derivation have to come from a single fixture
+state. The sweep domains are the exception the harness already handles: they are
+fitted on their own copies' bases via `N_copy`, which is how the 2026-07-25 pair
+sits in a 2026-07-26 derivation without mixing readings.
+
+### The fixture, and re-running it
+
+The same 2026-07-24 dump and the same 18.4 cluster as §7 —
+`tmp/ghostreplay-20260724T101501Z.dump` restored with `postgresql@18`'s own
+`pg_restore` (`--no-owner --no-privileges`, port 5433). It came up as §0's
+fixture exactly: `alembic_version` `20260720_01`, 4,184 `game_sessions`, 131,676
+`session_moves`, 1,646 ended-visible, `ck_game_sessions_player_accuracy`
+`convalidated`. One disposable copy per run, cloned `CREATE DATABASE … TEMPLATE`;
+each atomic and batch copy drops and re-adds the CHECK `NOT VALID`
+(`20260709_01`'s condition verbatim), reconstructing the pre-`20260719_01` state.
+The two probe copies do not — the probe never calls `time_validate`.
+
+Populations come from the harness's own synthesis, `K = 1000`, which leaves
+`N_stale = 646` on production's 1,646 ended-visible sessions: the same fixture
+ceiling §7 records, and the same reason `B_TESTED` is not frozen.
+
+Phase 2 is pure arithmetic over the committed files and needs no database, so it
+re-runs from a clean checkout:
+
+```
+python backend/scripts/size_accuracy_backfill.py --derive \
+  --measurement docs/sizing/atomic_full_20260726.json \
+  --measurement docs/sizing/atomic_empty_20260726.json \
+  --measurement docs/sizing/batch_b100_r200_20260726.json \
+  --measurement docs/sizing/batch_b250_r500_20260726.json \
+  --measurement docs/sizing/batch_b500_r1000_20260726.json \
+  --measurement docs/sizing/batch_b1000_r2000_20260726.json \
+  --measurement docs/sizing/cancel_probe_batch_20260726.json \
+  --measurement docs/sizing/cancel_probe_atomic_20260726.json \
+  --measurement docs/sizing/sweep_batch_domain_20260725.json \
+  --measurement docs/sizing/sweep_batch_domain_endpoint_20260725.json \
+  --out docs/sizing/derived_20260726.json
+```
+
+Run from the repo root, and with those relative paths: `main` labels every
+artifact with the path it was handed, so the emitted provenance — and therefore
+the committed output — is a function of these strings as well as of the files.
+`test_the_committed_measurement_set_re_derives_its_published_output` re-runs
+exactly this and compares the serialized payload, so an edited artifact, a changed
+formula or a reordered input set fails the gate.
+
+### The two dimension readings, and the measured inputs
+
+On the atomic full point, the copy `SIZED_*` is frozen from:
+
+| | pre-synthesis | post-synthesis (`timing_basis`) |
+|---|---|---|
+| `count(*) game_sessions` | 4,184 | 4,184 |
+| `pg_total_relation_size('game_sessions')` | 4,096,000 | 6,144,000 |
+| `count(*) session_moves` | 131,676 | 130,676 |
+| `pg_total_relation_size('session_moves')` | 45,817,856 | 45,817,856 |
+
+Both are recorded on every artifact, `g-b-size-harness-defects`'s fix working as
+designed on a run that was measured after it: the 2,048,000-byte displacement is
+`synthesize_stale`'s dead tuples, the 1,000-row one is `synthesize_repair`
+deleting a ply from each of `K` sessions. `SIZED_*` is frozen from the
+post-synthesis reading, which is what the timed statements ran against.
+
+| Measurement | Value |
+|---|---|
+| `N_stale` / `N_repair` / `M_moves` (of the stale set) | 646 / 1,000 / 43,009 (66.58 mean plies) |
+| `VALIDATE CONSTRAINT` (full point / empty point) | 0.895 ms / 0.947 ms |
+| Backfill total (select + load + compute + guarded update), 646 sessions | 989.6 ms |
+| `per_row_snap` | 1.532 ms/session |
+| `max_single_session_compute_ms` (n = 646) | 20.32 ms (median 1.106 ms) |
+| `T_repair_per_candidate`, scans excluded (n = 1,000) | median 0.360 ms (max 1.491 ms) |
+| `T_atomic_teardown_empty` — `COMMIT` mutating **nothing**, own fresh restore | 1.200 ms |
+| `T_atomic_teardown_full` — `COMMIT` at `N_mut_snap` = 1,646 | 1.173 ms |
+| `max_batch_commit_ms` — both phases, across all four candidates | 0.760 ms |
+| `max_batch_cancel_to_unlock_ms` — batch scope, 20 trials, 0 discarded, 1,000 rows locked | **1.962 ms** |
+| `rollback_only_teardown_ms` beside it | 0.184 ms |
+| `max_atomic_cancel_to_unlock_ms` — atomic scope, 20 trials, 0 discarded, 1,646 rows locked | **2.424 ms** |
+| `rollback_only_teardown_ms` beside it | 0.173 ms |
+
+The empty point's `COMMIT` came in **above** the full point's — 1.200 ms against
+1.173 ms — which is what a 27 µs difference between two single-sample commits
+looks like on a laptop, and it does not corrupt the slope: the full point's
+teardown is `max(commit, atomic cancel-to-unlock)` = 2.424 ms, because an atomic
+run that breaches rolls back the whole population. The slope is
+`(2.424 − 1.200) / 1,646` = 0.744 µs/row. It is worth naming rather than
+smoothing, because it is the direct evidence that a *single* commit sample cannot
+resolve the floor from the slope at this transaction size, and that the frozen
+pair rests on the cancel path instead.
+
+Scan-bearing statements, 5 trials each at `N_repair` = 1,000:
+
+| Statement | Cold (ms) | Max (ms) | Median (ms) |
+|---|---|---|---|
+| `REPAIR_POPULATE_SQL` | 54.88 | **56.82** | 54.65 |
+| `REPAIR_REMAINING_SQL` | 52.66 | 52.83 | 51.92 |
+| `SOUNDNESS_ASSERT_SQL` | 53.29 | 53.29 | 52.31 |
+| repair population count (pre-flight) | 52.16 | 53.17 | 52.16 |
+| — bare `PLY_DETECTOR_SQL` *(diagnostic only, never priced)* | 50.92 | 52.87 | 51.86 |
+| `COVERAGE_ASSERT_SQL` | 1.29 | **1.29** | 0.86 |
+| `BACKFILL_REMAINING_SQL` | 1.21 | **1.21** | 1.02 |
+
+`scan_plan_inversion` is **false** (complete statements 52.8–56.8 ms, bare
+detector 52.9 ms), the design's stated relationship holding.
+
+Four candidates, one fresh copy each, both phases per run:
+
+| Backfill batch: requested | demonstrated | Observed max single batch | `3x` | Passes |
+|---|---|---|---|---|
+| 100 | 100 | 162.8 ms | 488 ms | ✅ |
+| 250 | 250 | 390.1 ms | 1,170 ms | ✅ |
+| 500 | 500 | 771.1 ms | 2,313 ms | ✅ |
+| 1,000 | **646** | 960.9 ms | 2,883 ms | ✅ ← `B_tested`, fixture-bound |
+
+| Repair batch: requested | demonstrated | Observed max single batch | `3x` | Passes |
+|---|---|---|---|---|
+| 200 | 200 | 90.9 ms | 273 ms | ✅ |
+| 500 | 500 | 206.2 ms | 619 ms | ✅ |
+| 1,000 | **1,000** | 465.2 ms | 1,396 ms | ✅ ← `R_tested`, fixture-bound |
+| 2,000 | 1,000 | 383.5 ms | 1,150 ms | ✅ |
+
+Both `_tested` values are the **demonstrated page cardinality**, not the requested
+`LIMIT`, and both are bounded by the fixture rather than by the deadline: 646 is
+the whole stale population and 1,000 the whole repair population.
+
+### The derived table, and why it is still *not* frozen
+
+| Constant | §3 frozen (15.18) | This run (18.4), artifact-backed |
+|---|---|---|
+| `SIZED_TOTAL_ROWS` | 6,000 | 4,184 |
+| `SIZED_SESSIONS_BYTES` | 10,010,624 | 6,144,000 |
+| `SIZED_M_TOTAL` | 357,000 | 130,676 |
+| `SIZED_MOVES_BYTES` | 93,241,344 | 45,817,856 |
+| `MARGINED_MS_PER_ROW` | 5 | 5 |
+| `MARGINED_MS_PER_REPAIR_ROW` | 2 | 2 |
+| `MARGINED_MS_PER_SCAN_STMT` | 521 | 171 |
+| `MARGINED_MS_COVERAGE_ASSERT` | 6 | 4 |
+| `MARGINED_MS_BACKFILL_REMAINING` | 6 | 4 |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | **71 — at this run's basis, not a second reading of 72; see below** |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | **491 — likewise** |
+| `SCAN_STMT_TIMEOUT_MS` | 521 | 171 |
+| `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | 61 |
+| `TEARDOWN_ALLOWANCE_MS` | 7 | 6 |
+| `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | 4 |
+| `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` | 2 | 3 |
+| `MAX_BATCH_SIZE` / `DEFAULT_BATCH_SIZE` | 1,000 | 646 |
+| `REPAIR_BATCH_SIZE` | 2,500 | 1,000 |
+| `EST_MAX_LOCK_HOLD_MS` | 5,007 | 5,006 |
+
+Decision 1 re-runs to the same verdict: `T_stall_prod = 1,548.7 ms`, margined
+4,646.0 ms against `MAX_WRITER_STALL_MS = 30,000` — **atomic**. At the minimum
+admitted batch size it is 1,654.1 ms margined to 4,962.2 ms, still atomic.
+
+The three reasons §7 gives for recording rather than applying its table all still
+hold, minus the one `g-b-size-harness-defects` closed: the byte dimensions are
+not production's (§0), and `MAX_BATCH_SIZE` / `REPAIR_BATCH_SIZE` are
+fixture-bounded. The pre-synthesis reading is now recorded, so that objection is
+gone; what replaces it is the general rule the sweep rows below make concrete —
+**a frozen term and the basis it was measured against have to move together**, and
+this run's basis is not the shipped one.
+
+### What the artifacts caught: two mixed-basis rows in §7's table
+
+The sweep coefficients are solved in **frozen-basis coordinates**, so both are a
+function of the basis the same derivation freezes. Over the same two sweep
+artifacts:
+
+| Basis | Sweep evidence | `a` (ms) | `b` (µs/page) | Margined |
+|---|---|---|---|---|
+| shipped `SIZED_*`, 6,000 / 10,010,624 | both | 23.867343 | 172.440 | **72 / 518** |
+| this restore, 4,184 / 6,144,000 | both | 23.592979 | 163.396 | **71 / 491** |
+| this restore, 4,184 / 6,144,000 | `gr_p1_sweep` alone | 14.648533 | 172.440 | **44 / 518** |
+
+[§7's full derived table](#full-derived-table-and-why-it-is-not-frozen) lists
+**72** and **518** in a column whose every other row is at that run's own basis of
+4,184 / 6,144,000. At that basis the sweep evidence gives 71 (both artifacts) or
+44 (the baseline alone) — never 72, which is the value at the shipped basis. The
+per-page slope reads as consistent for a reason worth stating: `b` is
+basis-independent for the baseline-alone fit, so **518** is what that run would
+have emitted while **72** is not.
+
+That is a transcription defect, not a derivation defect — no constant moved, and
+the shipped pair is and remains the LP at the shipped basis, which
+`test_frozen_sweep_model_matches_the_published_envelope` has re-derived from
+committed evidence throughout. It is recorded here because it is exactly the
+failure the bead predicted: a table that cannot be regenerated cannot be checked,
+and the row that was wrong was the one row whose inputs happened to be on disk.
+
+### What this does and does not make reproducible
+
+**Does.** Every term `--derive` computes, from evidence in the repo, on any
+checkout, with the gate failing closed if an artifact or a formula changes
+underneath the published output.
+
+**Does not.** The §3 literals the revision actually ships. They were measured on
+PostgreSQL 15.18 against a locally synthesized 6,000-row snapshot that no longer
+exists, and no run on any other fixture can return them — this one included. The
+sweep pair remains the sole exception, because its inputs were committed and its
+solver is pure. A test cannot fail closed when someone edits
+`MARGINED_MS_PER_SCAN_STMT` without re-measuring; what it can now do, and does, is
+fail closed when the *artifact-backed* table drifts from the artifacts. Closing
+the remaining gap means re-freezing the shipped constants from a committed
+measurement set, which is `g-b-sizing-harness` (Phase 3) and its from-scratch
+scope in §5.

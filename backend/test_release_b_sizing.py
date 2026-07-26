@@ -1437,7 +1437,9 @@ def test_production_zero_populations_do_not_project_the_snapshots_row_work():
 # the evidence on disk.
 # ---------------------------------------------------------------------------
 
-_SWEEP_ARTIFACT = _BACKEND_DIR.parent / "docs" / "sizing" / "sweep_batch_domain_20260725.json"
+_SIZING_DIR = _BACKEND_DIR.parent / "docs" / "sizing"
+
+_SWEEP_ARTIFACT = _SIZING_DIR / "sweep_batch_domain_20260725.json"
 
 #: The endpoint basis (``g-b-sweep-endpoint-measure``), measured on a row-cloned
 #: copy out to ``IMPORT_WORST_CASE_SWEEP_PAGES``.
@@ -1454,15 +1456,20 @@ _FROZEN_BASIS = {
 def _shipped_sweep_artifacts() -> list[tuple[str, dict]]:
     """Every sweep-domain artifact on disk, through the EXACT-decimal intake.
 
-    The glob stands in for ``derive``'s own selection, which these tests cannot
-    reach: ``derive`` picks its sweep inputs by ``kind == "sweep_domain"`` and
-    refuses the pre-schema shape outright, but getting that far needs the
-    atomic/batch/probe measurements, and those were never committed
-    (``g-b-size-measurement-json``). So both selection rules are ASSERTED here
-    rather than assumed. An artifact that quietly stopped matching them would be
-    fitted by every test below while the real derivation ignored it — a
-    disagreement between the evidence the suite checks and the evidence the
-    constants come from, which is the one thing this file exists to prevent.
+    The glob has to agree with ``derive``'s own selection, which picks its sweep
+    inputs by ``kind == "sweep_domain"`` and refuses the pre-schema shape
+    outright. Both rules are ASSERTED here rather than assumed: an artifact that
+    quietly stopped matching them would be fitted by every test below while the
+    real derivation ignored it — a disagreement between the evidence the suite
+    checks and the evidence the constants come from, which is the one thing this
+    file exists to prevent.
+
+    That the two agree is no longer only asserted rule-by-rule. The
+    atomic/batch/probe measurements are on disk now
+    (``g-b-size-measurement-json``), so ``derive`` runs end to end over the
+    committed set and names the sweep inputs it actually selected — checked
+    against this glob in
+    ``test_the_committed_derivation_selects_exactly_the_shipped_sweep_artifacts``.
     """
     paths = sorted(_SWEEP_ARTIFACT.parent.glob("sweep_*.json"))
     assert paths, f"no sweep-domain artifact under {_SWEEP_ARTIFACT.parent}"
@@ -1577,6 +1584,208 @@ def test_frozen_sweep_model_covers_every_retained_measurement():
     assert {(run, pages) for _, run, pages in slacks[:2]} == {("C", 824), ("B", 4)}
 
 
+# ---------------------------------------------------------------------------
+# The committed derivation set: `--derive`, end to end, over evidence on disk.
+#
+# `g-b-size-measurement-json`. Every number `--derive` consumes used to survive
+# as a TRANSCRIPTION in the runbook, and a transcription cannot be re-run: a
+# derivation error affecting a non-sweep constant was detectable only by
+# re-reading arithmetic in prose. The sweep pair was the single exception —
+# `solve_sweep_envelope` is a pure function of artifacts that WERE committed, so
+# `test_frozen_sweep_model_matches_the_published_envelope` can re-derive it.
+#
+# The measurements below give every other term the same property. What they do
+# NOT give it is the §3 literals the revision ships: those were measured on
+# PostgreSQL 15.18 against a locally synthesized 6,000-row snapshot that no
+# longer exists, and no run on any other fixture can return them. So the claim
+# these tests make is the one the evidence supports — this derivation is
+# reproducible, and its basis is not the shipped basis — and
+# `test_the_committed_derivation_is_recorded_not_applied` is where the difference
+# is pinned rather than glossed.
+# ---------------------------------------------------------------------------
+
+#: The measurement set `--derive` consumes, as the repo-relative paths the
+#: runbook's §8 command passes it. The paths are load-bearing: `main` labels each
+#: artifact with the path it was given, so the emitted provenance — and therefore
+#: the committed output below — is a function of these strings as well as of the
+#: files' contents.
+#:
+#: ONE RUN's manifest, not a listing of `docs/sizing/`. Phase 3 re-measures into
+#: the same directory, and its artifacts belong in a set and a `derived_*.json`
+#: of their own rather than appended here: the atomic and batch timings have to
+#: come from a single fixture state for the frozen basis to mean anything. The
+#: sweep domains are the exception the harness already handles — they are fitted
+#: on their own copies' bases via `N_copy`, which is why the 2026-07-25 pair sits
+#: in a 2026-07-26 derivation without mixing readings.
+_COMMITTED_DERIVATION_SET = (
+    "docs/sizing/atomic_full_20260726.json",
+    "docs/sizing/atomic_empty_20260726.json",
+    "docs/sizing/batch_b100_r200_20260726.json",
+    "docs/sizing/batch_b250_r500_20260726.json",
+    "docs/sizing/batch_b500_r1000_20260726.json",
+    "docs/sizing/batch_b1000_r2000_20260726.json",
+    "docs/sizing/cancel_probe_batch_20260726.json",
+    "docs/sizing/cancel_probe_atomic_20260726.json",
+    "docs/sizing/sweep_batch_domain_20260725.json",
+    "docs/sizing/sweep_batch_domain_endpoint_20260725.json",
+)
+
+_COMMITTED_DERIVED = _SIZING_DIR / "derived_20260726.json"
+
+#: What a `docs/sizing/` filename's leading token declares its `kind` to be. The
+#: sweep artifacts predate the convention and keep their `sweep_` prefix, which is
+#: exactly why one is needed: `_shipped_sweep_artifacts` selects them by globbing
+#: `sweep_*.json`, so any artifact whose name could match that glob without being
+#: a sweep domain would enter the fit.
+_ARTIFACT_NAME_KINDS = {
+    "sweep_": "sweep_domain",
+    "atomic_": "atomic",
+    "batch_": "batch",
+    "cancel_probe_": "cancel_probe",
+}
+
+
+def _committed_measurements() -> list[dict]:
+    """The committed set through `main`'s own intake, labelled the way it labels."""
+    out = []
+    for rel in _COMMITTED_DERIVATION_SET:
+        doc = harness._load_measurement_json(str(_BACKEND_DIR.parent / rel))
+        doc.setdefault("artifact", rel)
+        out.append(doc)
+    return out
+
+
+def test_the_committed_measurement_set_re_derives_its_published_output():
+    """`--derive` runs end to end from the repo, and returns what is committed.
+
+    The check the bead exists for. `derive` is pure arithmetic over its inputs, so
+    the committed measurements and the committed output are a closed pair: edit an
+    artifact, change a formula, or reorder the inputs, and this fails. Compared as
+    the SERIALIZED payload `main` writes, not field by field, because a
+    field-by-field comparison silently ignores whatever it forgot to look at —
+    and the terms most worth catching a change in are the ones no assertion here
+    thought to name.
+
+    It cannot fail closed on an edit to a SHIPPED literal, and no test can: the
+    §3 constants were measured on PostgreSQL 15.18 against a snapshot that no
+    longer exists. What it does fail closed on is this table drifting from the
+    evidence behind it, which is the property §7's transcription never had.
+    """
+    fresh = json.dumps(harness.derive(_committed_measurements(), None), indent=2, default=str)
+    assert fresh + "\n" == _COMMITTED_DERIVED.read_text()
+
+
+def test_the_committed_derivation_selects_exactly_the_shipped_sweep_artifacts():
+    """`derive`'s own selection, against the glob every sweep test fits over.
+
+    `_shipped_sweep_artifacts` globs `sweep_*.json` and asserts the two rules
+    `derive` selects by; this asserts the selections THEMSELVES agree, over the
+    real input set. An artifact that matched the glob but not `kind`, or reached
+    `derive` from somewhere the glob does not look, would leave the suite fitting
+    a different domain than the derivation does.
+    """
+    out = harness.derive(_committed_measurements(), None)
+    selected = [b["artifact"] for b in out["projected_ms"]["sweep_copy_growth_factors"]]
+    assert selected == [f"docs/sizing/{name}" for name, _ in _shipped_sweep_artifacts()]
+    # And every OTHER committed artifact reached the derivation too — the set is
+    # the whole set, not the subset that happens to be fitted.
+    assert [b["artifact"] for b in out["scaling"]["measurement_bases"]] == list(
+        _COMMITTED_DERIVATION_SET
+    )
+
+
+def test_the_committed_derivation_is_recorded_not_applied():
+    """A term and the basis it was measured against have to move together.
+
+    This run is a production restore on PostgreSQL 18.4; the shipped constants
+    were frozen on 15.18 against a 6,000-row synthesized snapshot. The two tables
+    are NOT alternative readings of one quantity, and the guard against reading
+    them as such is that the derived basis is traceable to an artifact rather than
+    to prose: `SIZED_*` here is the atomic full point's own post-synthesis
+    reading, and it is not the shipped one.
+
+    The sweep pair makes the point sharpest, because it is the one term both
+    tables contain and the same LP produces both. Solved in frozen-basis
+    coordinates, its coefficients are a function of the basis declared — so
+    `derive` returns 71 / 491 µs at THIS run's 4,184 rows / 6,144,000 bytes and
+    the shipped 72 / 518 µs at 6,000 / 10,010,624, from the very same two sweep
+    artifacts. Copying one row of this table onto the other basis is the error the
+    arrangement is built to prevent.
+    """
+    out = harness.derive(_committed_measurements(), None)
+    consts, basis = out["constants"], out["scaling"]["frozen_basis"]
+
+    atomic_full = harness._load_measurement_json(
+        str(_BACKEND_DIR.parent / _COMMITTED_DERIVATION_SET[0])
+    )
+    assert basis["source"] == f"atomic snapshot {_COMMITTED_DERIVATION_SET[0]}"
+    assert basis["reading"] == "post_synthesis"
+    assert basis["dimensions"] == {
+        k: int(atomic_full["dimensions_before"][k]) for k in harness.DIMENSION_KEYS
+    }
+
+    # Recorded, not applied — asserted so that applying a row without its basis
+    # cannot pass quietly.
+    assert consts["SIZED_TOTAL_ROWS"] == 4_184 != mod.SIZED_TOTAL_ROWS
+    assert consts["SIZED_SESSIONS_BYTES"] == 6_144_000 != mod.SIZED_SESSIONS_BYTES
+
+    # The same two artifacts, the same LP, two bases. Neither pair is a correction
+    # of the other.
+    assert (
+        consts["MARGINED_MS_BACKFILL_SWEEP_SCAN"],
+        consts["MARGINED_US_BACKFILL_SWEEP_PER_PAGE"],
+    ) == (71, 491)
+    at_shipped_basis = harness.solve_sweep_envelope(_shipped_sweep_points())
+    assert mod.MARGINED_MS_BACKFILL_SWEEP_SCAN == math.ceil(
+        harness.MARGIN * at_shipped_basis["a"]
+    ) == 72
+    assert mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE == math.ceil(
+        harness.MARGIN * at_shipped_basis["b"] * 1000
+    ) == 518
+
+
+def test_docs_sizing_holds_measurement_artifacts_named_for_their_kind():
+    """The naming convention, enforced rather than described.
+
+    `docs/sizing/` is globbed by prefix — `sweep_*.json` is how the sweep domain
+    is selected — so a filename is a selector and not a label. Every measurement
+    there must declare the kind its name claims, and that holds over the whole
+    directory rather than over one generation's set: Phase 3 measures into this
+    same directory, and a convention checked only against the files that exist
+    today stops being checked the moment it is used.
+
+    Which artifacts a given derivation stands on is a separate question, answered
+    by `_COMMITTED_DERIVATION_SET` and not by what happens to be on disk. All this
+    asserts about that is that the inputs it names are still here.
+    """
+    on_disk = sorted(p.name for p in _SIZING_DIR.glob("*.json"))
+    named = {pathlib.PurePosixPath(rel).name for rel in _COMMITTED_DERIVATION_SET}
+    missing = (named | {_COMMITTED_DERIVED.name}) - set(on_disk)
+    assert not missing, (
+        f"the committed derivation names artifacts that are gone: {sorted(missing)}"
+    )
+
+    for name in on_disk:
+        if name.startswith("derived_"):
+            # A derivation's OUTPUT rather than a measurement, so it has no `kind`
+            # to agree with. Asserted, not assumed: otherwise `derived_` becomes a
+            # prefix under which a measurement can sit outside the convention.
+            assert "kind" not in harness._load_measurement_json(str(_SIZING_DIR / name)), (
+                f"{name} carries a `kind` — a measurement named as a derivation output"
+            )
+            continue
+        prefixes = [p for p in _ARTIFACT_NAME_KINDS if name.startswith(p)]
+        assert prefixes, f"{name}: no kind prefix — it cannot be selected by name"
+        # Longest match: `cancel_probe_` starts with no other prefix, but a future
+        # `batch_domain_` would sit under `batch_`.
+        prefix = max(prefixes, key=len)
+        doc = harness._load_measurement_json(str(_SIZING_DIR / name))
+        assert doc["kind"] == _ARTIFACT_NAME_KINDS[prefix], (
+            f"{name} declares kind {doc['kind']!r}, its name declares "
+            f"{_ARTIFACT_NAME_KINDS[prefix]!r}"
+        )
+
+
 def test_measured_sweep_domain_reaches_the_page_count_the_budget_charges():
     """The domain is MEASURED to the endpoint, and the constant says so.
 
@@ -1636,10 +1845,10 @@ def test_the_endpoint_basis_enters_the_fit_without_moving_it():
     assert endpoint_doc.get("kind") == "sweep_domain"
     assert endpoint_doc.get("sessions_synthesized") is True
 
-    # And that guard in `derive`'s own code, over the pair as an input set. The
-    # full derivation cannot run — the atomic/batch/probe artifacts were never
-    # committed (`g-b-size-measurement-json`) — so what this pins is that the ONLY
-    # thing stopping it is those missing runs, not anything about these two.
+    # And that guard in `derive`'s own code, over the pair ALONE as an input set:
+    # what stops a sweeps-only derivation is the missing atomic run, never
+    # anything about these two. `sessions_synthesized` confines the endpoint copy
+    # to the sweep domain, and the sweep domain is where it is being offered.
     with pytest.raises(SystemExit) as excinfo:
         harness.derive([doc for _, doc in _shipped_sweep_artifacts()], None)
     assert "--mode atomic" in str(excinfo.value)
