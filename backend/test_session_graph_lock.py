@@ -38,6 +38,27 @@ STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_E4_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 AFTER_E4E5_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 
+# Valid per-row browser-game-v2 DYNAMIC provenance (g-mk1d §2.2). The uploads
+# below carry it so they behave the way a modern client's do: rows are stamped
+# browser-game-v2 and actually stored. Without provenance the upload declares the
+# retired browser-game-v1 (g-bgv1-cutover) and the batch writer refuses the whole
+# batch with INACTIVE_PROFILE_KEEP — the upload still returns 200 but stores no
+# cache rows, which would make the degrade test's continuation assertion vacuous
+# (0 rows is indistinguishable from "the cache write never ran past the graph
+# failure boundary"). See g-bgv1-graph-lock-test.
+BROWSER_V2_PROVENANCE = {
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "search_limit_type": "depth",
+    "search_limit_value": 17,
+    "threads": 1,
+    "hash_mb": 128,
+}
+
 # The e4 e5 opening line, posted as a /moves upload. Two valid edges teach the
 # graph (start->e4, after_e4->e5) and three distinct positions.
 _OPENING_MOVES = [
@@ -54,6 +75,7 @@ _OPENING_MOVES = [
         "best_move_eval_cp": 20,
         "eval_delta": 0,
         "classification": "best",
+        "provenance": BROWSER_V2_PROVENANCE,
     },
     {
         "move_number": 1,
@@ -68,6 +90,7 @@ _OPENING_MOVES = [
         "best_move_eval_cp": 12,
         "eval_delta": 0,
         "classification": "best",
+        "provenance": BROWSER_V2_PROVENANCE,
     },
 ]
 
