@@ -645,18 +645,42 @@ def test_scan_stmt_max_absorbs_the_bare_detector_when_the_plan_inverts():
 # ---------------------------------------------------------------------------
 
 
+def _bases(dimensions, populations=None, *, pre=None, legacy=False):
+    """The two labelled readings the harness attaches to every artifact.
+
+    Derived from the artifact's own ``dimensions_before`` by default, so the
+    substitution guard passes and a test that wants to trip it has to say so.
+    ``pre`` supplies a DIFFERENT pre-synthesis reading — the shape a real
+    synthesis leaves — and ``legacy`` drops it entirely.
+    """
+    dims = {k: v for k, v in dimensions.items() if k in harness.DIMENSION_KEYS}
+    return {
+        "timing_basis": harness.TIMING_BASIS,
+        "dimension_bases": {
+            "pre_synthesis": (
+                {"status": harness.LEGACY_UNRECORDED}
+                if legacy
+                else {"status": "measured", **(pre or dims)}
+            ),
+            "post_synthesis": {"status": "measured", **dims, "populations": populations or {}},
+        },
+    }
+
+
 def _measurement(**over):
     """A minimal but complete atomic measurement, with everything nonzero."""
+    dims = {
+        "total_rows": 1000,
+        "sessions_bytes": 2_000_000,
+        "m_total": 60_000,
+        "moves_bytes": 8_000_000,
+    }
     base = {
         "kind": "atomic",
         "batch_size": 500,
         "repair_batch_size": 200,
-        "dimensions_before": {
-            "total_rows": 1000,
-            "sessions_bytes": 2_000_000,
-            "m_total": 60_000,
-            "moves_bytes": 8_000_000,
-        },
+        "dimensions_before": dims,
+        **_bases(dims),
         "populations_before": {
             "n_stale": 1000,
             "m_moves": 60_000,
@@ -698,6 +722,7 @@ def _empty_point(commit_ms=40.0, *, validated=True):
         "validated_in_run": validated,
         "teardown": {"commit_ms": commit_ms, "n_mutated": 0},
         "dimensions_before": _measurement()["dimensions_before"],
+        **_bases(_measurement()["dimensions_before"]),
         "populations_before": {"n_stale": 0, "m_moves": 0, "n_broken_audit": 0, "n_repair": 0},
         "scans": _measurement()["scans"],
         "timings": {},
@@ -719,6 +744,8 @@ def _batch_measurement(
         "kind": "batch",
         "batch_size": size,
         "repair_batch_size": repair_size,
+        "dimensions_before": _measurement()["dimensions_before"],
+        **_bases(_measurement()["dimensions_before"]),
         "timings": {
             "single_batch": {"max_ms": max_batch_ms},
             # The ACTUAL page cardinality, which defaults to the requested size.
@@ -764,11 +791,16 @@ _SWEEP_DEFAULT_POINTS = [_sweep_point(1, "10.1"), _sweep_point(11, "11.1")]
 
 
 def _sweep_domain(points=None, *, dimensions=None, **over):
+    # Merged onto the default four rather than replacing them: a real basis is
+    # always all four dimensions, and these overrides only ever care about the two
+    # the growth factor divides.
+    dims = {**_measurement()["dimensions_before"], **(dimensions or {})}
     base = {
         "kind": "sweep_domain",
         "artifact": "synthetic-sweep-domain",
         "sessions_synthesized": False,
-        "dimensions_before": dimensions or _measurement()["dimensions_before"],
+        "dimensions_before": dims,
+        **_bases(dims, {"n_stale": 1000}),
         "populations_before": {"n_stale": 1000},
         "points": list(points if points is not None else _SWEEP_DEFAULT_POINTS),
     }
@@ -780,6 +812,8 @@ def _probe(scope, unlock_max, *, trials=harness.MIN_CANCEL_TRIALS, rows_locked=1
     return {
         "kind": "cancel_probe",
         "scope": scope,
+        "dimensions_before": _measurement()["dimensions_before"],
+        **_bases(_measurement()["dimensions_before"]),
         "trials": trials,
         "rows_locked": rows_locked,
         "cancel_to_unlock_ms": {"max": unlock_max, "median": unlock_max / 2, "min": 1.0},
@@ -1843,6 +1877,223 @@ def test_derive_names_the_migration_rather_than_finding_zero_artifacts():
     }
     with pytest.raises(SystemExit, match="pre-schema shape"):
         harness.derive(_complete() + [legacy], None)
+
+
+# ---------------------------------------------------------------------------
+# Measurement provenance: which reading, recorded and checked.
+#
+# The harness synthesizes its populations BEFORE the measured pass, so the
+# relation the timed statements ran against is the post-synthesis one. That is
+# the CORRECT basis for those timings. The defect was that it was the only
+# reading recorded and nothing said which one it was — while SIZED_*, the basis
+# the runtime divides every scan term by, is frozen from it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_harness_records_both_readings_and_names_the_one_it_timed_against():
+    """Both readings on every artifact, and an explicit selector between them."""
+    pre = {"total_rows": 1000, "sessions_bytes": 2_000_000,
+           "m_total": 61_000, "moves_bytes": 8_000_000}
+    m = _measurement(**_bases(_measurement()["dimensions_before"], pre=pre))
+    bases = harness.measurement_bases(m, artifact="synthesized")
+
+    assert bases["timing_basis"] == "post_synthesis"
+    assert bases["timings_paired_with"] == m["dimensions_before"]
+    assert bases["pre_synthesis_recorded"] is True
+    # What the synthesis moved, in the shape the production restore showed:
+    # session_moves DOWN by the plies synthesize_repair deleted, and nothing
+    # else claimed to have changed.
+    assert bases["synthesis_delta"]["m_total"] == -1_000
+    assert bases["synthesis_delta"]["total_rows"] == 0
+
+
+def test_derive_fails_closed_on_an_artifact_with_no_machine_readable_basis():
+    """Unlabelled is REFUSED, not assumed. Checked for every kind, not just sweeps.
+
+    A basis is never inferred — not from prose, not from a filename, not from a
+    sibling copy, and not by inverting the frozen-basis calculation.
+    """
+    for kind, drop in (
+        ("atomic", _measurement()),
+        ("sweep_domain", _sweep_domain()),
+        ("batch", _batch_measurement(500, 400.0)),
+        ("cancel_probe", _probe("batch", 10.0)),
+    ):
+        unlabelled = {k: v for k, v in drop.items()
+                      if k not in ("timing_basis", "dimension_bases")}
+        others = [m for m in _complete() if m.get("kind") != kind]
+        with pytest.raises(SystemExit, match="no machine-readable measurement basis"):
+            harness.derive(others + [unlabelled], None)
+
+
+def test_derive_refuses_a_basis_substituted_for_the_one_the_statements_timed_against():
+    """The failure mode strictly worse than the defect itself.
+
+    Swapping the recorded basis to the pre-synthesis reading while leaving the
+    timings alone reads as a correction and is not one: it divides a statement
+    timed against 6,144,000 bytes by a 4,096,000-byte basis.
+
+    It is not refused for being optimistic. The error runs in both directions —
+    ``N_copy`` is ``frozen / copy``, so substituting a sweep copy's own reading
+    downward over-charges that point while substituting the FROZEN basis downward
+    under-charges every point (and over-charges the run-time ``live / SIZED``).
+    The guard holds because a timing and its basis move together, either way.
+    """
+    m = _measurement()
+    swapped = dict(m["dimension_bases"]["post_synthesis"])
+    swapped["sessions_bytes"] = 4_096_000  # the pre-synthesis reading, timings untouched
+    m["dimension_bases"] = {**m["dimension_bases"], "post_synthesis": swapped}
+    with pytest.raises(SystemExit, match="basis has been SUBSTITUTED"):
+        harness.derive([m] + _complete()[1:], None)
+
+
+def test_derive_refuses_a_substituted_basis_on_a_sweep_artifact_too():
+    """Where the substitution is worth the most: N_copy is a per-point divisor."""
+    sweep = _sweep_domain()
+    lean = dict(sweep["dimension_bases"]["post_synthesis"])
+    lean["sessions_bytes"] = 1_000_000
+    sweep["dimension_bases"] = {**sweep["dimension_bases"], "post_synthesis": lean}
+    without = [m for m in _complete() if m.get("kind") != "sweep_domain"]
+    with pytest.raises(SystemExit, match="basis has been SUBSTITUTED"):
+        harness.derive(without + [sweep], None)
+
+
+def test_derive_refuses_a_timing_basis_it_does_not_measure_against():
+    """``post_synthesis`` is the only basis this harness measures on.
+
+    A timing may only be normalized by the basis of the copy it actually ran on;
+    carrying it onto another is a separate, explicit step, not a field to relabel.
+    """
+    m = _measurement(timing_basis="pre_synthesis")
+    with pytest.raises(SystemExit, match="only.*basis this harness measures against"):
+        harness.derive([m] + _complete()[1:], None)
+
+
+def test_derive_will_not_freeze_sized_from_a_copy_whose_displacement_is_unrecorded():
+    """The one place the pre-synthesis reading gates anything.
+
+    SIZED_* stays the POST-synthesis reading — term and basis have to move
+    together — but a basis inflated by synthesis and frozen without that being
+    visible leaves the runtime growth factor pinned at 1.0 across the whole gap,
+    charging nothing extra the entire way.
+    """
+    legacy = _measurement(**_bases(_measurement()["dimensions_before"], legacy=True))
+    with pytest.raises(SystemExit, match="supply the frozen SIZED_. dimensions"):
+        harness.derive([legacy] + _complete()[1:], None)
+
+    # The same input is fine once the basis comes from production facts that were
+    # never synthesized: the question the gate asks does not arise.
+    out = harness.derive([legacy] + _complete()[1:], _ZERO_PRODUCTION)
+    assert out["constants"]["SIZED_SESSIONS_BYTES"] == 2_000_000
+
+
+@pytest.mark.parametrize(
+    "production",
+    [
+        pytest.param({}, id="empty-file"),
+        pytest.param({"populations": _ZERO_PRODUCTION["populations"]}, id="populations-only"),
+        pytest.param(
+            {"dimensions": {"total_rows": 1000, "sessions_bytes": 2_000_000}}, id="two-of-four"
+        ),
+        pytest.param(
+            {"dimensions": {**_ZERO_PRODUCTION["dimensions"], "m_total": 0}}, id="zero-dimension"
+        ),
+        pytest.param({"dimensions": _ZERO_PRODUCTION["dimensions"]}, id="no-populations"),
+        pytest.param(
+            {
+                "dimensions": _ZERO_PRODUCTION["dimensions"],
+                "populations": {"n_stale": 0, "n_repair": 0},
+            },
+            id="populations-missing-m_moves",
+        ),
+    ],
+)
+def test_the_production_escape_must_actually_declare_a_production_relation(production):
+    """The gate above must not be waivable by a file that declares nothing.
+
+    Passing ``--production-dimensions`` is what asserts the frozen basis is
+    production fact rather than a synthesized copy. Presence of the flag used to
+    be enough: any non-``None`` object turned the gate off while each missing
+    block fell through to the SNAPSHOT, so an empty file froze the synthesized
+    basis, skipped the check, and reported the source as
+    ``--production-dimensions``. A zero dimension is refused for a different
+    reason — it is the denominator ``_growth_factor`` divides by, and a zero one
+    drops its ratio out entirely, pinning the factor at 1.0 however far the
+    relation grows.
+    """
+    legacy = _measurement(**_bases(_measurement()["dimensions_before"], legacy=True))
+    with pytest.raises(SystemExit, match="--production-dimensions"):
+        harness.derive([legacy] + _complete()[1:], production)
+
+    # And it is the DECLARATION that is refused, not the legacy artifact: a
+    # complete one admits the same run.
+    assert harness.derive([legacy] + _complete()[1:], _ZERO_PRODUCTION)
+
+
+def test_a_legacy_sweep_artifact_still_constrains_the_bound_and_is_reported_as_incomplete():
+    """Migrated, not discarded. The reading its timings ran against IS recorded.
+
+    That is all the fit needs — normalization uses the basis the timing actually
+    ran on. What is missing gates only the freeze of SIZED_*, which no sweep
+    artifact supplies. The gap is stated in the output rather than left for a
+    reader to notice.
+    """
+    sweep = _sweep_domain(**_bases(_measurement()["dimensions_before"],
+                                   {"n_stale": 1000}, legacy=True))
+    without = [m for m in _complete() if m.get("kind") != "sweep_domain"]
+    out = harness.derive(without + [sweep], None)
+
+    assert out["projected_ms"]["sweep_domain_points"] == 2
+    base = out["projected_ms"]["sweep_copy_growth_factors"][0]
+    assert base["pre_synthesis_recorded"] is False
+    assert base["pre_synthesis_status"] == harness.LEGACY_UNRECORDED
+    assert base["synthesis_delta"] is None
+    assert base["timing_basis"] == "post_synthesis"
+
+
+def test_derive_says_where_the_frozen_dimensions_came_from():
+    """Which basis SIZED_* is, stated rather than worked out from what was passed."""
+    snapshot = harness.derive(_complete(), None)["scaling"]["frozen_basis"]
+    assert snapshot["reading"] == "post_synthesis"
+    assert "atomic snapshot" in snapshot["source"]
+    assert snapshot["dimensions"] == _measurement()["dimensions_before"]
+
+    supplied = harness.derive(_complete(), _ZERO_PRODUCTION)["scaling"]["frozen_basis"]
+    assert supplied["source"] == "--production-dimensions"
+    assert supplied["reading"] == "production"
+
+
+def test_derive_emits_both_readings_of_every_artifact_it_consumed():
+    """The pre-synthesis reading is recorded and divided by NOWHERE.
+
+    It is the evidence an explicit rebasing would start from, not an input to
+    this derivation — so it belongs in the output and in no formula.
+    """
+    out = harness.derive(_complete(), None)
+    emitted = out["scaling"]["measurement_bases"]
+    assert len(emitted) == len(_complete())
+    assert {b["kind"] for b in emitted} == {"atomic", "batch", "cancel_probe", "sweep_domain"}
+    assert all(b["timing_basis"] == "post_synthesis" for b in emitted)
+    assert all(b["pre_synthesis_recorded"] for b in emitted)
+
+
+@pytest.mark.parametrize("path", [_SWEEP_ARTIFACT, _SWEEP_ENDPOINT_ARTIFACT])
+def test_the_shipped_sweep_artifacts_carry_machine_readable_provenance(path):
+    """The migration, pinned. Both are legacy on the pre-synthesis side and say so.
+
+    Their post-synthesis reading was copied verbatim from their own
+    ``dimensions_before``; nothing was reconstructed, and the equality below is
+    what makes that claim checkable rather than a comment in a JSON file.
+    """
+    doc = harness._load_measurement_json(str(path))
+    bases = harness.measurement_bases(doc, artifact=path.name)
+    assert bases["timing_basis"] == "post_synthesis"
+    assert bases["pre_synthesis_status"] == harness.LEGACY_UNRECORDED
+    assert bases["timings_paired_with"] == {
+        k: int(doc["dimensions_before"][k]) for k in harness.DIMENSION_KEYS
+    }
+    with pytest.raises(SystemExit, match="cannot supply"):
+        harness.require_recorded_pre_synthesis(bases, purpose="supply anything")
 
 
 def test_derive_reports_the_extrapolation_gap_in_its_own_output():

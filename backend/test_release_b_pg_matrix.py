@@ -623,3 +623,75 @@ def test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_presen
                     "DELETE FROM game_sessions WHERE id = ANY(CAST(:ids AS uuid[]))"
                 ).bindparams(ids=[str(intact_id), str(broken_id)])
             )
+
+
+# ---------------------------------------------------------------------------
+# 6. The two dimension readings the synthesis moves between.
+# ---------------------------------------------------------------------------
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_the_harness_records_the_reading_its_synthesis_moved(pg_engine):
+    """Both readings, and a delta that is a real property of the synthesis.
+
+    The harness synthesizes BEFORE it measures, so the relation the timed
+    statements run against is not the one the copy arrived as. Recording only the
+    post-synthesis reading — the basis every ``SIZED_*`` is frozen from and every
+    scan term divided by — left nothing able to say which side of the synthesis a
+    number came from.
+
+    ``synthesize_repair`` is measured here rather than ``synthesize_stale``
+    because its displacement is EXACT: it DELETEs one ply from each of K
+    corrupted sessions, so ``m_total`` falls by exactly ``k_corrupted``. The byte
+    dimensions move too — that is what the 6,144,000-vs-4,096,000 reading on the
+    production restore was — but they move by an amount that depends on vacuum
+    state, so asserting on them would test the host rather than the harness.
+    """
+    ids = [uuid.uuid4() for _ in range(4)]
+    try:
+        with pg_engine.begin() as conn:
+            for i, sid in enumerate(ids):
+                _seed_pg_session(
+                    conn, sid, status="ended", mode="normal", drill_state=None,
+                    version=None, plies=INTACT_PLIES, user_id=910020 + i,
+                )
+
+        with pg_engine.connect() as conn:
+            pre = size_accuracy_backfill.basis_reading(conn)
+        with pg_engine.begin() as conn:
+            # K = the whole eligible set, which check_repair_sample_size admits
+            # under its "or the whole set if smaller" arm.
+            corrupted = size_accuracy_backfill.synthesize_repair(conn, len(ids))["k_corrupted"]
+        with pg_engine.connect() as conn:
+            post = size_accuracy_backfill.basis_reading(conn)
+
+        assert corrupted == len(ids)
+        assert post["m_total"] == pre["m_total"] - corrupted
+        assert post["populations"]["n_repair"] == corrupted
+
+        bases = size_accuracy_backfill.dimension_bases(pre, post)
+        assert bases["pre_synthesis"]["status"] == "measured"
+        assert bases["post_synthesis"]["status"] == "measured"
+
+        # And the pair survives the derivation's intake as the basis of an
+        # artifact whose timings ran on the POST reading.
+        checked = size_accuracy_backfill.measurement_bases(
+            {
+                "kind": "atomic",
+                "timing_basis": size_accuracy_backfill.TIMING_BASIS,
+                "dimension_bases": bases,
+                "dimensions_before": {
+                    k: post[k] for k in size_accuracy_backfill.DIMENSION_KEYS
+                },
+            },
+            artifact="pg-synthesized",
+        )
+        assert checked["synthesis_delta"]["m_total"] == -corrupted
+        assert checked["pre_synthesis_recorded"] is True
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM game_sessions WHERE id = ANY(CAST(:ids AS uuid[]))"
+                ).bindparams(ids=[str(i) for i in ids])
+            )

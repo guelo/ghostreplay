@@ -93,7 +93,39 @@ Subcommands
     verdict — as JSON, for transcription into the runbook. Touches no database
     and takes no ``--url``. The sweep model is fitted here, as a two-variable LP
     over every sweep-domain artifact offered, solved in frozen-basis coordinates
-    so points measured on different copies enter on their own bases.
+    so points measured on different copies enter on their own bases. **Fails
+    closed** on an artifact carrying no machine-readable measurement basis, on
+    one whose recorded basis disagrees with the dimensions its statements were
+    timed against, and on a ``--production-dimensions`` file that does not
+    COMPLETELY declare a production relation — see "Which reading" below.
+
+Which reading, and why both are recorded
+----------------------------------------
+The synthesis runs *before* the measured pass, and it moves the relation:
+``synthesize_stale`` UPDATEs every ended-visible row and leaves the dead tuples,
+``synthesize_repair`` DELETEs one ply from each of K sessions, and
+``synthesize_sessions`` clones rows outright. On the production restore that was
+6,144,000 bytes post-synthesis against 4,096,000 pre, and 130,676 moves against
+131,676.
+
+The post-synthesis reading is the **correct** basis for these timings: it is the
+relation the timed statements ran against. The defect was that it was the *only*
+reading recorded and nothing said which one it was — while ``SIZED_*``, the basis
+the runtime divides every scan term by, is frozen from it. So every run now
+records **both** readings under ``dimension_bases``, names the one its timings are
+paired with in ``timing_basis``, and keeps ``dimensions_before`` meaning exactly
+what it always did: the reading taken at the start of the measured pass.
+
+Substituting the pre-synthesis reading while leaving the timings alone is not a
+correction and is refused — it divides a statement timed against 6,144,000 bytes
+by a 4,096,000-byte basis. Carrying a timing onto the other reading is a separate,
+explicit step, and nothing here does it implicitly.
+
+``SIZED_*`` is the one thing the pre-synthesis reading gates: a snapshot whose
+displacement was never recorded cannot supply it. ``--production-dimensions``
+waives that, because a production relation was never synthesized — so the file
+has to declare one COMPLETELY (see ``production_basis``). Anything less would
+waive the gate and then fill the gaps from the synthesized snapshot anyway.
 
 Why cancel-to-unlock and not ``teardown_ms``
 --------------------------------------------
@@ -162,6 +194,25 @@ DEFAULT_SCAN_TRIALS = 5
 #: maximum must not steer a fit, but a bound still has to cover a number the host
 #: actually produced.
 MIN_SWEEP_TRIALS = 7
+
+#: The reading every timing in an artifact is paired with. The harness runs its
+#: synthesis BEFORE the measured pass, so the relation the timed statements ran
+#: against is the POST-synthesis one — and that is the basis those timings must
+#: be normalized by. Recorded as a selector rather than left implicit: an
+#: unlabelled dimension is one a later reader has to guess the provenance of, and
+#: the guess that looks most like a correction (substituting the pre-synthesis
+#: reading while leaving the timings alone) is strictly worse than guessing
+#: nothing, because it divides a statement timed against 6,144,000 bytes by a
+#: 4,096,000-byte basis.
+TIMING_BASIS = "post_synthesis"
+
+#: A pre-synthesis reading that was never taken, on an artifact produced before
+#: this harness recorded one. NEVER reconstructed — not from prose, not from a
+#: filename, not from a sibling copy, and not by inverting the frozen-basis
+#: calculation. Such an artifact stays valid as sweep evidence, because the
+#: dimensions its timings actually ran against ARE recorded; what it may not do
+#: is supply ``SIZED_*`` or serve as a pre-synthesis basis.
+LEGACY_UNRECORDED = "not_recorded_legacy"
 
 
 def _revision_module():
@@ -290,6 +341,12 @@ _BROKEN_AUDIT_SQL = f"""
 """
 
 
+#: The four relation dimensions, named once. A basis is compared, differenced and
+#: frozen key by key, and each of those places has to agree about what "the
+#: dimensions" are.
+DIMENSION_KEYS = ("total_rows", "sessions_bytes", "m_total", "moves_bytes")
+
+
 def read_dimensions(conn) -> dict[str, int]:
     scalar = lambda sql: int(conn.execute(text(sql)).scalar() or 0)  # noqa: E731
     return {
@@ -316,6 +373,34 @@ def read_populations(conn) -> dict[str, int]:
         "n_broken_audit": scalar(_BROKEN_AUDIT_SQL),
         "n_repair": count(mod.REPAIR_REMAINING_SQL),
     }
+
+
+def basis_reading(conn) -> dict[str, Any]:
+    """One labelled dimensions-and-populations reading of a copy.
+
+    ``status`` sits beside the numbers it qualifies rather than above them, so a
+    reading can never be picked up without its provenance travelling with it.
+    """
+    return {"status": "measured", **read_dimensions(conn), "populations": read_populations(conn)}
+
+
+def dimension_bases(pre: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:
+    """The two readings a measured artifact carries, named for WHEN each was taken.
+
+    The harness synthesizes its populations before it measures anything, and
+    synthesis moves the relation: ``synthesize_stale`` UPDATEs every ended-visible
+    row and leaves the dead tuples behind, ``synthesize_repair`` DELETEs one ply
+    from each of K sessions, ``synthesize_sessions`` clones rows outright. On the
+    production restore that was 6,144,000 bytes post-synthesis against 4,096,000
+    pre, and 130,676 moves against 131,676.
+
+    Recording ONE of those readings is the defect this pair closes. It is not that
+    the post reading is wrong — it is the relation the timed statements ran
+    against, and every timing here is correctly paired with it. It is that a
+    single unlabelled number cannot tell a later reader WHICH reading it is, and
+    the ``SIZED_*`` constants every scan term is divided by are frozen from it.
+    """
+    return {"pre_synthesis": pre, "post_synthesis": post}
 
 
 # ---------------------------------------------------------------------------
@@ -1485,6 +1570,212 @@ def run_cancel_probe(engine, *, batch_size: int, trials: int, park_seconds: floa
 MIN_CANCEL_TRIALS = 20
 
 
+# ---------------------------------------------------------------------------
+# Measurement provenance.
+#
+# Every artifact --derive consumes has to say which reading its timings were
+# paired with, and carry the other one. The intake below FAILS CLOSED on an
+# artifact that does not: a basis is never inferred from prose, from a filename,
+# from a sibling copy, or by inverting the frozen-basis calculation.
+#
+# The check that earns its place is the last one. An artifact whose
+# `dimension_bases.post_synthesis` disagrees with the `dimensions_before` its
+# statements were timed against has had its basis SUBSTITUTED, and that is the
+# one failure mode strictly worse than the defect this block closes: a statement
+# timed against 6,144,000 bytes divided by a 4,096,000-byte basis reads as a
+# correction, and nothing downstream can tell.
+#
+# It is NOT refused for being optimistic. The error runs in BOTH directions,
+# depending on which side of a ratio the substituted reading lands on. N_copy is
+# frozen_bytes / copy_bytes, so a sweep copy's own reading substituted downward
+# raises that point's factor and OVER-charges it, while the frozen basis
+# substituted downward lowers every point's factor and UNDER-charges the whole
+# fit — and at run time _growth_factor divides by SIZED_*, where that same
+# smaller frozen basis over-charges instead. The guard holds because a timing and
+# its basis have to move together, not because either direction is safe.
+# ---------------------------------------------------------------------------
+
+
+def _basis_dimensions(reading: dict, *, artifact: str, where: str) -> dict[str, int]:
+    """The four dimensions of one reading, as exact integers."""
+    out: dict[str, int] = {}
+    for key in DIMENSION_KEYS:
+        value = reading.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, Decimal)) or int(value) != value:
+            raise SystemExit(
+                f"{artifact}: {where}.{key} is {value!r}; a basis is a ratio of INTEGER "
+                "dimensions and has to stay exactly rational"
+            )
+        out[key] = int(value)
+    return out
+
+
+def measurement_bases(m: dict, *, artifact: str) -> dict[str, Any]:
+    """One artifact's two labelled readings, checked against what it timed.
+
+    Uniform across all four kinds — atomic, batch, cancel probe, sweep domain —
+    so there is no per-kind exemption for a future reader to misremember. The
+    probe's dimensions feed no term; they identify the copy that was probed.
+    """
+    basis, timing_basis = m.get("dimension_bases"), m.get("timing_basis")
+    if not basis or not timing_basis:
+        raise SystemExit(
+            f"{artifact}: no machine-readable measurement basis (needs `timing_basis` and "
+            "`dimension_bases` with a pre_synthesis and a post_synthesis reading). The harness "
+            "synthesizes its populations BEFORE it measures, so an unlabelled dimension cannot "
+            "say which side of that it was read on — and the SIZED_* every scan term is divided "
+            "by is frozen from it. Migrate the artifact per docs/release_b_runbook.md §7; a "
+            "pre-synthesis reading that was never taken is recorded as "
+            f"status: {LEGACY_UNRECORDED!r}, never reconstructed"
+        )
+    if timing_basis != TIMING_BASIS:
+        raise SystemExit(
+            f"{artifact}: timing_basis is {timing_basis!r}, and {TIMING_BASIS!r} is the only "
+            "basis this harness measures against — the synthesis runs before the timed pass, so "
+            "the post-synthesis relation is the one the statements ran on. A timing may only be "
+            "normalized by the basis of the copy it actually ran on; carrying it onto another "
+            "basis is a separate, explicit step and is not what this field selects"
+        )
+    post = basis.get("post_synthesis") or {}
+    if post.get("status") != "measured":
+        raise SystemExit(
+            f"{artifact}: dimension_bases.post_synthesis.status is {post.get('status')!r}. The "
+            "reading the timings are paired with is the one reading that can never be missing"
+        )
+    timed_against = m.get("dimensions_before")
+    if not timed_against:
+        raise SystemExit(
+            f"{artifact}: carries a measurement basis but no dimensions_before to check it "
+            "against, so the label cannot be verified against what the statements ran on"
+        )
+    post_dims = _basis_dimensions(post, artifact=artifact, where="dimension_bases.post_synthesis")
+    timed_dims = _basis_dimensions(timed_against, artifact=artifact, where="dimensions_before")
+    if post_dims != timed_dims:
+        raise SystemExit(
+            f"{artifact}: dimension_bases.post_synthesis is {post_dims} but the statements were "
+            f"timed against dimensions_before = {timed_dims}. Its basis has been SUBSTITUTED — "
+            "the timings still belong to the relation they ran on, and dividing them by another "
+            "reading is mismatched provenance dressed as a correction. Rebase the TIMINGS or "
+            "restore the reading; do not move one without the other"
+        )
+
+    pre = basis.get("pre_synthesis") or {}
+    status = pre.get("status")
+    if status not in ("measured", LEGACY_UNRECORDED):
+        raise SystemExit(
+            f"{artifact}: dimension_bases.pre_synthesis.status is {status!r}; it is 'measured' "
+            f"when the reading was taken and {LEGACY_UNRECORDED!r} when it never was. There is no "
+            "third state, and in particular there is no state that means 'assume it matched'"
+        )
+    recorded = status == "measured"
+    pre_dims = (
+        _basis_dimensions(pre, artifact=artifact, where="dimension_bases.pre_synthesis")
+        if recorded
+        else None
+    )
+    return {
+        "artifact": artifact,
+        "kind": m.get("kind"),
+        "timing_basis": timing_basis,
+        "timings_paired_with": post_dims,
+        "pre_synthesis_status": status,
+        "pre_synthesis_recorded": recorded,
+        "pre_synthesis_dimensions": pre_dims,
+        # What the synthesis MOVED, visible rather than inferred. On the
+        # production restore: sessions_bytes up by the dead tuples
+        # synthesize_stale leaves behind, m_total down by the one ply per session
+        # synthesize_repair deletes.
+        "synthesis_delta": (
+            {k: post_dims[k] - pre_dims[k] for k in DIMENSION_KEYS} if pre_dims else None
+        ),
+    }
+
+
+def require_recorded_pre_synthesis(bases: dict, *, purpose: str) -> dict[str, int]:
+    """The pre-synthesis dimensions, or a refusal — the only accessor that returns them.
+
+    Reaching the pre-synthesis reading is deliberately narrow. It is provenance
+    the derivation EMITS and never divides by; the one thing it gates is freezing
+    a declared basis, because a basis you cannot see the synthesis displacement of
+    is one nothing can check a later term against.
+    """
+    if not bases["pre_synthesis_recorded"]:
+        raise SystemExit(
+            f"{bases['artifact']}: its pre-synthesis reading is "
+            f"{bases['pre_synthesis_status']!r}, so it cannot {purpose}. The reading it does "
+            "carry is post-synthesis and stays valid for the timings paired with it — what is "
+            "missing is any way to see how far the synthesis moved the relation. Supply the "
+            "basis explicitly with --production-dimensions, or re-measure on a copy this "
+            "harness read before it synthesized"
+        )
+    return bases["pre_synthesis_dimensions"]
+
+
+def production_basis(production: dict) -> tuple[dict[str, int], dict]:
+    """The production relation as a COMPLETE declaration, or a refusal.
+
+    ``--production-dimensions`` is the one input that switches the pre-synthesis
+    requirement off, on the grounds that the frozen basis is then production
+    fact rather than a copy this harness synthesized. That reasoning covers only
+    the numbers the file actually carries — and PRESENCE of the flag used to be
+    enough. An empty or partial file satisfied it, each missing block fell
+    through to the SNAPSHOT, and the run froze the synthesized basis, skipped the
+    gate, and labelled the result ``--production-dimensions``: the exact defect
+    the gate exists for, entered through the gate's own escape hatch. So the
+    escape is the strictest input here rather than the loosest.
+    """
+    if not isinstance(production, dict):
+        raise SystemExit(
+            "--production-dimensions must be a JSON object with `dimensions` and `populations`, "
+            f"got {type(production).__name__}"
+        )
+    dims = production.get("dimensions")
+    if not dims:
+        raise SystemExit(
+            "--production-dimensions carries no `dimensions` block. Supplying the file is what "
+            "declares the frozen basis to be production fact and waives the pre-synthesis "
+            "reading, so a file that declares nothing waives the check and then freezes SIZED_* "
+            "from the synthesized snapshot anyway. Give all four dimensions, or omit the flag"
+        )
+    prod_dims = _basis_dimensions(dims, artifact="--production-dimensions", where="dimensions")
+    nonpositive = sorted(k for k, v in prod_dims.items() if v <= 0)
+    if nonpositive:
+        raise SystemExit(
+            f"--production-dimensions: dimensions.{', dimensions.'.join(nonpositive)} is not "
+            "positive. SIZED_* is the DENOMINATOR the runtime measures growth from, and a zero "
+            "one drops its ratio out of _growth_factor entirely — the relation is then free to "
+            "grow without bound while the factor stays pinned at 1.0"
+        )
+    pops = production.get("populations")
+    if pops is None:
+        raise SystemExit(
+            "--production-dimensions carries no `populations` block. Falling back to the "
+            "snapshot's would declare a population this harness SYNTHESIZED to be production's. "
+            "A production population of zero is legitimate and is written as one; absent is not "
+            "zero"
+        )
+    for key in ("n_stale", "n_repair", "m_moves"):
+        value = pops.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, Decimal))
+            or int(value) != value
+            or value < 0
+        ):
+            raise SystemExit(
+                f"--production-dimensions: populations.{key} is {value!r}; each production "
+                "population is an explicit non-negative integer. Zero is a real measurement "
+                "here — the term drops out of Decision 1 while the constant stays declared — "
+                "and absence would be read as that zero without anyone having measured it"
+            )
+    return prod_dims, pops
+
+
+def _artifact_name(m: dict, i: int) -> str:
+    """The artifact's PATH where --derive was given one, else its database, else its slot."""
+    return str(m.get("artifact") or m.get("database") or f"{m.get('kind')}[{i}]")
+
+
 def _ratio(prod: float | None, snap: float | None) -> float:
     """Production-over-snapshot scaling. A full restore makes this exactly 1.
 
@@ -1647,8 +1938,13 @@ def sweep_points(measurement: dict, frozen_dims: dict, *, artifact: str) -> list
     solution, and would let the shipped bound sit below a maximum a host actually
     produced.
     """
+    # Through the provenance intake, not around it: the dimensions that become
+    # this artifact's N_copy are the ones whose label has been checked against the
+    # statements it timed. A substituted basis reaches the LP as a wrong divisor
+    # and nothing after this point could tell.
+    bases = measurement_bases(measurement, artifact=artifact)
     n_copy = sweep_copy_growth_factor(
-        measurement.get("dimensions_before") or {}, frozen_dims, artifact=artifact
+        bases["timings_paired_with"], frozen_dims, artifact=artifact
     )
     raw = measurement.get("points")
     if not raw:
@@ -1804,6 +2100,34 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     probes = [m for m in measurements if m.get("kind") == "cancel_probe"]
     sweeps = [m for m in measurements if m.get("kind") == "sweep_domain"]
 
+    # The pre-schema sweep artifact is keyed by top-level `runs` and
+    # `dimensions_of_this_copy`, with no `kind` and no `dimensions_before`. Named
+    # BEFORE the provenance intake below, which would otherwise reject it for
+    # carrying no basis — true, but the least useful thing to say about a file
+    # that needs a schema migration rather than a re-measurement.
+    legacy = [m for m in measurements if "dimensions_of_this_copy" in m]
+    if legacy:
+        raise SystemExit(
+            "a sweep measurement is in the pre-schema shape (dimensions_of_this_copy / top-level "
+            "runs, no kind): migrate it to kind: 'sweep_domain' with dimensions_before and a "
+            "flattened points[], per docs/release_b_runbook.md §7. A legacy adapter would be a "
+            "second permanent intake path maintained for exactly one file"
+        )
+
+    # Provenance FIRST, before any measurement is read for a number. Checked here
+    # for every kind at once so an artifact cannot enter the derivation through a
+    # path that never asked what basis it was measured on. The legacy sweep
+    # artifacts pass: their post-synthesis reading is recorded and correct, and
+    # what they are missing — the pre-synthesis reading — gates only the freeze of
+    # SIZED_*, which no sweep artifact supplies.
+    #
+    # Keyed by IDENTITY, because the per-kind lists below hold the same objects and
+    # equality would collide two measurements that happen to read alike. Every
+    # measurement stays referenced by `measurements` for the whole call, so no id
+    # is reused under it.
+    bases_by_id = {id(m): measurement_bases(m, artifact=_artifact_name(m, i))
+                   for i, m in enumerate(measurements)}
+
     # A copy whose game_sessions was grown by row cloning is valid for the sweep
     # domain and for NOTHING else: the clones carry no session_moves rows, so every
     # session_moves-scaled term and the whole repair population on such a copy are
@@ -1880,12 +2204,33 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     probe_unlock_max, probe = _probe_max_unlock_ms(probes, "batch")
     atomic_unlock_max, atomic_probe = _probe_max_unlock_ms(probes, "atomic")
 
-    snap_dims = atomic["dimensions_before"]
+    atomic_bases = bases_by_id[id(atomic)]
+    snap_dims = atomic_bases["timings_paired_with"]
     snap_pops = atomic["populations_before"]
-    prod = production or {}
-    prod_dims = prod.get("dimensions", snap_dims)
-    prod_pops = prod.get("populations", snap_pops)
+    # A full restore IS the production relation, so its own reading is the basis;
+    # anything else has to declare one COMPLETELY (see production_basis). There is
+    # deliberately no third state where the flag was passed and the snapshot's
+    # numbers are used anyway — that state waives the gate below and then freezes
+    # the very basis the gate was protecting.
     full_restore = production is None
+    if full_restore:
+        prod_dims, prod_pops = snap_dims, snap_pops
+    else:
+        prod_dims, prod_pops = production_basis(production)
+
+    # SIZED_* is the basis the runtime divides every scan term by and the point
+    # _growth_factor measures growth FROM, so freezing it is the one place the
+    # pre-synthesis reading is required. It stays the POST-synthesis reading —
+    # that is what the timings ran against, and term and basis have to move
+    # together — but a copy whose displacement cannot be seen cannot declare one:
+    # a basis inflated by synthesis and frozen without that being visible leaves
+    # the growth factor pinned at 1.0 across the whole gap, charging nothing extra
+    # the entire way. With --production-dimensions the basis comes from production
+    # facts that were never synthesized, and the question does not arise.
+    if full_restore:
+        require_recorded_pre_synthesis(
+            atomic_bases, purpose="supply the frozen SIZED_* dimensions"
+        )
 
     # The snapshot populations are what every per-row constant is MEASURED from,
     # so an empty one is not a zero branch — it is an unsynthesized snapshot, and
@@ -1978,19 +2323,9 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     # divided into these — per artifact, inside the fit, never as a post-fit
     # multiplier.
     #
-    # The legacy sweep artifact is keyed by top-level `runs` and
-    # `dimensions_of_this_copy`, with no `kind` and no `dimensions_before`. Offered
-    # as it stands it would match nothing here, and the run carrying the only
-    # retained trials on record would be silently invisible — so it is NAMED rather
-    # than skipped.
-    legacy = [m for m in measurements if "dimensions_of_this_copy" in m]
-    if legacy:
-        raise SystemExit(
-            "a sweep measurement is in the pre-schema shape (dimensions_of_this_copy / top-level "
-            "runs, no kind): migrate it to kind: 'sweep_domain' with dimensions_before and a "
-            "flattened points[], per docs/release_b_runbook.md §7. A legacy adapter would be a "
-            "second permanent intake path maintained for exactly one file"
-        )
+    # The pre-schema shape is rejected at the top of this function, before the
+    # provenance intake: offered as it stands it would match nothing here, and the
+    # run carrying the only retained trials on record would be silently invisible.
     if not sweeps:
         raise SystemExit(
             "derivation needs at least one --mode sweep-domain measurement: the selection sweep "
@@ -2000,8 +2335,10 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
         )
     sweep_all_points: list[SweepPoint] = []
     sweep_bases = []
-    for i, m in enumerate(sweeps):
-        artifact = str(m.get("artifact") or m.get("database") or f"sweep_domain[{i}]")
+    for m in sweeps:
+        # The name the provenance intake already gave it, so an unnamed artifact
+        # is not called `sweep_domain[0]` here and something else there.
+        artifact = bases_by_id[id(m)]["artifact"]
         pts = sweep_points(m, prod_dims, artifact=artifact)
         sweep_all_points.extend(pts)
         sweep_bases.append({
@@ -2009,6 +2346,15 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "sessions_synthesized": bool(m.get("sessions_synthesized")),
             "dimensions_before": m.get("dimensions_before"),
             "populations_before": m.get("populations_before"),
+            # Which reading carried this copy's points, and whether its
+            # displacement is on record. A legacy artifact still constrains the
+            # bound — its post-synthesis reading is what its timings ran against,
+            # and that is all the fit needs — but the gap is stated rather than
+            # left for a reader to notice.
+            "timing_basis": bases_by_id[id(m)]["timing_basis"],
+            "pre_synthesis_status": bases_by_id[id(m)]["pre_synthesis_status"],
+            "pre_synthesis_recorded": bases_by_id[id(m)]["pre_synthesis_recorded"],
+            "synthesis_delta": bases_by_id[id(m)]["synthesis_delta"],
             "N_copy": float(pts[0].n_copy),
             "N_copy_exact": str(pts[0].n_copy),
             "points": len(pts),
@@ -2252,6 +2598,25 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "production_dimensions": prod_dims,
             "snapshot_populations": snap_pops,
             "production_populations": prod_pops,
+            # Where the frozen SIZED_* came from and which reading it is, stated
+            # rather than left to be worked out from whether --production-
+            # dimensions was passed. This is the number every MARGINED_* term is
+            # divided by at run time.
+            "frozen_basis": {
+                "source": (
+                    f"atomic snapshot {atomic_bases['artifact']}"
+                    if full_restore
+                    else "--production-dimensions"
+                ),
+                "reading": TIMING_BASIS if full_restore else "production",
+                "dimensions": prod_dims,
+            },
+            # Both readings of every artifact that entered this derivation, and
+            # what the synthesis moved between them. The pre-synthesis reading is
+            # recorded here and divided by NOWHERE: carrying a timing onto it is a
+            # separate, explicit step, and this is the evidence such a step would
+            # start from.
+            "measurement_bases": [bases_by_id[id(m)] for m in measurements],
         },
         "projected_ms": {
             "T_backfill_prod": t_backfill_prod,
@@ -2582,6 +2947,23 @@ def main(argv: list[str] | None = None) -> int:
                 "REWRITES the rows it measures and installs a parking trigger"
             )
 
+        # The PRE-synthesis reading, taken before anything in this process has
+        # touched the copy, and taken on EVERY run — including one that
+        # synthesizes nothing, where it is a genuine second reading rather than a
+        # copy of the post one. Two effects, both deliberate:
+        #
+        #   It reads the relations once more before the timed pass than a
+        #   non-synthesis run used to, which perturbs the cold-ish first trial
+        #   `cold_ms`. The frozen number is the MAXIMUM across trials, never
+        #   cold_ms, and the trade buys something worth more: the warm state at
+        #   the start of the timed pass is now identical whether or not synthesis
+        #   ran, so runs are comparable to each other.
+        #
+        #   It makes "both readings, on every artifact" true by construction, so
+        #   --derive can demand them without a per-kind exemption.
+        with engine.connect() as conn:
+            pre_basis = basis_reading(conn)
+
         # ORDER MATTERS, and the order is stale-then-repair. Stale synthesis nulls
         # the version across the ENTIRE ended-visible set; repair synthesis then
         # stamps K of those rows version 1 with a non-NULL accuracy over a broken
@@ -2615,10 +2997,21 @@ def main(argv: list[str] | None = None) -> int:
                 synthesis["analyzed"] = True
 
         if args.cancel_probe:
+            # The probe has no measured pass of its own to read a basis at the
+            # start of, so its POST reading is taken here — after synthesis,
+            # before the probe. Recorded under the same two keys the three
+            # measured modes use, so the intake in --derive has no per-kind
+            # exemption to remember. The probe's numbers still feed no
+            # dimension-scaled term; what they identify is WHICH copy was probed.
+            with engine.connect() as conn:
+                probe_dims = read_dimensions(conn)
+                probe_pops = read_populations(conn)
             result = {
                 "kind": "cancel_probe",
                 "scope": args.probe_scope,
                 "batch_size": args.batch_size,
+                "dimensions_before": probe_dims,
+                "populations_before": probe_pops,
                 **run_cancel_probe(
                     engine,
                     batch_size=args.batch_size,
@@ -2644,6 +3037,20 @@ def main(argv: list[str] | None = None) -> int:
             )
         result["database"] = dbname
         result["server_version"] = server
+        # dimensions_before / populations_before keep exactly the meaning they
+        # always had — the reading taken at the start of the measured pass, which
+        # is AFTER any synthesis. What is new is that they are now named as that
+        # and carried beside the reading they are not, so a consumer can tell the
+        # two apart instead of inferring one from prose.
+        result["timing_basis"] = TIMING_BASIS
+        result["dimension_bases"] = dimension_bases(
+            pre_basis,
+            {
+                "status": "measured",
+                **result["dimensions_before"],
+                "populations": result["populations_before"],
+            },
+        )
         if synthesis:
             result["synthesis"] = synthesis
 

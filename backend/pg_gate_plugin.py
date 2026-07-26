@@ -192,6 +192,11 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     # already carries a served value on a broken grid.
     "test_release_b_pg_matrix.py::"
     "test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_present",
+    # The two dimension readings the synthesis moves between
+    # (g-b-size-harness-defects). PostgreSQL-only for the same reason: the
+    # displacement is produced by synthesize_repair, whose candidate selection and
+    # ply deletion run through PLY_DETECTOR_SQL over uuid session ids.
+    "test_release_b_pg_matrix.py::test_pg_the_harness_records_the_reading_its_synthesis_moved",
     # Release-B runtime envelope (g-b-runtime-envelope). Every one of these is
     # structurally invisible to the SQLite suite: SQLite has no statement_timeout
     # and no lock_timeout, no FOR NO KEY UPDATE SKIP LOCKED, no second writer to

@@ -201,6 +201,22 @@ measurement. It **raises** when:
   out of Decision 1 while the constant stays declared, because the runtime guard
   multiplies it by the live count.)
 - no batch candidate both executed and satisfied `3 × observed <= MAX_BATCH_MS`.
+- an artifact of **any** kind carries no machine-readable measurement basis, or
+  carries one whose `post_synthesis` reading disagrees with the
+  `dimensions_before` its statements were timed against, or selects a
+  `timing_basis` other than `post_synthesis` — see
+  [§7's provenance subsection](#the-two-dimension-readings-g-b-size-harness-defects);
+- `SIZED_*` would be frozen from an atomic snapshot whose **pre**-synthesis
+  reading was never recorded. Only on the full-restore path: with
+  `--production-dimensions` the basis comes from production facts that were never
+  synthesized.
+- `--production-dimensions` was passed but does not **completely** declare a
+  production relation — all four dimensions, each a positive integer, plus
+  `n_stale` / `n_repair` / `m_moves` as explicit non-negative integers. The flag
+  is what waives the rule above, so a file that declares nothing would waive it
+  and then freeze the synthesized snapshot's basis anyway; a partial one would
+  fill the gaps from the snapshot's synthesized numbers and label the result
+  production. Zero populations are written as zeros — absent is not zero.
 
 Multiple probes of one scope are combined by **maximum**, never first-wins.
 
@@ -1069,12 +1085,14 @@ distinct states:
 missing 1,000 moves went. So the byte spread is partly dead tuples from rewrite
 and vacuum state and partly a genuinely different post-synthesis relation, and
 **neither component is recoverable from the frozen dimension alone** — which is
-the provenance defect in `g-b-size-harness-defects` #1, seen from the outside. It
+the provenance defect in `g-b-size-harness-defects` #1, seen from the outside,
+[since fixed](#the-two-dimension-readings-g-b-size-harness-defects). It
 matters because the normalization factor is
 `SIZED_bytes / measured_bytes`, so the **least** bloated copy demands the
 **largest** factor. Normalizing a timing with some other copy's byte reading
-under-charges it, and an earlier version of this section normalized everything
-with 6,144,000 — which is `gr_p1_b1000`'s figure alone.
+charges it wrongly in whichever direction that reading errs; an earlier version
+of this section normalized everything with 6,144,000 — `gr_p1_b1000`'s figure
+alone, the **most** bloated of the seven — which under-charged every leaner copy.
 
 **`MARGINED_MS_BACKFILL_REMAINING`**, every Phase 1 measurement paired with its
 own copy:
@@ -1457,8 +1475,9 @@ qualification bead has to clear first:
    dimensions **without rebasing the timings** would be strictly worse — a
    measurement taken against 6,144,000 bytes, divided by a 4,096,000-byte basis,
    is mismatched provenance dressed as a correction. The fix is to record both
-   and keep every timing with its own basis. Tracked as
-   `g-b-size-harness-defects`.
+   and keep every timing with its own basis — done 2026-07-26 under
+   `g-b-size-harness-defects`, see
+   [the two dimension readings](#the-two-dimension-readings-g-b-size-harness-defects).
 2. **The byte dimensions are not production's at all**, synthesized or not — §0.
    A logical dump does not carry a physical footprint.
 3. **`MAX_BATCH_SIZE` and `REPAIR_BATCH_SIZE` are fixture-bounded**, per the
@@ -1475,6 +1494,96 @@ but the basis still declaring 6,000, the relation can grow all the way from 4,18
 to 6,000 — a 1.43x increase in exactly the quantity these terms scale with —
 while the growth factor sits pinned at 1.0 and charges nothing extra. A frozen
 term and the basis it was measured against have to move together.
+
+### The two dimension readings (`g-b-size-harness-defects`)
+
+**Fixed 2026-07-26.** The harness synthesizes its populations *before* the
+measured pass, so the relation the timed statements run against is not the one
+the copy arrived as. `synthesize_stale` UPDATEs every ended-visible row and
+leaves the dead tuples, `synthesize_repair` DELETEs one ply from each of K
+sessions, `synthesize_sessions` clones rows outright. On the production restore:
+
+| | post-synthesis | pre-synthesis |
+|---|---|---|
+| `SIZED_SESSIONS_BYTES` | 6,144,000 | 4,096,000 |
+| `SIZED_M_TOTAL` | 130,676 | 131,676 |
+
+**The post-synthesis reading was never the wrong one.** It is the relation the
+timed statements ran against, so every timing is correctly paired with it, and
+`SIZED_*` stays frozen from it — a term and its declared basis have to move
+together. The defect was **provenance**: it was the only reading recorded, and
+nothing marked which one it was.
+
+What each run now emits, for every kind — atomic, batch, cancel probe, sweep
+domain:
+
+```json
+"timing_basis": "post_synthesis",
+"dimension_bases": {
+  "pre_synthesis":  {"status": "measured", "total_rows": 4184, "sessions_bytes": 4096000, ...},
+  "post_synthesis": {"status": "measured", "total_rows": 4184, "sessions_bytes": 6144000, ...}
+}
+```
+
+`dimensions_before` keeps exactly the meaning it always had — the reading taken
+at the start of the measured pass. What changed is that it is now labelled and
+**checkable**: `--derive` refuses an artifact whose `post_synthesis` reading
+disagrees with it. That check is the one worth having. Substituting the
+pre-synthesis reading while leaving the timings alone reads as a correction and
+is not one — it divides a statement timed against 6,144,000 bytes by a
+4,096,000-byte basis, and nothing downstream can tell.
+
+It is **not** refused for being optimistic. The error runs in *both* directions,
+depending on which side of a ratio the substituted reading lands on:
+
+| reading substituted downward | factor | effect |
+|---|---|---|
+| a **sweep copy's** own | `N_copy = frozen / copy` rises | that point **over**-charged |
+| the **frozen basis** | every `N_copy` falls | the whole fit **under**-charged |
+| the **frozen basis**, at run time | `g_sessions = live / SIZED` rises | scan terms **over**-charged |
+
+So the guard holds because a timing and its basis have to move together, not
+because either direction is safe. The pre-synthesis reading is emitted under
+`scaling.measurement_bases` and divided by **nowhere**; carrying a timing onto it
+is a separate, explicit step, and this is the evidence such a step would start
+from.
+
+Two further rules, both fail-closed:
+
+- **`SIZED_*` may not be frozen from a copy whose displacement is unrecorded.**
+  Only on the full-restore path, where the basis falls back to the atomic
+  snapshot's own dimensions. This is the blind spot described above: a basis
+  inflated by synthesis and frozen without that being visible leaves
+  `_growth_factor` pinned at 1.0 across the whole gap.
+- **A basis is never inferred** — not from prose, not from a filename, not from a
+  sibling copy, and not by inverting the growth factor.
+
+**The two committed sweep artifacts were migrated, not re-measured.** Their
+`dimensions_before` *is* an accurate post-synthesis reading, which is all the
+sweep fit needs, so both keep their points and their `N_copy` and both remain
+active constraints. Their pre-synthesis reading was never taken and is recorded
+as `status: "not_recorded_legacy"` rather than reconstructed — for `gr_p1_sweep`
+it is genuinely unrecoverable, since readings of the same restore moved
+(4,079,616, then 4,096,000 once autovacuum materialised the FSM/VM forks) before
+any synthesis ran. `--derive` reports them as incomplete in
+`sweep_copy_growth_factors[].pre_synthesis_recorded`. Neither supplies `SIZED_*`.
+
+Regression tests in `test_release_b_sizing.py` cover the intake, the substitution
+guard on both an atomic and a sweep artifact, the `SIZED_*` gate, the completeness
+of its `--production-dimensions` escape (empty, populations-only, partial, and
+zero-dimension declarations each refused), and the migration of both shipped
+artifacts; plus
+`test_release_b_pg_matrix.py::test_pg_the_harness_records_the_reading_its_synthesis_moved`,
+PostgreSQL-gated and pinned in the manifest, which asserts the delta against
+`synthesize_repair`'s exact displacement — one ply per corrupted session, rather
+than a byte figure that would test the host's vacuum state.
+
+**Defect #2 of that bead — the sweep measured at one arbitrary point — was
+closed earlier**, by `g-b-sweep-batch-cost` (the domain sweep, the
+`MIN_SWEEP_TRIALS = 7` floor enforced at generation, retained raw trials, and the
+removal of the sweep from `time_scan_statements`) and `g-b-sweep-endpoint-measure`
+(the maximum population, via `--synthesize-sessions`). Nothing was added for it
+here.
 
 ### Harness defect found and fixed under this bead
 

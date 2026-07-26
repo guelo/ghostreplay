@@ -20,6 +20,24 @@
   "populations_before": {
     "n_stale": 1646
   },
+  "timing_basis": "post_synthesis",
+  "dimension_bases": {
+    "migrated": "2026-07-26 under g-b-size-harness-defects. This artifact predates the harness recording two readings; nothing here is new measurement. The post_synthesis reading is copied verbatim from this file's own dimensions_before / populations_before, which is what the timed statements ran against. The pre-synthesis reading was never taken and is NOT reconstructed -- not from the prose notes above, not from a sibling copy, and not by inverting the growth factor.",
+    "pre_synthesis": {
+      "status": "not_recorded_legacy",
+      "note": "gr_p1_sweep was read only AFTER --synthesize-stale had already nulled the version across the whole ended-visible set. The restore's own game_sessions byte reading before that rewrite is unrecoverable: pg_total_relation_size on a logical restore measures the locally rebuilt relation, and readings of the same restore moved (4,079,616, then 4,096,000 once autovacuum materialised the FSM/VM forks) before any synthesis ran at all."
+    },
+    "post_synthesis": {
+      "status": "measured",
+      "total_rows": 4184,
+      "sessions_bytes": 5414912,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 1646
+      }
+    }
+  },
   "frozen_basis": {
     "SIZED_TOTAL_ROWS": 6000,
     "SIZED_SESSIONS_BYTES": 10010624,

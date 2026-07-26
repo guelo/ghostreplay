@@ -22,6 +22,28 @@
     "n_broken_audit": 10,
     "n_repair": 0
   },
+  "timing_basis": "post_synthesis",
+  "dimension_bases": {
+    "migrated": "2026-07-26 under g-b-size-harness-defects. This artifact predates the harness recording two readings; nothing here is new measurement. The post_synthesis reading is copied verbatim from this file's own dimensions_before / populations_before, which is what the timed statements ran against. The pre-synthesis reading was never taken and is NOT reconstructed from the restore's documented row counts, which are not a dimension reading.",
+    "pre_synthesis": {
+      "status": "not_recorded_legacy",
+      "note": "gr_p2_sweep6000 was read only AFTER --synthesize-sessions 6000 had cloned the ended-visible set up to 6,000 stale rows. The restore came up as the documented fixture -- 4,184 game_sessions, 131,676 session_moves -- but those are row counts from the dump's own contents, not a pg_total_relation_size reading of this cluster's rebuilt relation, and the two are not interchangeable. m_total and moves_bytes did not move: --synthesize-sessions adds no session_moves rows."
+    },
+    "post_synthesis": {
+      "status": "measured",
+      "total_rows": 8538,
+      "sessions_bytes": 14008320,
+      "m_total": 131676,
+      "moves_bytes": 45817856,
+      "populations": {
+        "n_stale": 6000,
+        "m_moves": 109376,
+        "mean_plies_per_stale": 18.229333333333333,
+        "n_broken_audit": 10,
+        "n_repair": 0
+      }
+    }
+  },
   "frozen_basis": {
     "SIZED_TOTAL_ROWS": 6000,
     "SIZED_SESSIONS_BYTES": 10010624,
