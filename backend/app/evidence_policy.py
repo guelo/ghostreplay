@@ -699,6 +699,11 @@ CAPABILITY_GRANTS: dict[str, frozenset[Capability]] = {
     JEFFML_PROFILE_ID: frozenset(),
 }
 
+# Per-profile overlay mode. Inert on its own: a mode is only ever consulted for a
+# row whose profile already holds DISPLAY_OVERLAY, and the grant is only ever
+# spendable through a non-NEVER mode — so ``_assert_registry_consistent`` pins the
+# two tables to agree (g-overlay-mode-parity). WHICH non-NEVER mode a profile takes
+# stays a policy choice; that it takes one at all does not.
 OVERLAY_MODE: dict[str, OverlayMode] = {
     CANONICAL_PROFILE_ID: OverlayMode.ALWAYS,
     CANONICAL_LINUX_PROFILE_ID: OverlayMode.ALWAYS,
@@ -768,6 +773,25 @@ def _assert_registry_consistent() -> None:
         if pid not in profiles:
             raise ValueError(f"CAPABILITY_GRANTS references unregistered {pid!r}")
 
+    # Overlay modes are well-formed: a registered profile, a real OverlayMode.
+    #
+    # The type check is not belt-and-braces. The parity rule below keys on "is not
+    # NEVER", so a value that is not an OverlayMode at all — the bare string
+    # ``"always"``, a ``None`` — reads as ENABLED there and satisfies parity, while
+    # every consumer compares with ``is`` against a member and reads the same value
+    # as disabled. That is precisely the dead-grant state the parity rule exists to
+    # catch, so the table's shape has to fail closed BEFORE parity is evaluated.
+    # Note the asymmetry with CAPABILITY_GRANTS: a malformed capability value
+    # already fails closed (it satisfies no ``in`` test, so parity rejects it),
+    # whereas a malformed mode fails OPEN and needs this.
+    for pid, mode in OVERLAY_MODE.items():
+        if pid not in profiles:
+            raise ValueError(f"OVERLAY_MODE references unregistered {pid!r}")
+        if not isinstance(mode, OverlayMode):
+            raise ValueError(
+                f"OVERLAY_MODE for {pid!r} is not an OverlayMode: {mode!r}"
+            )
+
     for pid, profile in profiles.items():
         grants = CAPABILITY_GRANTS.get(pid, frozenset())
         if profile.authoritative and profile.active:
@@ -799,6 +823,29 @@ def _assert_registry_consistent() -> None:
                 f"profile {pid!r} uses internally inconsistent protocol "
                 f"{protocol.version!r} and may not hold active-required "
                 "capabilities"
+            )
+
+        # OVERLAY_MODE <-> DISPLAY_OVERLAY parity in BOTH directions. Drift here is
+        # SILENT — each half is a no-op without the other, so neither direction
+        # surfaces as a failure anywhere downstream:
+        #   * a non-NEVER mode without the grant is a dead mode — ``has_capability``
+        #     rejects the row before ``overlay_mode`` is ever read;
+        #   * the grant without a non-NEVER entry is a dead grant — ``overlay_mode``
+        #     defaults to NEVER for an unlisted profile, so the overlay gates return
+        #     False for a row the grant says may overlay.
+        # Both read as "this profile does not overlay", which is exactly what a
+        # correctly-NEVER profile reads as, so only comparing the two tables can
+        # tell an intended NEVER from a half-finished edit. Stated LAST in the loop
+        # so a profile that also violates the protocol rule above reports that
+        # instead: the parity mismatch is the weaker statement.
+        # The loop above validated every present value, and the default is a member,
+        # so ``mode`` is a real OverlayMode here — the ``is`` test means what it says.
+        mode = OVERLAY_MODE.get(pid, OverlayMode.NEVER)
+        granted_overlay = Capability.DISPLAY_OVERLAY in grants
+        if (mode is not OverlayMode.NEVER) != granted_overlay:
+            raise ValueError(
+                f"profile {pid!r} overlay mode {mode.value!r} does not match its "
+                f"DISPLAY_OVERLAY grant (granted={granted_overlay})"
             )
 
 

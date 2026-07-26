@@ -650,6 +650,15 @@ performs for arrows/lines. Key points:
   `analyzer_protocol_version` fails closed. Lifecycle is deliberately NOT part of
   that rule — retirement is enforced at USE time by `has_capability`
   (`profile.active` or capability ∈ `RETIREMENT_SURVIVING`).
+  A second load assertion pins the two overlay tables to agree: every `OVERLAY_MODE`
+  entry names a registered profile and is a real `OverlayMode`, and **a non-`NEVER`
+  mode holds if and only if the profile is granted `DISPLAY_OVERLAY`.** Either half
+  alone is inert — a mode without the grant never runs (`has_capability` rejects the
+  row first), and a grant without a non-`NEVER` entry never runs either
+  (`overlay_mode` defaults an unlisted profile to `NEVER`) — and both read downstream
+  as "this profile does not overlay", indistinguishable from an intended `NEVER`, so
+  the drift is silent everywhere except at load. WHICH non-`NEVER` mode a profile
+  takes stays a policy choice.
 - **Exact-key model.** `SessionAnalysisMove` carries `fen_before` and `move_uci`.
   The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
   wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove

@@ -5,9 +5,11 @@ the only thing standing between a registry edit and a silently inconsistent
 policy: EDGES that reference a profile nobody registered, an EDGES/``dominates``
 pair that drifted apart, an ACTIVE-REQUIRED (non-``RETIREMENT_SURVIVING``)
 capability granted to a profile whose analyzer protocol is not internally
-consistent, a profile referencing an unregistered protocol, or an authoritative
-profile quietly stripped of a capability. Each of those must raise, and one test
-proves the enforcement really happens AT IMPORT rather than only when called.
+consistent, a profile referencing an unregistered protocol, an authoritative
+profile quietly stripped of a capability, or an ``OVERLAY_MODE`` entry that
+disagrees with the profile's ``DISPLAY_OVERLAY`` grant in either direction. Each
+of those must raise, and one test proves the enforcement really happens AT IMPORT
+rather than only when called.
 
 The capability rule is stated PROTOCOL-side and is independent of both authority
 and lifecycle: retirement is enforced at USE time by ``has_capability``, which the
@@ -42,6 +44,7 @@ from app.analysis_cache_policy import (
     Decision,
     Reason,
     decide_analysis_cache_replacement,
+    display_upgrade_eligible,
     project_cache_row,
 )
 from app.analysis_profiles import (
@@ -60,11 +63,13 @@ from app.evidence_policy import (
     ALL_CAPABILITIES,
     CAPABILITY_GRANTS,
     EDGES,
+    OVERLAY_MODE,
     PROTOCOLS,
     RETIREMENT_SURVIVING,
     Capability,
     Edge,
     EdgeKind,
+    OverlayMode,
     _assert_registry_consistent,
     has_capability,
 )
@@ -143,6 +148,21 @@ def _set_grants(monkeypatch, **overrides) -> None:
 
 def _set_profiles(monkeypatch, profiles) -> None:
     monkeypatch.setattr(evidence_policy, "list_profiles", lambda: tuple(profiles))
+
+
+def _set_overlay_modes(monkeypatch, **overrides) -> None:
+    """``OVERLAY_MODE`` with ``overrides`` applied; a ``None`` value DELETES the entry.
+
+    Deletion is a distinct case from ``OverlayMode.NEVER``, not a convenience:
+    ``overlay_mode`` defaults an unlisted profile to NEVER, so an absent entry is
+    the OTHER way a grant goes dead and the rule has to reject both.
+    """
+    modes = {**OVERLAY_MODE, **overrides}
+    monkeypatch.setattr(
+        evidence_policy,
+        "OVERLAY_MODE",
+        {pid: mode for pid, mode in modes.items() if mode is not None},
+    )
 
 
 # --- the two tables the capability rule reads --------------------------------------
@@ -293,6 +313,10 @@ def test_inconsistent_protocol_may_not_hold_an_active_required_capability(
         monkeypatch,
         **{profile_id: frozenset({Capability.DISPLAY_OVERLAY, capability})},
     )
+    # The overlay grant is paired with a non-NEVER mode so the OVERLAY_MODE parity
+    # rule is SATISFIED for these profiles (browser-game-v1 and jeffml are NEVER
+    # today): the protocol rule must be the only thing left to raise.
+    _set_overlay_modes(monkeypatch, **{profile_id: OverlayMode.ALWAYS})
     with pytest.raises(ValueError, match="uses internally inconsistent protocol"):
         _assert_registry_consistent()
 
@@ -303,10 +327,13 @@ def test_overlay_only_grant_to_an_inconsistent_protocol_still_loads(
 ):
     # The negative control for the rule above: it keys on the active-required
     # REMAINDER, not on "holds a grant at all", so a retirement-surviving grant to
-    # the very same profiles loads fine.
+    # the very same profiles loads fine. The mode moves with the grant for the same
+    # reason as above — a bare grant would now trip the parity rule instead, which
+    # would prove nothing about the protocol rule.
     _set_grants(
         monkeypatch, **{profile_id: frozenset({Capability.DISPLAY_OVERLAY})}
     )
+    _set_overlay_modes(monkeypatch, **{profile_id: OverlayMode.ALWAYS})
     _assert_registry_consistent()
 
 
@@ -387,6 +414,110 @@ def test_read_grants_to_a_consistent_non_authoritative_protocol_load(monkeypatch
             )
         },
     )
+    _assert_registry_consistent()
+
+
+# --- OVERLAY_MODE <-> DISPLAY_OVERLAY parity (g-overlay-mode-parity) --------------
+
+
+def test_overlay_mode_for_an_unregistered_profile_raises(monkeypatch):
+    # Same reference rule CAPABILITY_GRANTS already carried: a mode for a profile
+    # nobody registered can never be reached, and is far more likely a typo'd id
+    # than an intent.
+    _set_overlay_modes(monkeypatch, **{GHOST: OverlayMode.ALWAYS})
+    with pytest.raises(
+        ValueError, match=f"OVERLAY_MODE references unregistered '{GHOST}'"
+    ):
+        _assert_registry_consistent()
+
+
+@pytest.mark.parametrize(
+    "profile_id",
+    [BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID],
+    ids=["granted", "ungranted"],
+)
+@pytest.mark.parametrize(
+    "value",
+    [OverlayMode.ALWAYS.value, OverlayMode.NEVER.value, None],
+    ids=["always-as-str", "never-as-str", "none"],
+)
+def test_a_mode_that_is_not_an_overlay_mode_raises(monkeypatch, profile_id, value):
+    """A malformed VALUE must fail closed before parity is ever evaluated.
+
+    The parity rule keys on ``is not NEVER``, so any non-member — the enum's own
+    ``"always"`` string, ``"never"``, ``None`` — reads as ENABLED there while every
+    consumer's ``is`` comparison reads it as disabled. On a GRANTED profile that
+    combination satisfies parity and reinstates the exact dead grant this section
+    exists to prevent; on an UNGRANTED one parity does raise, but for the wrong
+    reason, so both axes assert on the malformed-value message specifically.
+
+    Patched directly rather than through ``_set_overlay_modes``, which reserves
+    ``None`` for deleting an entry — here ``None`` is the stored value under test.
+    """
+    monkeypatch.setattr(
+        evidence_policy, "OVERLAY_MODE", {**OVERLAY_MODE, profile_id: value}
+    )
+    with pytest.raises(ValueError, match="is not an OverlayMode"):
+        _assert_registry_consistent()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [OverlayMode.ALWAYS, OverlayMode.REQUIRES_COMPARISON],
+    ids=lambda m: m.value,
+)
+def test_a_mode_without_the_grant_raises(monkeypatch, mode):
+    # DEAD MODE. browser-game-v1 holds nothing, so has_capability rejects its rows
+    # before overlay_mode is ever read — either non-NEVER mode is unreachable code
+    # dressed as policy. Both modes are covered because the rule is stated over
+    # "not NEVER", not over ALWAYS.
+    _set_overlay_modes(monkeypatch, **{BROWSER_PROFILE_ID: mode})
+    with pytest.raises(ValueError, match="does not match its DISPLAY_OVERLAY grant"):
+        _assert_registry_consistent()
+
+
+@pytest.mark.parametrize(
+    "mode", [OverlayMode.NEVER, None], ids=["explicit-never", "entry-deleted"]
+)
+def test_a_grant_without_a_non_never_mode_raises(monkeypatch, mode):
+    # DEAD GRANT, the other direction. browser-analysis-multipv-v2 holds
+    # DISPLAY_OVERLAY; demoting it to NEVER and deleting its entry outright are the
+    # same failure, which is why the rule reads OVERLAY_MODE through its NEVER
+    # default rather than through its key set.
+    _set_overlay_modes(monkeypatch, **{BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: mode})
+    with pytest.raises(ValueError, match="does not match its DISPLAY_OVERLAY grant"):
+        _assert_registry_consistent()
+
+
+def test_a_dead_grant_is_silent_everywhere_except_the_load_rule(monkeypatch):
+    """Why this has to be a LOAD assertion: the drift has no downstream symptom.
+
+    The row stays identity-verified, keeps its capability, and simply stops
+    overlaying — indistinguishable from a profile that was never meant to overlay.
+    Nothing raises, nothing logs, and the only remaining detector is comparing the
+    two tables at import.
+    """
+    row = _row(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert display_upgrade_eligible(row) is True  # control: overlays today
+
+    _set_overlay_modes(monkeypatch, **{BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: None})
+    assert has_capability(row, Capability.DISPLAY_OVERLAY) is True  # grant survives
+    assert display_upgrade_eligible(row) is False  # ...and buys nothing
+
+    with pytest.raises(ValueError, match="does not match its DISPLAY_OVERLAY grant"):
+        _assert_registry_consistent()
+
+
+def test_a_grant_and_a_mode_added_together_load(monkeypatch):
+    # The permissive boundary: the rule blocks DRIFT between the tables, not the
+    # arrival of a new overlaying profile. jeffml holds nothing and is NEVER today;
+    # moved on both axes at once it loads — and the grant stays inside
+    # RETIREMENT_SURVIVING, so the protocol rule (jeffml declares no protocol) has
+    # nothing to say about it either.
+    _set_grants(
+        monkeypatch, **{JEFFML_PROFILE_ID: frozenset({Capability.DISPLAY_OVERLAY})}
+    )
+    _set_overlay_modes(monkeypatch, **{JEFFML_PROFILE_ID: OverlayMode.ALWAYS})
     _assert_registry_consistent()
 
 
