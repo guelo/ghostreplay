@@ -1277,7 +1277,9 @@ describe("useChessGameLifecycle", () => {
     abandonDrillMock.mockResolvedValueOnce({
       session_id: "drill-session-123",
       mode: "drill",
-      drill_state: "abandoned",
+      // The server preserves the terminal outcome across abandon
+      // (g-drill-failed-overwrite); the store still finalizes to "abandoned".
+      drill_state: "failed",
       opening_key: "target-fen",
       opening_name: "Target",
       opening_family: "Target",
@@ -1331,7 +1333,9 @@ describe("useChessGameLifecycle", () => {
     });
     abandonDrillMock.mockResolvedValueOnce({
       session_id: "drill-session-456",
-      drill_state: "abandoned",
+      // Server keeps 'failed'; the store's drillState is the CLIENT lifecycle
+      // sentinel and must still land on "abandoned" (g-drill-failed-overwrite).
+      drill_state: "failed",
     });
 
     await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
@@ -2412,7 +2416,7 @@ describe("useChessGameLifecycle", () => {
       });
       abandonDrillMock.mockResolvedValueOnce({
         session_id: "drill-session-123",
-        drill_state: "abandoned",
+        drill_state: "failed",
       });
       await waitFor(() =>
         expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),

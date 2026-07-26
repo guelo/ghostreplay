@@ -665,6 +665,28 @@ def test_abandoned_drill_hidden_from_history_stats_and_analysis(client, auth_hea
     assert session.is_rated is False
 
 
+def test_failed_then_abandoned_drill_is_hidden_too(client, auth_headers, db_session):
+    """Hiding keys on the visibility guard (session_mode='normal' OR
+    drill_state='converted'), never on drill_state == 'abandoned' — so preserving
+    'failed' across abandon (g-drill-failed-overwrite) leaks nothing."""
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+    client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
+        headers=auth_headers(),
+    )
+    abandoned = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+    assert abandoned.status_code == 200
+    assert abandoned.json()["drill_state"] == "failed"
+
+    assert client.get("/api/history", headers=auth_headers()).json()["games"] == []
+    assert client.get("/api/stats/summary", headers=auth_headers()).json()["games"]["played"] == 0
+    assert client.get(f"/api/session/{session_id}/analysis", headers=auth_headers()).status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # strictness_cp tests
 # ---------------------------------------------------------------------------
@@ -2264,7 +2286,9 @@ def test_abandon_accuracy_failed_drill_does_not_bump_cursor(client, auth_headers
     with capture_statements() as log:
         response = client.post(f"/api/drills/{session_id}/abandon", headers=headers)
     assert response.status_code == 200, response.text
-    assert response.json()["drill_state"] == "abandoned"
+    # Abandon preserves the terminal outcome (g-drill-failed-overwrite); only the
+    # eligibility/cursor behaviour is under test here and it is unchanged.
+    assert response.json()["drill_state"] == "failed"
 
     pre = no_cursor_bump(log)
     assert any(s.startswith("update game_sessions") for s in pre), pre  # the write DID run
@@ -2273,3 +2297,124 @@ def test_abandon_accuracy_failed_drill_does_not_bump_cursor(client, auth_headers
     assert current_evidence_seq(db_session, 123, "black") == seq_before
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.status == "ended"
+
+
+# ---------------------------------------------------------------------------
+# Abandon preserves a terminal drill outcome (g-drill-failed-overwrite).
+#
+# drill_state is the OUTCOME record; status/result/ended_at are the LIFECYCLE
+# record. Abandon writes the lifecycle unconditionally but must only claim the
+# outcome slot when there is no outcome yet — the old unconditional write
+# relabelled ~94% of real failures as 'abandoned'.
+# ---------------------------------------------------------------------------
+def test_abandon_preserves_accuracy_failed_outcome(client, auth_headers, db_session):
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+
+    failed = client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
+        headers=auth_headers(),
+    )
+    assert failed.status_code == 200, failed.text
+
+    response = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    assert response.json()["drill_state"] == "failed"
+    assert response.json()["terminal_reason"] == "accuracy"
+
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "accuracy"
+    # The session still ENDS — that is what abandon is for.
+    assert session.status == "ended"
+    assert session.result == "drill_abandon"
+    assert session.ended_at is not None
+    assert session.is_rated is False
+
+
+def test_abandon_preserves_off_route_failed_outcome_and_bumps_cursor(
+    client, auth_headers, db_session
+):
+    """An off-route-failed drill is NOT evidence-eligible (the carve-out is
+    accuracy-only), so ending it still flips false->true and must still bump."""
+    graph = _steering_graph()
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=50, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+        route = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            headers=auth_headers(),
+        )
+        assert route.json()["status"] == "failed"
+        # _start_drill_cp plays white.
+        seq_before = current_evidence_seq(db_session, 123, "white")
+
+        response = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+    assert response.status_code == 200, response.text
+    assert response.json()["drill_state"] == "failed"
+    assert response.json()["terminal_reason"] == "off_route"
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "off_route"
+    assert session.status == "ended"
+    assert session.result == "drill_abandon"
+
+
+def test_second_abandon_of_failed_drill_is_a_noop(client, auth_headers, db_session):
+    """Idempotency now rests on status='ended' alone, since drill_state no longer
+    records the quit — exactly how the already-ended natural-end case works."""
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+    client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
+        headers=auth_headers(),
+    )
+
+    first = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+    assert first.status_code == 200, first.text
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    ended_at = session.ended_at
+
+    second = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+    assert second.status_code == 200, second.text
+    assert second.json()["drill_state"] == "failed"
+
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.ended_at == ended_at
+    assert session.drill_state == "failed"
+
+
+def test_abandon_of_unfailed_drill_still_records_abandoned(client, auth_headers, db_session):
+    """Guards against over-broad preservation: a drill with no terminal outcome
+    still gets one written by abandon, from both non-terminal states."""
+    for state in ("active", "root_reached"):
+        session_id = _start_drill(client, auth_headers).json()["session_id"]
+        session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+        session.drill_state = state
+        db_session.commit()
+
+        response = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+        assert response.status_code == 200, response.text
+        assert response.json()["drill_state"] == "abandoned", state
+
+        db_session.expire_all()
+        session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+        assert session.drill_state == "abandoned", state
+        assert session.drill_terminal_reason is None, state
+        assert session.status == "ended", state

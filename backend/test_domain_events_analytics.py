@@ -223,7 +223,27 @@ def test_abandon_drill_emits_once_and_is_idempotent(client, auth_headers, captur
     assert second.status_code == 200
     did, _event, props = _one(captured, "drill_abandoned")
     assert did == "55"
-    assert props == {}
+    # NULL terminal_reason == quit mid-drill, the genuine abandon (g-drill-failed-overwrite).
+    assert props == {"terminal_reason": None}
+
+
+def test_abandon_after_failure_emits_both_events_once(client, auth_headers, captured, db_session):
+    """A quit-after-failure emits drill_failed AND drill_abandoned, and the
+    abandon event carries the reason that drill_state no longer records."""
+    session_id = _start_kp_drill(client, auth_headers, user_id=55)
+    _force_drill_state(db_session, session_id, "root_reached")
+    with patch("app.api.drills.get_opening_roots", return_value=_drill_roots()):
+        failed = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={"terminal_reason": "accuracy"},
+            headers=auth_headers(user_id=55),
+        )
+        abandoned = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers(user_id=55))
+    assert failed.status_code == 200
+    assert abandoned.status_code == 200
+
+    assert _one(captured, "drill_failed")[2] == {"reason": "accuracy"}
+    assert _one(captured, "drill_abandoned")[2] == {"terminal_reason": "accuracy"}
 
 
 def _start_kp_drill(client, auth_headers, *, user_id: int) -> str:

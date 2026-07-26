@@ -987,13 +987,19 @@ export const useChessGameLifecycle = ({
     // on a backend failure would leave an active failed drill with no cleanup
     // opportunity. The caller keeps the drill active and surfaces an error.
     if (store.drillOpeningKey && store.drillState !== "converted") {
-      const contract = await abandonDrill(store.sessionId);
+      await abandonDrill(store.sessionId);
       if (useGameStore.getState().sessionId !== finalizingSessionId) {
         return;
       }
       coordinator.stopSessionUploads();
       const s = useGameStore.getState();
-      s.setDrillState(contract.drill_state);
+      // The server now PRESERVES a terminal drill_state ('failed') across abandon
+      // (g-drill-failed-overwrite), so it no longer reports 'abandoned' for a
+      // stopped drill. The store's drillState is the CLIENT lifecycle: a successful
+      // abandon is this client's "finalized" sentinel, regardless of the persisted
+      // outcome label. Read by isReviewedDrillReturnValid, isStoppedDrill, and
+      // handleContinueDrill, none of which should see 'failed' after finalization.
+      s.setDrillState("abandoned");
       s.setIsRated(false);
     }
 
@@ -1023,13 +1029,15 @@ export const useChessGameLifecycle = ({
 
     try {
       if (store.drillOpeningKey && store.drillState !== "converted") {
-        const contract = await abandonDrill(store.sessionId);
+        await abandonDrill(store.sessionId);
         if (useGameStore.getState().sessionId !== finalizingSessionId) {
           return;
         }
         coordinator.stopSessionUploads();
         const s = useGameStore.getState();
-        s.setDrillState(contract.drill_state);
+        // Client lifecycle sentinel, not a mirror of the persisted outcome — see
+        // abandonStoppedDrill (g-drill-failed-overwrite).
+        s.setDrillState("abandoned");
         s.setIsRated(false);
         finishLocalGame(
           { type: "resign", message: "Drill abandoned." },

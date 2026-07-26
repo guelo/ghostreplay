@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Chess } from "chess.js";
+import { cleanup } from "@testing-library/react";
 import { render, screen, fireEvent, waitFor, act, within } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
@@ -489,7 +490,11 @@ describe("ChessGame characterization safeguards", () => {
     continueDrillMock.mockReset();
     checkDrillRouteMock.mockReset();
     abandonDrillMock.mockReset();
-    abandonDrillMock.mockResolvedValue({ drill_state: "abandoned" });
+    // The real post-fix response for a STOPPED drill: the server preserves the
+    // terminal outcome across abandon (g-drill-failed-overwrite). The client
+    // store's drillState is its own lifecycle sentinel and must still land on
+    // "abandoned" — that mapping is what these tests exercise.
+    abandonDrillMock.mockResolvedValue({ drill_state: "failed" });
     mockCoordinator.clearSession.mockClear();
     useDrillAnalysisStore.getState().clear();
     startDrillMock.mockReset();
@@ -1144,6 +1149,10 @@ describe("ChessGame characterization safeguards", () => {
     expect(abandonDrillMock).toHaveBeenCalledWith("session-characterization");
     expect(mockCoordinator.clearSession).toHaveBeenCalled();
     expect(useGameStore.getState().isGameActive).toBe(false);
+    // Server says 'failed' (outcome preserved); the client store finalizes to
+    // 'abandoned', which is what isReviewedDrillReturnValid and the post-game
+    // banner read (g-drill-failed-overwrite).
+    expect(useGameStore.getState().drillState).toBe("abandoned");
 
     const snapshot = useDrillAnalysisStore.getState().snapshot!;
     // The late-resolved failed move's eval is included in the snapshot.
@@ -1152,6 +1161,51 @@ describe("ChessGame characterization safeguards", () => {
     // starting-position sentinel (-1) (g-eflo).
     expect(snapshot.initialMoveIndex).toBe(-1);
     expect(snapshot.warning).toBeNull();
+  });
+
+  it("Analyze then return restores the reviewed drill, with the server preserving 'failed'", async () => {
+    // End-to-end guard on the client-lifecycle pin (g-drill-failed-overwrite):
+    // the abandon response says drill_state 'failed', and the reviewed-return
+    // path — which requires drillState === "abandoned" — must still light up.
+    // Driving the REAL Analyze flow is the point; a hand-seeded "abandoned"
+    // store cannot prove the transition.
+    mockCoordinator.waitForAnalysis.mockResolvedValue(null);
+    await driveOffRouteFail();
+    act(() => {
+      // A real drill carries strictness; the reviewed-return guard requires it.
+      useGameStore.setState({ drillStrictness: "standard", drillStrictnessCp: 25 });
+    });
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Analyze" }));
+    });
+    await waitFor(() => {
+      expect(useDrillAnalysisStore.getState().snapshot).not.toBeNull();
+    });
+    expect(useGameStore.getState().drillState).toBe("abandoned");
+    // Drain the abandon/teardown continuations before unmounting, so no state
+    // update lands on the outgoing tree outside act() (the pre-push gate rejects
+    // "not wrapped in act(" as a hard failure).
+    await act(async () => {});
+
+    // Remount /play the way the round trip back from /drill-analysis does.
+    cleanup();
+    mockLocation = {
+      state: {
+        returnFromDrillAnalysis: { sourceSessionId: "session-characterization" },
+      },
+      pathname: "/play",
+    };
+    // The fresh mount fires its own async effects (rating fetch, opening-root
+    // lineage); settle them inside act before asserting.
+    await act(async () => {
+      render(<ChessGame />);
+    });
+
+    // Reviewed-return presentation: drill actions restored, no generic banner.
+    expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new game/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /play white/i })).toBeNull();
   });
 
   it("keeps the stopped drill active and surfaces an error when abandon fails", async () => {
@@ -2198,12 +2252,13 @@ describe("ChessGame characterization safeguards", () => {
     expect(useGameStore.getState().drillLine).toBeNull();
   });
 
-  // Reaches the natural-end PostGameBanner ("Another drill") branch by resigning
-  // a drill (abandonDrill -> drillState "failed", finishLocalGame sets
-  // gameResult + showPostGamePrompt).
+  // Reaches the natural-end PostGameBanner ("Another drill") branch. Resigning is
+  // scaffolding for gameResult + showPostGamePrompt; the drillState the branch keys
+  // on ("failed") is set the way naturalEndDrill's contract echo sets it
+  // (useChessGameLifecycle.ts:436). Resign itself finalizes to "abandoned" and can
+  // no longer produce this state (g-drill-failed-overwrite).
   const reachNaturalEndDrillBanner = async () => {
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    abandonDrillMock.mockResolvedValueOnce({ drill_state: "failed" });
     await startGameAsWhite();
     act(() => {
       useGameStore.setState({
@@ -2221,6 +2276,9 @@ describe("ChessGame characterization safeguards", () => {
     });
     await act(async () => {
       fireEvent.click(screen.getByText("Resign"));
+    });
+    act(() => {
+      useGameStore.getState().setDrillState("failed");
     });
 
     expect(

@@ -604,7 +604,19 @@ def abandon_drill(
         # off_route drills; an accuracy-failed drill was already eligible (no
         # flip, no bump) (g-jact).
         was_evidence_eligible = session_is_evidence_eligible(session)
-        session.drill_state = "abandoned"
+        # A drill that already FAILED keeps its outcome: 'abandoned' means "quit with
+        # no terminal outcome", and overwriting it erased ~94% of real failures
+        # (g-drill-failed-overwrite). The session still ENDS here — status/result/
+        # ended_at are the LIFECYCLE record, drill_state + drill_terminal_reason are
+        # the OUTCOME record.
+        #
+        # failed + status='ended' is a row shape natural-end already produces, so the
+        # DB CHECKs are proven — but the two remain distinguishable by ``result``:
+        # natural-end writes checkmate_win|checkmate_loss|draw, this path writes
+        # 'drill_abandon'. That difference is what lets the g-drill-failed-backfill
+        # predicate target only rows this endpoint clobbered.
+        if session.drill_state != "failed":
+            session.drill_state = "abandoned"
         session.status = "ended"
         session.result = "drill_abandon"
         session.ended_at = utcnow()
@@ -614,5 +626,11 @@ def abandon_drill(
             bump_evidence_seq(db, user.user_id, session.player_color)
         db.commit()
         db.refresh(session)
-        capture(str(user.user_id), "drill_abandoned", {})
+        # terminal_reason separates "quit after a failure" from "quit mid-drill"
+        # (NULL) now that drill_state no longer records the quit.
+        capture(
+            str(user.user_id),
+            "drill_abandoned",
+            {"terminal_reason": session.drill_terminal_reason},
+        )
     return _contract(session)

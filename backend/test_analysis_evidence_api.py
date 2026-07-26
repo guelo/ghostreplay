@@ -499,6 +499,9 @@ def test_endpoint_abandoned_drill_not_eligible(client, auth_headers, create_game
 
 
 def test_endpoint_ended_unconverted_drill_not_eligible(client, auth_headers, create_game_session, db_session):
+    # failed + ended is also the shape a failed-then-abandoned drill now persists
+    # (g-drill-failed-overwrite): the ended-unconverted clause catches it where the
+    # drill_state == 'abandoned' clause used to.
     session_id = create_game_session(user_id=123)
     _seed_e4_move(db_session, session_id)
     _make_drill(db_session, session_id, drill_state="failed", status="ended")
