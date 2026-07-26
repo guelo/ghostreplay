@@ -192,6 +192,24 @@ describe("DrillSetupPanel", () => {
     expect(props.onStartDrill).toHaveBeenCalledTimes(1);
   });
 
+  // Reachability contract, not styling: .drill-setup__fields is the element
+  // that scrolls when the panel is height-capped. Start Drill living inside it
+  // is what put the CTA below the fold under 768px (g-drill-cta-clip).
+  it("keeps the start button outside the scrollable fields region", () => {
+    const props = makeProps();
+    const { container } = render(
+      <DrillSetupPanel
+        {...props}
+        selectedOpening={props.openingFamilies![0].roots[0]}
+      />,
+    );
+
+    const fields = container.querySelector(".drill-setup__fields");
+    const startButton = screen.getByRole("button", { name: /start drill/i });
+    expect(fields).not.toBeNull();
+    expect(fields!.contains(startButton)).toBe(false);
+  });
+
   it("disables start button when no opening is selected", () => {
     const props = makeProps();
     render(<DrillSetupPanel {...props} selectedOpening={null} />);
