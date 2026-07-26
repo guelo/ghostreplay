@@ -45,6 +45,14 @@ START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 FEN_AFTER_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 FEN_AFTER_E5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 
+# The motivating g-kgiq position: game aa05b29f-4409-4713-bd9b-719cdefcdb68 after
+# 21...h4, white to move, played 22.Nb6+ (c4b6). Real session_moves wire values.
+NB6_FEN_BEFORE = "2kr1b1r/pp1q4/2p5/P1P2p2/2NP2pp/8/1B3PPP/R2QR1K1 w - - 0 22"
+NB6_FEN_AFTER = "2kr1b1r/pp1q4/1Np5/P1P2p2/3P2pp/8/1B3PPP/R2QR1K1 b - - 1 22"
+# Line 1 of the completed visible depth-21 MultiPV-3 search (it ranks c4b6 first).
+NB6_BEST_LINE = ("c4b6", "a7b6", "a5b6")
+NB6_BEST_CP = 631
+
 
 # --------------------------------------------------------------------------- #
 # helpers
@@ -989,3 +997,78 @@ def test_session_analysis_null_move_uci_skipped(client, auth_headers, create_gam
     resp = client.get(f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123))
     assert resp.status_code == 200
     assert resp.json()["moves"][0]["upgraded"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Motivating regression — 22.Nb6+ (g-nb6-reuse-integration)
+# --------------------------------------------------------------------------- #
+def test_motivating_nb6_visible_multipv_corrects_the_contradictory_row(
+    client, auth_headers, create_game_session, db_session
+):
+    """The g-kgiq case, end to end on the server side.
+
+    Game aa05b29f-4409-4713-bd9b-719cdefcdb68, move 22.Nb6+ (c4b6). Production
+    stored a self-contradictory ``browser-analysis-v1`` row for this exact key: the
+    hidden single-PV root picked a5a6 while its post-move scores rated c4b6 higher,
+    so the row said ``classification=excellent`` with ``best_move_uci=a5a6`` and
+    ``eval_delta=0``. The visible depth-21 MultiPV search ranks c4b6 FIRST, so the
+    reuse producer derives c4b6 as both played and best from one search.
+
+    Asserts the whole server half of the fix: rederivation accepts the same-search
+    tuple, the write correctively replaces the retired row, the stored row is
+    stamped browser-analysis-multipv-v2 and is internally consistent, and a REFETCH
+    still carries the durable upgrade.
+    """
+    session_id = create_game_session(user_id=123)
+    _add_session_move(
+        db_session, session_id, move_number=22, color="white", move_san="Nb6+",
+        fen_before=NB6_FEN_BEFORE, fen_after=NB6_FEN_AFTER, classification="excellent",
+    )
+    # The shipped, contradictory hidden-protocol row (real production values).
+    _seed_browser_analysis_row(
+        db_session, fen=NB6_FEN_BEFORE, move_uci="c4b6", move_san="Nb6+",
+        best_move_uci="a5a6", best_move_san="a6", best_line_uci="a5a6 h4h3 a6b7",
+        played_eval=718, best_eval=570, eval_delta=0, classification="excellent",
+        profile=BROWSER_ANALYSIS_PROFILE_ID,
+    )
+
+    resp = _post(client, auth_headers, session_id, [
+        _evidence_row(
+            fen=NB6_FEN_BEFORE, move_uci="c4b6", best_move_uci="c4b6",
+            best_line_uci=NB6_BEST_LINE, played_eval=NB6_BEST_CP,
+            best_eval=NB6_BEST_CP, eval_delta=0, classification="best",
+        )
+    ])
+    assert resp.status_code == 200
+    result = resp.json()["results"][0]
+    # Rederivation accepts the same-search tuple, and the retired row is corrected.
+    assert result["reason"] == "protocol_corrected_replace"
+    # The POST response carries the upgrade that patches the open MoveList to best.
+    assert result["upgrade"]["classification"] == "best"
+    assert result["upgrade"]["best_move_san"] == "Nb6+"
+    assert result["upgrade"]["eval_delta"] == 0
+    assert result["upgrade"]["authoritative"] is False
+
+    stored = _cache_row(db_session, NB6_FEN_BEFORE, "c4b6")
+    assert stored.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+    assert stored.evidence_contract_id == "resolver-complete-v2"
+    # c4b6 is now BOTH the played and the best move — the contradiction is gone.
+    assert stored.best_move_uci == "c4b6"
+    assert stored.best_move_san == "Nb6+"
+    # The PV is replaced wholesale too — retaining the retired "a5a6 ..." line beside
+    # a c4b6 best move would reintroduce the same contradiction one field over.
+    assert stored.best_line_uci == " ".join(NB6_BEST_LINE)
+    assert stored.classification == "best"
+    assert stored.eval_delta == 0
+    assert stored.played_eval == stored.best_eval == NB6_BEST_CP
+
+    # Refetch: the durable upgrade survives, alongside the untouched original label.
+    refetch = client.get(
+        f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123)
+    )
+    move = refetch.json()["moves"][0]
+    assert move["classification"] == "excellent"  # base evidence untouched
+    assert move["upgraded"]["classification"] == "best"
+    assert move["upgraded"]["best_move_san"] == "Nb6+"
+    # White to move, so the mover-relative overlay eval equals the white-relative one.
+    assert move["upgraded"]["eval_cp"] == NB6_BEST_CP
