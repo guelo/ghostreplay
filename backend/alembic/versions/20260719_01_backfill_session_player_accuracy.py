@@ -152,10 +152,11 @@ Deviations from the plan, stated rather than hidden
   ``GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`` moves that page count by a factor of
   ``MAX_BATCH_SIZE`` and the measured cost across that domain spans 42x
   (g-b-sweep-batch-cost).
-- **The model is measured to 1,647 pages and LINEARLY EXTRAPOLATED beyond it.**
-  The import-time worst case evaluates 6,001 pages, and nothing between those two
-  numbers has been measured. See ``MARGINED_US_BACKFILL_SWEEP_PER_PAGE``'s
-  docstring; the endpoint measurement is g-b-sweep-endpoint-measure.
+- The model is MEASURED across the whole domain it is evaluated over, out to and
+  including the ``IMPORT_WORST_CASE_SWEEP_PAGES = 6,001`` pages the import-time
+  budget charges. It was extrapolated past 1,647 pages when it was frozen;
+  g-b-sweep-endpoint-measure closed that gap on a production-shaped copy and the
+  fit did not move. See ``MARGINED_US_BACKFILL_SWEEP_PER_PAGE``'s docstring.
 
 Both keyset sweeps use the plan's first-page/later-page statement pair, and that
 is not interchangeable with the two shortcuts it looks like. A sentinel minimum
@@ -456,20 +457,26 @@ MARGINED_MS_BACKFILL_SWEEP_SCAN = 72
 #: milliseconds fails loudly rather than inflating every projection by three
 #: orders of magnitude. Frozen as ceil(3 * b * 1000) with b = 0.172439… ms/page.
 #:
-#: EXTRAPOLATION, NAMED AS ONE. The measured sweep domain reaches 1,647 pages
-#: (docs/sizing/sweep_batch_domain_20260725.json). The import-time budget
-#: evaluates IMPORT_WORST_CASE_SWEEP_PAGES = 6,001 and the atomic rejection
-#: boundary sits near 5,137, so everything past 1,647 pages is LINEAR
-#: EXTRAPOLATION and an ASSUMPTION rather than evidence: the LP covers the points
-#: it was given and says nothing beyond them. Every figure that depends on the
-#: unmeasured range is labelled assumption-dependent in the runbook, and
-#: g-b-sweep-endpoint-measure measures the endpoint on a copy sized to the frozen
-#: basis. Until it lands, test_release_b_pg_runtime.py's endpoint gate narrows the
-#: assumption without discharging it: it executes 6,001 pages and checks that the
-#: per-page slope PAST 1,647 matches the slope inside it ON THAT HOST, so a
-#: nonlinearity in the extrapolated range fails. It cannot speak for the frozen
-#: numbers, because its relation is a fixture of clones rather than a
-#: production-shaped copy.
+#: MEASURED TO THE ENDPOINT, on TWO production-shaped bases. The domain reaches
+#: IMPORT_WORST_CASE_SWEEP_PAGES = 6,001 pages — the exact page count the
+#: import-time budget charges, and past the atomic rejection boundary near 5,137 —
+#: so no figure downstream of this pair rests on extrapolation. This pair was
+#: frozen from a domain that stopped at 1,647 pages
+#: (docs/sizing/sweep_batch_domain_20260725.json, gr_p1_sweep) and was linearly
+#: extrapolated beyond it; g-b-sweep-endpoint-measure closed the gap with
+#: docs/sizing/sweep_batch_domain_endpoint_20260725.json — gr_p2_sweep6000, a
+#: fresh restore of the same production dump grown to N_stale = SIZED_TOTAL_ROWS
+#: = 6,000, every row stale, swept at MIN_ADMITTED_BATCH for exactly 6,001 pages.
+#: The LP re-solved over both bases returns the SAME vertex and the same two
+#: active constraints, and no point of the new basis binds: at 6,001 pages this
+#: pair models 3,180.518 ms against the 3 x 1,004.131 = 3,012.394 ms coverage
+#: demands. The extrapolation was correct, and is no longer load-bearing.
+#:
+#: test_release_b_pg_runtime.py's endpoint gate is a separate, live-host claim and
+#: still earns its place: it re-runs the linearity check on WHATEVER host the gate
+#: runs on, comparing the per-page slope past 1,647 pages against the slope inside
+#: it ON THAT HOST. It cannot speak for these frozen numbers — its relation is a
+#: fixture of clones rather than a production-shaped copy — and no longer has to.
 MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518
 
 #: The per-statement cap for EVERY scan-bearing statement: the repair population

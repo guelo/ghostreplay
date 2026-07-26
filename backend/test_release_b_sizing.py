@@ -1405,6 +1405,10 @@ def test_production_zero_populations_do_not_project_the_snapshots_row_work():
 
 _SWEEP_ARTIFACT = _BACKEND_DIR.parent / "docs" / "sizing" / "sweep_batch_domain_20260725.json"
 
+#: The endpoint basis (``g-b-sweep-endpoint-measure``), measured on a row-cloned
+#: copy out to ``IMPORT_WORST_CASE_SWEEP_PAGES``.
+_SWEEP_ENDPOINT_ARTIFACT = _SWEEP_ARTIFACT.parent / "sweep_batch_domain_endpoint_20260725.json"
+
 #: The basis the shipped constants are frozen against — the revision's own
 #: ``SIZED_*``, not any measuring copy's.
 _FROZEN_BASIS = {
@@ -1414,10 +1418,25 @@ _FROZEN_BASIS = {
 
 
 def _shipped_sweep_artifacts() -> list[tuple[str, dict]]:
-    """Every sweep-domain artifact on disk, through the EXACT-decimal intake."""
+    """Every sweep-domain artifact on disk, through the EXACT-decimal intake.
+
+    The glob stands in for ``derive``'s own selection, which these tests cannot
+    reach: ``derive`` picks its sweep inputs by ``kind == "sweep_domain"`` and
+    refuses the pre-schema shape outright, but getting that far needs the
+    atomic/batch/probe measurements, and those were never committed
+    (``g-b-size-measurement-json``). So both selection rules are ASSERTED here
+    rather than assumed. An artifact that quietly stopped matching them would be
+    fitted by every test below while the real derivation ignored it — a
+    disagreement between the evidence the suite checks and the evidence the
+    constants come from, which is the one thing this file exists to prevent.
+    """
     paths = sorted(_SWEEP_ARTIFACT.parent.glob("sweep_*.json"))
     assert paths, f"no sweep-domain artifact under {_SWEEP_ARTIFACT.parent}"
-    return [(p.name, harness._load_measurement_json(str(p))) for p in paths]
+    docs = [(p.name, harness._load_measurement_json(str(p))) for p in paths]
+    for name, doc in docs:
+        assert doc.get("kind") == "sweep_domain", f"{name}: derive would not select this"
+        assert "dimensions_of_this_copy" not in doc, f"{name}: pre-schema shape"
+    return docs
 
 
 def _shipped_sweep_points() -> list[harness.SweepPoint]:
@@ -1482,9 +1501,11 @@ def test_frozen_sweep_model_matches_the_published_envelope():
     # — and one of them is run B's, the only evidence at 4 pages.
     active = {(c["run"], c["pages"]) for c in fit["active_constraints"]}
     assert active == {("B", 4), ("C", 824)}
-    # And it is less conservative than the shifted-OLS envelope it replaces
-    # (103.31 ms of over-charge over the same points).
-    assert fit["sum_overcharge_ms"] == pytest.approx(89.771466, abs=1e-5)
+    # Over BOTH bases now. The endpoint artifact added ten points, all of them
+    # covered and none of them active, so the objective's total over-charge grows
+    # while the line itself does not move — see
+    # test_the_endpoint_basis_enters_the_fit_without_moving_it.
+    assert fit["sum_overcharge_ms"] == pytest.approx(276.580163, abs=1e-5)
 
 
 def test_frozen_sweep_model_covers_every_retained_measurement():
@@ -1522,18 +1543,22 @@ def test_frozen_sweep_model_covers_every_retained_measurement():
     assert {(run, pages) for _, run, pages in slacks[:2]} == {("C", 824), ("B", 4)}
 
 
-def test_measured_sweep_domain_is_declared_and_its_extrapolation_is_bounded():
-    """What is measured, and what is assumed, stated where the constant lives.
+def test_measured_sweep_domain_reaches_the_page_count_the_budget_charges():
+    """The domain is MEASURED to the endpoint, and the constant says so.
 
-    The measured domain reaches 1,647 pages. The import-time budget evaluates
-    6,001 and the atomic rejection boundary sits near 5,137, so everything between
-    is LINEAR EXTRAPOLATION — the upper-envelope construction says nothing there.
-    An undeclared extrapolation reads as evidence, so the gap and the word are
-    both required to be in the constant's own docstring.
+    It was not always: the pair was frozen from a domain that stopped at 1,647
+    pages and was linearly extrapolated to the 6,001 the import-time budget
+    evaluates, with the gap declared as an assumption here and in the docstring.
+    ``g-b-sweep-endpoint-measure`` measured the endpoint on a production-shaped
+    copy, so the assertion inverts: the evidence must now REACH
+    ``IMPORT_WORST_CASE_SWEEP_PAGES``, and a docstring still declaring an
+    extrapolation would be describing a state that no longer holds.
+
+    The page count is the whole claim. A domain that stops short of the budget's
+    own worst case cannot bound it, whichever direction the prose leans.
     """
     measured_max_pages = max(p.pages for p in _shipped_sweep_points())
-    assert measured_max_pages == 1_647
-    assert measured_max_pages < mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
+    assert measured_max_pages == mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
 
     source = pathlib.Path(mod.__file__).read_text()
     tree = ast.parse(source)
@@ -1542,10 +1567,76 @@ def test_measured_sweep_domain_is_declared_and_its_extrapolation_is_bounded():
     # for in the source rather than in `__doc__`.
     assert "MARGINED_US_BACKFILL_SWEEP_PER_PAGE = " in source
     declaration = source.split("MARGINED_US_BACKFILL_SWEEP_PER_PAGE = ")[0]
-    assert "EXTRAPOLATION" in declaration
     assert f"{measured_max_pages:,}" in declaration
     assert "IMPORT_WORST_CASE_SWEEP_PAGES" in declaration
+    # The word survives only in the past tense, describing how the pair was frozen
+    # and what closed the gap. What must NOT survive is the live declaration.
+    assert "EXTRAPOLATION, NAMED AS ONE" not in declaration
+    assert "MEASURED TO THE ENDPOINT" in declaration
     assert isinstance(tree, ast.Module)  # the source parsed; the split is over real code
+
+
+def test_the_endpoint_basis_enters_the_fit_without_moving_it():
+    """The second basis is a MEASUREMENT, not a re-basing of the first.
+
+    ``gr_p2_sweep6000`` is its own copy with its own ``dimensions_before``, and its
+    points enter the same LP through their own ``N_copy`` alongside
+    ``gr_p1_sweep``'s. Nothing is rebased, dropped or merged — which is exactly
+    what makes "the fit did not move" a finding rather than a construction.
+
+    Its ``N_copy`` is the clamp: the copy is LARGER than the frozen basis on both
+    axes (8,538 rows / 14,008,320 bytes against 6,000 / 10,010,624), so
+    ``max(1, ...)`` binds at 1 and its timings enter undiscounted. That is what
+    makes it admissible where the fixture-scale linearity probe is not — a copy
+    whose relation sits far BELOW the basis would have its scan coefficient
+    multiplied by a factor with no measurement behind it.
+    """
+    # The two fields `derive` keys on, pinned at the DOCUMENT rather than inferred
+    # from the points it yields. `kind` is how `derive` selects a sweep input;
+    # `sessions_synthesized` is the record that this copy's game_sessions was grown
+    # by row cloning, the provenance that confines it to the sweep and nothing else
+    # and that `derive` enforces against every other kind. Lose either quietly and
+    # the fit asserted below stays green while the real derivation either skips the
+    # artifact or forgets what it is.
+    endpoint_doc = harness._load_measurement_json(str(_SWEEP_ENDPOINT_ARTIFACT))
+    assert endpoint_doc.get("kind") == "sweep_domain"
+    assert endpoint_doc.get("sessions_synthesized") is True
+
+    # And that guard in `derive`'s own code, over the pair as an input set. The
+    # full derivation cannot run — the atomic/batch/probe artifacts were never
+    # committed (`g-b-size-measurement-json`) — so what this pins is that the ONLY
+    # thing stopping it is those missing runs, not anything about these two.
+    with pytest.raises(SystemExit) as excinfo:
+        harness.derive([doc for _, doc in _shipped_sweep_artifacts()], None)
+    assert "--mode atomic" in str(excinfo.value)
+    assert "sessions_synthesized" not in str(excinfo.value)
+
+    by_artifact: dict[str, list[harness.SweepPoint]] = {}
+    for p in _shipped_sweep_points():
+        by_artifact.setdefault(p.artifact, []).append(p)
+    endpoint = by_artifact[_SWEEP_ENDPOINT_ARTIFACT.name]
+    baseline = by_artifact[_SWEEP_ARTIFACT.name]
+
+    assert {p.n_copy for p in endpoint} == {Fraction(1)}
+    assert {p.n_copy for p in baseline} == {Fraction(1222, 661)}
+    assert all(p.steers and p.trials >= harness.MIN_SWEEP_TRIALS for p in endpoint)
+    assert max(p.pages for p in endpoint) == mod.IMPORT_WORST_CASE_SWEEP_PAGES
+
+    # The same vertex, from the baseline alone and from both bases together.
+    alone = harness.solve_sweep_envelope(baseline)
+    both = harness.solve_sweep_envelope(baseline + endpoint)
+    assert (both["a"], both["b"]) == (alone["a"], alone["b"])
+    assert both["coverage_points"] == 34 and both["objective_points"] == 22
+    assert both["max_pages"] == 6_001
+
+    # And the frozen pair covers 3x the endpoint's own maximum, which is the claim
+    # the whole bead exists to make: 6,001 pages priced by measurement.
+    worst = max(endpoint, key=lambda p: p.pages)
+    modelled = (
+        mod.MARGINED_MS_BACKFILL_SWEEP_SCAN / float(worst.n_copy)
+        + mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE * worst.pages / 1000
+    )
+    assert modelled >= harness.MARGIN * float(worst.max_ms)
 
 
 def test_legacy_maxima_constrain_the_fit_without_steering_it():
@@ -1559,8 +1650,8 @@ def test_legacy_maxima_constrain_the_fit_without_steering_it():
     """
     points = _shipped_sweep_points()
     with_b = harness.solve_sweep_envelope(points)
-    assert with_b["coverage_points"] == 24
-    assert with_b["objective_points"] == 12
+    assert with_b["coverage_points"] == 34
+    assert with_b["objective_points"] == 22
     assert any(c["run"] == "B" and not c["steers"] for c in with_b["active_constraints"])
 
     # Dropping run B changes the solution — the proof that it constrains rather

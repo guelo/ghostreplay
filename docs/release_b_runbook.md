@@ -1019,6 +1019,7 @@ is the single easiest way to under-charge a scan term:
 | Definition | `max(1, SIZED_rows / copy_rows, SIZED_SESSIONS_BYTES / copy_bytes)` | `_growth_factor(live relation vs the frozen basis)` |
 | Direction | measurement copy → frozen basis | frozen basis → live relation |
 | Value for `gr_p1_sweep` | **1222/661** = 1.848714… | — |
+| Value for `gr_p2_sweep6000` | **1** — the `max(1, …)` clamp, since that copy is *larger* than the basis on both axes | — |
 | Value *at* the frozen basis | — | **1.0** |
 | Where it lives | inside the LP, as each point's own divisor | applied at every runtime call site |
 | Applies to | the scan component only | the scan component only |
@@ -1046,6 +1047,12 @@ sessions, and their `game_sessions` relations differ by 26%:
 | `gr_p1_b100` | 6,758,400 | 1.43403 | **1.48121** | 1.48121 |
 | `gr_p1_b250` | 6,815,744 | 1.43403 | **1.46875** | 1.46875 |
 | `gr_p1_atomic`, `gr_p1_b500` | 6,848,512 | 1.43403 | **1.46172** | 1.46172 |
+
+`gr_p2_sweep6000` is the eighth copy and the only one that is not 4,184 rows:
+`--synthesize-sessions 6000` grew it to 8,538 rows / 14,008,320 bytes, so both
+ratios fall below 1 (0.70274 and 0.71462) and the clamp takes its growth factor
+to **1**. It is the same restore of the same dump; what differs is that its
+synthesis added rows rather than only rewriting them.
 
 **Same source population and same `game_sessions` row count — not identical
 data.** Every copy is the same restore of `ghostreplay-20260724T101501Z.dump`,
@@ -1126,8 +1133,10 @@ placement decided above. An earlier version of this section carried a caveat blo
 saying they were provisional on exactly those decisions; the decisions are made
 and the caveat is retired.
 
-**Every row beyond 1,647 pages carries the extrapolation declared two subsections
-down.** That is a different reservation and it is not retired.
+Every row beyond 1,647 pages **was** extrapolated when this section was first
+written, and carried a reservation saying so. That reservation is now retired
+too: `g-b-sweep-endpoint-measure` measured the domain out to 6,001 pages on a
+production-shaped copy and the fit did not move. Two subsections down.
 
 At the worst reachable configuration — `MIN_ADMITTED_BATCH = 1`,
 `SIZED_TOTAL_ROWS = 6,000`, so `ceil(6000/1) + 1 = 6,001` pages, growth factors
@@ -1197,28 +1206,100 @@ any case. And carry ratios unrounded into the `ceil`:
 factor *down*, against the one direction it exists to protect. A factor rounded
 down and then `ceil`-ed can only under-charge; the ceiling has to be last.
 
-### The sweep domain beyond the measured range
+### The sweep domain, measured to the endpoint (`g-b-sweep-endpoint-measure`)
 
-**The measured domain reaches 1,647 pages. The import-time budget evaluates 6,001
-and the atomic rejection boundary sits near 5,137.** Everything between is
-**linear extrapolation** — the LP covers the points it was given and says nothing
-past them — and every figure in the section above that depends on the unmeasured
-range is assumption-dependent for that reason.
+**The domain now reaches 6,001 pages — the exact page count the import-time
+budget evaluates, and past the atomic rejection boundary near 5,137.** Nothing in
+the section above rests on extrapolation any more, and the fit did not move.
 
-The primary remedy in the plan for this bead was a second sweep-domain artifact:
-`gr_p2_sweep6000`, a fresh restore of `ghostreplay-20260724T101501Z.dump` grown to
-`SIZED_TOTAL_ROWS = 6,000` ended-visible rows, every one stale, swept at
-`MIN_ADMITTED_BATCH` for exactly the 6,001 pages the worst case evaluates. **That
-copy could not be produced: the 2026-07-24 dump is no longer on disk, and the
-18.4 cluster the Phase 1 copies lived in is gone.** So the fallback applies —
-the extrapolation is declared as an **assumption** rather than as evidence, in the
-constants' docstrings, here, and in `SPEC.md`, and the endpoint measurement is
-filed as `g-b-sweep-endpoint-measure`, blocking Phase 3 qualification.
+`g-b-sweep-batch-cost` froze the pair from a domain stopping at 1,647 pages and
+declared everything past it a linear extrapolation, because its primary remedy —
+a second sweep-domain artifact on a copy grown to the endpoint — was believed
+unexecutable: *"the 2026-07-24 dump is no longer on disk, and the 18.4 cluster
+the Phase 1 copies lived in is gone."* **Both statements were wrong.** The dump
+is at `tmp/ghostreplay-20260724T101501Z.dump` (21,645,384 bytes, TOC header
+`Dumped from database version: 18.4`, `dbname: railway`, archived 2026-07-24
+03:15:01 PDT) and the cluster is at `/opt/homebrew/var/postgresql@18` — stopped,
+and holding nothing but its template databases, which is why the Phase 1 copies
+were not found. Only the **copies** had been dropped. So the fallback was never
+needed and the primary path ran.
 
-What *was* measured, on a different host and at fixture scale, is the thing the
-extrapolation actually claims: **linearity in page count out to the endpoint.**
-6,000 cloned ended-visible rows, all stale, swept five times at each of eight
-batch sizes, maxima:
+#### `gr_p2_sweep6000`
+
+The same dump, restored fresh into that 18.4 cluster (`--no-owner
+--no-privileges`, port 5433). It came up as §0's fixture exactly:
+`alembic_version` `20260720_01`, 4,184 `game_sessions`, 131,676 `session_moves`,
+`ck_game_sessions_player_accuracy` `convalidated`. The CHECK is left as
+production left it — `run_sweep_domain` never calls `time_validate`, and a
+constraint's validation state cannot move a `SELECT`'s plan, so §7's
+drop-and-re-add-`NOT VALID` step belongs to the atomic and batch runs, not to
+this one.
+
+```
+--mode sweep-domain --synthesize-sessions 6000 --scan-trials 7
+```
+
+cloned 4,354 ended-visible rows and stamped the whole set stale: `N_stale` =
+**6,000** exactly, 8,538 rows, 14,008,320 bytes. Ten batch sizes, **7 trials
+each, every trial retained**, page counts agreeing across all seven trials and
+with `backfill_sweep_pages` at every point (`agreed_sweep_pages`). 14.7 s wall
+clock. [`docs/sizing/sweep_batch_domain_endpoint_20260725.json`](sizing/sweep_batch_domain_endpoint_20260725.json).
+
+| Batch size | Pages | Max (ms) | Median (ms) | Min (ms) |
+|---|---|---|---|---|
+| 1 | **6,001** | **1,004.13** | 944.62 | 926.80 |
+| 2 | 3,001 | 482.03 | 473.27 | 406.99 |
+| 5 | 1,201 | 212.37 | 200.99 | 194.81 |
+| 10 | 601 | 111.90 | 105.17 | 103.39 |
+| 25 | 241 | 58.90 | 52.68 | 49.28 |
+| 50 | 121 | 35.35 | 33.15 | 30.57 |
+| 100 | 61 | 24.57 | 21.61 | 19.73 |
+| 250 | 25 | 16.91 | 14.62 | 14.26 |
+| 500 | 13 | 24.71 | 14.51 | 12.78 |
+| 1,000 | 7 | 24.74 | 15.68 | 15.19 |
+
+**Its `N_copy` is 1, and that is what makes it admissible.**
+`max(1, 6000/8538, 10010624/14008320) = max(1, 0.7027, 0.7146)` — the copy is
+*larger* than the frozen basis on both axes, so the clamp binds and its timings
+enter the LP undiscounted, charging a bigger relation's cost against a smaller
+basis. Contrast the fixture-scale probe below, whose relation sits far *below*
+the basis: normalizing that one would multiply the scan coefficient by a factor
+with no measurement behind it, which is why it does not enter the fit.
+
+**The fit does not move.** Re-solved over both artifacts — 34 coverage points, 22
+objective, `gr_p1_sweep` on `N_copy = 1222/661` and `gr_p2_sweep6000` on 1 — the
+LP returns the same vertex, `a = 16170721723/677525000`, `b = 1414007/8200000`,
+and the same two active constraints (run B at 4 pages, run C at 824). The only
+number that changes is the objective's total over-charge, 89.77 ms → 276.58 ms,
+which is 22 points being summed instead of 12. Not one point of the new basis
+binds: at 6,001 pages the frozen pair models `72 x 1.0 + 518 x 6001 / 1000` =
+**3,180.518 ms** against the `3 x 1,004.131` = 3,012.394 ms coverage requires, a
+ratio of **1.056**.
+
+So `MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` and
+`MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` are unchanged. What changed is their
+standing: the extrapolation turned out to be correct, and is no longer
+load-bearing. `test_measured_sweep_domain_reaches_the_page_count_the_budget_charges`
+now asserts the evidence reaches `IMPORT_WORST_CASE_SWEEP_PAGES` rather than
+asserting that the shortfall is declared, and
+`test_the_endpoint_basis_enters_the_fit_without_moving_it` pins the second basis's
+`N_copy`, its retention, and the unchanged vertex.
+
+**What this copy is valid for.** The sweep domain, and nothing else. Its 4,354
+clones carry no `session_moves` rows, so every `session_moves`-scaled term and the
+whole repair population on it are meaningless — the measurement records
+`sessions_synthesized: true` and `--derive` hard-fails if it is offered as any
+other kind. The sweep statement reads `game_sessions` alone, which is why it is
+measured exactly here. The clones are of *production's own* ended-visible
+sessions, so page width and predicate selectivity stay production's.
+
+#### The same claim, re-checked on whatever host runs the gate
+
+The above is one pair of copies on one machine. The *shape* the model assumes — a
+per-page term that stays a per-page term as the page count grows — is a property
+of the host, so it is also checked at fixture scale on every gate run. 6,000
+cloned ended-visible rows, all stale, swept five times at each of eight batch
+sizes, maxima:
 
 | Batch size | Pages | Max (ms) | Marginal µs/page vs the next row |
 |---|---|---|---|
@@ -1314,14 +1395,15 @@ managed on the same machine — 163.7 / 177.1 µs/page against a 403 µs/page bu
 Pairing, the median and the balanced order removed noise and bias; they did not
 add slack. The headroom above is a property of the host, not of the sampling.
 
-**What this does not establish.** Linearity *on this host*, on a fixture of clones.
-It does not convert the extrapolation into evidence for the frozen pair, and the
-constants' docstrings, `SPEC.md` and the gate manifest all say so; production-shaped
-endpoint coverage remains an assumption owned by `g-b-sweep-endpoint-measure`.
+**What this does not establish.** Linearity *on this host*, on a fixture of clones,
+and nothing more. Its timings are not evidence for the frozen pair and never enter
+the LP — the constants' docstrings, `SPEC.md` and the gate manifest all say so.
+`gr_p2_sweep6000` is where the endpoint became a measured claim about the shipped
+constants; this is where that claim keeps being re-checked on hosts nobody sized.
 
-The test is pinned in `pg_gate_plugin.REQUIRED_PG_GATE_TESTS`, because an
-extrapolation gate that silently stops being collected is the failure that
-matters, and so is
+The test is pinned in `pg_gate_plugin.REQUIRED_PG_GATE_TESTS`, because a gate
+whose whole job is to run on unsized hosts is worth nothing if it can silently
+stop being collected, and so is
 `test_pg_synthesize_sessions_establishes_the_stale_population_it_promises` — the
 endpoint is only the endpoint if the population really is `SIZED_TOTAL_ROWS`
 stale rows, and `--synthesize-sessions` targets that population directly

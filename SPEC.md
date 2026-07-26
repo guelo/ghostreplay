@@ -1773,7 +1773,7 @@ Provenance — snapshot, date, timed SHA, every raw number, every batch candidat
 
 **What the restore does and does not settle.** Production holds 4,184 sessions and 131,676 moves — fewer rows than the sizing snapshot on both axes. Row counts are the only dimension a *logical* dump carries: `pg_total_relation_size` on a restore measures the locally rebuilt relation, and readings of the same restore gave 4,079,616, then 4,096,000 once autovacuum materialised the FSM/VM forks, then 5,414,912 … 6,848,512 across seven sibling copies — same source population, same `game_sessions` row count, different synthesis and vacuum state. Nor does "fewer rows" imply "smaller constants": every `MARGINED_*` term is an elapsed time, jointly determined by relation size, chosen plan, storage, CPU and server major. A re-derivation on production's own major (18.4) against the restore is recorded in `docs/release_b_runbook.md` §7; it is **not** applied to the revision, because the harness records `SIZED_*` with no provenance — one unlabelled post-synthesis reading — and the runtime divides every scan term by those dimensions. It did time `BACKFILL_REMAINING_SQL` and the selection sweep directly for the first time. **A timing may only be normalized by the basis of the copy it actually ran on**: the 1.147 ms `BACKFILL_REMAINING_SQL` maximum was measured on `gr_p1_atomic` and carries that copy's 6,848,512 bytes, giving `ceil(3 · 1.147 · max(6000/4184, 10010624/6848512)) = 6`. `MARGINED_MS_BACKFILL_REMAINING = 6` is qualified as the **worst of seven such pairings**, not of any single one, and carries no page-count term since that statement runs once per pass.
 
-**The selection sweep is a two-component model, because it cannot be a scalar at all.** The sweep is every `SELECT_BATCH_*` page of one pass, so `pages = ceil(N_stale / batch_size) + 1`, and `resolve_batch_size` admits `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` anywhere in `MIN_ADMITTED_BATCH..MAX_BATCH_SIZE`. Measured across that whole domain the cost spans **42x** (3.66 ms at 2 pages to 282.25 ms at 1,647), so no scalar is honest across it: the frozen 37 was 21x under-charged at `batch_size = 1`, and unqualified at *every* page size measured with enough trials to estimate a maximum — not merely outside part of its range. It was **deleted**, not re-picked; a scalar left in the module is a scalar something goes on to price a sweep with. What replaced it is `MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` ms (the relation walk, `xG_sessions` — keyset pagination is served from the primary key, so the relation is read about once *in total* rather than once per page, which is where the original `pages x scan` derivation went wrong) plus `MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` µs (statement startup, `x pages`, no growth factor). Both are frozen from an **upper-envelope** fit rather than a least-squares one — a regression through a set of maxima sits below some of them, so tripling its coefficients still under-prices a measurement it was fitted to — specifically the least conservative line covering every measured maximum on record, a two-variable LP solved exactly in **frozen-basis coordinates** with each point carrying the growth factor of the copy *it* ran on, since the sizing copies share a row count while their relations differ by 26% and one shared factor silently under-charges the leanest. Every measured maximum constrains the bound including the legacy 3-trial run, whose `(4 pages, 13.60 ms)` outlier is an active constraint; the 7-trial floor applies only to points that *steer* the objective. Correctly pricing the sweep moves the atomic rejection boundary from `N_stale = 5,675` to **5,136** at `batch_size = 1` — a false-admission band that is itself a function of the batch size, which is the point. **The model is measured to 1,647 pages and linearly extrapolated to the 6,001 the import-time budget evaluates**; that gap is declared as an assumption in the constants' docstrings and the runbook rather than presented as evidence. A PostgreSQL-gated endpoint test *narrows* the assumption without discharging it: it executes a 6,001-page sweep and checks that the per-page slope beyond 1,647 pages matches the slope inside it **on the same host** — paired, interleaved samples reduced by median, segment by segment, so a late nonlinearity in the extrapolated range fails — with absolute coverage asserted separately. It is not evidence for the frozen numbers, since its relation is a fixture of clones rather than a production-shaped copy; `g-b-sweep-endpoint-measure` owns the production-restore measurement and the extrapolation stands as an assumption until it lands. `MARGINED_MS_BACKFILL_REMAINING = 6` is unaffected and directly qualified: it runs once per pass, carries no page-count term, and the worst of seven measurements normalized on their own bases is exactly 6. Raw trials and the migrated domain artifact in `docs/sizing/sweep_batch_domain_20260725.json`. See `docs/release_b_runbook.md` §0 and §5-§7.
+**The selection sweep is a two-component model, because it cannot be a scalar at all.** The sweep is every `SELECT_BATCH_*` page of one pass, so `pages = ceil(N_stale / batch_size) + 1`, and `resolve_batch_size` admits `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` anywhere in `MIN_ADMITTED_BATCH..MAX_BATCH_SIZE`. Measured across that whole domain the cost spans **42x** (3.66 ms at 2 pages to 282.25 ms at 1,647), so no scalar is honest across it: the frozen 37 was 21x under-charged at `batch_size = 1`, and unqualified at *every* page size measured with enough trials to estimate a maximum — not merely outside part of its range. It was **deleted**, not re-picked; a scalar left in the module is a scalar something goes on to price a sweep with. What replaced it is `MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` ms (the relation walk, `xG_sessions` — keyset pagination is served from the primary key, so the relation is read about once *in total* rather than once per page, which is where the original `pages x scan` derivation went wrong) plus `MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` µs (statement startup, `x pages`, no growth factor). Both are frozen from an **upper-envelope** fit rather than a least-squares one — a regression through a set of maxima sits below some of them, so tripling its coefficients still under-prices a measurement it was fitted to — specifically the least conservative line covering every measured maximum on record, a two-variable LP solved exactly in **frozen-basis coordinates** with each point carrying the growth factor of the copy *it* ran on, since the sizing copies share a row count while their relations differ by 26% and one shared factor silently under-charges the leanest. Every measured maximum constrains the bound including the legacy 3-trial run, whose `(4 pages, 13.60 ms)` outlier is an active constraint; the 7-trial floor applies only to points that *steer* the objective. Correctly pricing the sweep moves the atomic rejection boundary from `N_stale = 5,675` to **5,136** at `batch_size = 1` — a false-admission band that is itself a function of the batch size, which is the point. **The model is measured across the whole domain it is evaluated over, out to the 6,001 pages the import-time budget charges and past the atomic rejection boundary near 5,137.** It was frozen from a domain stopping at 1,647 pages and linearly extrapolated beyond it, with the gap declared as an assumption; `g-b-sweep-endpoint-measure` closed it on a **second production-shaped basis** — `gr_p2_sweep6000`, a fresh restore of the same production dump grown by `--synthesize-sessions` to `N_stale = SIZED_TOTAL_ROWS = 6,000`, every row stale, swept at `MIN_ADMITTED_BATCH` for exactly 6,001 pages, seven trials per point, every trial retained. Nothing was rebased or merged: its points enter the same LP through their own `N_copy`, which is **clamped at 1** because that copy is larger than the frozen basis on both axes, so its timings are charged undiscounted. The vertex does not move — same `a`, same `b`, same two active constraints — and no point of the new basis binds: at 6,001 pages the frozen pair models 3,180.518 ms against the 3 x 1,004.131 = 3,012.394 ms coverage demands. A PostgreSQL-gated endpoint test asserts the same *shape* on whatever host runs it, since a per-page term that stays one as the page count grows is a property of the machine rather than of the constant: it executes a 6,001-page sweep and compares that host's upper-range per-page slope against its own lower-range one — paired, interleaved samples reduced by median, segment by segment, so a late nonlinearity fails — with absolute coverage asserted separately. Its timings are never evidence for the frozen numbers and never enter the LP, since its relation is a fixture of clones rather than a production-shaped copy. `MARGINED_MS_BACKFILL_REMAINING = 6` is unaffected and directly qualified: it runs once per pass, carries no page-count term, and the worst of seven measurements normalized on their own bases is exactly 6. Raw trials, the migrated domain artifact and the endpoint basis in `docs/sizing/sweep_batch_domain_20260725.json` and `docs/sizing/sweep_batch_domain_endpoint_20260725.json`. See `docs/release_b_runbook.md` §0 and §5-§7.
 
 ### 7.4 Move Analysis Storage
 
@@ -3374,8 +3374,18 @@ Drill sessions use `session_mode = 'drill'` in `game_sessions`. They start unrat
 | `active` | Playing toward the target opening position |
 | `root_reached` | User successfully reached the target FEN |
 | `failed` | User deviated from route or made an accuracy mistake post-root |
-| `abandoned` | User quit the drill without converting |
+| `abandoned` | User quit the drill **without a terminal outcome** |
 | `converted` | User elected to continue as a rated game after reaching root |
+
+`drill_state` is the **outcome** record; `status`/`result`/`ended_at` are the separate
+**lifecycle** record. Abandoning a drill that already `failed` ends the session
+(`status='ended'`, `result='drill_abandon'`, unrated) but **preserves**
+`drill_state='failed'` and its `drill_terminal_reason` — the same row shape natural-end
+produces. Only a drill with no terminal outcome yet (`active`/`root_reached`) becomes
+`abandoned`. Before g-drill-failed-overwrite the abandon write was unconditional, and
+since the client abandons on every exit from a stopped drill (Analyze, Again, New Game,
+Resign) it relabelled essentially every real failure — historical rows undercount
+`failed` drastically.
 
 Only `converted` drill sessions appear in game history alongside normal games; all other states are hidden.
 
@@ -3487,6 +3497,12 @@ The same `route_map_for_target` selector drives opponent steering (`/api/game/ne
 | `accuracy` | Post-root move exceeded the centipawn strictness threshold |
 | `natural_end` | Game ended by checkmate/draw before root was reached |
 
+`drill_terminal_reason` is written only by the fail paths and is **never cleared** —
+including by `/continue`, which sets `drill_state='converted'` and leaves the reason in
+place. So `drill_terminal_reason IS NOT NULL` means the session **experienced a failure**,
+not that its outcome is `failed`. On a `drill_state='abandoned'` row the reason is `NULL`
+(a genuine quit-mid-drill); that pairing is what distinguishes the two exits.
+
 ### 17.7 API Endpoints
 
 | Method | Endpoint | Description |
@@ -3497,7 +3513,7 @@ The same `route_map_for_target` selector drives opponent steering (`/api/game/ne
 | POST | `/api/drills/:id/continue` | Convert to rated game after root reached |
 | POST | `/api/drills/:id/fail` | Mark drill failed (accuracy, post-root only) |
 | POST | `/api/drills/:id/natural-end` | Record natural game-over during drill phase |
-| POST | `/api/drills/:id/abandon` | Abandon drill (use `/api/game/end` for converted drills) |
+| POST | `/api/drills/:id/abandon` | End an unconverted drill session — **preserves** an existing `failed` outcome, only labels `abandoned` when there is none (§17.2). No-op once `status='ended'`. Use `/api/game/end` for converted drills |
 
 ### 17.8 Post-Drill Analysis (transient)
 
@@ -3512,7 +3528,9 @@ route:
    are flushed *before* navigation so the fire-and-forget POSTs survive the unmount.
 2. The live `moveHistory` + analysis map are snapshotted into a narrow, non-persisted client
    store (`drillAnalysisStore`). Plies whose analysis is still unresolved keep null fields.
-3. The drill is abandoned (`abandonStoppedDrill`): unrated, hidden, game inactive. The live
+3. The session is **ended** (`abandonStoppedDrill` → `POST /api/drills/:id/abandon`):
+   `status='ended'`, `result='drill_abandon'`, unrated, hidden, game inactive. A drill that
+   already failed **keeps** `drill_state='failed'` and its terminal reason (§17.2). The live
    analysis session is cleared so it idle-shuts down.
 4. `/drill-analysis` renders the existing data-driven `AnalysisBoard` from the snapshot, with
    a minimal "Drill review — not saved" footer (no `GameReviewStats` — accuracy is not
@@ -3521,7 +3539,11 @@ route:
 The review is ephemeral: refreshing or navigating directly to `/drill-analysis` finds no
 snapshot and redirects to `/play`. **No conversion, rating, history entry, or game statistics
 are created.** Abandoned/failed drills stay hidden from `/api/session/:id/analysis`, history,
-and normal game analysis via the existing visibility guard. Persisting a drill review would
+and normal game analysis: the shared visibility guard (`visible_session_filter()` /
+`is_visible_game_session`) admits **only** `session_mode='normal'` OR
+`drill_state='converted'`, so neither `failed` nor `abandoned` qualifies and hiding never
+distinguishes the two. (The guard contains no `status` term at all; `/history` applies
+`status='ended'` as a separate filter alongside it.) Persisting a drill review would
 require a dedicated drill-analysis endpoint (future work).
 
 **Returning to the drill (g-65ve).** The review surface has an explicit "Back to drill"
@@ -3533,7 +3555,13 @@ On mount, `/play` decides **synchronously** (no post-paint effect, so the new-ga
 flashes) whether this is a valid reviewed-return: the marker/snapshot/store session IDs match,
 `isGameActive === false`, `drillState === "abandoned"`, the opening key and move history are
 present, and the full restart settings (player color, engine Elo, strictness tier, exact
-`drillStrictnessCp`) are available. When valid, the retained board, moves, orientation, and
+`drillStrictnessCp`) are available. The store's `drillState` here is the **client's local
+finalization sentinel**, deliberately distinct from the persisted `drill_state`: the client
+already sets it from inferred state without a server round trip (off-route and accuracy
+failures), and a successful abandon pins it to `"abandoned"` regardless of the outcome label
+the server now preserves (§17.2). Three client predicates read that sentinel — this
+reviewed-return check, the stopped-drill post-game banner, and the Continue action — and all
+three mean "this client finalized the drill", not "the row says abandoned". When valid, the retained board, moves, orientation, and
 settings are read straight from the game store and the original drill-stopped actions
 (`DrillStopActions` — the terminal-reason subtitle plus **Again**/settings) are restored;
 the **Analyze** action keeps its original label but is re-wired on return to simply

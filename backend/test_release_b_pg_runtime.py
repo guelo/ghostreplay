@@ -1015,13 +1015,22 @@ def test_pg_synthesize_sessions_establishes_the_stale_population_it_promises(
 def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
     pg_migration_db, monkeypatch
 ):
-    """THE ENDPOINT GATE — the one test that is not extrapolating.
+    """THE ENDPOINT GATE — linearity to the endpoint, on whatever host runs it.
 
-    The measured sweep domain reaches 1,647 pages
-    (``docs/sizing/sweep_batch_domain_20260725.json``), while the import-time
-    budget evaluates ``IMPORT_WORST_CASE_SWEEP_PAGES`` = 6,001 and the atomic
-    rejection boundary sits near 5,137. Everything between is LINEAR
-    EXTRAPOLATION, and the upper-envelope construction says nothing there.
+    The frozen pair is measured across the whole domain it is evaluated over:
+    ``docs/sizing/sweep_batch_domain_20260725.json`` (gr_p1_sweep) reaches 1,647
+    pages and ``docs/sizing/sweep_batch_domain_endpoint_20260725.json``
+    (gr_p2_sweep6000) reaches ``IMPORT_WORST_CASE_SWEEP_PAGES`` = 6,001, the exact
+    page count the import-time budget charges and past the atomic rejection
+    boundary near 5,137. That is a claim about the SIZING host, made once, on two
+    production-shaped copies. This gate makes the same claim about the host it
+    happens to be running on, every time it runs.
+
+    That is not redundant with the artifacts. A model frozen from measurements on
+    one machine is deployed onto others, and the shape it assumes — a per-page
+    term that stays a per-page term as the page count grows — is a property of the
+    machine, not of the constant. A host whose per-page cost degrades in the upper
+    range is one this pair misprices, and no artifact on disk can notice that.
 
     This executes the endpoint: ``SIZED_TOTAL_ROWS`` stale rows swept at
     ``MIN_ADMITTED_BATCH``, which is exactly the configuration the import-time
@@ -1030,7 +1039,7 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
     startup, which does not scale with the relation, so a green run here bounds
     the SLOPE at the endpoint and says nothing about the scan component.
 
-    **The extrapolation claim is LINEARITY, and nothing here may compare this host
+    **The claim under test is LINEARITY, and nothing here may compare this host
     against a frozen constant.** Two forms were tried and both fail as tests of it:
 
     * ``model(6001) >= 3 x observed``. The model IS 3x a fit, so this reduces to
@@ -1043,13 +1052,13 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
       4,800-page interval also averages away a late spike, which is the shape a
       failure of linearity would actually take.
 
-    What is asserted instead is entirely internal to this host: the slope BEYOND
-    the measured domain against the slope INSIDE it, both measured here, minutes
+    What is asserted instead is entirely internal to this host: the slope in the
+    UPPER range against the slope in the LOWER one, both measured here, minutes
     apart, over the same population and the same statement. A host that is
     uniformly slow moves both and the ratio is unchanged; a host whose per-page
-    cost degrades past 1,647 pages moves only the numerator. And the beyond-domain
-    side is checked SEGMENT BY SEGMENT rather than as one average, so a spike in
-    the last stretch cannot hide behind the cheap pages before it.
+    cost degrades past 1,647 pages moves only the numerator. And the upper side is
+    checked SEGMENT BY SEGMENT rather than as one average, so a spike in the last
+    stretch cannot hide behind the cheap pages before it.
 
     **Every slope is PAIRED and then taken robustly**, because a segmented ratio
     built out of independently sampled summary statistics is not a segmented test.
@@ -1069,8 +1078,8 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
     to survive it: at 6 pages apart, per-trial noise IS the numerator.
 
     The tolerance is the revision's own ``MARGIN``: the frozen pair claims 3x
-    covers variance, so the claim under test is that extrapolating past the
-    measured domain does not consume more than that margin's worth of slope.
+    covers variance, so the claim under test is that reaching the endpoint does not
+    consume more than that margin's worth of slope.
 
     Absolute coverage is a SEPARATE assertion, at the level it can honestly hold:
     the frozen pair, already margined 3x, covers what the endpoint sweep cost. That
@@ -1078,11 +1087,10 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
 
     WHAT THIS DOES NOT DO. It measures linearity on THIS host and this fixture, and
     that is all — a five-thousand-row relation of clones is neither production-width
-    nor production-sized, so it does not convert the extrapolation into a measured
-    claim about the shipped constants. The assumption stands until
-    ``g-b-sweep-endpoint-measure`` measures the endpoint on a copy sized to the
-    frozen basis; what this gate rules out is the specific way the extrapolation
-    could be wrong that is testable without one.
+    nor production-sized, so its timings are not evidence for the frozen numbers
+    and never enter the LP. ``gr_p2_sweep6000`` is where the endpoint became a
+    measured claim about the shipped constants; this gate is where it stays true on
+    a host nobody sized.
 
     The population is established with the shipped ``--synthesize-sessions`` path
     rather than seeded row by row: the clones carry no ``session_moves`` rows,
@@ -1090,7 +1098,8 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
     sweep statement reads ``game_sessions`` alone.
 
     Pinned in ``pg_gate_plugin.REQUIRED_PG_GATE_TESTS`` so it cannot silently stop
-    being collected — which for an extrapolation gate is the failure that matters.
+    being collected — which for a gate whose whole job is to run on hosts nobody
+    sized is the failure that matters.
     """
     from scripts import size_accuracy_backfill as harness
 
@@ -1129,7 +1138,12 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
         ), (batch_size, pages)
     assert max(samples) == mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
 
-    domain_max_pages = 1_647  # what the shipped artifact actually measured
+    # Where the LOWER range ends and the UPPER one begins. 1,647 is gr_p1_sweep's
+    # ceiling — the page count past which this pair was once extrapolated, and the
+    # range gr_p2_sweep6000 went on to measure. Kept as the split because it leaves
+    # both sides with pairs the _MIN_SLOPE_SPAN_PAGES rule below can actually use:
+    # six samples at or below it (7 … 1,201) and two above (3,001 and 6,001).
+    domain_max_pages = 1_647
     _MIN_SLOPE_SPAN_PAGES = 500
     inside = sorted(p for p in samples if p <= domain_max_pages)
     beyond = sorted(p for p in samples if p > domain_max_pages)
