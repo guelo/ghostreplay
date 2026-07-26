@@ -17,9 +17,12 @@ Coverage:
 * AC7 — live analysis / session_moves / cache lookup agree: a move uploaded
   through ``POST /api/session/{id}/moves`` is read back through both
   ``GET /api/session/{id}/analysis`` (post-game display surface) and
-  ``POST /api/analysis/lookup`` (cache surface); ``eval_delta``, the production
-  classification, and the best-move eval must agree across both, and survive an
-  idempotent re-upload.
+  ``POST /api/analysis/lookup`` (cache surface); the MOVE-grain values
+  (``eval_delta`` and the production classification) must agree across both, and
+  survive an idempotent re-upload. The best-move eval is NOT among them: since
+  g-position-analysis.4 it is a POSITION-grain fact, so the session-moves list
+  still carries the uploaded seed while the cache surface trust-gates it and
+  returns ``None`` for this untrusted browser upload.
 * AC5 — classification stability: the stored/round-tripped classification equals
   the deterministic ``classify_move_advanced`` output for the eval pair.
 * AC6 — SRS exactly-once: ``POST /api/srs/review`` records exactly one review row
