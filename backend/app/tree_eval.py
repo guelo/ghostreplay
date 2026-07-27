@@ -26,10 +26,27 @@ from typing import Iterable
 from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
-from app.analysis_trust import cache_row_as_move_dict, move_trust_flags, source_rank
+from app.analysis_trust import (
+    cache_row_as_move_dict,
+    describe_move_row,
+    move_trust_flags,
+    source_rank,
+)
+from app.evidence_policy import Capability
 from app.fen import normalize_fen
 from app.models import AnalysisCache
 from app.position_analysis_repo import TrustedPosition, resolve_trusted_position
+
+# The tree resolves a SHARED graph node with no per-viewer identity, so owner
+# scoping is not expressible here: the same node would have to evaluate differently
+# per viewer, which contradicts a shared graph. TREE_EVAL is therefore ungranted to
+# every non-canonical profile and every tree read resolves with NO viewer (g-v21l).
+#
+# That keeps the ROOT eval and the TRUSTED move tiers 1-2 canonical. It does NOT
+# make the tree canonical-only: the UNTRUSTED move tiers 3-4 are deliberately
+# source-agnostic and already surface untrusted browser and legacy played evals.
+# Those tiers sit outside the capability system entirely and are unchanged.
+_TREE_VIEWER: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,20 +76,40 @@ def _best_move_eval(tp: TrustedPosition) -> MoveEval | None:
 
 
 def _move_trusted(row: AnalysisCache) -> bool:
-    """True when the row's PLAYED-move evidence passes the move-grain trust gate."""
-    return move_trust_flags(cache_row_as_move_dict(row))[2]
+    """True when the row's PLAYED-move evidence holds TREE_EVAL (no viewer)."""
+    return move_trust_flags(
+        cache_row_as_move_dict(row), Capability.TREE_EVAL, _TREE_VIEWER
+    )[2]
 
 
 def _move_sort_key(row: AnalysisCache) -> tuple:
     # Ranks a candidate list deterministically: prefer rows with mate data, then
-    # precomputed > game > other, then lowest id. Used for BOTH the trusted
-    # normalized survivors (tier 2) and the untrusted fallback survivors (tier 4) —
-    # trust filtering no longer strictly precedes this, so an untrusted row may be
-    # ranked here when no trusted eval exists.
+    # precomputed > game > other, then lowest id. Used for the UNTRUSTED fallback
+    # survivors (tiers 3-4) and kept BYTE-FOR-BYTE unchanged: those tiers are
+    # deliberately source-agnostic and sit outside the capability system.
     return (
         0 if row.played_eval_mate is not None else 1,
         source_rank(row.source),
         row.id,
+    )
+
+
+def _trusted_move_sort_key(row: AnalysisCache) -> tuple:
+    """Tier-2 (TRUSTED normalized) ranking: canonical first, then :func:`_move_sort_key`.
+
+    Filtering and ranking are separate (g-v21l). Once a granted non-canonical row
+    passes the capability gate it becomes a trusted CANDIDATE, but canonical
+    evidence must still win the trusted tier — otherwise a browser mate row would
+    outrank a canonical CP row before ``source_rank`` is consulted. Used ONLY here;
+    the untrusted tiers keep their own key unchanged.
+
+    Today TREE_EVAL is granted to canonical profiles alone, so every tier-2
+    candidate is already authoritative and this key is inert. It is the structural
+    guarantee that the ordering stays correct if that ever changes (g-tree-eval-browser).
+    """
+    return (
+        0 if describe_move_row(row).is_effectively_authoritative() else 1,
+        *_move_sort_key(row),
     )
 
 
@@ -159,8 +196,8 @@ def lookup_move_evals(
     for fen, uci in unresolved:
         key = (norm_of[(fen, uci)], uci)
         trusted = trusted_by_norm.get(key)
-        if trusted:  # tier 2
-            result[(fen, uci)] = _played_eval(min(trusted, key=_move_sort_key))
+        if trusted:  # tier 2 (canonical-first within the trusted tier)
+            result[(fen, uci)] = _played_eval(min(trusted, key=_trusted_move_sort_key))
             continue
         exact = exact_map.get((fen, uci))  # tier 3: untrusted exact row
         if exact is not None:
@@ -191,7 +228,7 @@ def lookup_root_eval(session: Session, starting_fen: str) -> MoveEval | None:
     except Exception:
         return None
 
-    tp = resolve_trusted_position(session, norm)
+    tp = resolve_trusted_position(session, norm, Capability.TREE_EVAL, _TREE_VIEWER)
     if tp is None:
         return None
     return _best_move_eval(tp)

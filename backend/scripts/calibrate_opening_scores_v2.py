@@ -79,10 +79,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # fixpoint over static app.* imports; add whatever it names.
 SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/analysis_profiles.py",
+    "backend/app/analysis_submissions.py",
     "backend/app/analysis_trust.py",
     "backend/app/centipawn_loss.py",
     "backend/app/database_url.py",
     "backend/app/db.py",
+    "backend/app/evidence_coherence.py",
     "backend/app/evidence_contracts.py",
     "backend/app/evidence_policy.py",
     "backend/app/fen.py",

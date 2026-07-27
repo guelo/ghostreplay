@@ -1480,7 +1480,7 @@ def test_run_postgresql_retries_then_succeeds(monkeypatch):
     sentinel = [(("k", "e2e4"), repo.Reason.NEW_KEY)]
     calls = {"n": 0}
 
-    def fake_run_batch(session, surviving, *, insert, for_update):
+    def fake_run_batch(session, surviving, *, insert, for_update, submitter_user_id=None):
         calls["n"] += 1
         assert for_update is True
         if calls["n"] <= 2:  # two deadlocks, then success
@@ -1516,7 +1516,7 @@ def test_run_postgresql_reraises_non_retryable(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_run_batch(session, surviving, *, insert, for_update):
+    def fake_run_batch(session, surviving, *, insert, for_update, submitter_user_id=None):
         calls["n"] += 1
         orig = Exception()
         orig.pgcode = "23505"
@@ -1557,7 +1557,7 @@ def test_run_batch_with_retry_warns_per_retry_and_on_exhaustion(
         def close(self):
             pass
 
-    def always_fail(session, surviving, *, insert, for_update):
+    def always_fail(session, surviving, *, insert, for_update, submitter_user_id=None):
         orig = Exception(err_text)
         if pgcode is not None:
             orig.pgcode = pgcode
@@ -1661,9 +1661,14 @@ def _distinct_passive_rows(n):
 
 def _assert_idempotent_constant(engine, Factory, n):
     """Seed N distinct single-signature rows, then re-upload the identical batch and
-    assert the re-upload is a constant 1 INSERT + 1 SELECT + 0 UPDATE (every row
+    assert the re-upload is a constant 1 INSERT + 2 SELECT + 0 UPDATE (every row
     idempotent-KEEP), independent of N. Shared by the PG and SQLite contracts so
-    the two can't silently diverge."""
+    the two can't silently diverge.
+
+    The second SELECT is the paired association load (g-v21l): these rows are
+    NON-authoritative, so the MERGE precondition needs their association sets. It is
+    one set-based query over the locked ids, so the property under test — a CONSTANT
+    statement count independent of N, with no per-row round-trip — is unchanged."""
     rows = _distinct_passive_rows(n)
     s = Factory(); write_analysis_cache_rows(s, rows); s.close()  # seed fresh
 
@@ -1671,8 +1676,30 @@ def _assert_idempotent_constant(engine, Factory, n):
         s = Factory(); write_analysis_cache_rows(s, [dict(r) for r in rows]); s.close()
 
     assert counts["INSERT"] == 1, counts
-    assert counts["SELECT"] == 1, counts   # single (FOR UPDATE) select over all conflicts
+    # one (FOR UPDATE) select over all conflicts + one association load
+    assert counts["SELECT"] == 2, counts
     assert counts["UPDATE"] == 0, counts   # every row idempotent-KEEP
+
+
+def test_canonical_conflicts_issue_no_association_query():
+    """A batch whose conflicts are all CANONICAL keeps its historical statement
+    count: canonical merges skip the ownership precondition and canonical rows
+    never carry associations, so no association query is issued at all (g-v21l).
+
+    In-memory engine so the counter sees the writer's statements (for a file DB the
+    helper writes through its own dedicated BEGIN IMMEDIATE engine)."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    Factory = sessionmaker(bind=engine)
+    rows = [{**_canonical_full(FEN), "fen_before": f"canon-{i}"} for i in range(5)]
+    s = Factory(); write_analysis_cache_rows(s, rows); s.close()  # seed fresh
+
+    with _statement_counter(engine) as counts:
+        s = Factory(); write_analysis_cache_rows(s, [dict(r) for r in rows]); s.close()
+
+    assert counts["INSERT"] == 1, counts
+    assert counts["SELECT"] == 1, counts  # conflict select only — no association load
+    engine.dispose()
 
 
 @pytest.mark.parametrize("n", [10, 40])

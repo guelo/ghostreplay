@@ -4,6 +4,7 @@ import { useMoveAnalysis } from './useMoveAnalysis'
 import { createAnalysisStore, type AnalysisStore } from '../stores/createAnalysisStore'
 import { buildBrowserProvenance } from '../workers/browserProvenance'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+import { withLookupSurfaces } from '../test/cacheLookupFixture'
 
 /** The provenance a fresh (untruncated) worker result carries on this device. */
 const expectedProvenance = () => buildBrowserProvenance(sessionAnalysisDepth())
@@ -11,7 +12,11 @@ const expectedProvenance = () => buildBrowserProvenance(sessionAnalysisDepth())
 const lookupAnalysisCacheMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
-  lookupAnalysisCache: (...args: unknown[]) => lookupAnalysisCacheMock(...args),
+  // See GameAnalysisCoordinator.test.ts: fixtures use the pre-g-v21l shorthand and
+  // `withLookupSurfaces` derives the canonical-parity drill/publication surfaces.
+  // A fixture that states one of those surfaces explicitly wins.
+  lookupAnalysisCache: (...args: unknown[]) =>
+    Promise.resolve(lookupAnalysisCacheMock(...args)).then(withLookupSurfaces),
 }))
 
 type MessageHandler = (event: MessageEvent) => void
@@ -1817,6 +1822,176 @@ describe('useMoveAnalysis', () => {
       expect(resolved?.classification).toBe('excellent')
       expect(resolved?.bestMove).toBe('g8f6')
       expect(resolved?.bestLine).toEqual(['g8f6'])
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // g-v21l: capability-gated publication and reuse (interactive consumer)
+  // -----------------------------------------------------------------------
+  describe('capability-gated publication and reuse (g-v21l)', () => {
+    const reusable = (over: Record<string, unknown> = {}) => ({
+      best_move_uci: 'c2c4',
+      best_line_uci: ['c2c4', 'e7e5'],
+      best_eval: 40,
+      best_eval_mate: null,
+      played_eval: 10,
+      played_eval_mate: null,
+      classification: 'inaccuracy',
+      eval_delta: 30,
+      interactive_analysis_reuse: true,
+      game_analysis_reuse: true,
+      ...over,
+    })
+
+    const settle = async (entry: Record<string, unknown>, move = 'e2e4') => {
+      vi.useFakeTimers()
+      let resolveLookup!: (value: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+      const { result } = renderHook(() => useMoveAnalysis(store))
+      act(() => { simulateMessage({ type: 'ready' }) })
+      act(() => { result.current.analyzeMove('fen-0', move, 'white', 0, 20) })
+      const requestId = postMessageMock.mock.calls[0][0].id
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+      act(() => { resolveLookup(new Map([[`fen-0::${move}`, entry]])) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      return requestId
+    }
+
+    it('publishes from the atomic payload, ignoring contradictory generic fields', async () => {
+      await settle({
+        best_move_uci: 'g1f3', best_line_uci: ['g1f3'], best_eval: -900,
+        played_eval: -900, eval_delta: 999, classification: 'blunder',
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable(),
+      })
+      const resolved = store.getState().analysisMap.get(0)!
+      expect(resolved.bestMove).toBe('c2c4')
+      expect(resolved.bestLine).toEqual(['c2c4', 'e7e5'])
+      expect(resolved.delta).toBe(30)
+      expect(resolved.classification).toBe('inaccuracy')
+    })
+
+    it('does NOT publish a tuple approved only for the game-analysis consumer', async () => {
+      await settle({
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable({ interactive_analysis_reuse: false }),
+      })
+      expect(store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('falls back to the worker for a null payload even when the row reads trusted', async () => {
+      await settle({
+        best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'e7e5'], best_eval: 40,
+        played_eval: 10, eval_delta: 30, classification: 'inaccuracy',
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null, reusable_analysis: null,
+      })
+      expect(store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('falls back when the payload lost its PV on the wire', async () => {
+      await settle({
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable({ best_line_uci: null }),
+      })
+      expect(store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('promotes only from publication_best.interactive_analysis_reuse', async () => {
+      const requestId = await settle(
+        {
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: false,
+          },
+        },
+        'c2c4',
+      )
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'c2c4', bestMove: 'g1f3',
+          bestLine: ['g1f3'], bestEval: 35, playedEval: 42,
+          playedEvalMate: null, delta: 7, classification: 'excellent',
+        })
+      })
+      const resolved = store.getState().analysisMap.get(0)!
+      expect(resolved.classification).toBe('best')
+      expect(resolved.delta).toBe(0)
+    })
+
+    it('performs NO promotion when publication_best is null but the row reads trusted', async () => {
+      const requestId = await settle(
+        {
+          best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'g8f6'],
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null, publication_best: null,
+        },
+        'c2c4',
+      )
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'c2c4', bestMove: 'g1f3',
+          bestLine: ['g1f3'], bestEval: 35, playedEval: 42,
+          playedEvalMate: null, delta: 7, classification: 'excellent',
+        })
+      })
+      const resolved = store.getState().analysisMap.get(0)!
+      expect(resolved.classification).toBe('excellent')
+      expect(resolved.delta).toBe(7)
+      expect(resolved.bestMove).toBe('g1f3')
+    })
+
+    it('does NOT promote from the game-analysis flag alone', async () => {
+      const requestId = await settle(
+        {
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: false,
+            game_analysis_reuse: true,
+          },
+        },
+        'c2c4',
+      )
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'c2c4', bestMove: 'g1f3',
+          bestLine: ['g1f3'], bestEval: 35, playedEval: 42,
+          playedEvalMate: null, delta: 7, classification: 'excellent',
+        })
+      })
+      expect(store.getState().analysisMap.get(0)!.classification).toBe('excellent')
+    })
+
+    it('a granted same-user browser hit publishes with no second worker request', async () => {
+      await settle({
+        position_trusted: true, move_trusted: true,
+        analysis_profile_id: 'browser-analysis-multipv-v2',
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable(),
+      })
+      expect(store.getState().analysisMap.get(0)!.bestMove).toBe('c2c4')
+      const analyzeCalls = postMessageMock.mock.calls.filter(
+        ([m]: any[]) => m?.type === 'analyze-move',
+      )
+      expect(analyzeCalls).toHaveLength(1) // the original request only
     })
   })
 })

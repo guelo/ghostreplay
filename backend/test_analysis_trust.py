@@ -14,6 +14,15 @@ from app.analysis_trust import (
     position_trust_flags,
     source_rank,
 )
+from app.evidence_policy import Capability
+
+# The two grains' generic read capabilities. Canonical rows hold every capability
+# for every viewer, so these cross-grain cases read exactly as they did before the
+# capability parameters existed (g-v21l); the capability/owner matrix has its own
+# suite in test_capability_read_trust.py.
+POS = Capability.POSITION_READ
+MOV = Capability.MOVE_READ
+VIEWER = None
 
 START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -50,10 +59,10 @@ def _move_facts() -> dict:
 
 def test_authoritative_move_complete_row_is_not_position_trusted():
     data = {**_identity(), "evidence_contract_id": "move-complete-v1", **_move_facts()}
-    assert move_trust_flags(data) == (True, True, True)
+    assert move_trust_flags(data, MOV, VIEWER) == (True, True, True)
     # Same authoritative row must NOT read as position-trusted: it declares the move
     # grain, and it is not a legacy v2 projection.
-    authoritative, satisfied, trusted = position_trust_flags(data)
+    authoritative, satisfied, trusted = position_trust_flags(data, POS, VIEWER)
     assert authoritative is True
     assert satisfied is False
     assert trusted is False
@@ -61,8 +70,8 @@ def test_authoritative_move_complete_row_is_not_position_trusted():
 
 def test_authoritative_position_complete_row_is_not_move_trusted():
     data = {**_identity(), "evidence_contract_id": "position-complete-v1", **_position_facts()}
-    assert position_trust_flags(data) == (True, True, True)
-    authoritative, satisfied, trusted = move_trust_flags(data)
+    assert position_trust_flags(data, POS, VIEWER) == (True, True, True)
+    authoritative, satisfied, trusted = move_trust_flags(data, MOV, VIEWER)
     assert authoritative is True
     assert satisfied is False
     assert trusted is False
@@ -76,8 +85,8 @@ def test_legacy_v2_row_is_trusted_at_both_grains():
         **_position_facts(),
         **_move_facts(),
     }
-    assert position_trust_flags(data)[2] is True
-    assert move_trust_flags(data)[2] is True
+    assert position_trust_flags(data, POS, VIEWER)[2] is True
+    assert move_trust_flags(data, MOV, VIEWER)[2] is True
 
 
 def test_browser_v1_row_is_trusted_at_neither_grain():
@@ -87,8 +96,8 @@ def test_browser_v1_row_is_trusted_at_neither_grain():
         **_position_facts(),
         **_move_facts(),
     }
-    p_auth, _, p_trusted = position_trust_flags(data)
-    m_auth, _, m_trusted = move_trust_flags(data)
+    p_auth, _, p_trusted = position_trust_flags(data, POS, VIEWER)
+    m_auth, _, m_trusted = move_trust_flags(data, MOV, VIEWER)
     assert p_auth is False and p_trusted is False
     assert m_auth is False and m_trusted is False
 
@@ -97,7 +106,7 @@ def test_authoritative_but_missing_facts_fails_its_own_grain():
     # Declares position-complete + canonical identity but has no PV -> not satisfied.
     data = {**_identity(), "evidence_contract_id": "position-complete-v1",
             "best_move_uci": "e2e4", "best_line_uci": None, "best_eval": 20}
-    authoritative, satisfied, trusted = position_trust_flags(data)
+    authoritative, satisfied, trusted = position_trust_flags(data, POS, VIEWER)
     assert authoritative is True
     assert satisfied is False
     assert trusted is False
@@ -140,5 +149,5 @@ def test_cache_row_projectors_round_trip_trust():
         best_eval_mate=None, played_eval=20, played_eval_mate=None,
         classification="best", eval_delta=0, **common,
     )
-    assert position_trust_flags(cache_row_as_position_dict(row))[2] is True
-    assert move_trust_flags(cache_row_as_move_dict(row))[2] is True
+    assert position_trust_flags(cache_row_as_position_dict(row), POS, VIEWER)[2] is True
+    assert move_trust_flags(cache_row_as_move_dict(row), MOV, VIEWER)[2] is True

@@ -2801,10 +2801,14 @@ class TestScorerSourceDigest:
         # declared dependency set + the scorer itself.
         assert cal.SCORER_SOURCE_FILES == (
             "backend/app/analysis_profiles.py",
+            # g-v21l: submitter eligibility and the shared coherent-tuple resolver
+            # are both in opening_evidence's import closure now.
+            "backend/app/analysis_submissions.py",
             "backend/app/analysis_trust.py",
             "backend/app/centipawn_loss.py",
             "backend/app/database_url.py",
             "backend/app/db.py",
+            "backend/app/evidence_coherence.py",
             "backend/app/evidence_contracts.py",
             "backend/app/evidence_policy.py",
             "backend/app/fen.py",

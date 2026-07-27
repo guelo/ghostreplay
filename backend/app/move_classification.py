@@ -138,6 +138,86 @@ def classify_move_advanced(
     return _classify_win_chance_drop(drop)
 
 
+def white_relative_to_mover_score(
+    cp: int | None, mate: int | None, mover: str
+) -> EngineScore | None:
+    """Convert a WHITE-relative stored eval to a ROOT mover-relative EngineScore.
+
+    Evidence rows store white-relative evals; the root-alternative classifier needs
+    mover-relative (root side-to-move) scores. A present mate count uses the raw
+    ``mate`` (a mate->CP conversion is only for the delta arithmetic), else the
+    finite CP. ``None`` when neither is usable.
+    """
+    if mate is not None:
+        return EngineScore("mate", mate if mover == "white" else -mate)
+    if cp is None:
+        return None
+    return EngineScore("cp", cp if mover == "white" else -cp)
+
+
+def validate_root_alternative_classification(
+    *,
+    mover: str,
+    played_uci: str | None,
+    best_uci: str | None,
+    played_eval: int | None,
+    played_eval_mate: int | None,
+    best_eval: int | None,
+    best_eval_mate: int | None,
+    eval_delta: int | None,
+    classification: str | None,
+) -> bool:
+    """The FULL non-authoritative classification rule — ingress AND read-time reuse.
+
+    :func:`classify_root_alternative` alone is NOT validation: it short-circuits to
+    ``best`` whenever ``is_best``, so equal UCIs would bless unequal CP facts,
+    unequal mate facts, or a nonzero loss. This helper closes that short circuit and
+    is the SINGLE implementation both callers use — the analysis-evidence ingress
+    (``api.session._build_evidence_cache_row``) and the read-time coherent-tuple
+    resolver — so a row that could not be submitted can never be read back either.
+
+    Inputs are the raw WHITE-relative stored facts plus the stored delta and label.
+    The rule:
+
+    * for MATCHING UCIs: exact equality of the played/best CP values, exact equality
+      of the played/best mate values, ``eval_delta == 0`` (a real zero, NOT a
+      null-coalesced one), and ``classification == "best"``;
+    * for NON-matching UCIs: a stored ``best`` is rejected outright;
+    * in ALL cases the label must equal what :func:`classify_root_alternative`
+      rederives from the mover-relative scores.
+
+    ``mover`` is the root side to move ('white' | 'black').
+    """
+    if classification not in VALID_CLASSIFICATIONS:
+        return False
+    if played_uci is None or best_uci is None:
+        return False
+
+    is_best = played_uci == best_uci
+    if is_best:
+        if played_eval != best_eval:
+            return False
+        if played_eval_mate != best_eval_mate:
+            return False
+        # A real zero, not `(eval_delta or 0) == 0`: a null delta on an exact-best
+        # row is missing evidence, not a proven zero loss.
+        if eval_delta != 0:
+            return False
+        if classification != "best":
+            return False
+    elif classification == "best":
+        return False
+
+    best_score = white_relative_to_mover_score(best_eval, best_eval_mate, mover)
+    played_score = white_relative_to_mover_score(played_eval, played_eval_mate, mover)
+    if best_score is None or played_score is None:
+        return False
+    return (
+        classify_root_alternative(best_score, played_score, mover, is_best)
+        == classification
+    )
+
+
 def classify_root_alternative(
     best_score: EngineScore,
     played_score: EngineScore,

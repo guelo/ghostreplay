@@ -710,7 +710,10 @@ def test_endpoint_writer_omits_survivor_surfaces_anomaly(
     # distinct writer_no_result reason instead of being masked as a false new_key.
     session_id = create_game_session(user_id=123)
     _seed_e4_move(db_session, session_id)
-    monkeypatch.setattr("app.api.session.write_analysis_cache_rows", lambda db, rows: [])
+    monkeypatch.setattr(
+        "app.api.session.write_analysis_cache_rows",
+        lambda db, rows, submitter_user_id=None: [],
+    )
     resp = _post(client, auth_headers, session_id, [_evidence_row()])
     assert resp.json()["results"][0]["reason"] == EVIDENCE_WRITER_NO_RESULT
 

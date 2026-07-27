@@ -403,6 +403,34 @@ export const hasCpEvalLoss = (input: {
 }
 
 /**
+ * STRUCTURAL re-check of the backend's atomic reuse payload (g-v21l).
+ *
+ * The backend already proved the payload is a coherent tuple — matching settings,
+ * agreeing facts, a rederived classification — so this does NOT re-decide trust.
+ * It only confirms the payload is renderable and gradeable HERE, so a wire-level
+ * loss (a dropped PV, a non-finite delta) releases the worker fallback instead of
+ * publishing a half-built result. Mirrors what `isTrustedPositionHit` +
+ * `isTrustedMoveHit` + `hasCpEvalLoss` used to check across the generic fields,
+ * against the one payload that is actually being published.
+ *
+ * The CAPABILITY half is the caller's: each consumer must independently require
+ * its OWN flag (`interactive_analysis_reuse` / `game_analysis_reuse`) — a payload
+ * approved for one consumer must never be published by the other.
+ */
+export const canResolveReusableAnalysis = (payload: {
+  best_move_uci?: string | null | undefined
+  best_line_uci?: string[] | null | undefined
+  classification: MoveClassification | string | null | undefined
+  played_eval?: number | null | undefined
+  played_eval_mate?: number | null | undefined
+  eval_delta?: number | null | undefined
+}): boolean =>
+  payload.best_move_uci != null &&
+  canResolvePositionAnalysis(payload) &&
+  canResolveMoveAnalysis(payload) &&
+  hasCpEvalLoss(payload)
+
+/**
  * Grain-split best reconciliation (g-move-best-icon, g-jfdj). The TRUSTED position
  * grain names `trustedBestUci` as the position's best move. "Is the played move
  * best?" is a POSITION-grain question, so the trusted position grain's answer wins

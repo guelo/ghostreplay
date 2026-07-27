@@ -666,6 +666,17 @@ ALL_CAPABILITIES: frozenset[Capability] = frozenset(Capability)
 # defective protocol must not blank overlays already computed from its stored rows.
 RETIREMENT_SURVIVING: frozenset[Capability] = frozenset({Capability.DISPLAY_OVERLAY})
 
+# Capabilities a NON-AUTHORITATIVE row may satisfy only for a viewer who
+# independently submitted a consistent tuple for it (g-v21l). Everything except
+# DISPLAY_OVERLAY, which is purely presentational re-labeling, already ships
+# unscoped, and whose cross-user question is filed separately (g-overlay-owner-scope).
+#
+# Stated as "every capability except ..." rather than an enumerated allow-list on
+# purpose: a capability added later is owner-scoped by DEFAULT, which is the
+# fail-closed direction. Effectively AUTHORITATIVE rows are unaffected — canonical
+# evidence is server-produced and carries no associations at all.
+OWNER_SCOPED: frozenset[Capability] = ALL_CAPABILITIES - RETIREMENT_SURVIVING
+
 
 class OverlayMode(Enum):
     ALWAYS = "always"  # overlay whenever DISPLAY_OVERLAY is held
@@ -677,18 +688,42 @@ class OverlayMode(Enum):
     NEVER = "never"
 
 
-# Per-profile capability grants (D5 base). Canonical holds all eight;
-# browser-analysis-multipv-v2 and the retired browser-analysis-v1 hold only the
-# retirement-surviving DISPLAY_OVERLAY; browser-game / jeffml / legacy hold none.
-# The read/reuse call-site wiring for the other seven stays on
-# ``_effectively_authoritative`` until g-v21l; this bead wires only DISPLAY_OVERLAY.
-# The browser-game and browser-analysis-v1 caps are not a choice: their protocols
-# are internally inconsistent, so ``_assert_registry_consistent`` refuses to load a
-# grant beyond RETIREMENT_SURVIVING to any of them.
+# Per-profile capability grants. Canonical holds all eight.
+#
+# g-v21l adds five ACTIVE-REQUIRED grants to browser-analysis-multipv-v2 — the only
+# non-canonical read-trust candidate in scope: it is active, non-authoritative,
+# replacement-eligible, and fixed to the truthful visible-MultiPV protocol (lite net
+# nn-9067e33176e8.nnue, depth 21, MultiPV 3). Its position and move facts may be
+# displayed, reused, and consumed by the opening path — FOR THEIR OWN SUBMITTER ONLY
+# (every capability but DISPLAY_OVERLAY is in :data:`OWNER_SCOPED`).
+#
+# DRILL_GRADE and TREE_EVAL stay UNGRANTED to everything non-canonical:
+#   * DRILL_GRADE — a fabricated row must never grade a drill;
+#   * TREE_EVAL — the tree resolves a SHARED graph node with no per-viewer identity,
+#     so owner scoping is not expressible there (the same node would have to
+#     evaluate differently per viewer). Withholding it keeps the tree ROOT eval and
+#     the TRUSTED move tiers 1-2 canonical; it does NOT make the tree canonical-only,
+#     because the untrusted tiers 3-4 are source-agnostic and sit outside this
+#     capability system entirely. Revisiting it is g-tree-eval-browser.
+#
+# The retired browser-analysis-v1 and the browser-game profiles keep exactly the
+# retirement-surviving DISPLAY_OVERLAY (or nothing); jeffml / legacy hold none. That
+# is not a free choice for the defective ones: their protocols are internally
+# inconsistent, so ``_assert_registry_consistent`` refuses to load a grant beyond
+# RETIREMENT_SURVIVING to any of them.
 CAPABILITY_GRANTS: dict[str, frozenset[Capability]] = {
     CANONICAL_PROFILE_ID: ALL_CAPABILITIES,
     CANONICAL_LINUX_PROFILE_ID: ALL_CAPABILITIES,
-    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: frozenset({Capability.DISPLAY_OVERLAY}),
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID: frozenset(
+        {
+            Capability.DISPLAY_OVERLAY,
+            Capability.POSITION_READ,
+            Capability.MOVE_READ,
+            Capability.INTERACTIVE_ANALYSIS_REUSE,
+            Capability.GAME_ANALYSIS_REUSE,
+            Capability.OPENING_EVIDENCE,
+        }
+    ),
     BROWSER_ANALYSIS_PROFILE_ID: frozenset({Capability.DISPLAY_OVERLAY}),
     # browser-game-v2 HOLDS the overlay capability but under REQUIRES_COMPARISON:
     # a stronger cross-user in-game diagnostic may re-label a weaker one, but only

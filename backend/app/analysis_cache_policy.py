@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from app.analysis_profiles import (
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_GAME_V2_PROFILE_ID,
     IDENTITY_FIELDS,
     StrengthComparison,
@@ -94,6 +95,14 @@ class Reason(str, Enum):
     SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
     SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
     MERGE_CONFLICT_KEEP = "merge_conflict_keep"
+    # A same-profile MERGE was refused because the stored NON-AUTHORITATIVE row is
+    # associated with a submitter other than the incoming one (g-v21l). ``_build_merged``
+    # starts from the EXISTING row and writes evidence columns only, so merging B's
+    # superset into A's row would let A read fields only B produced. NOT a denial of
+    # access: the claim rule still runs, so B associates with the UNMERGED row, which
+    # by the coverage condition contains only fields B produced. Never reached for an
+    # effectively authoritative existing row — canonical merges skip the precondition.
+    MERGE_OWNER_MISMATCH_KEEP = "merge_owner_mismatch_keep"
     # --- same-profile MEASURED-STRENGTH outcomes (g-mk1d, declared-dynamic
     # profiles only). Two rows from one dynamic profile are not interchangeable:
     # they may have searched to different depths on different devices.
@@ -265,9 +274,82 @@ def _same_profile_strength_decision(
     return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
 
 
+def merge_owner_ok(
+    existing: CacheRow,
+    existing_submitters: frozenset[int],
+    incoming_submitter: int | None,
+) -> bool:
+    """May a same-profile MERGE fold ``incoming``'s evidence into ``existing``?
+
+    ``_build_merged`` keeps the EXISTING row's provenance and only fills its null
+    evidence columns, so the merged row is read by everyone already associated with
+    ``existing``. That is only safe when nobody but the incoming submitter holds an
+    association — i.e. the existing association set is a subset of
+    ``{incoming submitter}`` (which includes the empty set).
+
+    Evaluated ONLY for a non-authoritative existing row. Canonical merges skip it
+    entirely and are byte-for-byte unchanged; that is belt-and-braces on top of the
+    claim restriction (canonical rows never acquire associations in the first place,
+    so even an unguarded subset test would hold) and it makes canonical parity
+    independent of the claim rule being correct.
+    """
+    if existing.is_effectively_authoritative():
+        return True
+    allowed = (
+        frozenset() if incoming_submitter is None else frozenset({incoming_submitter})
+    )
+    return existing_submitters <= allowed
+
+
+def is_browser_claimable(row: CacheRow) -> bool:
+    """True when ``row`` is effectively browser-analysis-multipv-v2 (g-v21l).
+
+    The browser-only restriction on the claim rule: identity verified, the ACTIVE
+    visible-MultiPV profile, and NOT effectively authoritative. Applied to BOTH the
+    incoming row and the row that will be stored after the decision — condition 3 is
+    the load-bearing one, because a browser submission can agree with and cover a
+    canonical tuple (Rule 5 then returns INCOMPATIBLE_KEEP), and a profile-agnostic
+    claim rule would attach a browser user to the canonical row. That association
+    would later fail :func:`merge_owner_ok` and block a canonical merge, breaking
+    canonical parity. Canonical rows must carry no associations, by construction and
+    at every moment.
+    """
+    profile = get_profile(row.effective_profile_id())
+    return (
+        profile is not None
+        and profile.profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+        and profile.active
+        and not row.is_effectively_authoritative()
+    )
+
+
+def keep_or_merge_claim_ok(existing: CacheRow, incoming: CacheRow) -> bool:
+    """The KEEP/MERGE half of the claim rule (g-v21l).
+
+    Associate the incoming submitter iff BOTH hold:
+
+    1. every overlapping populated evidence field is equal (:func:`_fields_agree`);
+    2. ``existing.populated_fields <= incoming.populated_fields`` — the stored row
+       populates nothing the submitter did not independently produce.
+
+    Condition 2 is what makes an association SAFE rather than merely plausible: it
+    guarantees a user can only ever read fields they produced themselves. Without it
+    a fabricator who agreed on every overlapping field could still inject, say, a
+    mate field the corroborating user left empty. Its deliberate cost is that a user
+    submitting a strict SUBSET of a stored row does not associate and falls back to
+    the worker.
+    """
+    return _fields_agree(existing, incoming) and (
+        existing.populated_fields <= incoming.populated_fields
+    )
+
+
 def decide_analysis_cache_replacement(
     existing: CacheRow | None,
     incoming: CacheRow,
+    *,
+    existing_submitters: frozenset[int] = frozenset(),
+    incoming_submitter: int | None = None,
 ) -> tuple[Decision, Reason]:
     # An incoming row that fails its contract or makes an unverifiable profile
     # claim is never stored.
@@ -319,11 +401,19 @@ def decide_analysis_cache_replacement(
         # stored row should advertise even though no evidence field changes. Mate
         # fields are NOT stripped here: for same-profile merge they are genuinely
         # additive evidence a later write can contribute.
+        # Single-affected-submitter precondition (g-v21l), guarding BOTH merge
+        # decisions and nothing else: an idempotent KEEP writes no evidence column,
+        # so it needs no ownership check and must keep its historical reason.
+        merge_allowed = merge_owner_ok(existing, existing_submitters, incoming_submitter)
         if incoming.populated_fields - existing.populated_fields:
+            if not merge_allowed:
+                return Decision.KEEP, Reason.MERGE_OWNER_MISMATCH_KEEP
             return Decision.MERGE, Reason.SAME_PROFILE_SUPERSET_MERGE
         if is_strict_successor(
             incoming.evidence_contract_id, existing.evidence_contract_id
         ):
+            if not merge_allowed:
+                return Decision.KEEP, Reason.MERGE_OWNER_MISMATCH_KEEP
             return Decision.MERGE, Reason.SAME_PROFILE_CONTRACT_UPGRADE
         return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
 

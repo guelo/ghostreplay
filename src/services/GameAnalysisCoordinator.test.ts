@@ -3,12 +3,18 @@ import { useGameStore } from '../stores/useGameStore'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { MoveRecord } from '../components/chess-game/domain/movePresentation'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+import { withLookupSurfaces } from '../test/cacheLookupFixture'
 
 const lookupAnalysisCacheMock = vi.fn()
 const uploadSessionMovesMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
-  lookupAnalysisCache: (...args: unknown[]) => lookupAnalysisCacheMock(...args),
+  // Fixtures describe a lookup entry in its pre-g-v21l shorthand (the generic
+  // read fields); `withLookupSurfaces` derives the canonical-parity drill and
+  // publication surfaces the backend would emit alongside them. A fixture that
+  // states any of those surfaces explicitly wins.
+  lookupAnalysisCache: (...args: unknown[]) =>
+    Promise.resolve(lookupAnalysisCacheMock(...args)).then(withLookupSurfaces),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
 }))
 
@@ -2031,6 +2037,306 @@ describe('GameAnalysisCoordinator', () => {
         },
       })
       expect(coordinator.store.getState().lastAnalysis).toBeNull()
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // g-v21l: capability-gated publication, drill grading, and reuse
+  // -----------------------------------------------------------------------
+  describe('capability-gated publication and reuse (g-v21l)', () => {
+    const reusable = (over: Record<string, unknown> = {}) => ({
+      best_move_uci: 'c2c4',
+      best_line_uci: ['c2c4', 'e7e5'],
+      best_eval: 40,
+      best_eval_mate: null,
+      played_eval: 10,
+      played_eval_mate: null,
+      classification: 'inaccuracy',
+      eval_delta: 30,
+      interactive_analysis_reuse: true,
+      game_analysis_reuse: true,
+      ...over,
+    })
+
+    const settle = async (entry: Record<string, unknown>, move = 'e2e4') => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([[`fen-0::${move}`, entry]]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', move, 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+    }
+
+    it('publishes from the atomic payload, ignoring contradictory generic fields', async () => {
+      await settle({
+        // Generic read fields describe a DIFFERENT, merely-readable row.
+        best_move_uci: 'g1f3', best_line_uci: ['g1f3'], best_eval: -900,
+        played_eval: -900, eval_delta: 999, classification: 'blunder',
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable(),
+      })
+      const result = coordinator.store.getState().analysisMap.get(0)
+      expect(result).toBeTruthy()
+      expect(result!.bestMove).toBe('c2c4')
+      expect(result!.bestLine).toEqual(['c2c4', 'e7e5'])
+      expect(result!.bestEval).toBe(40)
+      expect(result!.playedEval).toBe(10)
+      expect(result!.delta).toBe(30)
+      expect(result!.classification).toBe('inaccuracy')
+    })
+
+    it('does NOT publish a tuple approved only for the interactive consumer', async () => {
+      await settle({
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable({ game_analysis_reuse: false }),
+      })
+      // Interactive-only reuse cannot feed durable game outcomes: the worker owns
+      // this index and nothing was published from the cache.
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('falls back to the worker for a null payload even when the row reads trusted', async () => {
+      await settle({
+        best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'e7e5'], best_eval: 40,
+        played_eval: 10, eval_delta: 30, classification: 'inaccuracy',
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null, reusable_analysis: null,
+      })
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('falls back when the payload carries a non-finite delta', async () => {
+      await settle({
+        position_trusted: true, move_trusted: true,
+        drill_best_move_uci: null, position_eval_loss_cp: null,
+        publication_best: null,
+        reusable_analysis: reusable({ eval_delta: null }),
+      })
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('reconciles only from publication_best.game_analysis_reuse', async () => {
+      // A worker result that under-rates the played move, plus a publication_best
+      // naming that same move as best -> promotion to the best-move star.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: true,
+          },
+        }],
+      ]))
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id, move: 'c2c4', bestMove: 'c2c4', bestLine: null,
+          bestEval: 20, playedEval: 20, playedEvalMate: null, delta: 12,
+          classification: 'excellent',
+        },
+      })
+      const result = coordinator.store.getState().analysisMap.get(0)
+      expect(result!.classification).toBe('best')
+      expect(result!.delta).toBe(0)
+    })
+
+    it('performs NO reconciliation when publication_best is null but the row reads trusted', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'e7e5'],
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null, publication_best: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id, move: 'c2c4', bestMove: 'c2c4', bestLine: null,
+          bestEval: 20, playedEval: 20, playedEvalMate: null, delta: 12,
+          classification: 'excellent',
+        },
+      })
+      // The worker result reaches the store UNMODIFIED: a read grant must not
+      // rewrite classification, delta, blunder, recordability or provenance.
+      const result = coordinator.store.getState().analysisMap.get(0)!
+      expect(result.classification).toBe('excellent')
+      expect(result.delta).toBe(12)
+      expect(result.blunder).toBe(false)
+    })
+
+    it('does NOT reconcile from the interactive flag alone', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          reusable_analysis: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: false,
+          },
+        }],
+      ]))
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id, move: 'c2c4', bestMove: 'c2c4', bestLine: null,
+          bestEval: 20, playedEval: 20, playedEvalMate: null, delta: 12,
+          classification: 'excellent',
+        },
+      })
+      expect(coordinator.store.getState().analysisMap.get(0)!.classification).toBe('excellent')
+    })
+
+    it('reconciles from publication_best even with a null reusable_analysis', async () => {
+      // The two surfaces are independent in BOTH directions: the canonical
+      // position-only / mate cases keep working.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          position_trusted: true, move_trusted: false,
+          drill_best_move_uci: 'c2c4', position_eval_loss_cp: null,
+          reusable_analysis: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: false,
+            game_analysis_reuse: true,
+          },
+        }],
+      ]))
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id, move: 'c2c4', bestMove: 'c2c4', bestLine: null,
+          bestEval: 20, playedEval: 20, playedEvalMate: null, delta: 12,
+          classification: 'excellent',
+        },
+      })
+      expect(coordinator.store.getState().analysisMap.get(0)!.classification).toBe('best')
+    })
+
+    it('drill truth accepts ONLY the dedicated drill fields', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          // A readable, publishable row that holds NO drill grant: the generic
+          // best move must not grade the drill.
+          best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'e7e5'], best_eval: 40,
+          played_eval: 10, eval_delta: 30, classification: 'inaccuracy',
+          position_trusted: true, move_trusted: true,
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: true,
+          },
+          reusable_analysis: reusable(),
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'c2c4', 0)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      // No drill grant -> the drill falls back to the worker channel, which
+      // resolves from the published cache result via analysisMap.
+      await expect(grade).resolves.toMatchObject({ source: 'worker' })
+    })
+
+    it('strictness-0 grades a mate position by exact UCI without awaiting the worker', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          move_san: null, best_move_uci: null, best_line_uci: null,
+          best_eval: null, best_eval_mate: 3,
+          played_eval: null, eval_delta: null, classification: null,
+          position_trusted: false, move_trusted: false,
+          // A canonical MATE position: a drill best move with a NULL loss.
+          drill_best_move_uci: 'c2c4', position_eval_loss_cp: null,
+          publication_best: null, reusable_analysis: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'c2c4', 0)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(grade).resolves.toEqual({
+        grade: 'pass', bestMove: 'c2c4', source: 'position',
+      })
+    })
+
+    it('positive strictness still falls back when the drill loss is null', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          best_move_uci: 'c2c4', best_line_uci: ['c2c4', 'e7e5'], best_eval: 40,
+          played_eval: 10, eval_delta: 30, classification: 'inaccuracy',
+          position_trusted: true, move_trusted: true,
+          drill_best_move_uci: 'c2c4', position_eval_loss_cp: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: true,
+          },
+          reusable_analysis: reusable(),
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'c2c4', 50)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(grade).resolves.toMatchObject({ source: 'worker' })
+    })
+
+    it('a granted same-user browser hit publishes with no second worker request', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::e2e4', {
+          position_trusted: true, move_trusted: true,
+          analysis_profile_id: 'browser-analysis-multipv-v2',
+          drill_best_move_uci: null, position_eval_loss_cp: null,
+          publication_best: {
+            best_move_uci: 'c2c4',
+            interactive_analysis_reuse: true,
+            game_analysis_reuse: true,
+          },
+          reusable_analysis: reusable(),
+        }],
+      ]))
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)!.bestMove).toBe('c2c4')
+      // The in-flight worker request is cancelled and no new one is dispatched.
+      expect(worker.postMessage).toHaveBeenCalledWith({
+        type: 'cancel-analysis', id,
+      })
+      expect(
+        worker.postMessage.mock.calls.filter(
+          ([m]: any[]) => m?.type === 'analyze-move',
+        ),
+      ).toHaveLength(0)
     })
   })
 })

@@ -1101,8 +1101,11 @@ def test_position_eval_loss_cp_null_when_strength_not_equal(client, auth_headers
     _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
                            best_line_uci="d2d4 d7d5", best_eval=50)
 
+    # g-v21l: the guard now compares the two grains' CAPTURED row snapshots
+    # (compare_row_strength) rather than registry profiles, so a declared-dynamic
+    # profile — whose registry values are all None — is comparable too.
     with patch(
-        "app.api.analysis.compare_search_strength",
+        "app.api.analysis.compare_row_strength",
         return_value=StrengthComparison.A_STRONGER,
     ):
         result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
@@ -1129,8 +1132,11 @@ def test_position_eval_loss_cp_null_when_move_untrusted(client, auth_headers, db
 
 def test_lookup_batch_position_only_move_and_miss(client, auth_headers, db_session):
     # A batch of [position-only, move+position, miss] returns the correct shapes
-    # and resolves all position evidence in a SINGLE batched resolver call.
-    from app.position_analysis_repo import resolve_trusted_positions as _real_resolve
+    # and loads all position evidence in a SINGLE batched candidate load, which
+    # every capability then resolves against IN MEMORY (g-v21l).
+    from app.position_analysis_repo import (
+        load_position_candidates as _real_load,
+    )
 
     # 1. Move + position hit at STARTING_FEN -> full grains + derived loss.
     _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
@@ -1142,7 +1148,7 @@ def test_lookup_batch_position_only_move_and_miss(client, auth_headers, db_sessi
 
     miss_fen = "8/8/8/8/8/8/8/K6k w - - 0 1"
     with patch(
-        "app.api.analysis.resolve_trusted_positions", wraps=_real_resolve,
+        "app.api.analysis.load_position_candidates", wraps=_real_load,
     ) as spy:
         results = client.post(
             "/api/analysis/lookup",
@@ -1154,7 +1160,7 @@ def test_lookup_batch_position_only_move_and_miss(client, auth_headers, db_sessi
             headers=auth_headers(),
         ).json()["results"]
 
-    assert spy.call_count == 1  # one batched resolver call for the whole request
+    assert spy.call_count == 1  # one batched candidate load for the whole request
 
     full = results[f"{STARTING_FEN}::e2e4"]
     assert full["move_trusted"] is True
@@ -1169,3 +1175,284 @@ def test_lookup_batch_position_only_move_and_miss(client, auth_headers, db_sessi
     assert pos_only["position_eval_loss_cp"] is None
 
     assert f"{miss_fen}::a1a2" not in results  # nothing trusted -> skipped
+
+
+# --------------------------------------------------------------------------- #
+# g-v21l: the three-way split between generic reads, drill grading, and
+# publication reconciliation, plus the four-SELECT query ceiling.
+# --------------------------------------------------------------------------- #
+from app.analysis_profiles import (  # noqa: E402
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+    CANONICAL_PROFILE_ID as _CANON,
+    stamp_profile_full as _stamp,
+)
+from app.evidence_contracts import RESOLVER_COMPLETE_V2 as _V2  # noqa: E402
+from app.models import AnalysisCacheSubmission, User  # noqa: E402
+
+_VIEWER = 123   # the id conftest's auth_headers() default token carries
+_OTHER = 456
+
+
+def _seed_browser_v2_row(db_session, *, fen=STARTING_FEN, move_uci="e2e4",
+                         associated_user=None, **over):
+    """Seed a complete, identity-valid browser-analysis-multipv-v2 row, optionally
+    with a submitter association for ``associated_user``."""
+    data = {
+        "fen_before": fen, "normalized_fen_before": normalize_fen(fen),
+        "move_uci": move_uci, "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5",
+        "played_eval": 20, "best_eval": 20, "eval_delta": 0,
+        "classification": "best", "source": "analysis",
+        "analysis_profile_id": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        "evidence_contract_id": _V2,
+        **_stamp(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
+    }
+    data.update(over)
+    row = AnalysisCache(**data)
+    db_session.add(row)
+    db_session.commit()
+    if associated_user is not None:
+        if db_session.get(User, associated_user) is None:
+            db_session.add(User(id=associated_user, username=f"u{associated_user}"))
+            db_session.commit()
+        db_session.add(
+            AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=associated_user)
+        )
+        db_session.commit()
+    return row
+
+
+def _seed_canonical_v2_row(db_session, *, fen=STARTING_FEN, move_uci="e2e4", **over):
+    data = {
+        "fen_before": fen, "normalized_fen_before": normalize_fen(fen),
+        "move_uci": move_uci, "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5",
+        "played_eval": 20, "best_eval": 20, "eval_delta": 0,
+        "classification": "best", "source": "precomputed",
+        "analysis_profile_id": _CANON, "evidence_contract_id": _V2,
+        **_stamp(_CANON),
+    }
+    data.update(over)
+    db_session.add(AnalysisCache(**data))
+    db_session.commit()
+
+
+# --- canonical parity ------------------------------------------------------- #
+def test_canonical_hit_emits_every_surface(client, auth_headers, db_session):
+    """Canonical rows hold every capability for every viewer, so a canonical hit
+    emits the generic fields, the drill fields, publication_best with BOTH reuse
+    flags, and a coherent reusable_analysis — all at once."""
+    _seed_canonical_v2_row(db_session)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+
+    assert r["position_trusted"] is True and r["move_trusted"] is True
+    assert r["drill_best_move_uci"] == "e2e4"
+    assert r["position_eval_loss_cp"] == 0
+    assert r["publication_best"] == {
+        "best_move_uci": "e2e4",
+        "interactive_analysis_reuse": True,
+        "game_analysis_reuse": True,
+    }
+    assert r["reusable_analysis"]["best_move_uci"] == "e2e4"
+    assert r["reusable_analysis"]["eval_delta"] == 0
+    assert r["reusable_analysis"]["interactive_analysis_reuse"] is True
+    assert r["reusable_analysis"]["game_analysis_reuse"] is True
+
+
+def test_canonical_position_only_hit_emits_drill_and_publication(
+    client, auth_headers, db_session
+):
+    """Position-only and mate hits keep working: publication_best is position-grain
+    only, so requiring the full coherent tuple there would have regressed them."""
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["move_san"] is None
+    assert r["drill_best_move_uci"] == "d2d4"
+    assert r["position_eval_loss_cp"] is None
+    assert r["publication_best"]["best_move_uci"] == "d2d4"
+    assert r["reusable_analysis"] is None  # no move row -> no tuple
+
+
+def test_canonical_mate_position_keeps_drill_best_and_nulls_the_loss(
+    client, auth_headers, db_session
+):
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50, best_eval_mate=4)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["drill_best_move_uci"] == "d2d4"
+    assert r["position_eval_loss_cp"] is None
+
+
+# --- browser evidence: granted read/reuse, ungranted drill ------------------- #
+def test_same_user_browser_hit_publishes_but_never_grades_a_drill(
+    client, auth_headers, db_session
+):
+    _seed_browser_v2_row(db_session, associated_user=_VIEWER)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+
+    # Granted: generic reads, both reuse surfaces.
+    assert r["position_trusted"] is True and r["move_trusted"] is True
+    assert r["publication_best"]["interactive_analysis_reuse"] is True
+    assert r["publication_best"]["game_analysis_reuse"] is True
+    assert r["reusable_analysis"] is not None
+    # UNGRANTED: DRILL_GRADE. Browser evidence emits NEITHER drill field.
+    assert r["drill_best_move_uci"] is None
+    assert r["position_eval_loss_cp"] is None
+
+
+def test_a_different_users_browser_row_serves_nothing(client, auth_headers, db_session):
+    _seed_browser_v2_row(db_session, associated_user=_OTHER)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["position_trusted"] is False and r["move_trusted"] is False
+    assert r["publication_best"] is None
+    assert r["reusable_analysis"] is None
+    assert r["drill_best_move_uci"] is None
+
+
+def test_an_unassociated_browser_row_serves_nothing(client, auth_headers, db_session):
+    _seed_browser_v2_row(db_session)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["position_trusted"] is False
+    assert r["publication_best"] is None
+    assert r["reusable_analysis"] is None
+
+
+def test_read_grants_alone_cannot_publish(client, auth_headers, db_session, monkeypatch):
+    """A row holding POSITION_READ / MOVE_READ but neither reuse capability emits
+    no publication_best and no reusable_analysis — reconciliation is
+    capability-gated, not read-gated."""
+    from app.evidence_policy import CAPABILITY_GRANTS, Capability
+
+    monkeypatch.setitem(
+        CAPABILITY_GRANTS,
+        BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        frozenset(
+            {Capability.DISPLAY_OVERLAY, Capability.POSITION_READ, Capability.MOVE_READ}
+        ),
+    )
+    _seed_browser_v2_row(db_session, associated_user=_VIEWER)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["position_trusted"] is True and r["move_trusted"] is True
+    assert r["publication_best"] is None
+    assert r["reusable_analysis"] is None
+
+
+def test_differing_per_capability_winners_emit_no_publication_best(
+    client, auth_headers, db_session, monkeypatch
+):
+    """When the two reuse capabilities resolve winners carrying DIFFERENT best
+    moves, no payload is emitted — one flag must never describe the other
+    capability's facts."""
+    from app.evidence_policy import CAPABILITY_GRANTS, Capability
+
+    # A canonical position winner and a same-user browser row that disagree.
+    _seed_canonical_v2_row(
+        db_session, move_uci="d2d4", move_san="d4",
+        best_move_uci="d2d4", best_move_san="d4", best_line_uci="d2d4 d7d5",
+    )
+    _seed_browser_v2_row(db_session, associated_user=_VIEWER)
+
+    # Make the browser profile hold only INTERACTIVE reuse, so the two
+    # capabilities can genuinely resolve different winners: canonical wins
+    # GAME_ANALYSIS_REUSE (browser lacks it) while the browser row is a candidate
+    # for INTERACTIVE. Canonical still wins the trusted tier for both, so force
+    # the disagreement by removing the canonical row's INTERACTIVE grant.
+    monkeypatch.setitem(
+        CAPABILITY_GRANTS,
+        _CANON,
+        frozenset(c for c in Capability if c is not Capability.INTERACTIVE_ANALYSIS_REUSE),
+    )
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["publication_best"] is None
+
+
+def test_publication_best_and_reusable_analysis_are_independent(
+    client, auth_headers, db_session
+):
+    """A null reusable_analysis does not suppress publication_best (the canonical
+    position-only case), and the two are emitted on their own terms."""
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["reusable_analysis"] is None
+    assert r["publication_best"] is not None
+
+
+def test_incoherent_browser_pair_emits_no_reusable_analysis(
+    client, auth_headers, db_session
+):
+    """Two equal-strength browser siblings whose facts disagree: the position
+    winner names d2d4, the exact move row names e2e4. Both are readable, but the
+    atomic payload refuses the combination."""
+    _seed_browser_v2_row(
+        db_session, move_uci="d2d4", associated_user=_VIEWER,
+        move_san="d4", best_move_uci="d2d4", best_move_san="d4",
+        best_line_uci="d2d4 d7d5", best_eval=99, played_eval=99,
+    )
+    _seed_browser_v2_row(db_session, move_uci="e2e4", associated_user=_VIEWER)
+    r = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert r["position_trusted"] is True   # readable...
+    assert r["move_trusted"] is True
+    assert r["reusable_analysis"] is None  # ...but not publishable
+
+
+# --- the four-SELECT query ceiling ------------------------------------------ #
+def test_mixed_lookup_stays_within_four_evidence_selects(
+    client, auth_headers, db_session
+):
+    """A mixed 60-position request exercising generic read, drill, and BOTH reuse
+    capabilities executes at most the four defined evidence SELECTs — the three
+    evidence fetches plus exactly ONE viewer-scoped association fetch — with no
+    per-row query. Measured with statement instrumentation, not a resolver spy."""
+    import chess
+    from sqlalchemy import event
+
+    from conftest import engine  # the engine the TestClient's session is bound to
+
+    board = chess.Board()
+    positions = []
+    for i in range(60):
+        fen = board.fen()
+        move = list(board.legal_moves)[0]
+        uci = move.uci()
+        positions.append({"fen": fen, "move_uci": uci})
+        if i % 3 == 0:
+            _seed_canonical_v2_row(
+                db_session, fen=fen, move_uci=uci, move_san=board.san(move),
+                best_move_uci=uci, best_move_san=board.san(move),
+                best_line_uci=f"{uci} {uci}",
+            )
+        elif i % 3 == 1:
+            _seed_browser_v2_row(
+                db_session, fen=fen, move_uci=uci, associated_user=_VIEWER,
+                move_san=board.san(move), best_move_uci=uci,
+                best_move_san=board.san(move), best_line_uci=f"{uci} {uci}",
+            )
+        board.push(move)
+
+    watched = ("analysis_cache", "position_analysis", "analysis_cache_submission")
+    seen: list[str] = []
+
+    def _before(conn, cursor, statement, parameters, context, executemany):
+        text = " ".join(statement.split()).lower()
+        if text.startswith("select") and any(t in text for t in watched):
+            seen.append(text)
+
+    event.listen(engine, "before_cursor_execute", _before)
+    try:
+        resp = client.post(
+            "/api/analysis/lookup",
+            json={"positions": positions},
+            headers=auth_headers(),
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _before)
+
+    assert resp.status_code == 200
+    assert len(seen) <= 4, seen
+    submission_selects = [s for s in seen if "analysis_cache_submission" in s]
+    assert len(submission_selects) == 1, seen

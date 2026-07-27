@@ -14,17 +14,14 @@ import {
   isWithinRecordingMoveCap,
   classifyMove,
   gradeDrillMove,
-  isTrustedPositionHit,
-  isTrustedExactBestHit,
-  isTrustedMoveHit,
-  hasCpEvalLoss,
+  canResolveReusableAnalysis,
   reconcileTrustedBest,
 } from '../workers/analysisUtils'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
 import { buildBrowserProvenance } from '../workers/browserProvenance'
 import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
-import type { CachedAnalysis, SessionMoveUpload } from '../utils/api'
+import type { ReusableAnalysis, SessionMoveUpload } from '../utils/api'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { AnalysisResult } from '../types/analysis'
 import { useGameStore } from '../stores/useGameStore'
@@ -98,14 +95,30 @@ type AnalysisWaiter = {
 type ReleaseReason = 'cache-miss' | 'untrusted' | 'cache-error' | 'timeout' | 'worker-error'
 
 /**
- * Drill-only "position truth" resolved from a trusted-cache exact-best hit
- * (g-position-analysis Phase 6). A SEPARATE side channel from the published
- * `AnalysisResult` path: it is fed only from CACHE evidence (never the worker)
- * and a position-only hit fulfils it WITHOUT publishing. `positionEvalLossCp` is
- * the backend-derived threshold loss (null unless both grains were trusted, pure
- * CP, and same search strength).
+ * Drill-only GRADE truth (g-position-analysis Phase 6; DRILL_GRADE-gated as of
+ * g-v21l). A SEPARATE side channel from the published `AnalysisResult` path: it is
+ * fed only from CACHE evidence (never the worker) and a position-only hit fulfils
+ * it WITHOUT publishing.
+ *
+ * Populated ONLY from the dedicated drill fields — `drill_best_move_uci` plus the
+ * nullable `position_eval_loss_cp` — never from `best_move_uci` / `position_trusted`.
+ * That is what keeps a generic read grant (or either reuse grant) from grading a
+ * drill: browser evidence does not hold DRILL_GRADE, so its rows leave both fields
+ * null and the drill falls back to the worker.
  */
 type DrillTruth = { best_move_uci: string; positionEvalLossCp: number | null }
+
+/**
+ * PUBLICATION truth: the exact best move this consumer may RECONCILE against
+ * (g-v21l §7). Populated ONLY when `publication_best.game_analysis_reuse === true`.
+ *
+ * Kept strictly apart from `DrillTruth` because the two answer different questions
+ * under different grants. Reconciliation rewrites classification, delta, blunder,
+ * recordability and provenance, and those values reach the store, the incremental
+ * upload, and the SRS/decision paths — a durable publication effect that must
+ * require the publication capability, never a read grant.
+ */
+export type PublicationBestTruth = { bestUci: string }
 
 type DrillTruthWaiter = {
   generation: number
@@ -219,27 +232,30 @@ const mateToPlayerPerspective = (
   return playerColor === 'white' ? whiteRelativeMate : -whiteRelativeMate
 }
 
-const fromCachedAnalysis = (
+const fromReusableAnalysis = (
   requestId: string,
-  cached: CachedAnalysis,
+  payload: ReusableAnalysis,
   move: string,
   moveIndex: number,
   playerColor: 'white' | 'black',
   legalMoveCount: number | undefined,
 ): AnalysisResult => {
-  const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
-  const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
-  const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
+  // Every slice comes from the ONE atomic payload the backend authorized for this
+  // consumer (g-v21l) — never the generic best/move fields, which may describe a
+  // different, merely-readable row whose facts contradict it.
+  const playedEval = toPlayerPerspective(payload.played_eval, playerColor)
+  const bestEval = toPlayerPerspective(payload.best_eval, playerColor)
+  const playedEvalMate = mateToPlayerPerspective(payload.played_eval_mate, playerColor)
   // `eval_delta` is the RAW cache evidence (uncapped, may be mate pseudo-cp)
   // retained for blunder/SRS/display on the published path; the normalized 0..1000
   // display/decision CPL is derived downstream by evalLoss (e.g. the DecisionOwner
   // SRS send). It is NOT the drill threshold loss and is left raw here because its
   // two local consumers — classifyMove (win-chance) and isRecordableFailure (≤150
   // threshold) — are both cap-independent. The drill grader reads the
-  // backend-derived, same-strength `position_eval_loss_cp` out-of-band (see
+  // backend-derived, DRILL_GRADE-gated `position_eval_loss_cp` out-of-band (see
   // `waitForDrillGrade`), never this browser-visible snapshot.
-  const delta = cached.eval_delta
-  const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
+  const delta = payload.eval_delta
+  const classification = (payload.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
   const blunder = !forced && classification === 'blunder'
   const recordable =
@@ -250,13 +266,13 @@ const fromCachedAnalysis = (
   return {
     id: requestId,
     move,
-    // The published gate only resolves an `isTrustedPositionHit` row, which
-    // guarantees `best_move_uci` is non-null — so use it directly. NEVER fall
-    // back to `?? move`: a published result's `bestMove` must be honest position
-    // truth, not the played move masquerading as best (the old g-l02q hazard,
-    // now owned by the drill-truth side channel for strictness-0 grading).
-    bestMove: cached.best_move_uci as string,
-    bestLine: cached.best_line_uci ?? null,
+    // The payload's `best_move_uci` is non-null by construction (the backend only
+    // emits a coherent tuple). NEVER fall back to `?? move`: a published result's
+    // `bestMove` must be honest position truth, not the played move masquerading
+    // as best (the old g-l02q hazard, now owned by the drill-truth side channel
+    // for strictness-0 grading).
+    bestMove: payload.best_move_uci,
+    bestLine: payload.best_line_uci ?? null,
     bestEval,
     playedEval,
     currentPositionEval: playedEval,
@@ -361,6 +377,14 @@ export class GameAnalysisCoordinator {
   // paths; they never depend on the worker.
   private drillTruth = new Map<number, { requestId: string; truth: DrillTruth | null }>()
   private drillTruthWaiters = new Map<number, Set<DrillTruthWaiter>>()
+
+  // Publication-reconciliation truth (g-v21l), request-bound and cleared /
+  // superseded / request-id-guarded symmetrically with `drillTruth`. The ONLY
+  // cached exact-best state `resolveAnalysisResult` / `reconcileTrustedBest` read.
+  private publicationBestTruth = new Map<
+    number,
+    { requestId: string } & PublicationBestTruth
+  >()
 
   // Coordinator-lifetime recording/SRS decision owner (g-2m0p). Fed every
   // outcome/reset for the singleton's life; the React layer leases UI callbacks
@@ -642,9 +666,10 @@ export class GameAnalysisCoordinator {
   }
 
   /** Reject only the drill-truth waiters bound to a specific request and drop the
-   *  index's truth record (supersession / per-request failure). */
+   *  index's truth records (supersession / per-request failure). */
   private rejectDrillTruthForRequest(moveIndex: number, requestId: string, error: Error) {
     this.drillTruth.delete(moveIndex)
+    this.publicationBestTruth.delete(moveIndex)
     const waiters = this.drillTruthWaiters.get(moveIndex)
     if (!waiters) return
     const remaining = new Set<DrillTruthWaiter>()
@@ -656,9 +681,10 @@ export class GameAnalysisCoordinator {
     else this.drillTruthWaiters.delete(moveIndex)
   }
 
-  /** Drop an index's truth record and reject ALL its waiters (revert prune). */
+  /** Drop an index's truth records and reject ALL its waiters (revert prune). */
   private rejectAndClearDrillTruth(moveIndex: number, error: Error) {
     this.drillTruth.delete(moveIndex)
+    this.publicationBestTruth.delete(moveIndex)
     const waiters = this.drillTruthWaiters.get(moveIndex)
     if (!waiters) return
     this.drillTruthWaiters.delete(moveIndex)
@@ -726,6 +752,9 @@ export class GameAnalysisCoordinator {
     const truth = await this.waitForDrillTruth(moveIndex, requestId, generation)
 
     if (strictnessCp <= 0) {
+      // Exact-best: compare the played UCI with `drill_best_move_uci` IMMEDIATELY.
+      // No move row, no CP eval and no `position_eval_loss_cp` are required, and we
+      // neither await nor publish a worker result (g-v21l §7).
       if (truth) {
         return {
           grade: gradeDrillMove(null, 0, playedMoveUci === truth.best_move_uci),
@@ -1050,10 +1079,12 @@ export class GameAnalysisCoordinator {
     this.resolutionState.clear()
     this.requestIdToMoveIndex.clear()
     this.cacheBatchFirstEnqueuedAt = null
-    // Drop all settled drill-truth records (waiters are rejected by the callers
-    // that also reject analysisWaiters — clearAllResolutionState never strands a
-    // waiter because every caller pairs it with rejectDrillTruthWaiters).
+    // Drop all settled drill-truth and publication-truth records (waiters are
+    // rejected by the callers that also reject analysisWaiters —
+    // clearAllResolutionState never strands a waiter because every caller pairs it
+    // with rejectDrillTruthWaiters).
     this.drillTruth.clear()
+    this.publicationBestTruth.clear()
   }
 
   waitForAnalysis(moveIndex: number): Promise<AnalysisResult> {
@@ -1188,8 +1219,9 @@ export class GameAnalysisCoordinator {
     this.cacheBatchFirstEnqueuedAt = null
     this.rejectAnalysisWaiters(new Error('Analysis cleared'))
     // clearAnalysis inlines its teardown (no clearAllResolutionState call), so
-    // clear the drill-truth records and reject their waiters here too.
+    // clear both truth records and reject the drill waiters here too.
     this.drillTruth.clear()
+    this.publicationBestTruth.clear()
     this.rejectDrillTruthWaiters(new Error('Analysis cleared'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
@@ -1568,18 +1600,24 @@ export class GameAnalysisCoordinator {
     if (this.resolvedIndices.has(moveIndex)) return
     this.resolvedIndices.add(moveIndex)
 
-    // Grain-split best reconciliation (g-move-best-icon / g-jfdj): the TRUSTED
-    // position grain names the exact best move (drill-truth is recorded before this
-    // terminal resolve on every cache/worker path) and that answer wins over the
-    // published classification — promoting a played==best result to 'best' (star),
-    // and demoting a fallback that wrongly graded a non-best move 'best' down to
-    // 'excellent'. Read truth
-    // BEFORE settleDrillTruthNull below; the requestId guard rejects a stale record
+    // Grain-split best reconciliation (g-move-best-icon / g-jfdj): the position
+    // grain names the exact best move and that answer wins over the published
+    // classification — promoting a played==best result to 'best' (star), and
+    // demoting a fallback that wrongly graded a non-best move 'best' down to
+    // 'excellent'.
+    //
+    // Read from `publicationBestTruth`, NOT `drillTruth` (g-v21l §7): reconciliation
+    // rewrites classification, delta, blunder, recordability and provenance, and
+    // this coordinator emits the rewritten result into the store, the incremental
+    // upload, and the SRS/decision paths. That is durable publication, so it
+    // requires GAME_ANALYSIS_REUSE — never the generic read grant, under which
+    // incoherent browser evidence rejected by `reusable_analysis` could still
+    // rewrite a worker result. The requestId guard rejects a stale record
     // (supersession clears stale truth, but the result.id match is belt-and-braces).
-    const truth = this.drillTruth.get(moveIndex)
+    const truth = this.publicationBestTruth.get(moveIndex)
     const published =
-      truth?.truth && truth.requestId === result.id
-        ? reconcileTrustedBest(result, truth.truth.best_move_uci)
+      truth && truth.requestId === result.id
+        ? reconcileTrustedBest(result, truth.bestUci)
         : result
 
     // Terminal: clear per-request state + both timers + pending metadata.
@@ -1681,51 +1719,61 @@ export class GameAnalysisCoordinator {
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
-          // Drill-truth side channel (Phase 6): record exact-best truth from a
-          // trusted position hit BEFORE and INDEPENDENT of the published gate. A
-          // position-only hit (no move row) feeds the drill but never publishes.
-          // Pure side-channel write — it must NOT touch resolutionState, the
-          // worker, uploads, or outcomes; the published gate below runs unchanged.
-          // settleDrillTruthNull on the terminal paths (release / resolve) covers
-          // every non-exact-best case, so a drill grade waiter can never hang.
-          if (cached && isTrustedExactBestHit(cached)) {
+          // Drill-truth side channel (Phase 6): record GRADE truth from the
+          // dedicated DRILL_GRADE fields BEFORE and INDEPENDENT of the published
+          // gate. A position-only hit (no move row) feeds the drill but never
+          // publishes. Pure side-channel write — it must NOT touch resolutionState,
+          // the worker, uploads, or outcomes; the published gate below runs
+          // unchanged. settleDrillTruthNull on the terminal paths (release /
+          // resolve) covers every non-drill case, so a waiter can never hang.
+          if (cached?.drill_best_move_uci != null) {
             this.recordDrillTruth(pending.moveIndex, pending.requestId, {
-              best_move_uci: cached.best_move_uci as string,
+              best_move_uci: cached.drill_best_move_uci,
               positionEvalLossCp: cached.position_eval_loss_cp ?? null,
             })
           }
 
+          // Publication-truth side channel (g-v21l §7): the ONLY input to
+          // `reconcileTrustedBest`, and gated on THIS consumer's reuse flag —
+          // never on `position_trusted` and never on the interactive flag.
+          if (cached?.publication_best?.game_analysis_reuse === true) {
+            this.publicationBestTruth.set(pending.moveIndex, {
+              requestId: pending.requestId,
+              bestUci: cached.publication_best.best_move_uci,
+            })
+          }
+
+          const reusable = cached?.reusable_analysis ?? null
           if (
-            !cached ||
-            !isTrustedPositionHit(cached) ||
-            !isTrustedMoveHit(cached) ||
-            !hasCpEvalLoss(cached)
+            !reusable ||
+            reusable.game_analysis_reuse !== true ||
+            !canResolveReusableAnalysis(reusable)
           ) {
-            // Release the worker fallback unless ALL three concerns pass. This
-            // is the PUBLISHED-path gate and it stays STRICT (Phase 6 does NOT
-            // relax it): regular-game blunder detection / SRS / uploads / the
-            // review board all consume this `AnalysisResult` and need a
-            // co-computed CP `eval_delta` snapshot.
-            //  - isTrustedPositionHit: trusted, renderable best move/PV so
-            //    `bestMove`/PV are grain-correct and exact-best is meaningful.
-            //  - isTrustedMoveHit: trusted, renderable played evidence
-            //    (classification + a played eval of either kind).
-            //  - hasCpEvalLoss: the published snapshot needs a finite CP
-            //    `eval_delta`; mate-only / post-split move rows lack one and the
-            //    worker publishes instead. The DRILL grade no longer depends on
-            //    this gate — it reads the backend-derived `position_eval_loss_cp`
-            //    via the drill-truth side channel recorded above (Phase 6), so a
-            //    release here does NOT block drill grading.
-            // Position-untrusted (null best), move-untrusted, and move-trusted
-            // mate-only rows all fall back on the published path.
+            // Release the worker fallback unless the backend published ONE coherent
+            // tuple for THIS consumer and it survives the structural re-check. This
+            // is the PUBLISHED-path gate and it stays STRICT: regular-game blunder
+            // detection / SRS / uploads / the review board all consume this
+            // `AnalysisResult` and need a co-computed CP `eval_delta` snapshot.
+            //  - a null payload means the backend refused the pairing (incompatible
+            //    settings, disagreeing facts, a failed classification rederivation,
+            //    a missing association for this viewer, or no capability at all);
+            //  - `game_analysis_reuse !== true` means the tuple was approved for a
+            //    DIFFERENT consumer — interactive-only reuse must never feed durable
+            //    game outcomes;
+            //  - `canResolveReusableAnalysis` re-checks renderability and a finite
+            //    CP `eval_delta` here, so a wire-level loss falls back rather than
+            //    publishing a half-built result.
+            // The DRILL grade does not depend on this gate — it reads the dedicated
+            // drill fields via the side channel recorded above — so a release here
+            // does NOT block drill grading.
             const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
             this.releaseFallback(pending.moveIndex, pending.requestId, reason)
             continue
           }
 
-          const result = fromCachedAnalysis(
+          const result = fromReusableAnalysis(
             pending.requestId,
-            cached,
+            reusable,
             pending.move,
             pending.moveIndex,
             pending.playerColor,
@@ -1737,7 +1785,7 @@ export class GameAnalysisCoordinator {
             this.clearActiveAnalysisStateIfCurrent(pending.requestId)
             this.cancelWorkerAnalysis(pending.requestId)
             console.log(
-              `[Analyst] resolve idx=${pending.moveIndex} source=cache(authoritative profile=${cached.analysis_profile_id ?? 'unknown'})`,
+              `[Analyst] resolve idx=${pending.moveIndex} source=cache(reusable profile=${cached?.analysis_profile_id ?? 'unknown'})`,
             )
             if (result.blunder && result.delta !== null) {
               console.log(

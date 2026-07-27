@@ -849,10 +849,13 @@ class TestSessionEligibilityParity:
     def test_inputs_version_bumped_for_eligibility_narrowing(self):
         # The eligibility gate changed the digest's row selection (raw-v4),
         # g-jact moved the version fold into the registry fingerprint (raw-v5),
-        # and g-no51 normalized the opening-quality eval_delta read (raw-v6);
-        # pre-change batches must self-heal via a version mismatch, not serve
-        # as fresh.
-        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v6"
+        # g-no51 normalized the opening-quality eval_delta read (raw-v6), and
+        # g-v21l changed WHICH rows the cache fallback selects (the
+        # OPENING_EVIDENCE grant), which of those a given user may read (submitter
+        # scoping), and which PAIRS upgrade (the coherent-tuple requirement) —
+        # raw-v7. Pre-change batches must self-heal via a version mismatch, not
+        # serve as fresh.
+        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v7"
 
     def test_in_progress_session_affects_neither_digest_nor_overlay(
         self, db_session, branching_graph
@@ -1355,7 +1358,7 @@ class TestCacheFallbackTrust:
         cannot be paired (cross-strength subtraction is invalid) → eval_delta."""
         import dataclasses
 
-        from app import analysis_profiles
+        from app import analysis_profiles, evidence_policy
         from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
 
         # A second authoritative profile at a DEEPER search limit (so it is
@@ -1365,6 +1368,16 @@ class TestCacheFallbackTrust:
             base, profile_id="canonical-sf18-depth30-test", search_limit_value=30
         )
         monkeypatch.setitem(analysis_profiles._REGISTRY, deep.profile_id, deep)
+        # A synthetic authoritative+active profile must also be granted (g-v21l):
+        # `_assert_registry_consistent` pins every authoritative+active profile to
+        # ALL_CAPABILITIES at import, and a monkeypatched registry entry bypasses
+        # that load-time check. Without the grant the row would be excluded by the
+        # CAPABILITY gate rather than by the strength guard this test is about.
+        monkeypatch.setitem(
+            evidence_policy.CAPABILITY_GRANTS,
+            deep.profile_id,
+            evidence_policy.ALL_CAPABILITIES,
+        )
 
         _insert_user(db_session)
         sid = _insert_session(db_session)
@@ -1931,3 +1944,246 @@ class TestDegradedUnderBudget:
         _insert_line(db_session, new_sid, ["e2e4", "c7c5"])
         overlay_evidence(db_session, 1, "white", branching_graph)
         assert counter.count > 1  # more than just the appended session replayed
+
+
+# --------------------------------------------------------------------------- #
+# g-v21l: capability + submitter scoping and ongoing association freshness
+# --------------------------------------------------------------------------- #
+class TestOpeningEvidenceCapabilityScoping:
+    """The opening fallback resolves BOTH grains under OPENING_EVIDENCE with the
+    batch's ``user_id`` as viewer, and pairs them through the shared
+    coherent-tuple resolver rather than an equal-strength check alone."""
+
+    @staticmethod
+    def _browser_row(db, fen, move_uci, move_san, *, played_eval, best_eval,
+                     best_move_uci, best_line_uci, classification="good",
+                     eval_delta=None):
+        from app.analysis_profiles import (
+            BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+            stamp_profile_full,
+        )
+
+        stamped = stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+        return _insert_analysis_cache(
+            db, fen, move_uci, move_san,
+            played_eval=played_eval, best_eval=best_eval,
+            best_move_uci=best_move_uci, best_move_san=best_move_uci,
+            best_line_uci=best_line_uci,
+            classification=classification,
+            eval_delta=max(best_eval - played_eval, 0) if eval_delta is None else eval_delta,
+            source="analysis",
+            analysis_profile_id=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+            evidence_contract_id="resolver-complete-v2",
+            identity=stamped,
+        )
+
+    @staticmethod
+    def _associate(db, row, user_id):
+        from app.models import AnalysisCacheSubmission
+
+        _insert_user(db, user_id)
+        db.add(AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=user_id))
+        db.commit()
+
+    def test_a_coherent_same_user_browser_pair_upgrades(self, db_session, branching_graph):
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # One coherent combined row: the played e4 is NOT the best move (d4 is),
+        # and its stored label follows from the two scores.
+        row = self._browser_row(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+        self._associate(db_session, row, 1)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_win_chance_loss(20, -30))
+        assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+    def test_the_same_pair_does_not_upgrade_for_another_user(
+        self, db_session, branching_graph
+    ):
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        row = self._browser_row(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+        self._associate(db_session, row, 999)  # someone else's submission
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(40))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+    def test_equal_profile_siblings_that_disagree_do_not_upgrade(
+        self, db_session, branching_graph
+    ):
+        """The disagreement regression: an equal-profile sibling exact-move row
+        whose best_move_uci / best_eval contradict the position winner leaves the
+        move at its eval_delta quality. Before g-v21l the equal-strength check
+        alone would have upgraded it."""
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # Position winner (lowest id at this normalized FEN): internally coherent.
+        winner = self._browser_row(
+            db_session, RAW_ROOT, "d2d4", "d4",
+            played_eval=35, best_eval=35,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+            classification="best", eval_delta=0,
+        )
+        # The exact played-move row is ALSO internally coherent — but it asserts a
+        # DIFFERENT best move and best eval than the position winner does.
+        played = self._browser_row(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=20, best_eval=20,
+            best_move_uci="e2e4", best_line_uci="e2e4 e7e5",
+            classification="best", eval_delta=0,
+        )
+        self._associate(db_session, winner, 1)
+        self._associate(db_session, played, 1)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(40))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+
+class TestAssociationFreshness:
+    """Associations gate the OPENING_EVIDENCE trust filter, so they must join the
+    evidence digest — a one-time version bump cannot invalidate anything that
+    changes AFTER it lands."""
+
+    def _seed_candidate(self, db):
+        _insert_user(db)
+        sid = _insert_session(db)
+        _insert_move(db, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        return TestOpeningEvidenceCapabilityScoping._browser_row(
+            db, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+
+    def test_an_association_only_write_changes_both_digests(self, db_session):
+        """Mechanism-level twin: insert the association row DIRECTLY, isolating the
+        digest change from the writer."""
+        from app.models import AnalysisCacheSubmission
+
+        row = self._seed_candidate(db_session)
+        snapshot = opening_evidence.raw_evidence_inputs_snapshot(db_session, 1, "white")
+
+        _insert_user(db_session, 2)
+        db_session.add(
+            AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=2)
+        )
+        db_session.commit()
+
+        after = opening_evidence.raw_evidence_inputs_snapshot(db_session, 1, "white")
+        assert after.digest != snapshot.digest
+        assert after.scoped_shared_digest != snapshot.scoped_shared_digest
+
+    def test_a_claim_through_the_writer_changes_both_digests(self, db_session):
+        """The REAL owner-only mutation path: a second submitter posts an identical
+        tuple, the decision is idempotent, every evidence column stays
+        byte-identical, and only an association row is inserted."""
+        from app.analysis_cache_policy import Reason
+        from app.analysis_cache_repo import write_analysis_cache_rows
+        from app.analysis_profiles import (
+            BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+            stamp_profile_full,
+        )
+
+        row = self._seed_candidate(db_session)
+        columns = {
+            f: getattr(row, f)
+            for f in ("played_eval", "best_eval", "eval_delta", "classification")
+        }
+        snapshot = opening_evidence.raw_evidence_inputs_snapshot(db_session, 1, "white")
+
+        _insert_user(db_session, 2)
+        db_session.commit()
+        results = write_analysis_cache_rows(
+            db_session,
+            [{
+                "fen_before": RAW_ROOT, "move_uci": "e2e4", "move_san": "e4",
+                "best_move_uci": "d2d4", "best_move_san": "d2d4",
+                "best_line_uci": "d2d4 d7d5",
+                "played_eval": -30, "best_eval": 20, "eval_delta": 50,
+                "classification": "good", "source": "analysis",
+                "analysis_profile_id": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+                "evidence_contract_id": "resolver-complete-v2",
+                **stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
+            }],
+            submitter_user_id=2,
+        )
+        assert [r for _, r in results] == [Reason.SAME_PROFILE_IDEMPOTENT]
+
+        db_session.expire_all()
+        refreshed = db_session.get(AnalysisCache, row.id)
+        assert {f: getattr(refreshed, f) for f in columns} == columns
+
+        after = opening_evidence.raw_evidence_inputs_snapshot(db_session, 1, "white")
+        assert after.digest != snapshot.digest
+        assert after.scoped_shared_digest != snapshot.scoped_shared_digest
+
+    def test_the_association_set_is_hashed_in_ac_and_acp_but_not_pa(self, db_session):
+        from app.models import AnalysisCacheSubmission
+
+        row = self._seed_candidate(db_session)
+        _insert_position_analysis(
+            db_session, RAW_ROOT, best_move_uci="e2e4", best_line_uci="e2e4 e7e5",
+            best_eval=20,
+        )
+        _insert_user(db_session, 5)
+        _insert_user(db_session, 3)
+        db_session.add_all([
+            AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=5),
+            AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=3),
+        ])
+        db_session.commit()
+
+        lines = opening_evidence._shared_evidence_lines(
+            db_session, [RAW_ROOT], [normalize_fen(RAW_ROOT)]
+        )
+        ac = [ln for ln in lines if ln.startswith("AC|")]
+        acp = [ln for ln in lines if ln.startswith("ACP|")]
+        pa = [ln for ln in lines if ln.startswith("PA|")]
+        # A sorted, deterministically formatted user-id list on both cache lines.
+        assert all(ln.endswith("|3,5") for ln in ac), ac
+        assert all(ln.endswith("|3,5") for ln in acp), acp
+        # position_analysis is canonical-only storage: no association half.
+        assert pa and not any(ln.endswith("|3,5") for ln in pa)
+
+    def test_shared_evidence_lines_stay_user_independent(self, db_session):
+        """Hashing the FULL set (not one viewer's membership) is what makes
+        "scoped digest == full digest's shared slice" hold by construction."""
+        from app.models import AnalysisCacheSubmission
+
+        row = self._seed_candidate(db_session)
+        _insert_user(db_session, 2)
+        db_session.add(AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=2))
+        db_session.commit()
+
+        norm = normalize_fen(RAW_ROOT)
+        first = opening_evidence._shared_evidence_lines(db_session, [RAW_ROOT], [norm])
+        second = opening_evidence._shared_evidence_lines(db_session, [RAW_ROOT], [norm])
+        assert first == second  # no user_id argument exists to vary
+        snapshot = opening_evidence.raw_evidence_inputs_snapshot(db_session, 1, "white")
+        assert snapshot.scoped_shared_digest == opening_evidence.shared_scope_digest(
+            db_session, snapshot.shared_raw_fens, snapshot.shared_norm_fens
+        )

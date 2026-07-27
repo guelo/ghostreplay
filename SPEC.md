@@ -3452,7 +3452,13 @@ The pair IS the table's identity, so `(analysis_cache_id, user_id)` is the **com
 primary key** with no surrogate id, plus a separate reverse-order
 `(user_id, analysis_cache_id)` index serving the viewer-scoped read
 (`WHERE user_id = :viewer AND analysis_cache_id IN :ids`). Both FKs are
-`ON DELETE CASCADE`. One row means exactly *this user independently submitted a tuple
+`ON DELETE CASCADE`, and that cascade is load-bearing rather than hygienic: it is what
+retires a deleted user's grants, so a recycled user id cannot inherit a stranger's read
+access. SQLite enforces foreign keys **per connection** and defaults to OFF, so every
+connection that writes this table must set `PRAGMA foreign_keys = ON` for itself — the
+application engine (`app.db`) does, and so must the dedicated `BEGIN IMMEDIATE` write
+engine in `analysis_cache_repo`, which does not inherit it. One row means exactly *this
+user independently submitted a tuple
 consistent with this stored row*: it is not ownership, confers no write rights, and is
 never exposed in an API response, log line, or metric dimension. The table joins
 `EVIDENCE_EPOCH_SHARED_TABLES`, so association writes bump `evidence_epoch` exactly as
@@ -3648,6 +3654,21 @@ shared-slice invariant. Without this, an association-only mutation would advance
 `evidence_epoch` via the shared-table trigger, fall to `_cheap_evidence_fresh` step 5,
 re-hash the stored scope, still match, and re-arm a batch computed when its user could
 not read evidence they can now read.
+
+The same argument generalizes past associations, and fixes the digest's scope. Because
+the opening fallback now pairs its two grains through `resolve_coherent_evidence_tuple`,
+the `AC|` projection must hash **every column that resolver reads off the move row**, not
+merely the facts the overlay ends up consuming — each one can flip a pair between
+accepted and refused on its own, with no other row changing. That adds `eval_delta` (the
+finite-CP check, the move-only recomputed-delta equality, and an argument to the
+classification validator) and `best_move_uci` / `best_line_uci` (which select the
+COMBINED-vs-move-only branch and then must equal the position winner's facts) alongside
+the already-hashed `played_eval*`, `best_eval*`, `classification`, and trust columns.
+`best_line_uci` is hashed in its stored encoding rather than decoded: equal encodings
+decode equal, so the digest can only over-invalidate, never under-invalidate. Omitting
+any of them reproduces the association failure mode exactly — the write bumps
+`evidence_epoch`, the scoped re-hash still matches, and the batch re-arms indefinitely
+while its coherence verdict has silently flipped.
 
 Separately, `OPENING_EVIDENCE_INPUTS_VERSION` moves `raw-v6` → **`raw-v7`**: three
 independent selection changes land here (the `OPENING_EVIDENCE` grant, association

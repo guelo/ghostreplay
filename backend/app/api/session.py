@@ -28,8 +28,8 @@ from app.analysis_profiles import (
     stamp_dynamic_profile,
     stamp_profile_full,
 )
-from app.evidence_policy import validate_browser_provenance
-from app.move_classification import EngineScore, classify_root_alternative
+from app.evidence_policy import Capability, validate_browser_provenance
+from app.move_classification import validate_root_alternative_classification
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
 from app.centipawn_loss import (
     centipawn_loss,
@@ -1724,7 +1724,15 @@ def get_session_analysis(
                 norm_by_fen[move.fen_before] = normalize_fen(move.fen_before)
             except Exception:
                 norm_by_fen[move.fen_before] = None
-    resolved = resolve_trusted_positions(db, [n for n in norm_by_fen.values() if n])
+    # POSITION_READ, scoped to the SESSION OWNER (g-v21l): this export is a generic
+    # read surface, so a non-canonical row may serve it only for the user who
+    # independently submitted it.
+    resolved = resolve_trusted_positions(
+        db,
+        [n for n in norm_by_fen.values() if n],
+        Capability.POSITION_READ,
+        game_session.user_id,
+    )
 
     position_analysis: dict[str, PositionAnalysis] = {}
     for move in session_moves:
@@ -1982,21 +1990,6 @@ def _session_membership_keys(session_moves: list[SessionMove]) -> set[tuple[str,
     return keys
 
 
-def _white_relative_score(cp: int, mate: int | None, mover: str) -> EngineScore:
-    """Convert a white-relative wire eval to a ROOT mover-relative EngineScore.
-
-    Evidence rows store white-relative evals (see ``AnalysisEvidenceRow``); the
-    root-alternative classifier needs mover-relative (root side-to-move) scores. A
-    present mate count uses the raw ``mate`` (a mate-to-CP ``eval`` is only for the
-    delta arithmetic), else the finite CP.
-    """
-    if mate is not None:
-        value = mate if mover == "white" else -mate
-        return EngineScore("mate", value)
-    value = cp if mover == "white" else -cp
-    return EngineScore("cp", value)
-
-
 def _build_evidence_cache_row(
     row: AnalysisEvidenceRow, profile_id: str
 ) -> tuple[dict | None, str | None]:
@@ -2052,25 +2045,24 @@ def _build_evidence_cache_row(
     if not contract_satisfied(RESOLVER_COMPLETE_V2, cache_row):
         return None, EVIDENCE_CONTRACT_UNSATISFIED
 
-    # Independent classification rederivation (§6.1). The contract guarantees
-    # played_eval / best_eval are finite ints and classification is a valid enum;
-    # now enforce that the LABEL follows from the scores.
-    is_best = row.move_uci == row.best_move_uci
-    # ``best`` requires the played move to BE the best move with equal scores and
-    # zero delta — a client cannot label a zero-loss best while carrying a drop.
-    if row.classification == "best" and not (
-        is_best
-        and row.played_eval == row.best_eval
-        and row.played_eval_mate == row.best_eval_mate
-        and (row.eval_delta or 0) == 0
-    ):
-        return None, EVIDENCE_CLASSIFICATION_MISMATCH
-
+    # Independent classification rederivation (§6.1), through the SHARED validator
+    # (g-v21l §6). Calling ``classify_root_alternative`` alone is NOT validation: it
+    # short-circuits to ``best`` whenever the UCIs match, so equal UCIs could bless
+    # unequal CP facts, unequal mate facts, or a nonzero loss. The same helper runs
+    # at read time inside the coherent-tuple resolver, so a row that cannot be
+    # submitted can never be read back either.
     mover = "white" if board.turn == chess.WHITE else "black"
-    best_score = _white_relative_score(row.best_eval, row.best_eval_mate, mover)
-    played_score = _white_relative_score(row.played_eval, row.played_eval_mate, mover)
-    expected = classify_root_alternative(best_score, played_score, mover, is_best)
-    if expected != row.classification:
+    if not validate_root_alternative_classification(
+        mover=mover,
+        played_uci=row.move_uci,
+        best_uci=row.best_move_uci,
+        played_eval=row.played_eval,
+        played_eval_mate=row.played_eval_mate,
+        best_eval=row.best_eval,
+        best_eval_mate=row.best_eval_mate,
+        eval_delta=row.eval_delta,
+        classification=row.classification,
+    ):
         return None, EVIDENCE_CLASSIFICATION_MISMATCH
 
     return cache_row, None
@@ -2183,7 +2175,15 @@ def submit_analysis_evidence(
         # Commit immediately before the writer so it receives a clean session with
         # no open transaction (the membership query above opened one).
         db.commit()
-        for (fen, uci), reason in write_analysis_cache_rows(db, survivors):
+        # The authenticated subject is threaded INTO the writer (g-v21l): the claim
+        # pass that grants this user submitter eligibility must run under the same
+        # locked transaction as the decision that justified it. An endpoint-side
+        # association write after this call would race a concurrent canonical
+        # REPLACE and could leave the user associated with facts they never
+        # submitted, after that REPLACE's clearing pass had already run.
+        for (fen, uci), reason in write_analysis_cache_rows(
+            db, survivors, submitter_user_id=user.user_id
+        ):
             writer_reasons[(fen, uci)] = reason.value
 
     # Immediate MoveList patch (g-xox0 Part B): for every ACCEPTED key, read the

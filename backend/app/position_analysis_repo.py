@@ -40,17 +40,20 @@ Concurrency model (two axes):
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
-from app.evidence_policy import verify_identity
+from app.analysis_submissions import viewer_associated_ids
+from app.evidence_policy import Capability, verify_identity
 from app.analysis_trust import (
-    cache_row_as_position_dict,
-    position_trust_flags,
+    CACHE_SOURCE,
+    POSITION_STORAGE_SOURCE,
+    ResolvedEvidence,
+    describe_position_row,
     source_rank,
 )
 from app.evidence_contracts import contract_satisfied
@@ -278,12 +281,13 @@ class TrustedPosition:
     best_line_uci: list[str] | None
     best_eval: int | None  # white-relative
     best_eval_mate: int | None  # white-relative
-    # Profile the winning row was produced with. Carried so a consumer that
-    # derives a cross-grain eval loss (e.g. /api/analysis/lookup's Phase-6
-    # ``position_eval_loss_cp``) can prove the position best_eval and the move
-    # row's played_eval came from the SAME search strength before subtracting
-    # them (see ``compare_search_strength``). None for legacy/unknown ids.
-    analysis_profile_id: str | None
+    # Immutable provenance of the row that WON (g-v21l), replacing the former
+    # profile-id-only field. A consumer deriving a cross-grain value (the drill CP
+    # loss, the coherent reuse tuple) compares THIS snapshot against the move
+    # grain's, so the comparison reads the exact winning row rather than
+    # reconstructing search settings from a profile id — which is not even
+    # possible for a declared-dynamic profile. Backend-only: never serialized.
+    evidence: ResolvedEvidence
 
 
 def get_position_analysis(
@@ -320,17 +324,27 @@ def get_position_analyses(
     return {r.normalized_fen: r for r in rows}
 
 
-def _legacy_position_sort_key(row: AnalysisCache) -> tuple:
+def _legacy_position_sort_key(candidate: "_PositionCandidate") -> tuple:
     """Position-grain ranking over trusted legacy ``analysis_cache`` rows.
 
-    Mirrors the deleted ``tree_eval._root_sort_key``: prefer mate data, then the
-    canonical complete best-move row (``move_uci == best_move_uci``), then the
-    deterministic source preference, then lowest id. It ranks rows that have ALREADY
-    passed the position trust gate, at the NORMALIZED-FEN grain (callers must not
-    prefer an exact full-FEN row first — that could miss a trusted mate/stronger row
-    at a clock variant of the same normalized position).
+    Mirrors the deleted ``tree_eval._root_sort_key``, with ONE key prepended
+    (g-v21l): effective authority. Filtering and ranking are separate concerns —
+    once a granted browser row passes the capability + owner gate it becomes a
+    trusted CANDIDATE, but canonical evidence must still win the tier. Without the
+    authority key a browser mate row, or a browser row that happens to be the
+    complete best-move row, would outrank a canonical CP-only legacy row before
+    ``source_rank`` is ever consulted.
+
+    The remaining order is unchanged: mate presence, the complete best-move row
+    (``move_uci == best_move_uci``), the deterministic source preference, then
+    lowest id. Ranks rows that have ALREADY passed the position trust gate, at the
+    NORMALIZED-FEN grain (callers must not prefer an exact full-FEN row first —
+    that could miss a trusted mate/stronger row at a clock variant of the same
+    normalized position).
     """
+    row = candidate.row
     return (
+        0 if candidate.evidence.is_effectively_authoritative() else 1,
         0 if row.best_eval_mate is not None else 1,
         0 if (row.best_move_uci is not None and row.move_uci == row.best_move_uci) else 1,
         source_rank(row.source),
@@ -338,12 +352,12 @@ def _legacy_position_sort_key(row: AnalysisCache) -> tuple:
     )
 
 
-def _trusted_position_from_row(row) -> TrustedPosition:
+def _trusted_position_from_row(row, evidence: ResolvedEvidence) -> TrustedPosition:
     """Build a :class:`TrustedPosition` from a storage OR analysis_cache row.
 
-    Both row types expose the same position columns (plus
-    ``analysis_profile_id``); ``best_line_uci`` is decoded from its space-joined
-    storage form to a list.
+    Both row types expose the same position columns; ``best_line_uci`` is decoded
+    from its space-joined storage form to a list. ``evidence`` is the descriptor
+    captured for THAT row at load time, carried through unchanged.
     """
     return TrustedPosition(
         best_move_uci=row.best_move_uci,
@@ -351,62 +365,181 @@ def _trusted_position_from_row(row) -> TrustedPosition:
         best_line_uci=decode_uci_line(row.best_line_uci),
         best_eval=row.best_eval,
         best_eval_mate=row.best_eval_mate,
-        analysis_profile_id=row.analysis_profile_id,
+        evidence=evidence,
     )
 
 
-def resolve_trusted_positions(
-    db: Session, normalized_fens: Iterable[str]
-) -> dict[str, TrustedPosition | None]:
-    """Resolve trusted position evidence for several normalized FENs (batched).
+@dataclass(frozen=True)
+class _PositionCandidate:
+    """One loaded candidate row plus its (capability-independent) descriptor."""
 
-    Two tiers per FEN, each as a single ``IN`` query to avoid N+1:
+    row: object
+    evidence: ResolvedEvidence
 
-    1. **Storage** — the ``position_analysis`` winner, used iff it is
-       position-trusted.
-    2. **Trusted legacy fallback** — the strongest position-trusted
-       ``resolver-complete-v2`` ``analysis_cache`` row at the SAME normalized FEN,
-       ranked by :func:`_legacy_position_sort_key` at the normalized grain.
 
-    A ``None`` value for a FEN means no trusted position exists; the caller takes
-    its own (untrusted) fallback.
+@dataclass(frozen=True)
+class PositionCandidates:
+    """Immutable candidate set for a normalized-FEN scope (g-v21l).
+
+    Loaded ONCE per request by :func:`load_position_candidates` (two queries), then
+    filtered and ranked in memory for as many capabilities as the caller needs.
+    That split is what keeps ``/api/analysis/lookup`` at four evidence SELECTs while
+    it resolves POSITION_READ, DRILL_GRADE and both reuse capabilities.
+
+    ``cache_ids`` is the id set the caller feeds to the ONE viewer-scoped
+    association fetch; the resolver takes the resulting membership set back as an
+    argument rather than querying for it.
     """
-    norms = list(dict.fromkeys(n for n in normalized_fens if n))
-    result: dict[str, TrustedPosition | None] = {n: None for n in norms}
+
+    storage: dict[str, _PositionCandidate]
+    cache_by_norm: dict[str, tuple[_PositionCandidate, ...]]
+    cache_ids: frozenset[int]
+    norms: tuple[str, ...]
+
+
+def load_position_candidates(
+    db: Session, normalized_fens: Iterable[str]
+) -> PositionCandidates:
+    """Load every position candidate for ``normalized_fens`` in TWO queries.
+
+    Tier 1 is the ``position_analysis`` storage winner; tier 2 is every
+    ``analysis_cache`` row at the same normalized FEN. Both tiers are loaded for
+    EVERY requested FEN — the pre-g-v21l code skipped the fallback query for FENs
+    whose storage row was already trusted, but trust is now capability- and
+    viewer-dependent, so the candidate set must be capability-agnostic. It is still
+    one query per tier regardless of FEN count.
+
+    Descriptors are built here with ``viewer_associated=False``; the caller stamps
+    real membership through :func:`resolve_positions_from_candidates`, which never
+    reads a row again.
+    """
+    norms = tuple(dict.fromkeys(n for n in normalized_fens if n))
     if not norms:
-        return result
+        return PositionCandidates({}, {}, frozenset(), ())
 
-    storage = get_position_analyses(db, norms)
-    remaining: list[str] = []
-    for n in norms:
-        row = storage.get(n)
-        if row is not None and position_trust_flags(_row_to_dict(row))[2]:
-            result[n] = _trusted_position_from_row(row)
-        else:
-            remaining.append(n)
-
-    if not remaining:
-        return result
+    storage: dict[str, _PositionCandidate] = {}
+    for n, row in get_position_analyses(db, list(norms)).items():
+        storage[n] = _PositionCandidate(
+            row=row,
+            evidence=describe_position_row(row, source_table=POSITION_STORAGE_SOURCE),
+        )
 
     cache_rows = (
         db.query(AnalysisCache)
-        .filter(AnalysisCache.normalized_fen_before.in_(remaining))
+        .filter(AnalysisCache.normalized_fen_before.in_(list(norms)))
         .all()
     )
-    by_norm: dict[str, list[AnalysisCache]] = {}
+    grouped: dict[str, list[_PositionCandidate]] = {}
+    cache_ids: set[int] = set()
     for r in cache_rows:
-        if not position_trust_flags(cache_row_as_position_dict(r))[2]:
-            continue
-        by_norm.setdefault(r.normalized_fen_before, []).append(r)
-    for n in remaining:
-        rows = by_norm.get(n)
-        if rows:
-            result[n] = _trusted_position_from_row(min(rows, key=_legacy_position_sort_key))
+        grouped.setdefault(r.normalized_fen_before, []).append(
+            _PositionCandidate(
+                row=r,
+                evidence=describe_position_row(r, source_table=CACHE_SOURCE),
+            )
+        )
+        cache_ids.add(r.id)
+
+    return PositionCandidates(
+        storage=storage,
+        cache_by_norm={k: tuple(v) for k, v in grouped.items()},
+        cache_ids=frozenset(cache_ids),
+        norms=norms,
+    )
+
+
+def _with_membership(
+    candidate: _PositionCandidate, associated_ids: frozenset[int]
+) -> _PositionCandidate:
+    """Restamp a candidate's descriptor with this viewer's association membership."""
+    evidence = candidate.evidence
+    associated = (
+        evidence.source_table == CACHE_SOURCE
+        and evidence.source_id is not None
+        and evidence.source_id in associated_ids
+    )
+    if associated == evidence.viewer_associated:
+        return candidate
+    return _PositionCandidate(
+        row=candidate.row,
+        evidence=replace(evidence, viewer_associated=associated),
+    )
+
+
+def resolve_positions_from_candidates(
+    candidates: PositionCandidates,
+    capability: Capability,
+    viewer_user_id: int | None,
+    associated_ids: frozenset[int] = frozenset(),
+) -> dict[str, TrustedPosition | None]:
+    """Filter + rank an already-loaded candidate set. PURE — issues no query.
+
+    Two tiers per FEN, in order:
+
+    1. **Storage** — the ``position_analysis`` winner, used iff it holds
+       ``capability`` for ``viewer_user_id``.
+    2. **Trusted fallback** — the strongest holding ``analysis_cache`` row at the
+       SAME normalized FEN, ranked by :func:`_legacy_position_sort_key` (canonical
+       first) at the normalized grain.
+
+    A ``None`` value for a FEN means no position holds the capability for this
+    viewer; the caller takes its own (untrusted) fallback.
+    """
+    result: dict[str, TrustedPosition | None] = {n: None for n in candidates.norms}
+    for n in candidates.norms:
+        stored = candidates.storage.get(n)
+        if stored is not None:
+            stored = _with_membership(stored, associated_ids)
+            if stored.evidence.holds(capability, viewer_user_id):
+                result[n] = _trusted_position_from_row(stored.row, stored.evidence)
+                continue
+        eligible = [
+            c
+            for c in (
+                _with_membership(c, associated_ids)
+                for c in candidates.cache_by_norm.get(n, ())
+            )
+            if c.evidence.holds(capability, viewer_user_id)
+        ]
+        if eligible:
+            winner = min(eligible, key=_legacy_position_sort_key)
+            result[n] = _trusted_position_from_row(winner.row, winner.evidence)
     return result
 
 
+def resolve_trusted_positions(
+    db: Session,
+    normalized_fens: Iterable[str],
+    capability: Capability,
+    viewer_user_id: int | None,
+) -> dict[str, TrustedPosition | None]:
+    """Load + resolve trusted position evidence for one capability (batched).
+
+    The ordinary wrapper for a caller that needs ONE capability: it loads the
+    candidate set, issues the single viewer-scoped association fetch, and resolves.
+    A caller needing SEVERAL capabilities over the same scope
+    (``/api/analysis/lookup``) must instead call :func:`load_position_candidates`
+    once and :func:`resolve_positions_from_candidates` per capability, so the
+    association fetch is issued exactly once for the whole request.
+
+    ``capability`` and ``viewer_user_id`` are REQUIRED and have no default.
+    ``viewer_user_id=None`` means "no viewer" and admits only effectively
+    authoritative rows.
+    """
+    candidates = load_position_candidates(db, normalized_fens)
+    associated = viewer_associated_ids(db, viewer_user_id, candidates.cache_ids)
+    return resolve_positions_from_candidates(
+        candidates, capability, viewer_user_id, associated
+    )
+
+
 def resolve_trusted_position(
-    db: Session, normalized_fen: str
+    db: Session,
+    normalized_fen: str,
+    capability: Capability,
+    viewer_user_id: int | None,
 ) -> TrustedPosition | None:
     """Single-FEN convenience wrapper over :func:`resolve_trusted_positions`."""
-    return resolve_trusted_positions(db, [normalized_fen]).get(normalized_fen)
+    return resolve_trusted_positions(
+        db, [normalized_fen], capability, viewer_user_id
+    ).get(normalized_fen)

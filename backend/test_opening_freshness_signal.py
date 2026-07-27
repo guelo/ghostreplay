@@ -544,6 +544,39 @@ def test_analysis_cache_inplace_update_at_candidate_fen_stales(db_session):
     _assert_stale(db_session, digest)
 
 
+@pytest.mark.parametrize("column,value", [
+    # Every one of these is read off the MOVE row by
+    # ``resolve_coherent_evidence_tuple`` and can flip an opening-evidence pair
+    # between accepted and refused on its own (g-v21l):
+    ("eval_delta", 7),            # check 4 + the move-only recomputed-delta equality
+    ("best_move_uci", "d2d4"),    # COMBINED-vs-move-only branch + facts-match
+    ("best_line_uci", "d2d4 d7d5"),  # facts-match
+    ("classification", "blunder"),   # the shared classification validator
+])
+def test_move_row_coherence_inputs_stale_the_digest(db_session, column, value):
+    """A coherence-input-only update must stale the batch.
+
+    The trigger bumps ``evidence_epoch`` for any of these writes, which drops the
+    check to the scoped re-hash — so if the column is missing from the ``AC|``
+    projection the re-hash MATCHES and ``_cheap_evidence_fresh`` re-arms the batch
+    indefinitely, serving an overlay whose coherence verdict has since flipped.
+    Freshness must therefore hash a superset of the facts the overlay consumes: the
+    full set the pairing rule READS, including fields never taken as truth from
+    this row.
+    """
+    _seed_base_evidence(db_session)
+    _insert_analysis_cache(db_session, START_FULL)
+    _build_batch(db_session)
+    digest = raw_evidence_inputs_digest(db_session, USER, "white")
+
+    db_session.execute(
+        text(f"UPDATE analysis_cache SET {column} = :v WHERE fen_before = :fb"),
+        {"v": value, "fb": START_FULL},
+    )
+    db_session.commit()
+    _assert_stale(db_session, digest)
+
+
 def test_analysis_cache_delete_at_candidate_fen_stales(db_session):
     # Scenario 9 — the repair-invalidation direct-DELETE gap: only the trigger
     # sees this write.

@@ -1580,23 +1580,36 @@ def test_manual_blunder_counts_as_evidence_regardless_of_session_status(db_sessi
 
 
 def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
-    # A batch stamped under an older OPENING_EVIDENCE_INPUTS_VERSION mismatches
-    # exactly once (self-healing recompute); the next unchanged trigger serves the
-    # rebuilt batch without recomputing. Since g-jact the evidence version rides in
-    # the REGISTRY fingerprint, so an older stamp shows up as registry drift.
+    # A batch stamped under the PREVIOUS OPENING_EVIDENCE_INPUTS_VERSION (raw-v6,
+    # the state g-v21l bumped away from) is stale WITHOUT any raw-row mutation, and
+    # mismatches exactly once (self-healing recompute); the next unchanged trigger
+    # serves the rebuilt batch without recomputing OR rebuilding the overlay. Since
+    # g-jact the evidence version rides in the REGISTRY fingerprint, so an older
+    # stamp shows up as registry drift.
     _seed_black_opening_session(db_session)
 
     first = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert first is not None
-    assert "raw-v6" in first.registry_fingerprint
-    first.registry_fingerprint = first.registry_fingerprint.replace("raw-v6", "raw-v5")
+    assert "raw-v7" in first.registry_fingerprint
+    # Seed the pre-bump stamp. No raw row is touched.
+    first.registry_fingerprint = first.registry_fingerprint.replace("raw-v7", "raw-v6")
     db_session.commit()
 
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+    with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
+        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert second is not None
+    assert second.id != first.id  # exactly one recompute
+    assert spy.call_count == 1
+    assert "raw-v7" in second.registry_fingerprint  # stamped at the new version
 
-    assert second is not None and third is not None
-    assert second.id != first.id
+    # A second unchanged read serves that same batch through the fast path — no
+    # recompute, and no overlay build at all.
+    with patch(
+        "app.opening_cache.overlay_evidence",
+        side_effect=AssertionError("overlay must not be built on the fast path"),
+    ):
+        third = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert third is not None
     assert third.id == second.id
 
 

@@ -3,11 +3,11 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedExactBestHit, isTrustedMoveHit, hasCpEvalLoss, reconcileTrustedBest } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, canResolveReusableAnalysis, reconcileTrustedBest } from '../workers/analysisUtils'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
 import { buildBrowserProvenance } from '../workers/browserProvenance'
 import { lookupAnalysisCache } from '../utils/api'
-import type { CachedAnalysis } from '../utils/api'
+import type { ReusableAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
 // AnalysisResult now lives in the neutral types module; re-exported here so its
 // existing consumers (stores, domain helpers, useVariationTree) are unaffected.
@@ -90,24 +90,28 @@ const mateToPlayerPerspective = (
 }
 
 /**
- * Build an AnalysisResult from a cached entry, recomputing the blunder flag
- * from game context.
+ * Build an AnalysisResult from the backend's ATOMIC reuse payload (g-v21l),
+ * recomputing the blunder flag from game context.
+ *
+ * Every slice comes from the ONE tuple the backend authorized for this consumer —
+ * never the generic best/move fields, which may describe a different, merely-
+ * readable row whose facts contradict it.
  */
-const fromCachedAnalysis = (
+const fromReusableAnalysis = (
   requestId: string,
-  cached: CachedAnalysis,
+  payload: ReusableAnalysis,
   move: string,
   moveIndex: number,
   playerColor: 'white' | 'black',
   legalMoveCount: number | undefined,
 ): AnalysisResult => {
-  const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
-  const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
-  const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
-  const delta = cached.eval_delta
+  const playedEval = toPlayerPerspective(payload.played_eval, playerColor)
+  const bestEval = toPlayerPerspective(payload.best_eval, playerColor)
+  const playedEvalMate = mateToPlayerPerspective(payload.played_eval_mate, playerColor)
+  const delta = payload.eval_delta
 
-  // Use classification from cache if available, fall back to legacy delta-based
-  const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
+  // Use classification from the payload if available, fall back to delta-based.
+  const classification = (payload.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
   const blunder = !forced && classification === 'blunder'
   const recordable =
@@ -120,8 +124,9 @@ const fromCachedAnalysis = (
     // to its request (Finding R6), matching the coordinator.
     id: requestId,
     move,
-    bestMove: cached.best_move_uci ?? move,
-    bestLine: cached.best_line_uci ?? null,
+    // Non-null by construction: the backend only emits a coherent tuple.
+    bestMove: payload.best_move_uci,
+    bestLine: payload.best_line_uci ?? null,
     bestEval,
     playedEval,
     currentPositionEval: playedEval,
@@ -463,39 +468,44 @@ export const useMoveAnalysis = (
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
-          // Exact-best truth side channel (g-49e2): record the trusted position's
-          // best move BEFORE the published gate / releaseFallback, so a played
-          // move that equals it is promoted to the best-move star at the terminal
-          // resolve even when this row is move-untrusted and falls back to the
-          // worker (which under-rates it). Pure side-channel write — it must NOT
-          // touch resolutionState, the worker, or outcomes; the gate below runs
-          // unchanged.
-          if (cached && isTrustedExactBestHit(cached)) {
+          // Exact-best truth side channel (g-49e2): record the best move BEFORE
+          // the published gate / releaseFallback, so a played move that equals it
+          // is promoted to the best-move star at the terminal resolve even when
+          // this row falls back to the worker (which under-rates it). Pure
+          // side-channel write — it must NOT touch resolutionState, the worker, or
+          // outcomes; the gate below runs unchanged.
+          //
+          // Populated ONLY from `publication_best.interactive_analysis_reuse`
+          // (g-v21l §7), never from `position_trusted` or the generic best fields:
+          // `reconcileTrustedBest` rewrites classification, delta, blunder,
+          // recordability and provenance, which is durable publication and needs
+          // the publication capability, not a read grant.
+          if (cached?.publication_best?.interactive_analysis_reuse === true) {
             exactBestTruth.current.set(pending.moveIndex, {
               requestId: pending.requestId,
-              bestUci: cached.best_move_uci as string,
+              bestUci: cached.publication_best.best_move_uci,
             })
           }
 
+          const reusable = cached?.reusable_analysis ?? null
           if (
-            !cached ||
-            !isTrustedPositionHit(cached) ||
-            !isTrustedMoveHit(cached) ||
-            !hasCpEvalLoss(cached)
+            !reusable ||
+            reusable.interactive_analysis_reuse !== true ||
+            !canResolveReusableAnalysis(reusable)
           ) {
-            // Release the worker fallback unless ALL three concerns pass:
-            // trusted+renderable POSITION (best move/PV), trusted+renderable
-            // MOVE evidence, and a CP eval-loss the current grader can use.
-            // `hasCpEvalLoss` is the TRANSITIONAL gate that keeps move-trusted
-            // mate-only rows on the worker until Phase 6 (epic g-l02q).
+            // Release the worker fallback unless the backend published ONE coherent
+            // tuple for THIS consumer and it survives the structural re-check: a
+            // null payload (refused pairing), a tuple approved only for the
+            // game-analysis consumer, or a payload that is not renderable/gradeable
+            // here (missing PV, non-finite delta) all fall back.
             const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
             releaseFallback(pending.moveIndex, pending.requestId, reason)
             continue
           }
 
-          const result = fromCachedAnalysis(
+          const result = fromReusableAnalysis(
             pending.requestId,
-            cached,
+            reusable,
             pending.move,
             pending.moveIndex,
             pending.playerColor,
@@ -511,7 +521,7 @@ export const useMoveAnalysis = (
             cancelWorkerRequest(pending.requestId)
             clearActiveAnalysisStateIfCurrent(pending.requestId)
             console.log(
-              `[Analyst] resolve idx=${pending.moveIndex} source=cache(authoritative profile=${cached.analysis_profile_id ?? 'unknown'})`,
+              `[Analyst] resolve idx=${pending.moveIndex} source=cache(reusable profile=${cached?.analysis_profile_id ?? 'unknown'})`,
             )
             if (result.blunder && result.delta !== null) {
               console.log(

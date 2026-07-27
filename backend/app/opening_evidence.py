@@ -33,14 +33,19 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 import app.game_phase as game_phase
-from app.analysis_profiles import (
-    IDENTITY_FIELDS,
-    StrengthComparison,
-    compare_search_strength,
-    get_profile,
+from app.analysis_profiles import IDENTITY_FIELDS
+from app.analysis_submissions import (
+    associated_user_ids_by_row,
+    viewer_associated_ids,
 )
-from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
+from app.analysis_trust import describe_move_row
 from app.centipawn_loss import centipawn_loss
+from app.evidence_coherence import (
+    MoveGrain,
+    PositionGrain,
+    resolve_coherent_evidence_tuple,
+)
+from app.evidence_policy import Capability
 from app.fen import normalize_fen
 from app.game_phase import (
     ContinuityError,
@@ -48,7 +53,7 @@ from app.game_phase import (
     is_opening_premove,
     reconstruct_board_sequence,
 )
-from app.models import AnalysisCache
+from app.models import AnalysisCache, decode_uci_line
 from app.opening_graph import OpeningGraph
 from app.opening_quality import cache_row_to_mover_evals, move_quality
 from app.position_analysis_repo import resolve_trusted_positions
@@ -86,7 +91,19 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 # ``move_quality``, so a historical raw >1000 row yields a different quality_sum;
 # the raw-row digest is blind to this derivation-code change, so the version bump
 # is required to reject pre-bump batches as stale and recompute under the cap.
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v6"
+# raw-v7 (g-v21l): THREE independent selection changes land together, all of which
+# leave every pre-existing raw database row byte-identical —
+#   1. granting OPENING_EVIDENCE to browser-analysis-multipv-v2 changes WHICH
+#      identity-valid rows ``_apply_cache_fallbacks`` selects;
+#   2. submitter (association) scoping changes which of those rows a GIVEN USER may
+#      read;
+#   3. the coherent-tuple requirement changes which PAIRS upgrade — equal-strength
+#      sibling rows whose facts disagree no longer do.
+# Old batches must therefore fail the registry/input fingerprint and self-heal.
+# This one-time bump is explicitly NOT a substitute for hashing the association set
+# in ``_shared_evidence_lines`` below: a version bump cannot invalidate anything
+# that changes AFTER it lands, and associations keep mutating.
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v7"
 
 # Cheap-freshness-signal contract version (g-jact). Bump whenever the CHEAP
 # signal's semantics change — the shared-scope definition captured on a batch,
@@ -725,36 +742,42 @@ def _build_move_rows(
             player_color,
         )
 
-    _apply_cache_fallbacks(db, opening_moves, cache_candidates)
+    _apply_cache_fallbacks(db, user_id, opening_moves, cache_candidates)
     return opening_moves
 
 
 def _apply_cache_fallbacks(
     db: Session,
+    user_id: int,
     opening_moves: list[_MoveRow],
     candidates: list[tuple[int, str, str, str]],
 ) -> None:
     """Upgrade eval_delta-only user moves to trusted win-chance quality.
 
-    Pairs a TRUSTED position best eval with the MOVE-trusted played eval, then
-    rescores — never reading the move row's own (possibly duplicated/untrusted)
-    ``best_eval`` as position truth (the duplicated-best-move bug from the parent
-    epic). Mirrors the cross-grain pairing in
-    ``app.api.analysis._position_eval_loss_cp``:
+    Pairs a position best eval with the played eval of the SAME analysis through
+    the SHARED coherent-tuple resolver, then rescores — never reading the move
+    row's own (possibly duplicated/untrusted) ``best_eval`` as position truth (the
+    duplicated-best-move bug from the parent epic).
 
+    * **Capability** — OPENING_EVIDENCE for BOTH grains, with ``user_id`` as the
+      viewer, so a non-canonical row serves only the user who independently
+      submitted it (g-v21l).
     * **Position best** from :func:`resolve_trusted_positions` — the
-      ``position_analysis`` storage winner or the strongest trusted legacy
-      ``resolver-complete-v2`` ``analysis_cache`` row at the normalized FEN.
-    * **Played eval** from the exact ``(fen_before, move_uci)`` ``analysis_cache``
-      row, gated by ``move_trust_flags``.
-    * **Equal search strength** — both profiles must be ``StrengthComparison.EQUAL``
-      before their win-chances are differenced; subtracting evals across
-      different-strength runs is invalid even through the saturating win-chance
-      curve.
+      ``position_analysis`` storage winner or the strongest holding
+      ``analysis_cache`` row at the normalized FEN.
+    * **Pairing** through :func:`resolve_coherent_evidence_tuple`, the single place
+      any consumer may combine a position grain with a move grain. This REPLACES
+      the former bare ``compare_search_strength(...) is EQUAL`` check, which had no
+      factual-coherence requirement at all: equal-profile sibling rows whose facts
+      disagreed used to upgrade opening quality even though the atomic reuse path
+      rejects the same combination. The rule that the move row's own ``best_eval``
+      is never read as position truth is preserved and STRENGTHENED — the helper's
+      overlap-agreement requirement now REJECTS the disagreement instead of
+      silently discarding it.
 
     Only applies when the primary session evals were absent, so it strictly
     improves on the deterministic eval_delta fallback; on any failed guard the
-    move keeps its eval_delta quality.
+    move keeps its eval_delta quality, exactly as before.
     """
     if not candidates:
         return
@@ -766,7 +789,10 @@ def _apply_cache_fallbacks(
     # Candidate fens already normalized successfully upstream (_build_move_rows
     # calls normalize_fen unguarded before a candidate is appended), so this is safe.
     norm_by_fen = {fen: normalize_fen(fen) for fen in fen_set}
-    trusted = resolve_trusted_positions(db, set(norm_by_fen.values()))
+    trusted = resolve_trusted_positions(
+        db, set(norm_by_fen.values()), Capability.OPENING_EVIDENCE, user_id
+    )
+    associated_ids = viewer_associated_ids(db, user_id, [r.id for r in rows])
 
     for move_index, fen_before, uci, stm in candidates:
         row = by_key.get((fen_before, uci))
@@ -775,19 +801,41 @@ def _apply_cache_fallbacks(
         tp = trusted.get(norm_by_fen[fen_before])
         if tp is None:
             continue
-        if not move_trust_flags(cache_row_as_move_dict(row))[2]:
-            continue
-        pp = get_profile(tp.analysis_profile_id)
-        mp = get_profile(row.analysis_profile_id)
-        if pp is None or mp is None:
-            continue
-        if compare_search_strength(pp, mp) is not StrengthComparison.EQUAL:
+        move_evidence = describe_move_row(
+            row, viewer_associated=row.id in associated_ids
+        )
+        coherent = resolve_coherent_evidence_tuple(
+            fen_before,
+            PositionGrain(
+                evidence=tp.evidence,
+                best_move_uci=tp.best_move_uci,
+                best_move_san=tp.best_move_san,
+                best_line_uci=tp.best_line_uci,
+                best_eval=tp.best_eval,
+                best_eval_mate=tp.best_eval_mate,
+            ),
+            MoveGrain(
+                evidence=move_evidence,
+                move_uci=row.move_uci,
+                played_eval=row.played_eval,
+                played_eval_mate=row.played_eval_mate,
+                eval_delta=row.eval_delta,
+                classification=row.classification,
+                best_move_uci=row.best_move_uci,
+                best_line_uci=decode_uci_line(row.best_line_uci),
+                best_eval=row.best_eval,
+                best_eval_mate=row.best_eval_mate,
+            ),
+            Capability.OPENING_EVIDENCE,
+            user_id,
+        )
+        if coherent is None:
             continue
         mover_evals = cache_row_to_mover_evals(
-            row.played_eval,
-            row.played_eval_mate,
-            tp.best_eval,
-            tp.best_eval_mate,
+            coherent.played_eval,
+            coherent.played_eval_mate,
+            coherent.best_eval,
+            coherent.best_eval_mate,
             stm,
         )
         if mover_evals is None:
@@ -1156,6 +1204,27 @@ def _shared_evidence_lines(
     move rows plus their trust columns, AND the trusted position sources
     (``position_analysis`` storage winner and the legacy ``analysis_cache`` rows
     that feed ``_legacy_position_sort_key``) at the candidate NORMALIZED FENs.
+
+    ONGOING ELIGIBILITY (g-v21l): submitter associations are an input to the
+    OPENING_EVIDENCE trust filter, so both ``analysis_cache`` projections — the
+    ``AC|`` move-grain line and the ``ACP|`` legacy position-tier line — hash each
+    row's associated user ids as a sorted, deterministically formatted list. Without
+    it an association-only mutation (the claim rule granting a second submitter
+    access while every evidence column stays byte-identical) would advance
+    ``evidence_epoch`` via the shared-table trigger, fall to ``_cheap_evidence_fresh``
+    step 5, re-hash the stored scope, STILL match, and re-arm a batch computed when
+    its user could not read evidence they can now read.
+
+    The FULL association set is hashed, not just the requesting user's membership:
+    this function must stay USER-INDEPENDENT — that is what makes "scoped digest ==
+    full digest's shared slice" hold by construction for ``shared_scope_digest``.
+    The cost is that one user's claim invalidates other users' batches at the same
+    positions; that is accepted, because association writes are rare next to
+    evidence writes and the alternative breaks the shared-slice invariant.
+
+    ``PA|`` deliberately does NOT carry it: ``position_analysis`` is canonical-only
+    storage that browser evidence is structurally excluded from, and canonical rows
+    carry no associations.
     """
     lines: list[str] = []
     ident_cols = ", ".join(IDENTITY_FIELDS)
@@ -1163,21 +1232,48 @@ def _shared_evidence_lines(
     def _ident(r) -> str:
         return "|".join(str(getattr(r, f, None)) for f in IDENTITY_FIELDS)
 
+    def _subs(row_id, submitters: dict[int, tuple[int, ...]]) -> str:
+        return ",".join(str(u) for u in submitters.get(int(row_id), ()))
+
     # 2a. Move grain: the exact (fen_before, move_uci) analysis_cache rows the
     #     fallback reads for a played eval, plus the columns the MOVE-trust gate
     #     reads (a move-trust flip must change the digest): played eval, the
     #     ``classification`` the move-complete contract requires, and the
-    #     profile/contract/IDENTITY trust columns. best_eval is no longer consumed
-    #     as truth from this row but is harmless to keep hashing.
+    #     profile/contract/IDENTITY trust columns.
+    #
+    #     COHERENCE INPUTS (g-v21l): this projection must hash every column
+    #     ``resolve_coherent_evidence_tuple`` reads off the MOVE row, because each
+    #     one can flip the pair between accepted and refused with no other row
+    #     changing. That is a strictly larger set than "the facts the overlay
+    #     consumes", and it is why the four fields below are hashed even though
+    #     three of them are never read as truth from this row:
+    #       * ``eval_delta``  — check 4 (finite CP data) and the move-only branch's
+    #         recomputed-delta equality, and an argument to the classification
+    #         validator;
+    #       * ``best_move_uci`` — selects the COMBINED vs move-only branch, and is
+    #         then required to equal the position winner's best move;
+    #       * ``best_line_uci``/``best_eval``/``best_eval_mate`` — the remaining
+    #         ``_combined_facts_match`` equalities.
+    #     ``best_line_uci`` is hashed in its STORED encoding rather than decoded:
+    #     the comparison is on the decoded value, and equal encodings decode equal,
+    #     so the digest can only over-invalidate (an extra recompute), never
+    #     under-invalidate. Hashing the pre-image is the safe direction.
     if candidate_fens:
         move_stmt = text(f"""
-            SELECT fen_before, move_uci, played_eval, played_eval_mate,
-                   best_eval, best_eval_mate, classification,
+            SELECT id, fen_before, move_uci, played_eval, played_eval_mate,
+                   best_move_uci, best_line_uci, best_eval, best_eval_mate,
+                   eval_delta, classification,
                    analysis_profile_id, evidence_contract_id, {ident_cols}
             FROM analysis_cache
             WHERE fen_before IN :fens
         """).bindparams(bindparam("fens", expanding=True))
-        for r in db.execute(move_stmt, {"fens": list(candidate_fens)}).fetchall():
+        move_rows = db.execute(move_stmt, {"fens": list(candidate_fens)}).fetchall()
+        # Bulk projection join, inside this function's own scoped query — NOT
+        # through the resolved-evidence descriptor (which carries only one viewer's
+        # membership) and NOT inside the four-SELECT lookup ceiling, which this
+        # path does not share.
+        move_subs = associated_user_ids_by_row(db, [r.id for r in move_rows])
+        for r in move_rows:
             lines.append(
                 "AC|"
                 + "|".join(
@@ -1186,12 +1282,16 @@ def _shared_evidence_lines(
                         str(r.move_uci),
                         str(r.played_eval),
                         str(r.played_eval_mate),
+                        str(r.best_move_uci),
+                        str(r.best_line_uci),
                         str(r.best_eval),
                         str(r.best_eval_mate),
+                        str(r.eval_delta),
                         str(r.classification),
                         str(r.analysis_profile_id),
                         str(r.evidence_contract_id),
                         _ident(r),
+                        _subs(r.id, move_subs),
                     )
                 )
             )
@@ -1243,7 +1343,9 @@ def _shared_evidence_lines(
             FROM analysis_cache
             WHERE normalized_fen_before IN :norms
         """).bindparams(bindparam("norms", expanding=True))
-        for r in db.execute(legacy_stmt, {"norms": list(norm_list)}).fetchall():
+        legacy_rows = db.execute(legacy_stmt, {"norms": list(norm_list)}).fetchall()
+        legacy_subs = associated_user_ids_by_row(db, [r.id for r in legacy_rows])
+        for r in legacy_rows:
             lines.append(
                 "ACP|"
                 + "|".join(
@@ -1259,6 +1361,7 @@ def _shared_evidence_lines(
                         str(r.analysis_profile_id),
                         str(r.evidence_contract_id),
                         _ident(r),
+                        _subs(r.id, legacy_subs),
                     )
                 )
             )

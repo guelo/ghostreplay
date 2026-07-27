@@ -16,8 +16,12 @@ import threading
 import time
 from collections import Counter
 from contextlib import nullcontext
+from dataclasses import dataclass
 from itertools import groupby
+from typing import NamedTuple
 
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select as sa_select
 from sqlalchemy import tuple_
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -31,11 +35,13 @@ from app.analysis_cache_policy import (
     declared_profile_inactive,
     dynamic_identity_of,
     incoming_is_valid,
+    is_browser_claimable,
+    keep_or_merge_claim_ok,
     project_cache_row,
 )
 from app.evidence_contracts import contract_satisfied, get_contract
 from app.fen import normalize_fen
-from app.models import AnalysisCache
+from app.models import AnalysisCache, AnalysisCacheSubmission
 
 log = logging.getLogger("analysis_cache_repo")
 
@@ -107,6 +113,15 @@ def _sqlite_write_engine(bind):
             dbapi_conn.isolation_level = None
             cur = dbapi_conn.cursor()
             cur.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+            # SQLite enforces foreign keys PER CONNECTION and defaults to OFF, so
+            # this dedicated engine does not inherit the application engine's
+            # pragma (app.db) — it must set its own. Without it the batch writer is
+            # the ONE path that can insert an analysis_cache_submission row naming a
+            # deleted user, and the ON DELETE CASCADE that is supposed to retire a
+            # user's grants along with the user silently does not run for rows
+            # written here (g-v21l). Set at connect time, outside any transaction,
+            # where the pragma is not a no-op.
+            cur.execute("PRAGMA foreign_keys = ON")
             cur.close()
 
         @event.listens_for(engine, "begin")
@@ -229,6 +244,16 @@ def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, s
     (logged ``DUPLICATE_CONFLICT``).
 
     Returns surviving rows plus (key, Reason) for keys rejected as conflicting.
+
+    DELIBERATELY carries no submitter-ownership precondition (g-v21l). It collapses
+    duplicate keys WITHIN one in-memory batch, before any row reaches the database,
+    so there is no persisted association set to test — and because the submitter is
+    batch-level, every row it could collapse necessarily shares one submitter, which
+    its existing same-profile/identical-identity-metadata requirement already
+    enforces at the producer level. There are no two submitters to compare. The
+    collapsed survivor is a single row from a single submitter and then faces the
+    ordinary claim rule against whatever is persisted, which is where cross-submitter
+    safety is decided.
     """
     from app.evidence_contracts import is_strict_successor, is_superset_or_successor
 
@@ -425,9 +450,11 @@ def _param_chunks(rows: list[dict], params_per_row: int):
         yield rows[i : i + step]
 
 
-def _insert_missing(session: Session, rows: list[dict], *, insert) -> set[tuple[str, str]]:
-    """``INSERT ... ON CONFLICT DO NOTHING`` over key-sorted ``rows``; return the
-    SET of freshly inserted keys.
+def _insert_missing(
+    session: Session, rows: list[dict], *, insert
+) -> dict[tuple[str, str], int]:
+    """``INSERT ... ON CONFLICT DO NOTHING`` over key-sorted ``rows``; return a MAP
+    from freshly inserted key to its new primary key.
 
     Rows are grouped into contiguous same-signature runs (a multi-row ``VALUES``
     insert needs a uniform column set), and each run is split into bind-param-
@@ -436,10 +463,14 @@ def _insert_missing(session: Session, rows: list[dict], *, insert) -> set[tuple[
     deadlock on Postgres speculative-insertion locks — a deadlock-probability
     heuristic, not a proof; any 40P01/40001 that still occurs is retried by
     ``_run_batch_with_retry``. ``RETURNING`` yields only rows actually inserted
-    (DO NOTHING skips conflicts); callers use the SET, never position.
+    (DO NOTHING skips conflicts); callers use the KEY SET, never position.
     (``RETURNING`` requires SQLite >= 3.35 — a documented floor for this module.)
+
+    The primary key is returned alongside the two key columns (g-v21l) so the
+    claim pass can associate a submitter with a row this very transaction created;
+    ``_lock_existing`` already yields full ORM rows, so pre-existing ids are in hand.
     """
-    inserted: set[tuple[str, str]] = set()
+    inserted: dict[tuple[str, str], int] = {}
     for run in _signature_runs(rows):
         for chunk in _param_chunks(run, len(run[0]["cols"])):
             stmt = (
@@ -448,10 +479,14 @@ def _insert_missing(session: Session, rows: list[dict], *, insert) -> set[tuple[
                 .on_conflict_do_nothing(
                     index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci]
                 )
-                .returning(AnalysisCache.fen_before, AnalysisCache.move_uci)
+                .returning(
+                    AnalysisCache.fen_before,
+                    AnalysisCache.move_uci,
+                    AnalysisCache.id,
+                )
             )
             for row in session.execute(stmt):
-                inserted.add((row[0], row[1]))
+                inserted[(row[0], row[1])] = row[2]
     return inserted
 
 
@@ -484,16 +519,195 @@ def _lock_existing(
     return existing
 
 
+class _LockedRows(NamedTuple):
+    """Locked rows, their projections, and the association sets that matter."""
+
+    by_key: dict[tuple[str, str], AnalysisCache]
+    projections: dict[int, object]
+    submissions: dict[int, frozenset[int]]
+
+
+def _lock_existing_with_submissions(
+    session: Session, conflicted: list[dict], *, for_update: bool
+) -> _LockedRows:
+    """Lock the rows for ``conflicted`` AND load the association sets (g-v21l).
+
+    The lock and the association load are PAIRED in one helper so a future lock
+    site cannot acquire rows without their associations. Every ``_lock_existing``
+    call site — each bounded TOCTOU pass AND the terminal recovery lock — must go
+    through here, because the MERGE precondition reads that set: a terminal
+    decision that skipped the load would read an empty set and wave a
+    cross-submitter merge through, which is exactly what the precondition exists
+    to refuse.
+
+    Only NON-AUTHORITATIVE locked rows are queried: :func:`merge_owner_ok` returns
+    True immediately for an effectively authoritative existing row (canonical
+    merges skip the precondition entirely) and the claim rule never reads the set
+    at all, so a canonical row's associations cannot change any decision. A batch
+    whose conflicts are all canonical therefore issues NO association query and
+    keeps its historical statement count byte-for-byte.
+    """
+    existing = _lock_existing(session, conflicted, for_update=for_update)
+    projections = {
+        row.id: project_cache_row(_row_to_dict(row)) for row in existing.values()
+    }
+    ids = sorted(
+        row_id
+        for row_id, proj in projections.items()
+        if not proj.is_effectively_authoritative()
+    )
+    submissions: dict[int, frozenset[int]] = {}
+    if ids:
+        collected: dict[int, set[int]] = {i: set() for i in ids}
+        for chunk in _param_chunks([{"id": i} for i in ids], 1):
+            rows = session.execute(
+                sa_select(
+                    AnalysisCacheSubmission.analysis_cache_id,
+                    AnalysisCacheSubmission.user_id,
+                ).where(
+                    AnalysisCacheSubmission.analysis_cache_id.in_(
+                        [c["id"] for c in chunk]
+                    )
+                )
+            ).all()
+            for cache_id, user_id in rows:
+                collected[int(cache_id)].add(int(user_id))
+        submissions = {k: frozenset(v) for k, v in collected.items()}
+    return _LockedRows(existing, projections, submissions)
+
+
+@dataclass(frozen=True)
+class _ClaimAction:
+    """What the claim pass must do for ONE stored row, decided in-loop, applied later.
+
+    ``clear`` is the unconditional half of a REPLACE: the stored tuple is now wholly
+    the incoming one, so every prior association must go — a stale association
+    surviving a full overwrite would let its holder read facts it never submitted.
+    ``associate`` is the claim itself, already gated by the browser-only restriction
+    and (for KEEP/MERGE) the agreement + coverage conditions.
+    """
+
+    cache_id: int
+    clear: bool
+    associate: bool
+
+
+def _claim_for_decision(
+    decision: Decision,
+    existing_proj,
+    incoming_proj,
+    cache_id: int,
+    submitter_user_id: int | None,
+) -> _ClaimAction | None:
+    """The claim rule (g-v21l), evaluated for every submission after the policy decides.
+
+    * **INSERT** — associate the writer (the stored tuple IS the incoming one).
+    * **REPLACE** — clear every existing association unconditionally, then associate
+      the writer iff the claim conditions hold. A canonical REPLACE therefore clears
+      associations and adds none, leaving the row association-free.
+    * **KEEP or MERGE** — associate iff :func:`keep_or_merge_claim_ok` (overlapping
+      fields agree AND the stored row populates nothing the submitter did not
+      produce). This is what unblocks a PRE-EXISTING row with no associations: the
+      first submitter to resubmit an agreeing, field-covering tuple takes the
+      ``SAME_PROFILE_IDEMPOTENT`` branch, touches no evidence column, and gains an
+      association — so the fixed-profile dead-key problem needs no migration, and two
+      independent submitters of the same tuple both associate through that branch.
+
+    Every association additionally requires a batch submitter and that BOTH the
+    incoming row and the POST-DECISION stored row are effectively
+    browser-analysis-multipv-v2 (see :func:`is_browser_claimable`). For KEEP/MERGE
+    the post-decision row is the EXISTING one (``_build_merged`` keeps its
+    provenance); for INSERT/REPLACE it is the incoming one.
+    """
+    clear = decision is Decision.REPLACE
+    associate = False
+    if submitter_user_id is not None and is_browser_claimable(incoming_proj):
+        if decision in (Decision.INSERT, Decision.REPLACE):
+            associate = True
+        elif existing_proj is not None and is_browser_claimable(existing_proj):
+            associate = keep_or_merge_claim_ok(existing_proj, incoming_proj)
+    if not clear and not associate:
+        return None
+    return _ClaimAction(cache_id=cache_id, clear=clear, associate=associate)
+
+
+def _apply_claims(
+    session: Session,
+    claims: list[_ClaimAction],
+    submitter_user_id: int | None,
+    *,
+    insert,
+) -> None:
+    """Apply every recorded claim action in ONE pass, before the batch's commit.
+
+    Runs after the conflict loop resolves and while every locked parent row is
+    still held (freshly inserted rows are the transaction's own), so an interleaved
+    canonical REPLACE cannot land between a claim's decision and its write. Clears
+    run before insertions so a REPLACE that re-associates its own writer is not
+    undone by its own clearing pass.
+
+    Insertions use ``ON CONFLICT DO NOTHING`` on the composite primary key, so the
+    bounded whole-transaction retry replays this pass idempotently and a rolled-back
+    batch leaves no association at all.
+    """
+    if not claims:
+        return
+    clear_ids = sorted({c.cache_id for c in claims if c.clear})
+    for chunk in _param_chunks([{"id": i} for i in clear_ids], 1):
+        session.execute(
+            sa_delete(AnalysisCacheSubmission).where(
+                AnalysisCacheSubmission.analysis_cache_id.in_(
+                    [c["id"] for c in chunk]
+                )
+            )
+        )
+    if submitter_user_id is None:
+        return
+    associate_ids = sorted({c.cache_id for c in claims if c.associate})
+    for chunk in _param_chunks([{"id": i} for i in associate_ids], 2):
+        session.execute(
+            insert(AnalysisCacheSubmission)
+            .values(
+                [
+                    {
+                        "analysis_cache_id": c["id"],
+                        "user_id": submitter_user_id,
+                    }
+                    for c in chunk
+                ]
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    AnalysisCacheSubmission.analysis_cache_id,
+                    AnalysisCacheSubmission.user_id,
+                ]
+            )
+        )
+
+
 def _resolve_conflict(
     r: dict,
     existing_row: AnalysisCache,
     reason_by_key: dict[tuple[str, str], Reason],
+    locked: _LockedRows,
+    submitter_user_id: int | None,
+    claims: list[_ClaimAction],
 ) -> None:
     """Apply the replacement policy for one pre-existing key (in-memory decide +
-    ORM mutation); record the resulting Reason."""
+    ORM mutation); record the resulting Reason and this key's claim action."""
     key, data, incoming_proj = r["key"], r["data"], r["proj"]
-    existing_proj = project_cache_row(_row_to_dict(existing_row))
-    decision, reason = decide_analysis_cache_replacement(existing_proj, incoming_proj)
+    existing_proj = locked.projections[existing_row.id]
+    decision, reason = decide_analysis_cache_replacement(
+        existing_proj,
+        incoming_proj,
+        existing_submitters=locked.submissions.get(existing_row.id, frozenset()),
+        incoming_submitter=submitter_user_id,
+    )
+    claim = _claim_for_decision(
+        decision, existing_proj, incoming_proj, existing_row.id, submitter_user_id
+    )
+    if claim is not None:
+        claims.append(claim)
     if decision is Decision.REPLACE:
         _apply_update(existing_row, data, full=True)
     elif decision is Decision.MERGE:
@@ -514,6 +728,7 @@ def _run_batch(
     *,
     insert,
     for_update: bool,
+    submitter_user_id: int | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Set-based read-decide-write for an already-deduped, key-sorted batch.
 
@@ -523,8 +738,15 @@ def _run_batch(
     number of statements while preserving verdict semantics and the returned
     ``(key, Reason)`` cardinality/order exactly. Commits the whole batch once.
     Returns one result per surviving key in key-sorted order.
+
+    ``submitter_user_id`` is BATCH-level (g-v21l) — correct because the only caller
+    that passes one (the analysis-evidence endpoint) submits a single-user,
+    single-producer batch by construction. Claim actions are recorded while each
+    decision is made and applied in one pass AFTER the conflict loop and BEFORE the
+    single commit, so the whole read-decide-claim-write unit is atomic.
     """
     reason_by_key: dict[tuple[str, str], Reason] = {}
+    claims: list[_ClaimAction] = []
 
     # Steps 1-2: partition validity in memory (invalid rows do no DB work) and
     # hoist normalize_fen once per valid row. valid_rows stays key-sorted.
@@ -548,10 +770,16 @@ def _run_batch(
 
     # Step 3: insert missing keys in global key order (RETURNING -> the SET of
     # freshly inserted keys). NEW_KEY for each; the rest pre-existed.
-    inserted_keys = _insert_missing(session, valid_rows, insert=insert)
+    inserted_ids = _insert_missing(session, valid_rows, insert=insert)
+    inserted_keys = inserted_ids.keys()
     for r in valid_rows:
         if r["key"] in inserted_keys:
             reason_by_key[r["key"]] = Reason.NEW_KEY
+            claim = _claim_for_decision(
+                Decision.INSERT, None, r["proj"], inserted_ids[r["key"]], submitter_user_id
+            )
+            if claim is not None:
+                claims.append(claim)
 
     # Steps 4-6: resolve pre-existing (conflicted) keys. A key can vanish between
     # the insert-conflict and the lock (PG-only TOCTOU: a concurrent deleter). We
@@ -566,14 +794,23 @@ def _run_batch(
     for _ in range(_MAX_TOCTOU_PASSES):
         if not pending:
             break
-        existing_by_key = _lock_existing(session, pending, for_update=for_update)
+        locked = _lock_existing_with_submissions(
+            session, pending, for_update=for_update
+        )
         vanished: list[dict] = []
         for r in pending:
-            existing_row = existing_by_key.get(r["key"])
+            existing_row = locked.by_key.get(r["key"])
             if existing_row is None:
                 vanished.append(r)
             else:
-                _resolve_conflict(r, existing_row, reason_by_key)
+                _resolve_conflict(
+                    r,
+                    existing_row,
+                    reason_by_key,
+                    locked,
+                    submitter_user_id,
+                    claims,
+                )
         if not vanished:
             pending = []
             break
@@ -581,6 +818,15 @@ def _run_batch(
         for r in vanished:
             if r["key"] in recovered:
                 reason_by_key[r["key"]] = Reason.NEW_KEY
+                claim = _claim_for_decision(
+                    Decision.INSERT,
+                    None,
+                    r["proj"],
+                    recovered[r["key"]],
+                    submitter_user_id,
+                )
+                if claim is not None:
+                    claims.append(claim)
         # Keys a concurrent writer re-created (not recovered) loop back to be
         # re-locked and re-decided against that live row.
         pending = [r for r in vanished if r["key"] not in recovered]
@@ -591,11 +837,20 @@ def _run_batch(
     # was neither written nor resolved, so it must NOT be reported as an insert.
     # Report RECOVERY_ABORTED_KEEP and warn instead of a phantom NEW_KEY.
     if pending:
-        existing_by_key = _lock_existing(session, pending, for_update=for_update)
+        locked = _lock_existing_with_submissions(
+            session, pending, for_update=for_update
+        )
         for r in pending:
-            existing_row = existing_by_key.get(r["key"])
+            existing_row = locked.by_key.get(r["key"])
             if existing_row is not None:
-                _resolve_conflict(r, existing_row, reason_by_key)
+                _resolve_conflict(
+                    r,
+                    existing_row,
+                    reason_by_key,
+                    locked,
+                    submitter_user_id,
+                    claims,
+                )
             else:
                 reason_by_key[r["key"]] = Reason.RECOVERY_ABORTED_KEEP
                 log.warning(
@@ -605,7 +860,12 @@ def _run_batch(
                     _MAX_TOCTOU_PASSES,
                 )
 
-    # Step 7: one commit for the whole batch.
+    # Step 7: the claim pass, then ONE commit for the whole batch. The claim must
+    # be inside this transaction, never after it: an endpoint-side association
+    # write would race a concurrent canonical REPLACE, leaving the user associated
+    # with facts they never submitted after that REPLACE's clearing pass had
+    # already run.
+    _apply_claims(session, claims, submitter_user_id, insert=insert)
     session.commit()
 
     # Step 8: results in key-sorted survivor order (invalid interleaved), matching
@@ -631,11 +891,19 @@ def _log_batch_summary(results: list[tuple[tuple[str, str], Reason]]) -> None:
 def write_analysis_cache_rows(
     caller_session: Session,
     rows: list[dict],
+    submitter_user_id: int | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Atomically apply the replacement policy to a batch of cache rows.
 
     Opens its own isolated session from ``caller_session``'s bind and owns the
     whole transaction. Returns one ``(key, Reason)`` per processed/rejected row.
+
+    ``submitter_user_id`` (g-v21l) is the authenticated subject whose client
+    produced this batch, or ``None``. Only the analysis-evidence endpoint passes
+    one — backend and canonical writers pass ``None`` and never claim. It is
+    threaded all the way into the writer's own transaction because the claim pass
+    must run under the same lock as the decision that justified it; an
+    endpoint-side write after this call would race a concurrent canonical REPLACE.
     """
     if not rows:
         return []
@@ -665,9 +933,13 @@ def write_analysis_cache_rows(
         # Dedicated IMMEDIATE-mode engine for file DBs (BEGIN IMMEDIATE is scoped
         # to this engine, never the shared/read engine); caller bind for :memory:.
         write_engine = _sqlite_write_engine(bind)
-        results = _run_sqlite(sessionmaker(bind=write_engine), surviving)
+        results = _run_sqlite(
+            sessionmaker(bind=write_engine), surviving, submitter_user_id
+        )
     else:  # postgresql: batched ON CONFLICT insert + one FOR UPDATE lock select
-        results = _run_postgresql(sessionmaker(bind=bind), surviving)
+        results = _run_postgresql(
+            sessionmaker(bind=bind), surviving, submitter_user_id
+        )
 
     results = dedupe_results + results
     _log_batch_summary(results)
@@ -712,6 +984,7 @@ def _run_batch_with_retry(
     max_retries: int,
     dialect: str,
     lock=None,
+    submitter_user_id: int | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Run one batch on a fresh session, retrying transient conflicts.
 
@@ -735,7 +1008,11 @@ def _run_batch_with_retry(
             session = factory()
             try:
                 return _run_batch(
-                    session, surviving, insert=insert, for_update=for_update
+                    session,
+                    surviving,
+                    insert=insert,
+                    for_update=for_update,
+                    submitter_user_id=submitter_user_id,
                 )
             except OperationalError as exc:
                 session.rollback()
@@ -787,7 +1064,9 @@ def _is_retryable_pg_error(exc: OperationalError) -> bool:
     return "deadlock" in text or "could not serialize" in text
 
 
-def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
+def _run_sqlite(
+    factory, surviving: list[dict], submitter_user_id: int | None = None
+) -> list[tuple[tuple[str, str], Reason]]:
     """Run the batch under BEGIN IMMEDIATE, retrying on SQLITE_BUSY.
 
     The whole batch is one transaction (the BEGIN IMMEDIATE is emitted on first
@@ -804,10 +1083,13 @@ def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], R
         max_retries=_SQLITE_MAX_RETRIES,
         dialect="sqlite",
         lock=_sqlite_write_lock,
+        submitter_user_id=submitter_user_id,
     )
 
 
-def _run_postgresql(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
+def _run_postgresql(
+    factory, surviving: list[dict], submitter_user_id: int | None = None
+) -> list[tuple[tuple[str, str], Reason]]:
     """Run the batch with a single FOR UPDATE lock select, retrying deadlocks."""
     return _run_batch_with_retry(
         factory,
@@ -817,4 +1099,5 @@ def _run_postgresql(factory, surviving: list[dict]) -> list[tuple[tuple[str, str
         is_retryable=_is_retryable_pg_error,
         max_retries=_PG_MAX_RETRIES,
         dialect="postgresql",
+        submitter_user_id=submitter_user_id,
     )
