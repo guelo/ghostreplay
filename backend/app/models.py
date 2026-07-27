@@ -275,8 +275,12 @@ class GameSession(Base):
     # Release A's serving write hooks (g-accuracy-hooks) populate both on game
     # end and post-end move uploads for ended, VISIBLE sessions (normal games and
     # converted drills); active sessions and ended failed/abandoned drills stay
-    # NULL. Nothing READS these yet — stats/history keep computing accuracy live
-    # until the Release B read switch.
+    # NULL. After Release B's read switch (g-b-cache-reads), /api/stats/summary
+    # and /api/history READ player_accuracy through
+    # app.accuracy.accuracy_for_sessions and compute nothing; those readers never
+    # look at player_accuracy_algo_version, whose currency the backfill's
+    # invalidation predicate owns. /api/session/{id}/analysis still computes live
+    # through game_accuracy_for_rows. No read path ever WRITES either column.
     player_accuracy: Mapped[int | None] = mapped_column(Integer)
     player_accuracy_algo_version: Mapped[int | None] = mapped_column(SmallInteger)
 
@@ -455,6 +459,133 @@ class SessionUploadReceipt(Base):
     )
 
 
+class OpponentDecision(Base):
+    """Authoritative, replayable record of one served opponent decision
+    (g-ghost-target-server-record).
+
+    Before this table the decision was computed, returned and forgotten: the only
+    server-side trace was a fire-and-forget PostHog ``opponent_move_served``, and
+    ``session_moves.target_blunder_id`` reached the database solely as a CLIENT echo
+    (``SessionMoveInput``). That is unusable as the denominator of a targeted
+    p_reach: a session that never uploads silently drops a FAILED steer, biasing the
+    ratio upward, and a client-controlled denominator gates ghost eligibility.
+
+    **Grain.** Opaque ``decision_id`` PK; ``UNIQUE (session_id, request_fingerprint)``
+    is the replay key. ``(session_id, ply_before)`` is NOT a safe unique grain:
+    ``rewindBoardLocally`` truncates history and the revert flow continues on the
+    SAME session, and the endpoint validates only existence and ownership (never
+    status), so a post-revert branch legitimately asks for a decision at the same ply
+    from a different position and history. Replaying the old row could return a move
+    that is illegal in the new branch, and a mismatched-FEN check on such a row would
+    turn legitimate continuation into a conflict instead.
+
+    **Envelope, not response.** ``served_at`` is not a ``NextOpponentMoveResponse``
+    field, so this row cannot be an extracted copy of one. ``response_payload`` is the
+    serialized response; ``target_blunder_id`` / ``resulting_fen`` /
+    ``reaches_drill_root`` are extracted off it for indexing and validation;
+    ``decision_id`` and ``served_at`` are envelope-level and stamped at construction.
+    The payload is stored rather than reconstructed because UCI + SAN + resulting FEN
+    cannot replay a response verbatim: ``target_blunder_id IS NULL`` cannot
+    distinguish a pre-root route ghost move from an engine move (so ``mode`` and
+    ``decision_source`` are unrecoverable), and ``target_blunder_srs`` snapshots
+    counters that move between the original request and its retry.
+
+    **FK to game_sessions, unlike SessionUploadReceipt.** That receipt keeps a plain
+    FK-free ``session_id`` so it stays a pure sink alongside the ``evidence_seq``
+    cursor bump (SPEC.md). ``next-opponent-move`` never writes the cursor, and
+    ``session_moves`` / ``blunder_opportunity_events`` already carry FK-CASCADE to
+    ``game_sessions`` from cursor-bumping paths. The route branch already holds
+    ``FOR NO KEY UPDATE`` on this very row, so the insert's ``KEY SHARE`` is a
+    same-transaction no-op; the ghost/engine branches hold no lock at all and take
+    ``KEY SHARE`` on ``game_sessions`` then ``blunders`` — FK-check order matches
+    ``record_blunder``'s session-then-blunder order, and ``KEY SHARE`` conflicts only
+    with ``FOR UPDATE`` / key-column updates, of which this schema has none. The FK is
+    load-bearing: retention is session-lifetime via ``ON DELETE CASCADE``, with no
+    independent TTL (the 30-day p_reach window is a QUERY concern, not a storage one).
+
+    ``target_blunder_id`` deliberately has no ``ondelete``, mirroring
+    ``session_moves.target_blunder_id``: no blunder-delete path exists, ``SET NULL``
+    would leave an extracted column disagreeing with its own ``response_payload``, and
+    ``CASCADE`` would delete decision rows that root confirmation still needs.
+    """
+
+    __tablename__ = "opponent_decisions"
+    __table_args__ = (
+        # The replay key AND the concurrency arbiter: the normal ghost/engine path
+        # holds no row lock (the pre-root branch rolls it back before falling
+        # through), so two concurrent identical requests can both miss the lookup and
+        # both compute. find_ghost_move is randomized, so their moves need not agree;
+        # this constraint — not a lock — decides which one is served.
+        UniqueConstraint(
+            "session_id", "request_fingerprint", name="uq_opponent_decisions_session_fingerprint"
+        ),
+        # The targeted-counters aggregate (per-decision served_at cutoff + after-created
+        # predicate, before any (session_id, target_blunder_id) grouping).
+        Index("idx_opponent_decisions_target_served", "target_blunder_id", "served_at"),
+        CheckConstraint("ply_before >= 0", name="ck_opponent_decisions_ply_before"),
+        # No separate session_id index: the unique index's leading column already
+        # answers "every decision for this session".
+    )
+
+    # Allocated APPLICATION-side (uuid4) and stamped into response_payload BEFORE the
+    # insert, so the payload always carries the decision_id of the row it is stored
+    # in. A server default is unknown until after the INSERT, which would force either
+    # a post-insert payload rewrite or a payload disagreeing with its own row.
+    decision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("game_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # sha256 over scheme version + NORMALIZED request FEN + the full UCI history.
+    # History is part of the key because Maia consumes NextOpponentMoveRequest.moves
+    # and two transpositions can share a FEN and a ply while being different inputs.
+    request_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    # app.fen.fen_hash(request.fen) — the FEN half on its own, queryable without
+    # reparsing the fingerprint.
+    request_fen_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    # The full UCI history the client sent, as a canonical JSON array (JSON-as-string
+    # per the repo convention). NOT the space-joined ``encode_uci_line`` form used by
+    # ``drill_line``: that is lossy over what this endpoint accepts, since
+    # ``NextOpponentMoveRequest.moves`` is ``list[str]`` with no per-element
+    # validation — ``["e2e4 e7e5", "g1f3"]`` and ``["e2e4", "e7e5 g1f3"]`` would store
+    # identical text AND share a ``ply_before``, so neither column could separate
+    # them. NOT NULL: ``[]`` is a real empty history (legitimate at ply 0 for a
+    # black-playing user), never an absent one.
+    uci_history: Mapped[str] = mapped_column(Text, nullable=False)
+    # len(request.moves). VALIDATED METADATA, not part of any key: root confirmation
+    # checks current_ply == ply_before + 1.
+    ply_before: Mapped[int] = mapped_column(Integer, nullable=False)
+    # IS the targeted timeline — the 30-day cutoff and after-created predicate read
+    # this column. blunder_opportunity_events stamps session.started_at instead, which
+    # would assign a late-session decision the session's opening time and silently
+    # drop targeting of any blunder created during that same session. Stamped app-side
+    # at envelope construction; the DDL default is the statement clock, never now()
+    # (transaction-start time would predate a lock wait).
+    served_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=statement_timestamp(),
+        nullable=False,
+    )
+    # The canonical serialized NextOpponentMoveResponse (Text, JSON-as-string per the
+    # repo convention). Replay returns THIS, verbatim — no business logic, no re-query
+    # of mutable state.
+    response_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    target_blunder_id: Mapped[int | None] = mapped_column(
+        BIGINT_SQLITE, ForeignKey("blunders.id")
+    )
+    # FEN after the served move. Route and ghost decisions always have one; the engine
+    # branch derives it by applying the controller's UCI and stores NULL (with a
+    # warning) if that move is not legal here, since nothing validates the controller
+    # today. Engine decisions are never root decisions, so root confirmation's
+    # resulting_fen check never reads a NULL.
+    resulting_fen: Mapped[str | None] = mapped_column(Text)
+    reaches_drill_root: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+
 class AnalysisCache(Base):
     __tablename__ = "analysis_cache"
     __table_args__ = (
@@ -507,6 +638,69 @@ class AnalysisCache(Base):
     evidence_contract_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AnalysisCacheSubmission(Base):
+    """(analysis_cache row, user) submitter-eligibility association (g-v21l).
+
+    ONE row means exactly: *this user independently submitted a tuple consistent
+    with this stored row*. It is NOT ownership, confers NO write rights, and is
+    never exposed in an API response, log line, or metric dimension.
+
+    Why an association and not a ``submitted_by_user_id`` column on
+    ``analysis_cache``: a single column cannot express either case this bead must
+    handle.
+
+    * ``browser-analysis-multipv-v2`` is a FIXED profile
+      (``dynamic_fields=frozenset()``), so ``_same_profile_strength_decision``
+      returns ``None`` on its first branch and there is NO same-profile REPLACE
+      path. Rows already stored by g-reuse-d21-search would migrate with a null
+      owner and could never acquire one — an identical resubmission decides
+      ``SAME_PROFILE_IDEMPOTENT`` and writes nothing. Every pre-existing key would
+      be permanently dead for reuse. With an association, that same idempotent
+      branch grants eligibility without touching an evidence column.
+    * If users A and B independently submit the same tuple, one column records only
+      one of them. First-wins denies B; ownership transfer denies A. Both are
+      ordinary outcomes for a shared opening position.
+
+    ``(analysis_cache_id, user_id)`` is the COMPOSITE PRIMARY KEY — the pair's
+    uniqueness IS the table's identity — with no surrogate id. The separate
+    reverse-order index serves the viewer-scoped read
+    (``WHERE user_id = :viewer AND analysis_cache_id IN :ids``), whose leading
+    column the primary key does not serve.
+
+    Both FKs are ``ON DELETE CASCADE``: deleting an ``analysis_cache`` row drops
+    its associations, and deleting a user cannot strand eligibility rows that a
+    recycled id would inherit.
+
+    The table is in :data:`EVIDENCE_EPOCH_SHARED_TABLES`, so association writes
+    bump ``evidence_epoch`` through the same per-dialect triggers as evidence
+    writes — associations are an input to the OPENING_EVIDENCE trust filter, so an
+    association-only mutation must invalidate opening-score batches exactly as an
+    evidence mutation does.
+    """
+
+    __tablename__ = "analysis_cache_submission"
+    __table_args__ = (
+        Index(
+            "idx_analysis_cache_submission_user",
+            "user_id",
+            "analysis_cache_id",
+        ),
+    )
+
+    analysis_cache_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("analysis_cache.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
     )
 
 
@@ -689,9 +883,20 @@ class EvidenceEpoch(Base):
     value: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False, server_default="0")
 
 
-# Tables whose writes must advance EvidenceEpoch (mirrored by the 20260708_01
-# migration; keep the two lists in sync).
-EVIDENCE_EPOCH_SHARED_TABLES = ("analysis_cache", "position_analysis")
+# Tables whose writes must advance EvidenceEpoch (mirrored by the 20260708_01 and
+# 20260727_01 migrations; keep the lists in sync).
+#
+# ``analysis_cache_submission`` (g-v21l) is here for the same reason the evidence
+# tables are: submitter associations gate the OPENING_EVIDENCE trust filter, so an
+# association-only write changes which rows a user may read even though every
+# evidence column stays byte-identical. Without the bump the cheap freshness check
+# would re-arm a batch computed when its user could not read evidence they can now
+# read.
+EVIDENCE_EPOCH_SHARED_TABLES = (
+    "analysis_cache",
+    "position_analysis",
+    "analysis_cache_submission",
+)
 
 
 def ensure_evidence_epoch_infrastructure(bind) -> None:

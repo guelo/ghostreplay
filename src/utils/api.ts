@@ -850,6 +850,11 @@ interface NextOpponentMoveResponse {
   target_fen: string | null
   decision_source: Exclude<SessionDecisionSource, 'local_fallback'>
   drill_route: DrillRouteMetadata | null
+  // Opaque id of the server-side opponent_decisions row that recorded this decision
+  // (g-ghost-target-server-record). Every served response carries one, including the
+  // replays this endpoint returns for the `retries: 2` duplicates below. Root
+  // confirmation sends it back to prove which decision the client actually applied.
+  decision_id: string
 }
 
 interface SrsReviewRequest {
@@ -1150,6 +1155,53 @@ export const uploadSessionMoves = async (
  *
  * Evals are white-relative centipawns; mate counts are white-relative.
  */
+/**
+ * ONE atomic, coherent analysis tuple the backend authorizes a consumer to
+ * REPUBLISH (backend `ReusableAnalysis`, g-v21l). Strictly stronger than the
+ * generic best/move fields: the backend proved the position grain and the move
+ * grain share compatible settings AND agree on every overlapping fact before
+ * emitting it. Build `AnalysisResult` from THESE slices — never from the generic
+ * fields, which may describe a different (merely readable) row.
+ *
+ * The two flags are resolved independently, one per reuse consumer. A flag is true
+ * only for the facts this payload actually carries; when the two capabilities would
+ * approve different facts, only one flag is true.
+ */
+export interface ReusableAnalysis {
+  best_move_uci: string
+  best_line_uci: string[] | null
+  best_eval: number | null
+  best_eval_mate: number | null
+  played_eval: number | null
+  played_eval_mate: number | null
+  classification: MoveClassification | null
+  /** Side-to-move-relative, clamped >= 0, proven consistent with the two evals. */
+  eval_delta: number
+  /** The AnalysisBoard (useMoveAnalysis) consumer may publish this tuple. */
+  interactive_analysis_reuse: boolean
+  /** The live-game (GameAnalysisCoordinator) consumer may publish this tuple. */
+  game_analysis_reuse: boolean
+}
+
+/**
+ * The exact best move a consumer may RECONCILE a worker result against (backend
+ * `PublicationBest`, g-v21l).
+ *
+ * Reconciliation (`reconcileTrustedBest`) is not display: it rewrites
+ * classification, delta, blunder, recordability and provenance, and those values
+ * reach the store, the incremental upload, and the SRS/decision paths. It is a
+ * durable PUBLICATION effect and is therefore gated on the consumer's own reuse
+ * capability — never on `position_trusted`, which is only a read grant.
+ *
+ * Position-grain only by design ("which move is best" is a position question), and
+ * independent of `reusable_analysis` in both directions.
+ */
+export interface PublicationBest {
+  best_move_uci: string
+  interactive_analysis_reuse: boolean
+  game_analysis_reuse: boolean
+}
+
 export interface CachedAnalysis {
   // ── MOVE grain (exact (fen, move_uci) row) ──
   /**
@@ -1164,17 +1216,30 @@ export interface CachedAnalysis {
    * blunder/SRS/display consumer normalizes it to 0..1000 via evalLoss before use. */
   eval_delta: number | null
   classification: MoveClassification | null
+  // ── DRILL grain (DRILL_GRADE-gated; independent of the read/reuse grants) ──
+  /**
+   * The DRILL_GRADE position winner's best move, resolved independently of the
+   * generic `best_move_uci` above. Present even when that eval is mate-valued or
+   * there is no move row. THIS — not `best_move_uci` — is what a drill grades
+   * against, so no read or reuse grant can leak into a drill grade.
+   */
+  drill_best_move_uci: string | null
   /**
    * CROSS-GRAIN drill threshold loss (mover-relative CP, clamped >= 0),
-   * derived on the BACKEND from the trusted position `best_eval` and the trusted
-   * move `played_eval`. Non-null ONLY when both grains are trusted, both pure CP
-   * (no mate field on either), and their profiles are search-strength EQUAL.
+   * derived on the BACKEND from the DRILL_GRADE position `best_eval` and the
+   * DRILL_GRADE move `played_eval`. Non-null ONLY when both drill grains exist,
+   * both hold DRILL_GRADE, both are pure CP (no mate field on either), and their
+   * captured settings compare EQUAL.
    * This — NOT `eval_delta` — is the trusted loss the drill grader reads;
    * `eval_delta` is the RAW (uncapped, may be mate pseudo-cp) canonical-run cache
    * snapshot; any blunder/SRS/display consumer normalizes it to 0..1000 via
    * evalLoss before use. The frontend does no eval arithmetic on it.
    */
   position_eval_loss_cp: number | null
+
+  // ── PUBLICATION surfaces (capability-gated; see the interfaces above) ──
+  reusable_analysis: ReusableAnalysis | null
+  publication_best: PublicationBest | null
 
   // ── POSITION grain (resolver-derived; null when no trusted position) ──
   best_move_uci: string | null

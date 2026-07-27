@@ -551,10 +551,10 @@ performs for arrows/lines. Key points:
   registry load rather than merely documenting them), *contract* (evidence shape —
   `evidence_contracts`), *comparison*
   (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
-  and *capability* (which consumers may reuse a row — `has_capability`). Read/reuse
-  grants beyond `DISPLAY_OVERLAY` (g-v21l) and the cross-grain authority rule (g-6xc3)
-  lay their API here but are not yet wired; measured-strength comparison is wired by
-  g-mk1d (below).
+  and *capability* (which consumers may reuse a row — `has_capability`). g-v21l wires
+  the read/reuse grants beyond `DISPLAY_OVERLAY` and adds submitter (owner) scoping on
+  top of them (§14.7); the cross-grain authority rule (g-6xc3) lays its API here but is
+  not yet wired; measured-strength comparison is wired by g-mk1d (below).
 - **`EDGES` and kinds.** Cross-profile ordering is explicit directed edges, never raw
   depth, each tagged `AUTHORITY` (canonical over any non-authoritative row),
   `PROTOCOL_CORRECTION` (a truthful protocol fixes a defective one), or `TIER_BASELINE`
@@ -625,6 +625,14 @@ performs for arrows/lines. Key points:
   `resolver-complete-v2`'s enum/arithmetic checks, the endpoint independently rederives
   each row's classification from the best/played root-relative scores using a dedicated
   root-alternative classifier and rejects any disagreement (`classification_mismatch`).
+  g-v21l extracts the FULL rule into one shared validator,
+  `validate_root_alternative_classification`, used at ingress AND at read time inside
+  the coherent-tuple resolver (§14.7), so a row that cannot be submitted can never be
+  read back either. Calling `classify_root_alternative` alone is NOT validation — it
+  short-circuits to `best` whenever the UCIs match — so the validator additionally
+  requires exact CP equality, exact mate equality and a REAL `eval_delta == 0` (never a
+  null-coalesced zero) for a matching-UCI row, and rejects a stored `best` on
+  non-matching UCIs.
   Lower lines and mate transitions are as client-supplied as line 1. The root
   classifier (`classify_root_alternative` / `classifyRootAlternative`) takes a truthful
   ROOT side-to-move contract — NOT the post-move opponent-to-move argument order of
@@ -635,11 +643,14 @@ performs for arrows/lines. Key points:
   `has_capability(row, DISPLAY_OVERLAY)` AND the profile's `OVERLAY_MODE == ALWAYS`
   (truth-table-identical to the old `dominates(browser-game-v1)` test for the profiles
   that existed before, now additionally admitting `browser-analysis-multipv-v2`).
-  Canonical holds all eight capabilities; `browser-analysis-multipv-v2` and the retired
-  `browser-analysis-v1` hold only `DISPLAY_OVERLAY`; `browser-game-v1` / jeffml hold
-  none. g-mk1d adds `browser-game-v2`, which holds `DISPLAY_OVERLAY` under the third
-  mode `REQUIRES_COMPARISON` (below) — the ALWAYS-only `display_upgrade_eligible`
-  predicate the one-row seam uses still excludes it.
+  Canonical holds all eight capabilities. g-v21l grants
+  `browser-analysis-multipv-v2` five more — `POSITION_READ`, `MOVE_READ`,
+  `INTERACTIVE_ANALYSIS_REUSE`, `GAME_ANALYSIS_REUSE`, `OPENING_EVIDENCE` — every one
+  of them SUBMITTER-SCOPED (§14.7); `DRILL_GRADE` and `TREE_EVAL` stay ungranted. The
+  retired `browser-analysis-v1` holds only `DISPLAY_OVERLAY`; `browser-game-v1` /
+  jeffml hold none. g-mk1d adds `browser-game-v2`, which holds `DISPLAY_OVERLAY` under
+  the third mode `REQUIRES_COMPARISON` (below) — the ALWAYS-only
+  `display_upgrade_eligible` predicate the one-row seam uses still excludes it.
   A registry-load assertion states the grant precondition PROTOCOL-side rather than
   per-profile: **holding any active-required (non-`RETIREMENT_SURVIVING`) capability
   requires an internally consistent protocol.** So `browser-game-v1`,
@@ -1276,6 +1287,8 @@ POST /api/game/next-opponent-move
 After a user move, backend returns exactly one opponent move. It first tries Ghost steering; if no due path exists, it falls back to the remote Maia3 API.
 
 1. Validate session ownership and that it's the opponent's turn for `fen`.
+1b. Look up `opponent_decisions` by (session_id, request fingerprint over normalized FEN + full UCI history).
+   → hit: return the stored response payload verbatim (idempotent replay of a retry), done.
 2. Compute normalized FEN hash.
 3. Look up position by `fen_hash` in `positions` table (for this user).
 4. If found:
@@ -1291,6 +1304,9 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
    → Return:
      { "mode": "engine", "move": { "uci": "...", "san": "..." },
        "target_blunder_id": null, "decision_source": "backend_engine" }
+7. Before returning (5 or 6): allocate a decision_id, stamp it into the response, and
+   INSERT ... ON CONFLICT DO NOTHING into opponent_decisions, then COMMIT. A lost
+   insert discards the local move and returns the winner's stored payload instead.
 ```
 
 **Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200–500ms network latency per engine fallback call. The backend must release the request DB transaction before waiting on the remote Maia fallback, so DNS/network stalls do not hold a database connection or read transaction. Slow-path logs are thresholded around ghost search, Maia fallback, analytics capture, and `/api/analysis/lookup` to distinguish DB time from remote-engine and request-lifecycle stalls.
@@ -1721,7 +1737,7 @@ CREATE INDEX idx_game_sessions_drill_state ON game_sessions(drill_state);
 
 ### 7.3.1 Cached session accuracy (Release A)
 
-Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. The `game-review` stats and history surfaces still compute accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch. See §5.5 for the parallel `rating_history` durable-head work shipped alongside.
+Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. **Through Release A** the `game-review` stats and history surfaces still computed accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch that ended that (§7.3.1.3). See §5.5 for the parallel `rating_history` durable-head work shipped alongside.
 
 **Frozen algorithm.** The scoring surface (`expected_total_moves_from_pgn`, `win_percent_from_cp`, `accuracy_from_win_percents`, `AccuracyMove`, `compute_game_accuracy`) is frozen in `app/accuracy_v1.py` and pinned to `python-chess`; `app/accuracy.py` re-exports it and defines `ACCURACY_ALGO_VERSION = 1`. Freezing v1 lets a future v2 coexist and lets a cached value be interpreted against the exact algorithm that produced it.
 
@@ -1796,6 +1812,25 @@ Provenance — snapshot, date, timed SHA, every raw number, every batch candidat
 
 **The selection sweep is a two-component model, because it cannot be a scalar at all.** The sweep is every `SELECT_BATCH_*` page of one pass, so `pages = ceil(N_stale / batch_size) + 1`, and `resolve_batch_size` admits `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` anywhere in `MIN_ADMITTED_BATCH..MAX_BATCH_SIZE`. Measured across that whole domain the cost spans **42x** (3.66 ms at 2 pages to 282.25 ms at 1,647), so no scalar is honest across it: the frozen 37 was 21x under-charged at `batch_size = 1`, and unqualified at *every* page size measured with enough trials to estimate a maximum — not merely outside part of its range. It was **deleted**, not re-picked; a scalar left in the module is a scalar something goes on to price a sweep with. What replaced it is `MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` ms (the relation walk, `xG_sessions` — keyset pagination is served from the primary key, so the relation is read about once *in total* rather than once per page, which is where the original `pages x scan` derivation went wrong) plus `MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` µs (statement startup, `x pages`, no growth factor). Both are frozen from an **upper-envelope** fit rather than a least-squares one — a regression through a set of maxima sits below some of them, so tripling its coefficients still under-prices a measurement it was fitted to — specifically the least conservative line covering every measured maximum on record, a two-variable LP solved exactly in **frozen-basis coordinates** with each point carrying the growth factor of the copy *it* ran on, since the sizing copies share a row count while their relations differ by 26% and one shared factor silently under-charges the leanest. Every measured maximum constrains the bound including the legacy 3-trial run, whose `(4 pages, 13.60 ms)` outlier is an active constraint; the 7-trial floor applies only to points that *steer* the objective. Correctly pricing the sweep moves the atomic rejection boundary from `N_stale = 5,675` to **5,136** at `batch_size = 1` — a false-admission band that is itself a function of the batch size, which is the point. **The model is measured across the whole domain it is evaluated over, out to the 6,001 pages the import-time budget charges and past the atomic rejection boundary near 5,137.** It was frozen from a domain stopping at 1,647 pages and linearly extrapolated beyond it, with the gap declared as an assumption; `g-b-sweep-endpoint-measure` closed it on a **second production-shaped basis** — `gr_p2_sweep6000`, a fresh restore of the same production dump grown by `--synthesize-sessions` to `N_stale = SIZED_TOTAL_ROWS = 6,000`, every row stale, swept at `MIN_ADMITTED_BATCH` for exactly 6,001 pages, seven trials per point, every trial retained. Nothing was rebased or merged: its points enter the same LP through their own `N_copy`, which is **clamped at 1** because that copy is larger than the frozen basis on both axes, so its timings are charged undiscounted. The vertex does not move — same `a`, same `b`, same two active constraints — and no point of the new basis binds: at 6,001 pages the frozen pair models 3,180.518 ms against the 3 x 1,004.131 = 3,012.394 ms coverage demands. A PostgreSQL-gated endpoint test asserts the same *shape* on whatever host runs it, since a per-page term that stays one as the page count grows is a property of the machine rather than of the constant: it executes a 6,001-page sweep and compares that host's upper-range per-page slope against its own lower-range one — paired, interleaved samples reduced by median, segment by segment, so a late nonlinearity fails — with absolute coverage asserted separately. Its timings are never evidence for the frozen numbers and never enter the LP, since its relation is a fixture of clones rather than a production-shaped copy. `MARGINED_MS_BACKFILL_REMAINING = 6` is unaffected and directly qualified: it runs once per pass, carries no page-count term, and the worst of seven measurements normalized on their own bases is exactly 6. Raw trials, the migrated domain artifact and the endpoint basis in `docs/sizing/sweep_batch_domain_20260725.json` and `docs/sizing/sweep_batch_domain_endpoint_20260725.json`. See `docs/release_b_runbook.md` §0 and §5-§7.
 
+#### 7.3.1.3 Cache-only aggregate reads (Release B)
+
+The read switch (`g-b-cache-reads`). Both aggregate consumers reach whole-game accuracy through **one seam**, `app.accuracy.accuracy_for_sessions(db, sessions)`, listed in that module's `__all__` and imported as `from app.accuracy import accuracy_for_sessions` — never out of `app.accuracy_v1`:
+
+```python
+def accuracy_for_sessions(db, sessions):
+    return {session.id: session.player_accuracy for session in sessions}
+```
+
+**Zero SQL.** Both callers already hold the ORM `GameSession` rows they are about to return, so the seam reads a loaded column attribute and must not trigger a lazy load or a refresh. `test_accuracy.py` pins that with a statement counter (and its converse, so the counter cannot pass vacuously); the benchmark re-asserts it on the **total** statement count per invocation. The unused `db` parameter is deliberate: it is what lets a future accuracy vN.0 swap this one body back to a bulk live computation without touching either consumer (`docs/session-accuracy-versioning.md`).
+
+**`/api/stats/summary`** already loads full ended `GameSession` objects, so the ordered move-evaluation query, the Python grouping, the per-session PGN parse, and the per-session computation are gone. `_mean_accuracy`, the overall/color grouping, the rounding, the window/visibility/ended filters, and the NULL exclusion are unchanged (§18.2–18.3). **`/api/history`** keeps one ordered `session_moves` query — it still needs `fen_after` for opening-name derivation — but narrows the select list to `(session_id, fen_after)` while **keeping its `ORDER BY move_number, white-before-black`**: `deepest_opening_name` walks the fens in play order, so dropping the ordering would silently derive a different opening rather than fail (ordering on non-selected columns is legal in SQLite and Postgres for this non-`DISTINCT` query). History builds its accuracy map from the sessions **it returns**, not from the grouped move rows, and constructs the zero-move summary per session so that branch carries its own cached value; an ended-visible session with no `session_moves` rows is absent from the `GROUP BY` yet still stamped by Release A's hook, and a map scoped to the grouped rows would regress there and nowhere else.
+
+**`/api/session/{id}/analysis` is the one endpoint that still computes**, live from its own already-loaded game through `game_accuracy_for_rows`. It is not an aggregate consumer and does not use the seam, so the ply-coordinate guard stays exercised end to end after the switch. History and stats prove the guard's verdict **transitively**: they serve the NULL `recompute_session_accuracy` stamped.
+
+**Version-agnostic read contract.** Neither the seam nor either consumer reads, filters on, or interprets `player_accuracy_algo_version`. Version currency belongs to the migration: `20260719_01`'s invalidation predicate (`player_accuracy_algo_version IS NULL OR < ACCURACY_ALGO_VERSION`) plus its coverage assertion guarantee every ended-visible row is stamped at the current version before any cache-only read serves — which is why deployment is gated on that contract being verified. A reader therefore sees exactly two states: an **integer 0–100**, or **NULL, meaning "no accuracy was derivable"** (including the guard's fail-closed verdict). Hidden rows never reach these consumers; `visible_session_filter` excludes them upstream. No read path ever writes either column.
+
+**Benchmark.** `backend/scripts/bench_stats_accuracy.py` builds its own in-memory SQLite engine and a seeded synthetic fixture (no database URL option) whose cached column is stamped by the production `recompute_session_accuracy` hook, then runs three passes in order: **equivalence** (untimed, first — identical per-session values including NULLs, identical overall/white/black means raw and rounded, and denominators equal to a pure `expected_denominators(games)`), **structural counters** (untimed, per invocation, reset outside every timed region — the live shape issues exactly `games` PGN parses and exactly **one SQL statement, which is the ordered evaluation query**; the cached path issues zero statements of any kind and zero parses). Both sides are pinned on the **total** statement count, not only on the ordered-eval count: the compute median is the numerator of the gated ratio, so a per-session lazy load would leave the eval-query count at 1 while inflating the baseline and making the 20x gate easier to pass, and only then **timing** (median over `--reps` after `--warmup` discards). It exits nonzero unless all three hold, with the gate being the same-run ratio `compute / cached >= MIN_RATIO = 20.0`; `MIN_RATIO` and `UNRESOLVED_GAMES` are module constants, never flags, so the gate is not weakenable from the command line. Absolute medians are recorded as evidence only, never gated — they are hardware-sensitive and no calibration owner exists. The final stdout line is a `BENCH_RESULT {json}` record. The equivalence pass is a round-trip proof that the write hook, the column, the seam, and the aggregate arithmetic agree; it is **not** an independent check of the algorithm, which the frozen goldens own. CI runs only `backend/test_bench_stats_accuracy.py` (small fixture, injected timings); the 500-game timing run stays **manual and non-CI** so hardware variance cannot redden CI.
+
 ### 7.4 Move Analysis Storage
 
 Per-move engine evaluations are captured during gameplay (from Worker B) and stored for post-game review.
@@ -1867,6 +1902,8 @@ This deterministic fill is deliberately a **final-ply-only mitigation**. If an e
 **NKU writer inventory (source-scanned).** The complete set of sanctioned `game_sessions` / `blunders` writer-lock sites — game end (×2), post-end `/moves`, the five drill writers, route-check (two branches), next-opponent, first/auto and manual blunder recording, and SRS review — is pinned by `test_writer_locks.py`, which also **source-scans** the lock modules and fails if any `.with_for_update()` there is not `FOR NO KEY UPDATE` (i.e. `key_share=True`, non-`read`). This keeps the inventory honest: a new non-NKU lock on these tables breaks the guard rather than shipping a silent `FOR UPDATE`/`FOR KEY SHARE` deadlock regression. The `analysis_cache` / `position_analysis` repos deliberately take a different (bare `FOR UPDATE`) lock on their own tables and are out of this inventory's scope.
 
 **Coordination graph (acyclic, cursor is a pure sink).** Across all these paths the lock-acquisition order is consistent and forms a DAG: `session → users`/`advisory → cursor`, `blunder → cursor`, `advisory → cursor`. No path takes any lock *after* writing `opening_score_cursors`, so the evidence cursor is a pure sink and the writers cannot form a lock cycle. The `session_upload_receipt` write (g-upload-observe) preserves this: its `session_id` is a **plain, FK-free column**, so the append-only insert takes **no `KEY SHARE` lock** on `game_sessions`, and it is flushed **before** the `evidence_seq` cursor bump (never after the transaction's final blocking statement) — a pure sink alongside the cursor, adding no edge to the DAG.
+
+`opponent_decisions` (g-ghost-target-server-record) makes the opposite choice deliberately, and stays inside the DAG anyway. Its `session_id` **does** carry an FK with `ON DELETE CASCADE` — retention is session-lifetime, so the cascade is load-bearing — but the receipt's FK-free rationale does not apply: `next-opponent-move` never writes `opening_score_cursors`, so its insert is not competing with a cursor bump. The pre-root drill branch already holds `FOR NO KEY UPDATE` on that same `game_sessions` row, making the insert's `KEY SHARE` a same-transaction no-op; the ghost and engine branches hold no lock at all (the drill lock is rolled back before either runs) and take `KEY SHARE` on `game_sessions` then `blunders` — the same session→blunder order `record_blunder` uses, held only for the microseconds to commit. `KEY SHARE` conflicts solely with `FOR UPDATE` and key-column updates, and every sanctioned lock on these tables is NKU (`test_writer_locks.py`), so no new edge and no cycle.
 
 - **Coalescing & dedup.** Pending work is keyed by `session_id` (one user + player_color per session). Within a coalesced entry, moves are deduped by `(move_number, color)` with **last-write-wins** — the same key as the `session_moves` upsert — so the end-of-session burst (the incremental fire-and-forget uploader plus the final full-history upload re-sending the same slots) collapses to **one worker run carrying exactly one payload per committed slot**. The entry is bounded by session size, not upload count, and the deduped payload avoids the analysis-cache `DUPLICATE_CONFLICT` that a naive concatenation of overlapping slots (with differing evals) would cause. The single worker thread serializes **all** evidence runs (even across sessions/users), so in single-process/single-replica prod the advisory lock is effectively uncontended; it still guards the unique indexes against any cross-process writer.
 - **Best-effort enqueue.** The enqueue swallows and logs any scheduler fault so it can never regress `/moves` from 200 to 500 (same contract as the opening-score `request_recompute`). The request returns 200 with the usual `drill_state` / `drill_terminal_reason`.
@@ -2138,7 +2175,8 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
     "reached_30d": "integer",
     "p_reach": "float"
   },
-  "decision_source": "ghost_path | backend_engine"
+  "decision_source": "ghost_path | backend_engine",
+  "decision_id": "uuid"
 }
 ```
 
@@ -2148,6 +2186,17 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
 - `target_fen` - FEN of the blunder position the ghost is steering toward (ghost mode only), or `null`.
 - `target_blunder_srs` - SRS metadata for the targeted blunder (ghost mode only), or `null`.
 - `decision_source` - Backend decision branch used to produce the move.
+- `decision_id` - Opaque id of the `opponent_decisions` row that recorded this decision (see below). Present on every served response, including replays.
+
+**Opponent-decision log (g-ghost-target-server-record).** Every served decision is written to `opponent_decisions` and **committed before the response is returned**; a write failure fails the request closed rather than serving a move nothing recorded. Previously the decision was computed, returned and forgotten — the only server-side trace was a fire-and-forget `opponent_move_served` event, and `session_moves.target_blunder_id` reached the database solely as a **client echo**, which is unusable as the denominator of a targeted p_reach (a session that never uploads silently drops a failed steer).
+
+The row is an **envelope**, not the response: `decision_id` and `served_at` are envelope-level, `response_payload` is the serialized `NextOpponentMoveResponse`, and `target_blunder_id` / `resulting_fen` / `reaches_drill_root` are extracted off that payload for indexing and validation. The payload is stored rather than reconstructed because UCI + SAN + resulting FEN cannot replay a response verbatim: `target_blunder_id IS NULL` cannot distinguish a pre-root route ghost move from an engine move, and `target_blunder_srs` snapshots counters that move between the original request and its retry.
+
+- **Grain.** Opaque `decision_id` PK with `UNIQUE (session_id, request_fingerprint)` as the replay key. The fingerprint covers the normalized request FEN **and** the full UCI history — Maia consumes the history, and two transpositions can share a FEN and a ply while being different inputs. `(session_id, ply_before)` is deliberately not the grain: a revert continues on the same session, so a new branch legitimately asks at the same ply from a different position, and replaying the old row could return a move that is illegal there.
+- **Replay, not recompute.** `getNextOpponentMove` sets `retries: 2`, so one decision can arrive as three requests. A duplicate fingerprint returns the stored payload — including the stored `decision_id` — which makes the endpoint idempotent at the source rather than deduplicating downstream. The lookup runs **before** the pre-root drill branch: that branch commits `drill_state='root_reached'` before returning the route move that would reach it, so without replay a lost first response would make the retry fall through and answer from a still-pre-root FEN with a different move.
+- **The unique constraint is the arbiter, not a lock.** The normal ghost/engine path holds no row lock (the pre-root branch rolls it back before falling through) and `find_ghost_move` is randomized, so two concurrent identical requests can both compute and disagree. The insert is `ON CONFLICT DO NOTHING RETURNING`; a loser **discards its own move** and re-reads the winner's payload. Serving its own would serve a move no row records, and root confirmation would then fail its `resulting_fen` check against the winner's row.
+- **`served_at` is the targeted timeline.** `blunder_opportunity_events` stamps `session.started_at` instead, which would assign a late-session decision the session's opening time and drop targeting of any blunder created during that same session. Indexed as `(target_blunder_id, served_at)`.
+- **Retention** is session-lifetime via `ON DELETE CASCADE`, with no independent TTL: the 30-day p_reach window is a query concern, not a storage boundary, and this log is the authoritative source for rebuilding targeted evidence.
 
 #### POST /api/game/end
 
@@ -3178,7 +3227,13 @@ Each entry is keyed by `(fen_before, move_uci)` — the exact position before a 
 
 ### 14.2 Frontend Lookup
 
-`lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned). Each `CachedAnalysis` now carries the *position* grain (`best_move_uci`, `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate`, `position_trusted`) and the *move* grain (`move_san` — nullable, `played_eval`, `played_eval_mate`, `eval_delta`, `classification`, `move_trusted`) independently, plus the cross-grain `position_eval_loss_cp`. Position-only hits (trusted position resolved, no exact `(fen, move_uci)` row) are emitted with a null `move_san`.
+`lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned). Since g-v21l the response is **three distinct surfaces with three distinct gates** (§14.7):
+
+- **Generic reads** — the *position* grain (`best_move_uci`, `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate`, `position_trusted`) and the *move* grain (`move_san` — nullable, `played_eval`, `played_eval_mate`, `eval_delta`, `classification`, `move_trusted`), gated on `POSITION_READ` / `MOVE_READ`. Their effect is confined to these fields and the session position-analysis export; they never grade a drill and never reconcile a publication.
+- **Drill grading** — `drill_best_move_uci` plus the cross-grain `position_eval_loss_cp`, both gated on `DRILL_GRADE` and resolved from a DRILL_GRADE-specific position winner independent of the generic one.
+- **Publication** — `reusable_analysis` (one atomic coherent tuple) and `publication_best` (the exact best move a consumer may reconcile against), each carrying an independent flag per reuse consumer.
+
+Position-only hits (a position resolved, no exact `(fen, move_uci)` row) are emitted with a null `move_san`.
 
 Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish analysis tasks. The completeness check is split per grain: `canResolvePositionAnalysis` requires `best_move_uci` + a multi-move `best_line_uci` whose first move matches it; `canResolveMoveAnalysis` requires an enum-valid classification + a finite played eval. The trust gates (`isTrustedPositionHit`, `isTrustedExactBestHit`, `isTrustedMoveHit`) layer `position_trusted` / `move_trusted` on top. A cache row bypasses the local engine on a grain only when its grain gate passes; otherwise the worker backfills. See §14.6.
 
@@ -3323,6 +3378,284 @@ best-move columns still on `analysis_cache` remain (backfill source + v2 project
 are no longer authoritative; dropping them is deferred to the same follow-up.
 
 ---
+
+### 14.7 Read-time capability trust and submitter scoping (g-v21l)
+
+Before this bead the only read-trust question was "is this row *canonical*?".
+`browser-analysis-multipv-v2` — the truthful visible depth-21 MultiPV-3 producer — could
+be stored, could correctively replace defective rows, and could re-label a MoveList
+entry, but could never be *read*. This section is how it became readable without
+becoming authoritative.
+
+#### 14.7.1 Threat model and the same-user decision
+
+Browser evidence is **authenticated but not attested**.
+`/sessions/{id}/analysis-evidence` maps its endpoint-controlled
+`producer="visible-multipv-v1"` discriminator to the profile and then validates only
+move legality, `resolver-complete-v2` completeness, and classification rederivation.
+None of that proves a search actually ran at the pinned identity: an authenticated user
+running a modified client can submit fabricated but internally coherent scores at any
+position reachable from their own session mainline, and **every** check in this design
+— contract, strength comparison, coherent-tuple validation, classification revalidation
+— passes.
+
+`analysis_cache` is globally keyed on `(fen_before, move_uci)` and carries no owner
+column, so an UNSCOPED read or reuse grant would convert "a user can lie to themselves"
+into "a user can lie to everyone": one fabricated row would suppress other users'
+workers, feed their durable game analysis and SRS, and steer their opening quality.
+
+The decision is **same-user scoping**:
+
+- Server-side verification/attestation is rejected — re-running the search server-side
+  destroys the entire reuse win, and there is no cheap proof-of-search primitive.
+- Every newly granted capability is **owner-scoped**: a non-authoritative row may
+  satisfy it only for a user who independently submitted a consistent tuple for it.
+  Fabricated evidence then affects only its own author's reads. **Self-deception** (a
+  user degrading their own SRS scheduling) is an accepted, documented residual risk;
+  cross-user, a fabricator can at most cause a denial of REUSE — occupying a key with a
+  row others fail to associate with, so they fall back to the worker — never an
+  injection of facts into another user's reads.
+- `TREE_EVAL` is **not** granted: the tree resolves a shared graph node with no
+  per-viewer identity (`tree_eval.lookup_root_eval(session, starting_fen)`), so owner
+  scoping is not expressible there — the same node would have to evaluate differently
+  per viewer. Withholding it keeps the tree ROOT eval and the TRUSTED move tiers 1–2
+  canonical. It does **not** make the tree canonical-only: the untrusted tiers 3–4 are
+  deliberately source-agnostic, already surface untrusted browser and legacy played
+  evals, sit outside this capability system entirely, and are unchanged.
+- `DRILL_GRADE` is **not** granted: a fabricated row must never grade a drill.
+- `DISPLAY_OVERLAY` keeps its current UNSCOPED behavior — purely presentational
+  re-labeling that already ships. The cross-user overlay question is filed separately
+  (g-overlay-owner-scope).
+
+The authority boundary is untouched: `Profile.authoritative` is unchanged, there is no
+general `read_trusted` flag, and canonical authority remains the ONLY route to legacy
+reclamation, `resolve_profile` write-time stamping, `position_analysis` admission, and
+authoritative MERGE behavior.
+
+#### 14.7.2 `analysis_cache_submission` — eligibility as an association
+
+Eligibility is a `(analysis_cache_id, user_id)` row, **not** a
+`submitted_by_user_id` column on `analysis_cache`. A single column cannot express
+either case:
+
+- `browser-analysis-multipv-v2` is a **fixed** profile (`dynamic_fields=frozenset()`),
+  so `_same_profile_strength_decision` returns `None` on its first branch and there is
+  **no same-profile REPLACE path**. Rows already stored by g-reuse-d21-search would
+  migrate with a null owner and could never acquire one — an identical resubmission
+  decides `SAME_PROFILE_IDEMPOTENT` and writes nothing, and a superset resubmission
+  hits the cross-owner merge refusal. Every pre-existing key would be permanently dead.
+- If users A and B independently submit the same tuple, one column records only one of
+  them. First-wins denies B; ownership transfer denies A. Both are ordinary outcomes
+  for a shared opening position.
+
+The pair IS the table's identity, so `(analysis_cache_id, user_id)` is the **composite
+primary key** with no surrogate id, plus a separate reverse-order
+`(user_id, analysis_cache_id)` index serving the viewer-scoped read
+(`WHERE user_id = :viewer AND analysis_cache_id IN :ids`). Both FKs are
+`ON DELETE CASCADE`. One row means exactly *this user independently submitted a tuple
+consistent with this stored row*: it is not ownership, confers no write rights, and is
+never exposed in an API response, log line, or metric dimension. The table joins
+`EVIDENCE_EPOCH_SHARED_TABLES`, so association writes bump `evidence_epoch` exactly as
+evidence writes do. **No backfill** is needed — see the claim rule below.
+
+#### 14.7.3 The claim rule (write path)
+
+A claim is possible only when all three hold: the batch carries a submitter (backend
+and canonical writers pass none), the incoming row is effectively
+`browser-analysis-multipv-v2` and non-authoritative, and the row that will be stored
+**after** the decision is likewise. Condition 3 is load-bearing: a browser submission
+can agree with and cover a canonical tuple (Rule 5 returns `INCOMPATIBLE_KEEP`), and a
+profile-agnostic rule would attach a browser user to a canonical row — which would then
+fail the MERGE precondition and block a later canonical merge. **Canonical rows carry
+no associations, by construction and at every moment.**
+
+Subject to that, per decision:
+
+| Decision | Claim action |
+|----------|--------------|
+| `INSERT` | associate the writer |
+| `REPLACE` | **unconditionally** clear every existing association, then associate the writer iff the claim conditions hold (a canonical REPLACE leaves the row association-free) |
+| `KEEP` / `MERGE` | associate iff `_fields_agree(existing, incoming)` **AND** `existing.populated_fields <= incoming.populated_fields` |
+| conflicting fields, or `submitter_user_id=None` | associate nobody |
+
+The coverage condition is what makes an association *safe* rather than merely
+plausible: a user can only ever read fields they produced themselves. Without it a
+fabricator agreeing on every overlapping field could still inject, say, a mate field
+the corroborating user left empty. Its deliberate cost is that a user submitting a
+strict **subset** of a stored row does not associate and falls back to the worker. The
+REPLACE clearing half is unconditional because a stale association surviving a full
+overwrite would let its holder read facts it never submitted.
+
+This rule is precisely what unblocks a pre-existing row: such a row has no
+associations, and the first submitter to resubmit an agreeing, field-covering tuple
+takes the `SAME_PROFILE_IDEMPOTENT` branch, touches no evidence column, and gains an
+association. Two independent submitters of the same tuple both associate through that
+same branch.
+
+**The claim runs inside the writer's locked transaction, never after it.**
+`submit_analysis_evidence` knows the user but the writer opens its own session (for
+SQLite a *different* engine) and owns the whole transaction through its single commit.
+An endpoint-side association write after that call would race: a canonical REPLACE
+landing in between would leave the user associated with facts they never submitted,
+after the REPLACE's clearing pass had already run. So `write_analysis_cache_rows` takes
+a batch-level `submitter_user_id` (batch-level is correct — the endpoint's batch is
+single-user and single-producer by construction), `_insert_missing` returns the primary
+key alongside the two key columns, association sets load immediately after **every**
+`_lock_existing` (each bounded TOCTOU pass *and* the terminal recovery lock, paired in
+one helper), and all deletions/insertions apply in one pass after the conflict loop and
+**before** the single commit. Insertions use `ON CONFLICT DO NOTHING`, so the bounded
+whole-transaction retry replays the pass idempotently.
+
+**MERGE requires a single affected submitter.** `_build_merged` starts from
+`dict(existing)` and writes evidence columns only, so merging B's superset into A's row
+would let A read fields only B produced. For a non-authoritative existing row the
+association set must be a subset of `{incoming submitter}`; otherwise the decision is
+`KEEP` / `merge_owner_mismatch_keep`. A refused merge is not a denial of access — the
+claim rule still runs, so B associates with the *unmerged* row, which by the coverage
+condition contains only fields B produced. An effectively authoritative existing row
+skips the precondition entirely, so canonical merges are byte-for-byte unchanged.
+`_dedupe_batch` carries no such guard, deliberately: it collapses one batch's in-memory
+rows before any reach the database, and the batch-level submitter means every row it
+could collapse necessarily shares one submitter.
+
+#### 14.7.4 Read path: capability + viewer are required arguments
+
+`position_trust_flags`, `move_trust_flags`, `resolve_trusted_position(s)` and the
+in-memory resolver all take a required `Capability` and `viewer_user_id` — no
+permissive default, because a caller that forgot to name its consumer would silently
+widen trust. Element 3 of the trust tuple is now
+`contract_satisfied AND has_capability(row, capability) AND owner_scope_ok(...)`;
+elements 1 and 2 (effective authority, grain contract) are unchanged.
+`viewer_user_id=None` means "no viewer" and admits only effectively authoritative rows.
+
+| Consumer | Capability | Viewer |
+|----------|-----------|--------|
+| `/api/analysis/lookup` generic best fields | `POSITION_READ` | token subject |
+| `/api/analysis/lookup` generic `move_trusted` | `MOVE_READ` | token subject |
+| session position-analysis export | `POSITION_READ` | session owner |
+| `tree_eval` root eval + trusted move tiers 1–2 | `TREE_EVAL` | `None` |
+| `opening_evidence._apply_cache_fallbacks` | `OPENING_EVIDENCE` | the batch's `user_id` |
+| drill-only position/move resolution | `DRILL_GRADE` | token subject |
+
+The untrusted tree tiers 3–4, the session `SessionMove` seed fallback, the move-card
+untrusted eval and the `MoveUpgrade` authority marker remain outside this system.
+
+**Resolved-evidence descriptor.** `TrustedPosition` no longer carries a bare
+`analysis_profile_id`; it carries an immutable, backend-only `ResolvedEvidence`: the
+source identifier as `(source_table, primary_key)`, the claimed profile, whether
+identity verified, the effective profile id and effective-authority result, the
+declared contract id and the grain-contract result, an immutable `viewer_associated`
+flag, and a snapshot of every `IDENTITY_FIELDS` value including nulls. It implements
+the `evidence_policy.RowView` methods from that snapshot, so `has_capability`,
+`compare_row_strength` and `compare_evidence_rows` operate on the exact winning row
+rather than reconstructing settings from a profile id — which is not even possible for
+a declared-dynamic profile. It carries only **this viewer's** membership, never the
+row's full association set; full-set loading is reserved for the locked writer's claim
+pass and the opening digest's shared projection. None of it is ever serialized.
+
+**Four-query lookup ceiling.** Position resolution splits into a batched loader and a
+PURE in-memory resolver, so `/api/analysis/lookup` executes at most four evidence
+SELECTs for any non-empty request of up to `MAX_LOOKUP_POSITIONS`, independent of hit
+count and capability count:
+
+1. exact/full-FEN `analysis_cache` rows;
+2. normalized-FEN `position_analysis` rows;
+3. normalized-FEN fallback `analysis_cache` rows;
+4. ONE viewer-scoped `analysis_cache_submission` fetch over the already-loaded
+   candidate ids.
+
+Query 4 stamps each descriptor's `viewer_associated`; `POSITION_READ`, `DRILL_GRADE`
+and both reuse capabilities then resolve against that same in-memory membership set. No
+capability may re-enter the two-query resolver and no loop may issue a query per row.
+
+**Canonical-first ordering.** Filtering and ranking are separate concerns: once a
+granted browser row passes the capability + owner gate it is a trusted *candidate*, but
+canonical evidence must still win the tier. `_legacy_position_sort_key` and a
+trusted-only tree move key each prepend an effective-authority key (the remaining order
+— mate presence, complete best-move row, source rank, id — is unchanged). The untrusted
+tier-3/4 move key is byte-for-byte unchanged.
+
+#### 14.7.5 Coherent tuples, and the three-way publication split
+
+`resolve_coherent_evidence_tuple` is the ONLY place any consumer may combine a position
+grain with a move grain. Both `/api/analysis/lookup`'s `reusable_analysis` and
+`opening_evidence._apply_cache_fallbacks` call it; no consumer hand-rolls the pairing.
+It requires: both grains independently satisfy their contract and hold the capability
+for the viewer; their settings are compatible (identical effective profile + identity
+snapshots, or `compare_evidence_rows` returns `EQUAL`); their FACTS are coherent (a
+combined `resolver-complete-v2` row's embedded best move / PV / CP / mate must exactly
+match the capability-filtered position result; a future move-only row assembles only if
+every overlapping fact agrees and a recomputed clamped delta equals the stored one); a
+finite CP `eval_delta`; and the shared classification validator for every
+non-authoritative move row.
+
+The overlap-agreement requirement is what makes this **strictly stronger than an
+equal-search-strength check alone**: two same-profile sibling rows can compare EQUAL on
+strength while asserting different facts. That combination is now refused on both the
+lookup and the opening-fallback paths (the latter previously upgraded opening quality
+with no factual-coherence check at all). Scope guard: the coherence requirement applies
+whenever EITHER grain is non-authoritative; an authoritative/authoritative pair keeps
+today's equal-strength behavior byte-for-byte (tightening it is g-open-canon-coherence).
+
+Three response surfaces, three gates:
+
+- **Generic reads** (`POSITION_READ` / `MOVE_READ`) — confined to the lookup response's
+  generic best/move fields and the session position-analysis export.
+- **Drill grading** (`DRILL_GRADE`) — `drill_best_move_uci` from an independently
+  resolved drill position, plus `position_eval_loss_cp`. A `DRILL_GRADE` position winner
+  may emit `drill_best_move_uci` even when its eval is mate-valued or there is no exact
+  move row; `position_eval_loss_cp` is non-null only when both drill grains exist, both
+  hold `DRILL_GRADE`, both are pure CP, and their captured settings compare EQUAL;
+  non-`DRILL_GRADE` browser evidence emits neither field.
+- **Publication reconciliation** (reuse capabilities) — `reusable_analysis` and
+  `publication_best`. `reconcileTrustedBest` is not a display helper: it rewrites
+  classification, delta, blunder, recordability and provenance, and
+  `GameAnalysisCoordinator.resolveAnalysisResult` emits that rewritten result into the
+  store, the incremental upload, and the SRS/decision paths. Reconciliation is therefore
+  a durable PUBLICATION effect and requires the capability that authorizes durable
+  publication for that consumer — never a read grant, so it can never be reached through
+  the generic `POSITION_READ` surface. `publication_best` is position-grain only by
+  design ("which move is best" is a position question; requiring the full tuple would
+  regress canonical position-only and mate hits), emits nothing when the two reuse
+  capabilities resolve different best moves, and is independent of `reusable_analysis`
+  in both directions.
+
+On the frontend, `GameAnalysisCoordinator` keeps `drillTruth` grade-only (populated
+solely from `drill_best_move_uci` + `position_eval_loss_cp`, consumed only in
+`waitForDrillGrade`; strictness zero compares the played UCI immediately without
+awaiting or publishing a worker result) and adds a separate `publicationBestTruth`
+populated only when `publication_best.game_analysis_reuse === true`. `useMoveAnalysis`
+populates `exactBestTruth` only from `publication_best.interactive_analysis_reuse`.
+Both consumers build `AnalysisResult` from the atomic payload's slices, publish only
+when their OWN flag is true, and fall back to the worker on a null payload, a false
+flag, a non-finite delta, a stale request, a timeout, or any structural failure.
+
+#### 14.7.6 Opening-score freshness tracks eligibility
+
+Associations are an input to the `OPENING_EVIDENCE` trust filter, so they join the
+evidence digest. Both `analysis_cache` projections in `_shared_evidence_lines` — the
+`AC|` move-grain line and the `ACP|` legacy position-tier line — hash the row's
+associated user ids as a sorted, deterministically formatted list. `PA|` does not:
+`position_analysis` is canonical-only storage that browser evidence is structurally
+excluded from.
+
+The **FULL** set is hashed, not the requesting user's membership, because
+`_shared_evidence_lines` must stay user-independent — that is what makes "scoped digest
+== full digest's shared slice" hold by construction for `shared_scope_digest`. The cost
+(one user's claim invalidates other users' batches at the same positions) is accepted:
+association writes are rare next to evidence writes, and the alternative breaks the
+shared-slice invariant. Without this, an association-only mutation would advance
+`evidence_epoch` via the shared-table trigger, fall to `_cheap_evidence_fresh` step 5,
+re-hash the stored scope, still match, and re-arm a batch computed when its user could
+not read evidence they can now read.
+
+Separately, `OPENING_EVIDENCE_INPUTS_VERSION` moves `raw-v6` → **`raw-v7`**: three
+independent selection changes land here (the `OPENING_EVIDENCE` grant, association
+scoping, and the coherent-tuple requirement) while every pre-existing raw row is
+byte-identical, so old batches must fail the registry/input fingerprint and self-heal.
+Per §13.2 a trust-selection semantic change requires exactly this bump — and the bump is
+explicitly NOT a substitute for hashing the association set, because it cannot
+invalidate anything that changes after it lands.
 
 ## 15. Local Fallback
 
@@ -3628,7 +3961,7 @@ This is deliberate, and each is pinned by a test in `test_stats_api.py`.
 |-------|-------|--------------------------|
 | `quality_distribution` | **move** | Classified player moves across **all** windowed sessions — **in-progress games included** |
 | `mistake_free_game_rate` | **game** | **All** ended sessions in the window |
-| `accuracy_pct` | **game** | Ended sessions in the window **that scored** — i.e. whose accuracy is not `None` |
+| `accuracy_pct` | **game** | Ended sessions in the window **that scored** — i.e. whose **cached** `player_accuracy` is not `NULL` (§7.3.1.3) |
 
 `colors.{white,black}.accuracy_pct` is the same statistic as `accuracy_pct`, scoped to
 that color. All three fields (and the color-scoped ones) are `null`, never `0`, when
@@ -3654,27 +3987,31 @@ the distribution, then consulted only for ended sessions.
 
 ### 18.2 `accuracy_pct` is an unweighted mean of per-game integers
 
-`compute_game_accuracy` returns a **rounded 0..100 integer** per game (accuracy v1,
-frozen — §7.3.1). `_mean_accuracy` averages those integers and rounds again to one
-decimal. Two consequences, both accepted:
+Accuracy v1 returns a **rounded 0..100 integer** per game (frozen — §7.3.1), and that is
+what `game_sessions.player_accuracy` stores. `_mean_accuracy` averages the cached integers
+and rounds again to one decimal. Two consequences, both accepted:
 
 - **It is double-rounded** (per-game round, then round the mean).
 - **It is unweighted:** a 10-move game weighs exactly as much as a 60-move game.
 
 Keep it that way. It answers *"how well do I play in a typical game"*, which is a
-per-game question, so per-game weighting is the honest one. Decisively: that per-game
-integer is **the same value g-aeq8's cached `game_sessions.player_accuracy` column will
-serve** (§7.3.1). A move-weighted variant would need per-move evidence the cache does not
-retain, so it would collide with the Release B read switch on arrival.
+per-game question, so per-game weighting is the honest one. Decisively: since the Release B
+read switch (§7.3.1.3) that per-game integer **is** what `game_sessions.player_accuracy`
+serves. A move-weighted variant would need per-move evidence the cache does not retain, so
+it is **foreclosed** — not on a collision course with a future switch, but incompatible with
+the one that already shipped.
 
 ### 18.3 The accuracy denominator is "ended games that **scored**"
 
-`_mean_accuracy` **silently drops games whose accuracy is `None`**. So `accuracy_pct` and
-`mistake_free_game_rate` are both game-grain and both ended-only, and *still* do not share
-a denominator: an ended game that fails to score is absent from the accuracy mean but
+`_mean_accuracy` **silently drops games whose CACHED accuracy is `NULL`**. So `accuracy_pct`
+and `mistake_free_game_rate` are both game-grain and both ended-only, and *still* do not
+share a denominator: an ended game that fails to score is absent from the accuracy mean but
 present (as clean) in the mistake-free rate.
 
-That drop-arm is not a rare edge. It fires today for an ended game with no resolved evals,
-and the frozen ply-coordinate guard (g-22t8.6) makes it **load-bearing**: a game whose ply
-coordinates are broken scores `None` rather than a silently wrong number, and drops out of
-the mean. The guard's fail-closed contract depends on this arm existing.
+That drop-arm is not a rare edge. It fires for an ended game with no resolved evals, and the
+frozen ply-coordinate guard (g-22t8.6) makes it **load-bearing**: a game whose ply
+coordinates are broken scores `None` rather than a silently wrong number. Since the read
+switch (§7.3.1.3) that verdict reaches the mean **through the cache** rather than through a
+live call — `recompute_session_accuracy` runs the guard, stamps the `NULL`, and
+`_mean_accuracy` drops it here. The guard's fail-closed contract depends on this arm
+existing.

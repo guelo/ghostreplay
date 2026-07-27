@@ -284,6 +284,26 @@ def _create_test_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_analysis_cache_norm_move "
         "ON analysis_cache(normalized_fen_before, move_uci)"
     ))
+    # Submitter-eligibility associations (g-v21l). The PAIR is the identity, so
+    # it is the composite primary key and there is no surrogate id; the separate
+    # reverse-order index serves the viewer-scoped read. Mirrors migration
+    # 20260727_01. (SQLite only enforces the ON DELETE CASCADE when
+    # ``PRAGMA foreign_keys=ON`` is set on the connection; the clause is declared
+    # here so the cascade regression can assert real behavior under that pragma.)
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS analysis_cache_submission (
+            analysis_cache_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (analysis_cache_id, user_id),
+            FOREIGN KEY (analysis_cache_id)
+                REFERENCES analysis_cache(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_cache_submission_user "
+        "ON analysis_cache_submission(user_id, analysis_cache_id)"
+    ))
     # Trusted position winner (one per normalized_fen) — see PositionAnalysisRow.
     # Distinct grain from analysis_cache; fen is provenance-only, normalized_fen is
     # the lookup/uniqueness key. Mirrors the 20260617_01 migration.
@@ -481,17 +501,49 @@ def _create_test_schema(conn) -> None:
             UNIQUE(blunder_id, idempotency_key)
         )
     """))
+    # g-ghost-target-server-record: authoritative, replayable opponent-decision log.
+    # Mirrors the ORM/Alembic definition so backend tests run the same schema. The
+    # UNIQUE is the replay key AND the concurrency arbiter (ON CONFLICT DO NOTHING);
+    # session_id cascades because retention is session-lifetime with no TTL.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opponent_decisions (
+            decision_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            request_fingerprint TEXT NOT NULL,
+            request_fen_hash TEXT NOT NULL,
+            uci_history TEXT NOT NULL,
+            ply_before INTEGER NOT NULL,
+            served_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            response_payload TEXT NOT NULL,
+            target_blunder_id INTEGER,
+            resulting_fen TEXT,
+            reaches_drill_root BOOLEAN DEFAULT false NOT NULL,
+            CONSTRAINT ck_opponent_decisions_ply_before CHECK (ply_before >= 0),
+            CONSTRAINT uq_opponent_decisions_session_fingerprint
+                UNIQUE (session_id, request_fingerprint),
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_blunder_id) REFERENCES blunders(id)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_opponent_decisions_target_served
+        ON opponent_decisions (target_blunder_id, served_at)
+    """))
     conn.commit()
 
 
 def _reset_test_schema(conn) -> None:
+    # Before game_sessions / blunders: opponent_decisions references both.
+    conn.execute(text("DROP TABLE IF EXISTS opponent_decisions"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_events"))
     conn.execute(text("DROP TABLE IF EXISTS opening_position_edges"))
     conn.execute(text("DROP TABLE IF EXISTS opening_position_scores"))
     conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
-    # NB: dropping analysis_cache / position_analysis below also drops their
-    # evidence_epoch triggers (sqlite drops triggers with their table).
+    # NB: dropping analysis_cache / position_analysis / analysis_cache_submission
+    # below also drops their evidence_epoch triggers (sqlite drops triggers with
+    # their table).
+    conn.execute(text("DROP TABLE IF EXISTS analysis_cache_submission"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batch_shared_scope"))
     conn.execute(text("DROP TABLE IF EXISTS evidence_epoch"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))

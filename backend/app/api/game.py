@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import math
 import random
@@ -11,15 +12,25 @@ from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.accuracy import expected_total_moves_from_pgn, recompute_session_accuracy
 from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.drill_steering import route_map_for_target, route_preserving_moves
-from app.fen import fen_hash, active_color
-from app.models import GameSession, Position, RatingHistory, User, decode_uci_line
+from app.fen import fen_hash, active_color, normalize_fen
+from app.models import (
+    GameSession,
+    OpponentDecision,
+    Position,
+    RatingHistory,
+    User,
+    decode_uci_line,
+)
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_cache import bump_evidence_seq
 from app.opening_densify import routing_view
@@ -634,6 +645,16 @@ class NextOpponentMoveResponse(BaseModel):
         description="Backend decision branch used to produce the move",
     )
     drill_route: DrillRouteMetadata | None = None
+    decision_id: uuid.UUID | None = Field(
+        None,
+        description=(
+            "Opaque id of the opponent_decisions row that recorded this decision. "
+            "Optional at the model level ONLY so the pre-stamp intermediate object is "
+            "constructible — every SERVED response carries one: a fresh decision gets "
+            "it from _record_decision before serializing, and a replay reads it out of "
+            "a stored payload that always had it. Root confirmation sends it back."
+        ),
+    )
 
 
 @router.post("/start", response_model=GameStartResponse, status_code=201)
@@ -870,6 +891,207 @@ def end_game(
     )
 
 
+# Version prefix on the fingerprint input so the definition can change later without
+# silently colliding with rows written under the old one.
+DECISION_FINGERPRINT_SCHEME = "v1"
+
+
+def _encode_uci_history(moves: list[str]) -> str:
+    """Store the history as canonical JSON, NOT ``encode_uci_line``'s space-join.
+
+    The repo's space-joined form (``drill_line``) is lossy over what this endpoint
+    accepts: ``NextOpponentMoveRequest.moves`` is ``list[str]`` with no per-element
+    validation, so ``["e2e4 e7e5", "g1f3"]`` and ``["e2e4", "e7e5 g1f3"]`` would store
+    identical text — and, having the same length, ``ply_before`` would not tell them
+    apart either. The column is documented as the FULL UCI history, so it stores the
+    array the client actually sent. JSON-as-string follows the repo convention for
+    structured Text columns and round-trips through ``json.loads``.
+
+    Compact separators pin one canonical rendering; ``[]`` is a real empty history,
+    never NULL.
+    """
+    return json.dumps(moves, separators=(",", ":"))
+
+
+def _decision_fingerprint(normalized_fen: str, moves: list[str]) -> str:
+    """Replay key over the whole request INPUT, not just the position.
+
+    History is included because Maia consumes ``NextOpponentMoveRequest.moves``, and
+    two transpositions can share a FEN and a ply while being different request inputs.
+    It is also what makes a post-revert branch — same session, same ply, truncated
+    history — a NEW decision rather than a conflict against the pre-revert row.
+
+    The encoding MUST be injective, because a collision lets one request replay a
+    different request's decision. Every field is therefore netstring-framed
+    (``<len>:<field>``), which is self-delimiting: a decoder reads digits up to ``:``
+    and then exactly that many characters, so no field's CONTENT can be mistaken for
+    a separator and no field boundary can shift.
+
+    Delimiter-joining was tried first and is not sufficient:
+
+    * ``" ".join(moves)`` is DEMONSTRABLY not injective. ``NextOpponentMoveRequest.moves``
+      is ``list[str]`` with no per-element validation, so ``["e2e4 e7e5"]`` and
+      ``["e2e4", "e7e5"]`` — two distinct JSON arrays, forwarded verbatim to Maia as
+      different inputs — joined to the same string. So did ``[""]`` and ``[]``. This
+      is a real replay hazard and the reason for the change.
+    * ``"\\n"`` was an unsound field separator, though no exploit is known.
+      ``normalize_fen`` splits on ``" "`` while ``chess.Board`` splits on ANY
+      whitespace, so a newline-carrying FEN parses and survives normalization — the
+      FEN field is not newline-free. A boundary SHIFT additionally needs one
+      normalized output to be a ``"\\n"``-terminated prefix of another, which
+      ``normalize_fen`` currently prevents by unconditionally overwriting ``parts[3]``
+      with ``"-"`` or a square name. Framing is defensive here: it stops that
+      non-obvious invariant from being load-bearing.
+
+    Per-element UCI validation would also close the first hole, but it would narrow
+    what the endpoint accepts — Maia owns that contract today. Framing closes it
+    without changing the accepted input surface.
+    """
+    payload = "".join(
+        f"{len(field)}:{field}"
+        for field in (DECISION_FINGERPRINT_SCHEME, normalized_fen, *moves)
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _replay_decision(
+    db: Session, session_id: uuid.UUID, request_fingerprint: str
+) -> NextOpponentMoveResponse | None:
+    """Return the stored response for an already-recorded request, else None.
+
+    Replay, NOT recompute: the payload is deserialized verbatim, with no business
+    logic and no re-query of mutable state. That is the whole point of storing the
+    serialized response — ``target_blunder_srs`` snapshots counters that move between
+    the original request and its retry, so a reconstruction would answer a retry with
+    a different response than the one first served.
+    """
+    # Typed columns rather than raw SQL: the UUID storage form differs between
+    # Postgres (native uuid) and the SQLite test dialect, and a hand-bound string
+    # would silently never match on one of them.
+    payload = db.execute(
+        select(OpponentDecision.response_payload).where(
+            OpponentDecision.session_id == session_id,
+            OpponentDecision.request_fingerprint == request_fingerprint,
+        )
+    ).scalar()
+    if payload is None:
+        return None
+    return NextOpponentMoveResponse.model_validate_json(payload)
+
+
+def _record_decision(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    request_fingerprint: str,
+    request_fen_hash: str,
+    uci_history: str | None,
+    ply_before: int,
+    response: NextOpponentMoveResponse,
+    resulting_fen: str | None,
+) -> tuple[NextOpponentMoveResponse, bool]:
+    """Persist a freshly computed decision and return the response to actually serve.
+
+    Returns ``(response, was_replayed)``. ``was_replayed`` is True when this caller
+    LOST an insert race and is serving the winner's stored payload instead of its own
+    computed move.
+
+    Concurrency is arbitrated by ``uq_opponent_decisions_session_fingerprint``, not by
+    a lock: the normal ghost/engine path holds none (the pre-root branch rolls the
+    drill lock back before falling through), so two concurrent identical requests can
+    both miss the replay lookup and both compute — and ``find_ghost_move`` is
+    randomized, so their moves need not agree.
+
+    The loser MUST discard its own move. Serving it would serve a move that no stored
+    decision records, and root confirmation would then fail its ``resulting_fen``
+    check against the winner's row. Returning the winner's payload also returns the
+    winner's ``decision_id``, so the id a client later confirms always names a
+    committed row.
+
+    This function commits. A response served from an uncommitted decision is one the
+    retry cannot replay. A write failure propagates rather than being swallowed: the
+    endpoint fails closed instead of serving a move it did not record, because an
+    unrecorded served target silently drops a FAILED steer from the p_reach
+    denominator.
+    """
+    decision_id = uuid.uuid4()
+    # Allocate BEFORE serializing so response_payload carries the decision_id of the
+    # row it is stored in. A database-default id is unknown until after the INSERT,
+    # forcing either a post-insert payload rewrite or a self-contradicting payload.
+    stamped = response.model_copy(update={"decision_id": decision_id})
+
+    values = {
+        "decision_id": decision_id,
+        "session_id": session_id,
+        "request_fingerprint": request_fingerprint,
+        "request_fen_hash": request_fen_hash,
+        "uci_history": uci_history,
+        "ply_before": ply_before,
+        "served_at": datetime.now(timezone.utc),
+        "response_payload": stamped.model_dump_json(),
+        "target_blunder_id": stamped.target_blunder_id,
+        "resulting_fen": resulting_fen,
+        # Read off the response, per the envelope rule — never recomputed here.
+        "reaches_drill_root": (
+            stamped.drill_route is not None
+            and stamped.drill_route.status == "root_reached"
+        ),
+    }
+
+    dialect_name = db.bind.dialect.name if db.bind else ""
+    if dialect_name in ("sqlite", "postgresql"):
+        insert = sqlite_insert if dialect_name == "sqlite" else postgresql_insert
+        stmt = (
+            insert(OpponentDecision)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    OpponentDecision.session_id,
+                    OpponentDecision.request_fingerprint,
+                ]
+            )
+            .returning(OpponentDecision.decision_id)
+        )
+        won = db.execute(stmt).first() is not None
+    else:
+        # Generic-dialect fallback: a plain insert, with the constraint violation as
+        # the loss signal. The savepoint keeps the surrounding transaction (which in
+        # the route branch carries the drill_state write) usable after the rollback.
+        try:
+            with db.begin_nested():
+                db.execute(OpponentDecision.__table__.insert().values(**values))
+            won = True
+        except IntegrityError:
+            won = False
+
+    if not won:
+        # Lost. Commit whatever else this transaction holds — in the route branch that
+        # is the drill_state write, which the winner already committed with the same
+        # value (both requests serialize on the drill row lock and the route move is
+        # deterministic), so it is a no-op rather than a clobber.
+        db.commit()
+        winner = _replay_decision(db, session_id, request_fingerprint)
+        if winner is None:
+            # Unreachable on Postgres: ON CONFLICT DO NOTHING blocks on a speculative
+            # insert and only reports a conflict once the winner COMMITTED (an aborted
+            # winner lets our insert proceed). Fail closed rather than serve a move
+            # that no decision records.
+            logger.error(
+                "opponent decision insert lost but no winner row is visible "
+                "session_id=%s fingerprint=%s",
+                session_id,
+                request_fingerprint,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Opponent decision could not be recorded; retry the request",
+            )
+        return winner, True
+
+    db.commit()
+    return stamped, False
+
+
 @router.post("/next-opponent-move", response_model=NextOpponentMoveResponse)
 def get_next_opponent_move(
     request: NextOpponentMoveRequest,
@@ -911,12 +1133,29 @@ def get_next_opponent_move(
             has_target_blunder,
         )
 
-    def _emit_served(mode: OpponentMoveMode, has_target_blunder: bool) -> None:
+    def _emit_served(
+        mode: OpponentMoveMode, has_target_blunder: bool, *, replayed: bool = False
+    ) -> None:
         capture(
             str(user.user_id),
             "opponent_move_served",
-            {"decision_source": mode.value, "has_target_blunder": has_target_blunder},
+            {
+                "decision_source": mode.value,
+                "has_target_blunder": has_target_blunder,
+                # Additive property: existing dashboards keep working, and served
+                # counts can now exclude the retry replays that fold three requests
+                # into one decision.
+                "replayed": replayed,
+            },
         )
+
+    def _serve(
+        served: NextOpponentMoveResponse, replayed: bool
+    ) -> NextOpponentMoveResponse:
+        has_target = served.target_blunder_id is not None
+        _emit_served(served.mode, has_target, replayed=replayed)
+        _log_slow(served.mode, served.decision_source, has_target)
+        return served
 
     # Fetch and validate session
     session = db.query(GameSession).filter(GameSession.id == request.session_id).first()
@@ -958,6 +1197,26 @@ def get_next_opponent_move(
             detail="Cannot get opponent move when it's the player's turn",
         )
 
+    try:
+        normalized_request_fen = normalize_fen(request.fen)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
+    request_fingerprint = _decision_fingerprint(normalized_request_fen, request.moves)
+
+    # Replay before dispatching to any decision branch. getNextOpponentMove sets
+    # retries: 2, so one decision can arrive as three requests; replaying makes the
+    # endpoint idempotent at the source instead of deduplicating downstream.
+    #
+    # Placement is load-bearing on both sides. AFTER the drill-state guard, so the
+    # terminal states keep answering 400 exactly as before. BEFORE the pre-root drill
+    # branch, because that branch commits drill_state='root_reached' before returning
+    # the route move that would reach it: without replay, a lost first response makes
+    # the retry read drill_state != 'active', release the lock, fall through, and
+    # answer from a still-pre-root FEN with a DIFFERENT move.
+    replayed = _replay_decision(db, request.session_id, request_fingerprint)
+    if replayed is not None:
+        return _serve(replayed, True)
+
     if is_active_preroot_drill:
         # The entry snapshot said active pre-root — a branch that mutates drill
         # state. Lock and refresh the row immediately, then re-derive from current
@@ -997,16 +1256,11 @@ def get_next_opponent_move(
                 raise HTTPException(status_code=400, detail="Current drill position is off route")
 
             move = suggestions[0]
-            if move.resulting_fen == route_map.target_fen:
+            reaches_root = move.resulting_fen == route_map.target_fen
+            if reaches_root:
                 session.drill_state = "root_reached"
-            # Commit is the transaction sink and lock release: the optional
-            # root_reached write is the only mutation, and the route response below
-            # does no ghost/engine work, so the lock must not outlive this commit.
-            db.commit()
 
-            _emit_served(OpponentMoveMode.GHOST, False)
-            _log_slow(OpponentMoveMode.GHOST, DecisionSource.GHOST_PATH, False)
-            return NextOpponentMoveResponse(
+            route_response = NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
                 move=MoveDetails(uci=move.uci, san=move.san),
                 target_blunder_id=None,
@@ -1014,12 +1268,28 @@ def get_next_opponent_move(
                 target_fen=route_map.target_fen,
                 decision_source=DecisionSource.GHOST_PATH,
                 drill_route=DrillRouteMetadata(
-                    status="root_reached" if move.resulting_fen == route_map.target_fen else "on_route",
+                    status="root_reached" if reaches_root else "on_route",
                     target_fen=route_map.target_fen,
                     resulting_fen=move.resulting_fen,
                     plies_to_target=move.plies_to_target,
                 ),
             )
+            # _record_decision's commit is this branch's transaction sink and lock
+            # release, exactly as the bare db.commit() it replaces: the optional
+            # root_reached write rides the same commit, so drill state and the
+            # decision that produced it are never written apart, and the lock does not
+            # outlive it (the route response does no ghost/engine work).
+            served, was_replayed = _record_decision(
+                db,
+                session_id=request.session_id,
+                request_fingerprint=request_fingerprint,
+                request_fen_hash=fen_hash(request.fen),
+                uci_history=_encode_uci_history(request.moves),
+                ply_before=len(request.moves),
+                response=route_response,
+                resulting_fen=move.resulting_fen,
+            )
+            return _serve(served, was_replayed)
 
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
@@ -1034,12 +1304,18 @@ def get_next_opponent_move(
     ghost_search_ms = _elapsed_ms(ghost_search_started)
 
     # If ghost path exists, convert SAN to both UCI and SAN formats
+    ghost_response: NextOpponentMoveResponse | None = None
+    ghost_resulting_fen: str | None = None
     if move_san is not None:
         import chess
         try:
             board = chess.Board(request.fen)
             # Parse SAN to get the move object
             move = board.parse_san(move_san)
+            # parse_san already proved the move legal here, so pushing it onto a copy
+            # is a free, exact resulting FEN.
+            resulting_board = board.copy(stack=False)
+            resulting_board.push(move)
 
             # Fetch SRS review counts for the targeted blunder (shared loader)
             review_counters = load_review_counters(
@@ -1073,13 +1349,7 @@ def get_next_opponent_move(
 
             target_fen = blunder_row[1] if blunder_row else None
 
-            _emit_served(OpponentMoveMode.GHOST, target_blunder_id is not None)
-            _log_slow(
-                OpponentMoveMode.GHOST,
-                DecisionSource.GHOST_PATH,
-                target_blunder_id is not None,
-            )
-            return NextOpponentMoveResponse(
+            ghost_response = NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
                 move=MoveDetails(
                     uci=move.uci(),
@@ -1090,6 +1360,7 @@ def get_next_opponent_move(
                 target_fen=target_fen,
                 decision_source=DecisionSource.GHOST_PATH,
             )
+            ghost_resulting_fen = resulting_board.fen()
         except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
             # If SAN parsing fails, log and fall through to engine fallback
             # This should not happen in normal operation but provides resilience
@@ -1099,6 +1370,22 @@ def get_next_opponent_move(
                 request.session_id,
                 e,
             )
+
+    if ghost_response is not None:
+        # Recorded OUTSIDE the except above on purpose: in there, a serialization or
+        # database error would be swallowed as "SAN parsing failed" and fall through
+        # to the engine, serving a move no decision records.
+        served, was_replayed = _record_decision(
+            db,
+            session_id=request.session_id,
+            request_fingerprint=request_fingerprint,
+            request_fen_hash=fen_hash(request.fen),
+            uci_history=_encode_uci_history(request.moves),
+            ply_before=len(request.moves),
+            response=ghost_response,
+            resulting_fen=ghost_resulting_fen,
+        )
+        return _serve(served, was_replayed)
 
     # Step 2: Backend engine fallback — remote Maia3 API
     try:
@@ -1119,18 +1406,6 @@ def get_next_opponent_move(
         )
         engine_ms = _elapsed_ms(engine_started)
 
-        _emit_served(OpponentMoveMode.ENGINE, False)
-        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
-        return NextOpponentMoveResponse(
-            mode=OpponentMoveMode.ENGINE,
-            move=MoveDetails(
-                uci=controller_move.uci,
-                san=controller_move.san,
-            ),
-            target_blunder_id=None,
-            decision_source=DecisionSource.BACKEND_ENGINE,
-        )
-
     except Maia3Error as e:
         if "engine_started" in locals():
             engine_ms = _elapsed_ms(engine_started)
@@ -1144,3 +1419,45 @@ def get_next_opponent_move(
             engine_ms = _elapsed_ms(engine_started)
         _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
         raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
+
+    # Recorded OUTSIDE the try above on purpose: in there, a database error would be
+    # caught by `except ValueError` or shadowed by the Maia mapping and answered as
+    # 400/503 with a move already chosen. Out here it propagates, so the endpoint
+    # fails closed rather than serving a move no decision records.
+    import chess
+
+    engine_resulting_fen: str | None = None
+    try:
+        engine_board = chess.Board(request.fen)
+        engine_board.push_uci(controller_move.uci)
+        engine_resulting_fen = engine_board.fen()
+    except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
+        # Nothing validates the controller's move today, and this record must not
+        # start rejecting engine responses. Engine decisions are never root decisions,
+        # so no consumer reads this NULL.
+        logger.warning(
+            "Failed to apply engine move %r for request session_id=%s: %s",
+            controller_move.uci,
+            request.session_id,
+            e,
+        )
+
+    served, was_replayed = _record_decision(
+        db,
+        session_id=request.session_id,
+        request_fingerprint=request_fingerprint,
+        request_fen_hash=fen_hash(request.fen),
+        uci_history=_encode_uci_history(request.moves),
+        ply_before=len(request.moves),
+        response=NextOpponentMoveResponse(
+            mode=OpponentMoveMode.ENGINE,
+            move=MoveDetails(
+                uci=controller_move.uci,
+                san=controller_move.san,
+            ),
+            target_blunder_id=None,
+            decision_source=DecisionSource.BACKEND_ENGINE,
+        ),
+        resulting_fen=engine_resulting_fen,
+    )
+    return _serve(served, was_replayed)

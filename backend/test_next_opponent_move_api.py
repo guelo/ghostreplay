@@ -151,6 +151,10 @@ def test_next_opponent_move_happy_path_returns_valid_contract(
     if data["mode"] == "engine":
         assert data["target_blunder_id"] is None
 
+    # Every served response names the opponent_decisions row that recorded it
+    # (g-ghost-target-server-record); root confirmation sends this id back.
+    assert data["decision_id"] is not None
+
 
 def test_next_opponent_move_returns_legal_move(
     client, auth_headers, create_game_session

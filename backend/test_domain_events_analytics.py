@@ -172,7 +172,37 @@ def test_opponent_move_served_engine_fallback(client, auth_headers, captured):
     assert r.status_code == 200
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "123"
-    assert props == {"decision_source": "engine", "has_target_blunder": False}
+    assert props == {"decision_source": "engine", "has_target_blunder": False, "replayed": False}
+
+
+def test_opponent_move_served_marks_a_replayed_decision(client, auth_headers, captured):
+    """A retry replays one stored decision; served counts must be able to exclude it."""
+    from app.opponent_move_controller import ControllerMove
+
+    start = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=auth_headers(user_id=123),
+    )
+    session_id = start.json()["session_id"]
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    body = {"session_id": session_id, "fen": fen_after_e4, "moves": ["e2e4"]}
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        assert client.post(
+            "/api/game/next-opponent-move", json=body, headers=auth_headers(user_id=123)
+        ).status_code == 200
+        captured.clear()
+        assert client.post(
+            "/api/game/next-opponent-move", json=body, headers=auth_headers(user_id=123)
+        ).status_code == 200
+
+    _did, _event, props = _one(captured, "opponent_move_served")
+    assert props == {
+        "decision_source": "engine",
+        "has_target_blunder": False,
+        "replayed": True,
+    }
 
 
 # --------------------------------------------------------------------------- drills
@@ -375,7 +405,7 @@ def test_opponent_move_served_drill_route_ghost(client, auth_headers, captured):
     assert r.json()["mode"] == "ghost"
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "88"
-    assert props == {"decision_source": "ghost", "has_target_blunder": False}
+    assert props == {"decision_source": "ghost", "has_target_blunder": False, "replayed": False}
 
 
 def test_opponent_move_served_ghost_with_target_blunder(
@@ -414,7 +444,7 @@ def test_opponent_move_served_ghost_with_target_blunder(
     assert data["target_blunder_id"] is not None
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "123"
-    assert props == {"decision_source": "ghost", "has_target_blunder": True}
+    assert props == {"decision_source": "ghost", "has_target_blunder": True, "replayed": False}
 
 
 # --------------------------------------------------------------------------- srs
