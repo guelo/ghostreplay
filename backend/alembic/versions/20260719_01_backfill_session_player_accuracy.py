@@ -138,12 +138,13 @@ Deviations from the plan, stated rather than hidden
   nullable, but the "runner never reads a statement constant directly" rule
   applies to the per-batch runner too, so its statements must be reachable
   through the bundle.
-- ``MARGINED_MS_BACKFILL_REMAINING`` is marked PROVISIONAL: the sizing derivation
-  that produced every other measured constant predates the discovery that the
-  backfill's OWN ``game_sessions`` work is relation-scaled, so it never timed
-  that statement directly. It is derived from that same run's recorded
-  ``game_sessions`` scan measurement — see its docstring — and
-  g-b-size-derive-backfill-terms re-measures it.
+- ``MARGINED_MS_BACKFILL_REMAINING`` shipped PROVISIONAL and is no longer: the
+  sizing derivation that produced every other measured constant predates the
+  discovery that the backfill's OWN ``game_sessions`` work is relation-scaled, so
+  it never timed that statement and the literal was inferred from the same run's
+  ``COVERAGE_ASSERT_SQL`` reading. g-b-size-derive-backfill-terms timed it
+  directly on PostgreSQL 18.4 and the inferred integer held. It is tight rather
+  than comfortable — see its docstring for how tight, and why that is asserted.
 - The selection SWEEP is not a scalar. It is
   ``MARGINED_MS_BACKFILL_SWEEP_SCAN * G_sessions +
   MARGINED_US_BACKFILL_SWEEP_PER_PAGE * pages / 1000``, evaluated by
@@ -395,8 +396,6 @@ MARGINED_MS_PER_SCAN_STMT = 521
 #: ratio. In atomic mode it runs under every row lock the backfill took.
 MARGINED_MS_COVERAGE_ASSERT = 6
 
-#: PROVISIONAL (g-b-size-derive-backfill-terms).
-#:
 #: One execution of BACKFILL_REMAINING_SQL, x3. Scan-bearing even though it never
 #: touches session_moves: it filters game_sessions on
 #: `player_accuracy_algo_version IS NULL OR < 1`, and NO INDEX covers that
@@ -407,10 +406,25 @@ MARGINED_MS_COVERAGE_ASSERT = 6
 #: correctly-stamped row raises this cost while leaving the population term
 #: unchanged. Omitting it priced a growing relation at zero.
 #:
-#: Provisional derivation, from the recorded run rather than a direct timing:
-#: COVERAGE_ASSERT_SQL is the same shape against the same relation — a count over
-#: game_sessions whose predicate no index covers — and it measured 1.74 ms max at
-#: the sized dimensions, so this takes the same ceil(3 * 1.74) = 6.
+#: MEASURED, and covering its worst measurement with NO integer headroom.
+#:
+#: It shipped inferred rather than timed: the Phase 1 run predates the discovery
+#: above, so the literal was taken from that run's COVERAGE_ASSERT_SQL reading —
+#: the same shape against the same relation, a count over game_sessions whose
+#: predicate no index covers — at ceil(3 * 1.74) = 6. g-b-size-derive-backfill-terms
+#: timed the statement itself on PostgreSQL 18.4 against a production restore, six
+#: points of one measurement set, each carried onto this basis by the growth factor
+#: of the copy IT ran on. The inference landed on the right integer.
+#:
+#: It landed on the LAST right integer. The worst point (docs/sizing/
+#: atomic_full_20260726.json, 1.207208 ms at 4,184 rows / 6,144,000 bytes)
+#: normalizes to 1.966944 ms against the 2 ms where ceil(3 * x) turns 7 — 1.7% of
+#: headroom, against MARGINED_MS_PER_SCAN_STMT's 10.7% over the same measurement
+#: set. Being inside the margin is not the same as being comfortably inside it, so
+#: the fact is asserted rather than recorded: test_release_b_sizing.py's
+#: test_frozen_backfill_remaining_covers_every_committed_measurement re-derives
+#: all six points from the committed artifacts and pins the equality at the worst.
+#: See docs/release_b_runbook.md §3 and §8.
 MARGINED_MS_BACKFILL_REMAINING = 6
 
 #: The RELATION-SCAN component of one full backfill selection SWEEP — every

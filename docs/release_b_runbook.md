@@ -461,7 +461,7 @@ file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 | `MARGINED_MS_PER_REPAIR_ROW` | 2 | `ceil(3 * 0.358)` |
 | `MARGINED_MS_PER_SCAN_STMT` | 521 | `ceil(3 * 173.49)` |
 | `MARGINED_MS_COVERAGE_ASSERT` | 6 | `ceil(3 * 1.74)` |
-| `MARGINED_MS_BACKFILL_REMAINING` | 6 | **PROVISIONAL** — `ceil(3 * 1.74)`, from the recorded `COVERAGE_ASSERT_SQL` measurement (see below) |
+| `MARGINED_MS_BACKFILL_REMAINING` | 6 | `ceil(3 * 1.966944)` — the worst of six committed 18.4 measurements, each on its own copy's basis. Shipped inferred from `COVERAGE_ASSERT_SQL` at the same integer; **measured 2026-07-26 and tight** (see below). §8. |
 | `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | `ceil(3 * 23.867343)` — the relation-scan coefficient of the covering LP over the sweep domain, **at the frozen basis**. Milliseconds. §7. |
 | `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | `ceil(3 * 0.172440 * 1000)` — the per-page slope of the same LP. **Microseconds**, divided by 1000 in `backfill_sweep_ms`. §7. |
 | `BACKFILL_SELECT_SWEEPS_UNDER_LOCK` | 1 | structural per-pass count (atomic backfill converges in one unlocked-selection pass) |
@@ -487,7 +487,7 @@ the design requires: the backfill *term* drops out of Decision 1 while the
 *constant* stays declared, because the runtime guard multiplies it by the **live**
 count.
 
-### The backfill's own `game_sessions` terms (one PROVISIONAL, one replaced)
+### The backfill's own `game_sessions` terms (one measured, one replaced)
 
 The backfill's selection sweep and `MARGINED_MS_BACKFILL_REMAINING` price the
 backfill's **own** `game_sessions` work: its keyset selection sweep (all
@@ -499,9 +499,9 @@ between sizing and deploy *grows* the scanned relation while *shrinking* the
 population. Omitting them priced a growing relation at zero, which is why they
 are now charged in both the scan budget and the atomic stall projection.
 
-They are **PROVISIONAL** because the Phase 1 run above predates the discovery of
-that leak and therefore never timed either statement directly. Their values are
-derived from that same run's recorded `game_sessions` scan measurement
+Both shipped **PROVISIONAL**, because the Phase 1 run above predates the discovery
+of that leak and therefore never timed either statement directly. Their values
+were inferred from that same run's recorded `game_sessions` scan measurement
 (`COVERAGE_ASSERT_SQL`, 1.74 ms max at the sized dimensions), which is the same
 shape against the same relation:
 
@@ -525,9 +525,8 @@ shape against the same relation:
 (`backfill_remaining` in `time_scan_statements`). The sweep is not a scan-statement
 timing at all and is no longer measured there: it is a **domain**, produced by
 `--mode sweep-domain` and fitted in `--derive`. `g-b-size-derive-backfill-terms`
-owns the convergence count's re-measurement, and sizing qualification may adjust
-the number and rerun this bead's gates — an adjusted *number* is expected
-refinement, not a structural change.
+owned the convergence count's re-measurement and closed it; Phase 3 may still move
+the number, which is expected refinement rather than a structural change.
 
 **Measured 2026-07-25 against the production restore; see §7.** An earlier
 version of this paragraph concluded the opposite — that the restore "cannot
@@ -546,9 +545,43 @@ no population, no zero branch" for exactly that reason. The one true observation
 in the paragraph — that 4,184 sessions is smaller than the 6,000-row basis — is a
 reason to *normalize* the result, which §7 does, not a reason not to measure.
 
-Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 6` is now
-**qualified** — the worst of seven measurements, each normalized on the basis of
-the copy it ran on, is exactly 6.
+Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 6` is
+**no longer provisional**, and the label came off against the committed set of §8
+rather than against §7's transcription: six atomic and batch points, each carried
+onto the frozen basis by its own copy's `N_copy`, all covered by the shipped 6.
+§7's seven-measurement run reached the same integer first; what §8 adds is that
+the check is now re-derivable from artifacts in the repo, so
+`test_frozen_backfill_remaining_covers_every_committed_measurement` fails closed
+if either the literal or the evidence moves.
+
+| Copy | `game_sessions` bytes | `N_copy` | Max (ms) | Normalized | `ceil(3x)` |
+|---|---|---|---|---|---|
+| `gr_m_atomic_full` | 6,144,000 | 1.62933 | 1.207208 | **1.966944** | **6** ← worst |
+| `gr_m_batch_100` | 6,144,000 | 1.62933 | 1.194125 | 1.945628 | 6 |
+| `gr_m_batch_250` | 6,144,000 | 1.62933 | 1.071958 | 1.746577 | 6 |
+| `gr_m_batch_500` | 6,144,000 | 1.62933 | 1.028000 | 1.674955 | 6 |
+| `gr_m_batch_1000` | 6,144,000 | 1.62933 | 0.983333 | 1.602177 | 5 |
+| `gr_m_atomic_empty` | 5,431,296 | 1.84314 | 0.634083 | 1.168702 | 4 |
+
+**Qualified, not comfortable.** `ceil(3 * x) <= 6` iff `x <= 2`, so the worst point
+sits 1.7% below the rounding boundary — against 10.7% for
+`MARGINED_MS_PER_SCAN_STMT` over the same six artifacts. The inference this
+replaces was correct, and it was correct by one rounding step. That is the reason
+the tightness is asserted in the gate rather than recorded here: a table cannot
+notice a future run coming in 2% hotter, and 7 is the next integer.
+
+> **`MARGINED_MS_COVERAGE_ASSERT = 6` does not survive the same check**, and it is
+> not this bead's term. `COVERAGE_ASSERT_SQL` — the statement the provisional
+> derivation borrowed from — measures 1.291375 ms max on `gr_m_atomic_full`, which
+> normalizes to **2.104063 ms** and demands **7**. The two statements are the same
+> shape against the same relation, so the borrowed inference was sound; what moved
+> is that on 18.4 the *source* statement now costs slightly more than the term
+> frozen from it on 15.18 allows. Impact is one millisecond per `G_sessions` in the
+> scan budget and the atomic stall projection, and none at all on
+> `SCAN_STMT_TIMEOUT_MS`, which is `max(521, …)` and unmoved. Filed as
+> `g-b-coverage-assert-18` — deliberately NOT fixed here, because a term and the
+> basis it is frozen against have to move together and this one's basis is §3's
+> 15.18 snapshot.
 
 The sweep scalar did not survive that measurement. The label "PROVISIONAL" came to
 mean something specific and worse than "not yet measured": a **scalar cannot price
@@ -880,9 +913,11 @@ precisely the statistic outliers land in, and every number fitted to this set
 changes depending on whether it is present.
 
 A single frozen scalar therefore cannot price this statement across the range the
-runtime admits. Tracked as `g-b-sweep-batch-cost` (P1), which **blocks** the
+runtime admits. Tracked as `g-b-sweep-batch-cost` (P1), which blocked the
 de-provisionalization of this term and `g-b-runtime-envelope`, since the
-projection and the import-time scan budget are its arithmetic.
+projection and the import-time scan budget are its arithmetic. **Landed:** the
+scalar is gone, replaced by the two-component model of §3, and both dependents
+have since been unblocked.
 
 `MARGINED_MS_BACKFILL_REMAINING` is untouched by this: `BACKFILL_REMAINING_SQL`
 runs once per pass, not once per page, so it carries no page-count term.

@@ -63,9 +63,11 @@ MEASURED_CONSTANTS = (
     "MARGINED_MS_PER_REPAIR_ROW",
     "MARGINED_MS_PER_SCAN_STMT",
     "MARGINED_MS_COVERAGE_ASSERT",
-    # The backfill's OWN game_sessions work. The convergence count is PROVISIONAL
-    # until g-b-size-derive-backfill-terms times it directly, but declared,
-    # positive and load-bearing now: the scan budget and the atomic projection both
+    # The backfill's OWN game_sessions work. The convergence count is measured
+    # directly as of g-b-size-derive-backfill-terms and gated against the committed
+    # artifacts by test_frozen_backfill_remaining_covers_every_committed_measurement
+    # — which is where its tightness lives, since it covers its worst measurement
+    # with no integer headroom. The scan budget and the atomic projection both
     # charge it, and a zero would price a growing relation at nothing.
     "MARGINED_MS_BACKFILL_REMAINING",
     # The selection sweep, as TWO constants rather than one scalar: a relation
@@ -1742,6 +1744,76 @@ def test_the_committed_derivation_is_recorded_not_applied():
     assert mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE == math.ceil(
         harness.MARGIN * at_shipped_basis["b"] * 1000
     ) == 518
+
+
+def _committed_backfill_remaining_points() -> list[tuple[str, Fraction, Fraction]]:
+    """`(artifact, max_ms, N_copy)` for every committed point that timed it.
+
+    The atomic and batch artifacts, which are the ones that run a scan block. The
+    cancel probes time a lock release and record no scans; the sweep domains are a
+    page-count measurement and time nothing standalone.
+
+    `N_copy` is `game_sessions`' factor and not `session_moves`': the statement
+    filters `game_sessions` on the unindexed version predicate and never touches
+    `session_moves`, so it is carried onto the frozen basis by the same relation it
+    scans. Per point, against the copy each one actually ran on — the six copies
+    share 4,184 rows and their relations differ by 13%.
+    """
+    out = []
+    for doc in _committed_measurements():
+        scan = (doc.get("scans") or {}).get("backfill_remaining")
+        if scan is None:
+            continue
+        out.append(
+            (
+                doc["artifact"],
+                Fraction(scan["max_ms"]),
+                harness.sweep_copy_growth_factor(
+                    doc["dimensions_before"], _FROZEN_BASIS, artifact=doc["artifact"]
+                ),
+            )
+        )
+    assert len(out) == 6, f"expected every atomic/batch point to time it, got {len(out)}"
+    return out
+
+
+def test_frozen_backfill_remaining_covers_every_committed_measurement():
+    """`MARGINED_MS_BACKFILL_REMAINING = 6` is MEASURED, and it is exactly tight.
+
+    The term shipped PROVISIONAL: the run that produced every other constant
+    predates the discovery that the backfill's own `game_sessions` work is
+    relation-scaled, so it never timed `BACKFILL_REMAINING_SQL` and the literal was
+    inferred from `COVERAGE_ASSERT_SQL` — the same shape against the same relation
+    — at `ceil(3 * 1.74) = 6`. `g-b-size-derive-backfill-terms` timed it directly
+    on PostgreSQL 18.4, and this is that measurement carried as a gate rather than
+    as a table: six points, each divided onto the frozen basis by its own copy's
+    `N_copy`, all covered by the shipped literal.
+
+    The inference landed on the right integer. That is the interesting part and the
+    reason this asserts EQUALITY at the worst point rather than mere coverage: the
+    worst normalized measurement demands exactly 6, so the frozen value has no
+    integer headroom at all. It is qualified, not comfortable. A future run that
+    comes in 1.7% hotter at the same basis needs 7, and this fails rather than
+    letting a term that is one rounding step from under-charging pass as measured.
+    """
+    points = _committed_backfill_remaining_points()
+    demanded = {
+        name: math.ceil(harness.MARGIN * max_ms * n_copy) for name, max_ms, n_copy in points
+    }
+    for name, ms in demanded.items():
+        assert mod.MARGINED_MS_BACKFILL_REMAINING >= ms, (name, ms)
+
+    worst_name, worst_ms, worst_n_copy = max(points, key=lambda p: p[1] * p[2])
+    assert worst_name == "docs/sizing/atomic_full_20260726.json"
+    assert demanded[worst_name] == mod.MARGINED_MS_BACKFILL_REMAINING == 6
+
+    # `ceil(3 * x) <= 6` iff `x <= 2`, so 2 ms at the frozen basis is the rounding
+    # boundary the literal sits against. Exact rationals, because the whole claim
+    # is about where a value falls relative to that boundary.
+    normalized = worst_ms * worst_n_copy
+    assert normalized < Fraction(2)
+    assert float(normalized) == pytest.approx(1.966944, abs=1e-6)
+    assert worst_n_copy == Fraction(10_010_624, 6_144_000)
 
 
 def test_docs_sizing_holds_measurement_artifacts_named_for_their_kind():
