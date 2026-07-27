@@ -65,3 +65,5 @@ backend/scripts/fixtures/cohort_provenance.json.tmp-*
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+/tmp/
+/backend/.tmp/
