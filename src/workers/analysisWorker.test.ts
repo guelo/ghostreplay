@@ -1933,6 +1933,12 @@ describe('analysisWorker', () => {
       const referencing = productionSources(srcRoot)
         .filter((file) => readFileSync(file, 'utf8').includes('selectAtomicSnapshot'))
         .map((file) => relative(srcRoot, file))
+        // The benchmark harness (src/bench, g-grade-device-runner) replays a
+        // worker's logged UCI transcript through the selector to REPORT §4.2
+        // acceptance. It is not a production path: a separate BENCH=1-gated Vite
+        // entry that nothing in the app imports — pinned by
+        // `src/bench/isolation.test.ts`, which is what bounds this exemption.
+        .filter((file) => !file.startsWith('bench/'))
         .sort()
 
       // Only the module that DEFINES it. Candidate arms (§12 step 3) will be its

@@ -402,6 +402,31 @@ const samePv = (a: string[] | null, b: string[]): boolean =>
   a !== null && a.length === b.length && a.every((move, index) => move === b[index])
 
 /**
+ * How an atomic selection differs from the legacy accumulators, or null when the
+ * two agree (§4.3).
+ *
+ * Pure and counter-free, so the benchmark harnesses can report divergence
+ * per row (§10.4) without re-implementing what "diverged" means. One definition,
+ * two readers: the worker's counter below and the harness's per-row record.
+ */
+export const legacyDivergenceReason = (
+  selection: AtomicSelection,
+  legacy: LegacySelection,
+): SnapshotDivergenceReason | null => {
+  if (!selection.accepted) {
+    return selection.reason
+  }
+
+  const slot = selection.slots[0]
+  const agrees =
+    sameScore(legacy.score, slot.score) &&
+    samePv(legacy.pv, slot.pv) &&
+    legacy.reachedDepth === selection.depth
+
+  return agrees ? null : 'accepted'
+}
+
+/**
  * Measure — never change — the gap between the two selectors (§4.3).
  *
  * Returns void by construction: this is the only atomic-selector call the shared
@@ -413,21 +438,9 @@ export const recordLegacySelectorDivergence = (
   request: AtomicSelectionRequest,
   legacy: LegacySelection,
 ): void => {
-  const selection = selectAtomicSnapshot(request)
-
-  let reason: SnapshotDivergenceReason
-  if (!selection.accepted) {
-    reason = selection.reason
-  } else {
-    const slot = selection.slots[0]
-    const agrees =
-      sameScore(legacy.score, slot.score) &&
-      samePv(legacy.pv, slot.pv) &&
-      legacy.reachedDepth === selection.depth
-    if (agrees) {
-      return
-    }
-    reason = 'accepted'
+  const reason = legacyDivergenceReason(selectAtomicSnapshot(request), legacy)
+  if (reason === null) {
+    return
   }
 
   counters.legacy_selector_divergence += 1

@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ghost Replay — analysis device benchmark</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --surface: #ffffff;
+        --surface-2: #f4f5f7;
+        --ink: #1b1d21;
+        --ink-2: #4c525c;
+        --ink-muted: #767d88;
+        --line: #dcdfe4;
+        /*
+          Categorical series steps, one per arm, in fixed slot order so a curve
+          keeps its colour when another arm is added. Validated (not eyeballed)
+          against this surface for the lightness band, chroma floor, all-pairs
+          protan/deutan separation, normal-vision separation and 3:1 contrast.
+        */
+        --series-0: #2f5fd0;
+        --series-1: #c05a12;
+        --series-2: #0f8f7a;
+        --series: var(--series-0);
+        --warn: #8a5300;
+        --bad: #b3261e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --surface: #16181c;
+          --surface-2: #1e2126;
+          --ink: #eef0f3;
+          --ink-2: #c3c8d0;
+          --ink-muted: #8d949e;
+          --line: #2c3037;
+          /* Selected for the dark surface, not flipped from the light steps. */
+          --series-0: #6b91ea;
+          --series-1: #cf7b33;
+          --series-2: #12a08c;
+          --series: var(--series-0);
+          --warn: #e0a94a;
+          --bad: #ef8a80;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 16px;
+        font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: var(--surface);
+        color: var(--ink);
+      }
+      h1 { font-size: 1.15rem; margin: 0 0 4px; }
+      h2 { font-size: 0.95rem; margin: 24px 0 8px; }
+      p.lede { margin: 0 0 16px; color: var(--ink-2); max-width: 62ch; }
+      .muted { color: var(--ink-muted); }
+      fieldset {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        margin: 0 0 12px;
+      }
+      legend { padding: 0 6px; color: var(--ink-2); font-size: 0.85rem; }
+      label { display: block; margin-bottom: 10px; font-size: 0.85rem; color: var(--ink-2); }
+      input, select, textarea {
+        width: 100%;
+        padding: 8px;
+        font: inherit;
+        color: var(--ink);
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .grid-2 { display: grid; gap: 0 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+      button {
+        font: inherit;
+        padding: 10px 16px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+      }
+      button.primary { background: var(--series); border-color: var(--series); color: #fff; }
+      button[disabled] { opacity: 0.5; }
+      #status { font-variant-numeric: tabular-nums; margin: 0 0 12px; color: var(--ink-2); }
+      #status.error { color: var(--bad); }
+      .scroll { overflow-x: auto; }
+      table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+      th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+      th:first-child, td:first-child { text-align: left; }
+      th { color: var(--ink-muted); font-weight: 600; }
+      td { font-variant-numeric: tabular-nums; }
+      .latency-chart { width: 100%; height: auto; max-width: 720px; }
+      .latency-chart .grid { stroke: var(--line); stroke-width: 1; }
+      .latency-chart .axis, .latency-chart .axis-title { fill: var(--ink-muted); font-size: 11px; }
+      .latency-chart .series { stroke: var(--series-0); stroke-width: 2; stroke-linejoin: round; }
+      .latency-chart .dot { fill: var(--series-0); }
+      .latency-chart .series-1 { stroke: var(--series-1); }
+      .latency-chart circle.series-1 { fill: var(--series-1); }
+      .latency-chart .series-2 { stroke: var(--series-2); }
+      .latency-chart circle.series-2 { fill: var(--series-2); }
+      /* Keeps crossing series readable where their markers overlap. */
+      .latency-chart .dot-ringed { stroke: var(--surface); stroke-width: 2; }
+      .latency-chart .legend { fill: var(--ink-2); font-size: 11px; }
+      .latency-chart .point-label { fill: var(--ink-2); font-size: 11px; }
+      #warnings { margin: 0 0 12px; padding: 0; list-style: none; }
+      #warnings li {
+        color: var(--warn);
+        border-left: 3px solid var(--warn);
+        padding: 2px 0 2px 8px;
+        margin-bottom: 4px;
+        font-size: 0.85rem;
+      }
+      .arms { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+      .arms label { display: flex; align-items: center; gap: 6px; margin: 0; }
+      .arms input { width: auto; }
+      .check { display: flex; align-items: center; gap: 8px; }
+      .check input { width: auto; }
+      textarea#jsonl { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+    </style>
+  </head>
+  <body>
+    <h1>Analysis device benchmark</h1>
+    <p class="lede">
+      Drives the real bundled analysis worker (g-two-search-grade §10.1/§10.4).
+      Cool the device first, plug it in, disable low-power mode, keep this tab in
+      the foreground with the screen lock off, then copy the JSONL when the run
+      finishes.
+    </p>
+
+    <form id="config">
+      <fieldset>
+        <legend>Device</legend>
+        <label>
+          Label (hardware, OS, browser)
+          <input id="deviceLabel" required placeholder="iPhone 15, iOS 18.4, Safari" />
+        </label>
+        <label>
+          Notes (thermal state, battery, anything unusual)
+          <input id="notes" placeholder="cooled 10 min, 100% battery, plugged in" />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Run</legend>
+        <!--
+          The numeric controls are text + inputmode, NOT type="number".
+
+          A number input applies the HTML value-sanitization algorithm: type `e`
+          into it and `.value` reads back as the empty string, indistinguishable
+          from a field the operator left blank. Every default would then apply as
+          though it had been requested — 40 plies, the session depth, no cooldown
+          — and the run header would record the substitute. `inputmode="numeric"`
+          keeps the phone keypad, which is the part that matters for a capture
+          run done by hand; the spinner is not worth a silent default.
+
+          The bounds are enforced by `configProblems`, not by min/max: this page
+          starts a run from a `type="button"`, so no form validity check ever runs.
+        -->
+        <div class="grid-2">
+          <label>
+            Position set
+            <select id="positionSetId">
+              <option value="smoke-6">Smoke — 6 positions</option>
+              <option value="thermal-40" selected>Thermal — game sequence</option>
+            </select>
+          </label>
+          <label>
+            Thermal plies (1–60)
+            <input id="thermalPlies" type="text" inputmode="numeric" value="40" />
+          </label>
+          <label>
+            Repeats (§10.4 minimum 3)
+            <input id="repeats" type="text" inputmode="numeric" value="3" />
+          </label>
+          <label>
+            Mode
+            <select id="mode">
+              <option value="sequence">Sequence — one fresh worker per repeat</option>
+              <option value="cold">Cold — fresh worker per measurement</option>
+            </select>
+          </label>
+          <label>
+            Depth (blank = this device's session depth, max 30)
+            <input id="depth" type="text" inputmode="numeric" placeholder="auto" />
+          </label>
+          <label>
+            Cooldown between blocks (ms, 60000 recommended)
+            <input id="blockCooldownMs" type="text" inputmode="numeric" value="60000" />
+          </label>
+        </div>
+        <label class="check">
+          <input id="warmup" type="checkbox" />
+          Warm-up measurement first (every position then gets a warm row)
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Arms</legend>
+        <div class="arms">
+          <label><input type="checkbox" name="arm" value="current" checked /> current (shipping protocol)</label>
+          <label><input type="checkbox" name="arm" value="variantA" /> variantA</label>
+          <label><input type="checkbox" name="arm" value="variantB" /> variantB</label>
+        </div>
+        <p class="muted" style="margin: 0">
+          Select two arms to compare protocols in one run: they alternate in a
+          counterbalanced order, which needs the repeat count to be a multiple of
+          the number of arms. Every repeat and every arm is a block, and only the
+          first block starts on a cooled device — so keep the cooldown, whether you
+          are comparing arms or just repeating one. Candidate arms need the
+          worker-side bench dispatch (g-grade-kill-gate); until it lands the runner
+          refuses them rather than mislabelling a current-protocol run.
+        </p>
+      </fieldset>
+    </form>
+
+    <div class="actions">
+      <button id="start" class="primary" type="button">Start run</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="copy" type="button" disabled>Copy JSONL</button>
+      <button id="download" type="button" disabled>Download JSONL</button>
+    </div>
+
+    <p id="status">Idle.</p>
+    <ul id="warnings"></ul>
+
+    <h2>Summary</h2>
+    <div class="scroll"><table id="summary"><tbody><tr><td class="muted">No results yet.</td></tr></tbody></table></div>
+
+    <h2>Median latency by move index</h2>
+    <div id="chart"><p class="muted">A thermal run of at least two moves draws the curve here.</p></div>
+
+    <h2>JSONL</h2>
+    <textarea id="jsonl" readonly placeholder="Results appear here as the run progresses."></textarea>
+
+    <script type="module" src="/src/bench/device/main.ts"></script>
+  </body>
+</html>

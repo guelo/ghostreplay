@@ -19,7 +19,11 @@
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:screens": "playwright test e2e/screenshots",
-    "gen:engine-identity": "node scripts/gen-browser-engine-identity.mjs"
+    "gen:engine-identity": "node scripts/gen-browser-engine-identity.mjs",
+    "bench:device:build": "BENCH=1 vite build",
+    "bench:device:preview": "vite preview --host",
+    "bench:device:dev": "vite --host",
+    "bench:baseline": "node scripts/bench/run-device-baseline.mjs"
   },
   "dependencies": {
     "@posthog/react": "^1.10.2",
