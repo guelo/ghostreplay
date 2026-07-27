@@ -63,6 +63,11 @@ backend/.opening_graph_cache/
 # working tree and need no entry.
 backend/scripts/fixtures/cohort_provenance.json.tmp-*
 
+# An agent CLI's per-project config. It is a SYMLINK into a home directory outside the repo,
+# so committing it puts a path off the release volume into the sealed checkout; the boundary
+# launcher refuses a run whose volume carries one (g-release-os-boundary).
+.antigravitycli/
+
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
 /tmp/

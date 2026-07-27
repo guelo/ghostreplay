@@ -48,6 +48,11 @@ import scripts.calibrate_opening_scores_v2 as cal
 # stamps). Reused rather than duplicated: the release CLI is a thin driver over
 # select_candidate, so its tests need exactly the inputs that bead's tests already build.
 import test_calibrate_selection as selfix
+# Those builders stamp scorer_source_verified_preexec=True, which after
+# g-release-os-boundary means "this run was sealed inside an OS boundary" — and the binding
+# checks compare that claim against THIS interpreter's constants. Imported rather than
+# redefined so there is one place saying how the synthetic suite pretends to be sealed.
+from test_calibrate_selection import _pretend_this_process_is_sealed  # noqa: F401
 
 
 # --- in-memory fixtures (mirrors test_opening_rootcalc helpers) -------------
@@ -2945,16 +2950,23 @@ class TestSourceStabilityFence:
         _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
         assert _run_child_build(ap, pp, env_digest=None) == {"preexec": False}
 
-    def test_inherited_matching_digest_stamps_verified(self, tmp_path):
-        # A digest computed BEFORE the interpreter started predates the compilation of every
-        # manifest file, so agreeing with it is what closes the compile window. The child
-        # also gets a fresh, write-disabled bytecode cache, so every scorer module is
-        # compiled from the source that digest hashes.
+    def test_an_inherited_matching_digest_is_accepted_but_does_not_verify_alone(self, tmp_path):
+        """A digest computed BEFORE the interpreter started predates the compilation of every
+        manifest file, so agreeing with it is what closes the compile window — and this run
+        does agree: it gets past the fence, and a disagreeing digest (next test) does not.
+
+        It stamps False all the same, and that is g-release-os-boundary. The digest says the
+        bytes were the same at two moments; it never held them still, and it says nothing at
+        all about the interpreter and the installed dependencies that execute them. Only a
+        run measuring itself onto a read-only volume stamps True — see
+        test_release_calibration_launcher.py::TestSealedCheckout, which does exactly this
+        against a real sealed volume and gets True.
+        """
         _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
         digest = cal.scorer_source_digest()
         assert _run_child_build(
             ap, pp, env_digest=digest.upper() + " ", pycache_prefix=tmp_path / "pyc",
-        ) == {"preexec": True}
+        ) == {"preexec": False}
 
     def test_inherited_disagreeing_digest_fails_closed(self, tmp_path):
         # The scorer moved while Python was compiling it: old code runs, new bytes hash,
@@ -3647,6 +3659,10 @@ class TestWinnerBinding:
         "config_fingerprint", "scorer_contract_id", "scorer_source_digest",
         "scorer_source_verified_preexec",
         "provenance_record_sha256", "runtime_python", "runtime_chess_version",
+        # The runtime attestation (g-release-os-boundary). runtime_python and
+        # runtime_chess_version are version STRINGS; runtime_image_sha256 is the digest of
+        # the read-only volume the run actually executed from.
+        "execution_boundary", "runtime_image_sha256", "os_build", "sealed_revision",
         "source_revision", "source_dirty_paths", "model_version", "artifact_sha256",
         "graph_fingerprint", "roots_fingerprint", "evidence_derivation_fingerprint",
         "release_guard_opening_key", "release_guard_child_opening_key",
@@ -3931,6 +3947,99 @@ class TestPrivatePathRule:
         assert "identified on disk" in str(exc.value)
 
 
+class TestSealedForbiddenRootFloor:
+    """The private-path rule asks GIT, and git answers through a directory that stays writable.
+
+    Round 4 of g-release-os-boundary bound the sealed `tree/.git` to this run's administrative
+    entry by (st_dev, st_ino). That closes the gitfile REDIRECT and nothing else: the
+    administrative directory itself is in the origin's mutable `.git`, so editing
+    `<admin>/commondir` makes `git rev-parse --git-common-dir` name a different repository
+    while the sealed `.git` file and the admin inode are both untouched. `git worktree list`
+    then names the other repository's trees and the ORIGIN CHECKOUT LEAVES THE FORBIDDEN SET —
+    so a production-derived result may be written into the real working tree, one `git add .`
+    from being committed. Reproduced before this was written.
+
+    The floor is measured on the host before the volume exists and carried to the child, and
+    the child takes the UNION of it and whatever git says: a mid-run edit can only ever add.
+    """
+
+    @pytest.fixture
+    def redirected(self, tmp_path, monkeypatch):
+        """An origin, a linked worktree executing the run, and a second repository the
+        administrative directory has been repointed at."""
+        origin = _git_repo_with_commit(tmp_path / "origin")
+        other = _git_repo_with_commit(tmp_path / "other")
+        linked = tmp_path / "linked"
+        subprocess.run(["git", "-C", str(origin), "worktree", "add", "-q", "--detach",
+                        str(linked)], check=True, capture_output=True)
+        admin = Path(subprocess.run(
+            ["git", "-C", str(linked), "rev-parse", "--path-format=absolute", "--git-dir"],
+            check=True, capture_output=True, text=True).stdout.strip())
+        gitfile_before = (linked / ".git").read_bytes()
+        admin_ino_before = admin.stat().st_ino
+        floor = [[origin.stat().st_dev, origin.stat().st_ino]]
+
+        (admin / "commondir").write_text(f"{other / '.git'}\n")   # THE EDIT
+
+        # What round 4 checks, unchanged by the edit — which is why it cannot see it.
+        assert (linked / ".git").read_bytes() == gitfile_before
+        assert admin.stat().st_ino == admin_ino_before
+        monkeypatch.setattr(cal, "_REPO_ROOT", linked)
+        monkeypatch.chdir(linked)
+        return SimpleNamespace(origin=origin, other=other, linked=linked, floor=floor,
+                               admin=admin)
+
+    def test_git_alone_no_longer_names_the_origin(self, redirected):
+        """The premise, asserted rather than assumed: without a floor the set really has lost
+        the origin, so the next test is measuring the fix and not a coincidence."""
+        roots = {root.resolve() for root in cal._private_path_forbidden_roots()}
+        assert redirected.origin.resolve() not in roots
+        assert redirected.other.resolve() in roots
+
+    def test_the_floor_keeps_the_origin_forbidden(self, redirected, monkeypatch):
+        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", json.dumps(redirected.floor))
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(redirected.origin / "result.json",
+                                           option="--result-output")
+
+    def test_without_the_floor_the_redirect_wins(self, redirected, monkeypatch):
+        """The finding itself, kept as a test so the floor cannot quietly stop being consulted:
+        with git redirected and nothing else to go on, the origin checkout is ACCEPTED."""
+        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", None)
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", None)     # an unsealed dev run
+        target = redirected.origin / "result.json"
+        assert cal._refuse_repo_interior_path(target, option="--result-output") == target.resolve()
+
+    def test_a_boundary_run_without_a_floor_refuses(self, redirected, monkeypatch):
+        """Under the boundary the floor is not optional: deciding this with only the thing that
+        can be edited is exactly the hole, so the run stops instead."""
+        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", None)
+        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(redirected.origin.parent / "r.json",
+                                           option="--result-output")
+        assert "sealed forbidden-root" in str(exc.value)
+
+    @pytest.mark.parametrize("raw", ['{"not": "a list"}', "[[1]]", "not json at all", "[]"])
+    def test_an_unreadable_floor_refuses_rather_than_being_ignored(
+            self, redirected, monkeypatch, raw):
+        """'I could not read the floor' is not 'there is no floor'."""
+        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", raw)
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(redirected.origin.parent / "r.json",
+                                           option="--result-output")
+
+    def test_the_union_still_catches_a_worktree_git_knows_about(self, redirected, monkeypatch):
+        """The other direction, and why this is a union rather than a replacement: a tree the
+        frozen floor never saw is still refused, because git is still asked."""
+        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", json.dumps(redirected.floor))
+        fresh = redirected.other.parent / "registered-later"
+        subprocess.run(["git", "-C", str(redirected.other), "worktree", "add", "-q", "--detach",
+                        str(fresh)], check=True, capture_output=True)
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(fresh / "result.json", option="--result-output")
+
+
 # --- select-release: the CLI harness ---------------------------------------
 
 
@@ -4066,6 +4175,88 @@ class TestArtifactInput:
         run = _ship(monkeypatch, capsys, tmp_path, result=tmp_path / "repo" / "result.json")
         assert run.code == 2
         assert not (tmp_path / "repo" / "result.json").exists()
+
+
+class TestTheJudgedDirectoryIsTheOneWrittenTo:
+    """--result-output was judged as a PATH and then reached by NAME, three times, minutes
+    later.
+
+    _refuse_repo_interior_path validates before any scoring work; publication creates the temp,
+    links it, and unlinks it — each by pathname — after the run. Replacing the validated parent
+    directory with a symlink into a checkout in between published the private result inside the
+    checkout, past the rule that exists to keep it out. Reproduced against the previous version.
+
+    The parent is now opened when it is judged and held until the result lands, and every step
+    of the publication happens relative to that descriptor.
+    """
+
+    def test_swapping_the_validated_parent_for_a_symlink_cannot_publish_into_a_checkout(
+            self, monkeypatch, capsys, tmp_path):
+        real_select = cal.select_candidate
+        store_out = tmp_path / "store" / "out"
+        checkout = tmp_path / "repo"
+
+        def swap_the_destination_mid_run(inputs):
+            # Exactly the window the descriptor closes: after the path was judged, before the
+            # bytes are written.
+            store_out.rename(tmp_path / "store" / "out-moved")
+            store_out.symlink_to(checkout)
+            return real_select(inputs)
+
+        run = _ship(monkeypatch, capsys, tmp_path, select=swap_the_destination_mid_run)
+        assert run.code == 0, run.err
+        assert not (checkout / "result.json").exists(), "the private result landed in a checkout"
+        assert not list(checkout.glob("result.json.tmp-*")), "a private temp landed in a checkout"
+        landed = tmp_path / "store" / "out-moved" / "result.json"
+        assert landed.is_file(), "the result did not land in the directory that was judged"
+        assert isinstance(json.loads(landed.read_text()), dict)
+
+    def test_the_open_refuses_a_parent_that_is_a_symlink(self, tmp_path):
+        """The narrow window O_NOFOLLOW is for. The CLI hands this a RESOLVED path, so no
+        component of it is a symlink at that moment — one that is has become one since the
+        resolution, which is the substitution being refused rather than followed."""
+        store = tmp_path / "store"
+        store.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (store / "aliased").symlink_to(elsewhere)
+        with pytest.raises(OSError):
+            cal._open_judged_output_parent(store / "aliased" / "result.json")
+
+    def test_a_symlinked_spelling_resolves_and_lands_in_the_real_directory(
+            self, monkeypatch, capsys, tmp_path):
+        """The other side of that: an operator whose private store is reached through a symlink
+        is not refused. The path is resolved first, and what is judged and held is where the
+        bytes actually go."""
+        store = tmp_path / "store"
+        store.mkdir(exist_ok=True)
+        real = tmp_path / "real-store"
+        real.mkdir()
+        (store / "aliased").symlink_to(real)
+        run = _ship(monkeypatch, capsys, tmp_path, result=store / "aliased" / "result.json")
+        assert run.code == 0, run.err
+        assert (real / "result.json").is_file()
+
+    def test_publication_still_refuses_to_clobber_a_reviewed_result(self, tmp_path):
+        """The property the link was chosen for, kept while the destination changed: a decision
+        record a human may already have read is never silently replaced."""
+        store = tmp_path / "store"
+        store.mkdir()
+        target = store / "result.json"
+        target.write_text("the reviewed one")
+        fd = cal._open_judged_output_parent(target)
+        try:
+            with pytest.raises(FileExistsError):
+                cal.publish_no_clobber('{"new": true}', target, dir_fd=fd)
+        finally:
+            os.close(fd)
+        assert target.read_text() == "the reviewed one"
+        assert not list(store.glob("result.json.tmp-*")), "a private temp was left behind"
+
+    def test_a_missing_parent_is_still_an_argument_refusal(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, make_result_parent=False)
+        assert run.code == 2
+        assert "parent directory" in run.err
 
     def test_a_missing_result_parent_directory_is_refused_not_created(self, monkeypatch, capsys, tmp_path):
         run = _ship(monkeypatch, capsys, tmp_path, make_result_parent=False)
@@ -4211,6 +4402,9 @@ class TestRedactedStdout:
         allowed = {str(c["p"]) for c in summary["candidates"]}
         binding = summary["winner_binding"]
         for pinned in (binding["runtime_python"], binding["runtime_chess_version"],
+                       # os_build is a pinned VERSION string in exactly the sense the two
+                       # above are — "macOS 26.0 (25C56)" — and is None on an unsealed run.
+                       binding["os_build"] or "",
                        binding["evidence_derivation_fingerprint"],
                        summary["cohort_provenance"]["evidence_derivation_fingerprint"]):
             allowed.update(re.findall(r"-?\d+\.\d+", pinned))
@@ -4229,7 +4423,7 @@ class TestPublication:
         assert not list(run.result.parent.glob("*.tmp-*"))
 
     def test_a_write_failure_leaves_no_temp_and_no_final_file(self, monkeypatch, capsys, tmp_path):
-        def boom(src, dst):
+        def boom(src, dst, **dir_fds):
             raise OSError(28, "No space left on device")
 
         monkeypatch.setattr(cal.os, "link", boom)
@@ -4245,9 +4439,9 @@ class TestPublication:
         order = []
         real_link = cal.os.link
 
-        def traced_link(src, dst):
+        def traced_link(src, dst, **dir_fds):
             order.append("link")
-            return real_link(src, dst)
+            return real_link(src, dst, **dir_fds)
 
         def traced_print(*args, **kwargs):
             order.append("print" if kwargs.get("file") is None else "stderr")
@@ -4308,7 +4502,7 @@ class TestSentinelLeak:
         assert SENTINEL_TEXT not in run.out + run.err
 
     def test_a_publication_failure_leaks_neither_basename_nor_path(self, monkeypatch, capsys, tmp_path):
-        def boom(final_path, data):
+        def boom(final_path, data, **dir_fds):
             raise cal.CapturePublicationError(
                 f"cannot create the private temp beside {final_path.name!r}: No space left."
             )

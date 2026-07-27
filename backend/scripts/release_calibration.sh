@@ -31,6 +31,14 @@
 # This wrapper is NOT a trust boundary. GHOSTREPLAY_PYTHON and a hostile PATH are still
 # whatever the caller makes them; it removes the ambient footgun (bare launcher, wrong
 # python), which is the realistic failure, not the adversarial one.
+#
+# THE OS BOUNDARY IS THE LAUNCHER'S JOB, NOT THIS FILE'S (g-release-os-boundary). The
+# launcher stages the whole execution input onto a read-only disk image — checkout,
+# interpreter, stdlib, dependencies, dylib closure, frozen artifact — and re-execs itself
+# from inside it before hashing anything. It REFUSES to run without that unless
+# --no-boundary is passed, and a --no-boundary run stamps
+# scorer_source_verified_preexec=False so no release can spend it. The interpreter chosen
+# here is the one COPIED onto the volume, which is the other reason it must be the right one.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
