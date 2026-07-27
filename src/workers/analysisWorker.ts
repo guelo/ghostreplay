@@ -12,6 +12,13 @@ import type {
 import type { EngineScore } from "./stockfishMessages";
 import { parseUciInfoLine } from "./parseInfo";
 import {
+  admitInfoLine,
+  createSnapshotAssembler,
+  recordCanceledSearch,
+  recordLegacySelectorDivergence,
+} from "./pvSnapshots";
+import type { SnapshotAssembler } from "./pvSnapshots";
+import {
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
@@ -53,6 +60,26 @@ let MAX_ANALYSIS_MS: number | null = null;
 /** Test-only: inject a finite budget so the dormant plumbing can be exercised. */
 export const __setMaxAnalysisMsForTests = (value: number | null) => {
   MAX_ANALYSIS_MS = value;
+};
+
+/**
+ * Atomic snapshot capture (g-atomic-snapshots, g-two-search-grade §4).
+ *
+ * INSTRUMENTATION ONLY. Batch assembly runs beside the legacy accumulators and
+ * writes to a separate field; nothing on this path reads a snapshot. The atomic
+ * selector is never named in this file — the one call to it goes through
+ * `recordLegacySelectorDivergence`, which returns void — so capturing snapshots
+ * provably cannot change default output. A test pins that absence. Production
+ * switches selectors at §12 step 9, not here.
+ */
+let snapshotInstrumentationEnabled = true;
+
+/**
+ * Test-only: disable capture so the selector-identity test can prove the legacy
+ * arm's (score, pv, reachedDepth) are the same with assembly on and off.
+ */
+export const __setSnapshotInstrumentationForTests = (enabled: boolean) => {
+  snapshotInstrumentationEnabled = enabled;
 };
 
 /**
@@ -135,6 +162,24 @@ type ActiveSearch = {
   /** Armed when the deadline sends `stop`; fires only if `bestmove` never comes. */
   graceTimer: ReturnType<typeof setTimeout> | null;
   onInfo?: (score: EngineScore, depth: number) => void;
+  /** The depth actually requested, so a snapshot can be judged stale or not. */
+  requestedDepth: number;
+  /**
+   * Whether a move ends the game in THIS search's root position, for §4.2's
+   * exemption from the two-move-minimum. Carried per search because the selector
+   * runs at `bestmove`, by which point the caller's position is long gone.
+   */
+  endsGame: (uci: string) => boolean;
+  /**
+   * Set when this search's request is canceled. Tracked on the SEARCH rather than
+   * read from `canceledAnalyses` at `bestmove`: cancel rejects the reset waiter,
+   * so analyzeMove can unwind — clearing the tombstone and `activeAnalysisId` —
+   * before the engine answers `stop`, and by then the id may belong to the next
+   * request.
+   */
+  canceled: boolean;
+  /** Instrumentation only — never read by the fields resolved above. */
+  snapshots: SnapshotAssembler;
 };
 let activeSearch: ActiveSearch | null = null;
 
@@ -450,6 +495,8 @@ const runSearch = async (
     sendEngineCommand("stop");
   }
 
+  const requestedDepth = searchDepth ?? DEFAULT_SEARCH_DEPTH;
+
   return new Promise<SearchResult>(
     (resolve, reject) => {
       const search = {
@@ -462,6 +509,12 @@ const runSearch = async (
         capTimer: null as ReturnType<typeof setTimeout> | null,
         graceTimer: null as ReturnType<typeof setTimeout> | null,
         onInfo,
+        requestedDepth,
+        endsGame: makeEndsGame(fen, moves),
+        canceled: false,
+        // Fresh per search: `seq` is a per-search emission counter and batches
+        // never cross a search boundary. K is 1 until restricted MultiPV lands.
+        snapshots: createSnapshotAssembler(1),
       };
       activeSearch = search;
       // Arm the wall-clock heartbeat for THIS search so a single long iteration
@@ -509,7 +562,7 @@ const runSearch = async (
       }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
-      sendEngineCommand(`go depth ${searchDepth ?? DEFAULT_SEARCH_DEPTH}`);
+      sendEngineCommand(`go depth ${requestedDepth}`);
     },
   );
 };
@@ -546,6 +599,54 @@ const terminalScoreAfterMove = (
   }
 
   return { type: "cp", value: 0 };
+};
+
+/**
+ * The position a search actually runs from: `fen` after `moves`. Null when the
+ * replay fails, so the caller degrades to "does not end the game" rather than
+ * letting chess.js throw out of instrumentation.
+ */
+const positionAfterMoves = (fen: string, moves: string[]): string | null => {
+  try {
+    const chess = new Chess(fen);
+    for (const uci of moves) {
+      const move = parseUciMove(uci);
+      if (!move) {
+        return null;
+      }
+      chess.move(move);
+    }
+    return chess.fen();
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * §4.2's exemption from the two-move minimum: a one-move PV is legitimate when
+ * that move ends the game — a mate in one has nothing to continue with, and
+ * without this a real mating line is miscounted as `pv-short` divergence.
+ *
+ * Evaluated LAZILY and memoized. The selector asks only about a PV shorter than
+ * two moves, which is rare, so a normal search never pays the chess.js replay and
+ * a K-slot batch pays it at most once.
+ */
+const makeEndsGame = (fen: string, moves: string[]) => {
+  let searchFen: string | null | undefined;
+
+  return (uci: string): boolean => {
+    if (searchFen === undefined) {
+      searchFen = positionAfterMoves(fen, moves);
+    }
+    if (searchFen === null) {
+      return false;
+    }
+    try {
+      return terminalScoreAfterMove(searchFen, uci) !== null;
+    } catch {
+      return false;
+    }
+  };
 };
 
 const buildBestLine = (
@@ -628,14 +729,44 @@ const handleEngineLine = (line: string) => {
 
     const parts = line.split(" ");
     const move = parts[1] ?? "";
+    const stopReason: StopReason = current.capFired ? "deadline" : "bestmove";
     current.resolve({
       bestmove: move,
       score: current.lastScore,
       pv: current.lastPv,
       capFired: current.capFired,
-      stopReason: current.capFired ? "deadline" : "bestmove",
+      stopReason,
       reachedDepth: current.lastDepth,
     });
+    // AFTER resolve, and void-returning: the legacy accumulators above are this
+    // search's only selector. This call measures what §12 step 9 would change.
+    if (snapshotInstrumentationEnabled) {
+      if (current.canceled) {
+        // A canceled request emits no row — analyzeMove unwinds via
+        // AnalysisCanceledError and posts nothing — so its truncated search has
+        // no output for the two selectors to disagree about. Selecting over it
+        // anyway would charge a `stale-depth` rejection to the drift report for a
+        // row that never existed, which is why §6.3 case 9a keeps cancellation in
+        // its own tally rather than any failure counter.
+        recordCanceledSearch();
+      } else {
+        recordLegacySelectorDivergence(
+          {
+            assembler: current.snapshots,
+            requestedDepth: current.requestedDepth,
+            bestMove: move,
+            capFired: current.capFired,
+            stopReason,
+            endsGame: current.endsGame,
+          },
+          {
+            score: current.lastScore,
+            pv: current.lastPv,
+            reachedDepth: current.lastDepth,
+          },
+        );
+      }
+    }
     // Search-phase completion (root / post-played / post-best): emit a
     // phase-boundary liveness ping so the watchdog covers the gap between this
     // bestmove and the next phase's first info line.
@@ -674,6 +805,13 @@ const handleEngineLine = (line: string) => {
     if (info.pv && (info.multipv === undefined || info.multipv === 1)) {
       activeSearch.lastPv = info.pv;
     }
+    // Assembly runs LAST and writes only to `snapshots`, so every legacy field
+    // above is settled before instrumentation sees the line. Score-only, PV-only,
+    // and bounded lines are filtered out by `admitInfoLine`, having already
+    // updated the streaming and heartbeat state above.
+    if (snapshotInstrumentationEnabled) {
+      admitInfoLine(activeSearch.snapshots, info);
+    }
   }
 };
 
@@ -686,6 +824,10 @@ const cancelAnalysis = (analysisId: string) => {
   if (activeAnalysisId === analysisId) {
     canceledAnalyses.add(analysisId);
     if (activeSearch) {
+      // Mark the search itself so its `bestmove` can still be identified as
+      // belonging to a canceled request — see ActiveSearch.canceled for why the
+      // request tombstone is not enough at that point.
+      activeSearch.canceled = true;
       sendEngineCommand("stop");
     }
     // Stop the heartbeat eagerly so a canceled request stops pinging immediately

@@ -19,11 +19,26 @@ export type EngineScore =
   | { type: 'cp'; value: number }
   | { type: 'mate'; value: number }
 
+/**
+ * Whether an `info` line's score is a settled evaluation or an aspiration-window
+ * failure. Stockfish marks the latter with `lowerbound`/`upperbound`; only `exact`
+ * lines may enter atomic snapshot assembly (g-atomic-snapshots §4).
+ */
+export type EngineScoreBound = 'exact' | 'lower' | 'upper'
+
 export type EngineInfo = {
   depth?: number
+  seldepth?: number
   score?: EngineScore
+  /** Set only alongside `score`; a score-less line has no bound to report. */
+  bound?: EngineScoreBound
   pv?: string[]
   multipv?: number
+  nodes?: number
+  nps?: number
+  /** UCI `time`, in milliseconds. */
+  time?: number
+  hashfull?: number
 }
 
 // The ACTUAL search limit issued for a request (never a hardcoded constant), so a

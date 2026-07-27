@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs'
+import { relative, resolve } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   AnalysisWorkerRequest,
@@ -1663,5 +1665,280 @@ describe('analysisWorker', () => {
     const message = await runAnalysisToCompletion('reason-natural')
     expect(message.stopReason).toBe('bestmove')
     expect(message.capFired).toBe(false)
+  })
+
+  describe('atomic snapshot instrumentation (g-two-search-grade §4.3)', () => {
+    /**
+     * A recorded engine transcript whose ROOT search makes the two selectors
+     * disagree, and whose post-move searches make them agree.
+     *
+     * The root phase reports an aspiration fail-high at depth 16 (which moves
+     * `lastScore` even though it is not a settled evaluation), a settled depth-16
+     * line, and then a depth-17 `currmove` status line that moves `lastDepth`
+     * without ever producing a depth-17 PV. The legacy accumulators therefore
+     * report a depth-17 search that no depth-17 line ever corroborated; the
+     * atomic selector's deepest complete batch is depth 16 and it rejects.
+     */
+    const TRANSCRIPT = [
+      {
+        marker: 'position fen rnbqkbnr',
+        lines: [
+          'info depth 15 multipv 1 score cp 28 nodes 1000 time 10 pv e2e4 e7e5 g1f3',
+          'info depth 16 score cp 62 lowerbound nodes 1500 time 15 pv e2e4 c7c5',
+          'info depth 16 multipv 1 score cp 34 nodes 1800 time 18 pv e2e4 e7e5 b1c3',
+          'info depth 17 currmove e2e4 currmovenumber 1',
+        ],
+        bestmove: 'bestmove e2e4',
+      },
+      {
+        marker: 'moves d2d4',
+        lines: ['info depth 17 multipv 1 score cp -12 nodes 4000 time 40 pv d7d5 c2c4'],
+        bestmove: 'bestmove d7d5',
+      },
+      {
+        marker: 'moves e2e4',
+        lines: ['info depth 17 multipv 1 score cp -20 nodes 5000 time 50 pv e7e5 g1f3'],
+        bestmove: 'bestmove e7e5',
+      },
+    ]
+
+    /** Replay the transcript for one analyze-move; returns its response and UCI stream. */
+    const replayTranscript = async (id: string) => {
+      const commands: string[] = []
+      engineWorkerPostMessageMock.mockClear()
+
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'd2d4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      for (const phase of TRANSCRIPT) {
+        await vi.waitFor(() => {
+          expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+            expect.stringContaining(phase.marker),
+          )
+        })
+        for (const line of phase.lines) {
+          engineMessageHandler?.(line)
+        }
+        engineMessageHandler?.(phase.bestmove)
+        // Snapshot this phase's commands and clear, so the NEXT phase's marker
+        // wait cannot match a command an earlier phase already posted.
+        commands.push(...engineWorkerPostMessageMock.mock.calls.map(([c]) => c as string))
+        engineWorkerPostMessageMock.mockClear()
+      }
+
+      const analysis = await vi.waitFor(() => {
+        const call = postMessageMock.mock.calls.find(
+          ([m]) => m?.type === 'analysis' && m.id === id,
+        )
+        expect(call).toBeDefined()
+        return call![0] as Record<string, unknown>
+      })
+
+      const { id: _id, ...payload } = analysis
+      return { payload, commands }
+    }
+
+    it('emits an identical result and UCI stream with assembly enabled and disabled', async () => {
+      const worker = await import('./analysisWorker')
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      worker.__setSnapshotInstrumentationForTests(true)
+      const withAssembly = await replayTranscript('assembly-on')
+
+      worker.__setSnapshotInstrumentationForTests(false)
+      const withoutAssembly = await replayTranscript('assembly-off')
+
+      // The legacy arm's selector is the accumulators, and nothing on this path
+      // reads a snapshot, so capturing them cannot move a single emitted value.
+      expect(withAssembly.payload).toEqual(withoutAssembly.payload)
+      expect(withAssembly.commands).toEqual(withoutAssembly.commands)
+
+      // Pinned so the identity above cannot be satisfied by both arms breaking.
+      expect(withAssembly.payload).toMatchObject({
+        move: 'd2d4',
+        bestMove: 'e2e4',
+        bestLine: ['e2e4', 'e7e5', 'b1c3'],
+        canonical: true,
+        capFired: false,
+        stopReason: 'bestmove',
+        // The accumulator hazard, preserved verbatim: no depth-17 root line ever
+        // carried a PV, yet the legacy selector reports depth 17.
+        reachedDepth: 17,
+      })
+    })
+
+    it('counts legacy_selector_divergence by reason without changing any emitted value', async () => {
+      const worker = await import('./analysisWorker')
+      // Same module registry as the worker's own import, so these are the very
+      // counters it mutates.
+      const { getSnapshotCounters, resetSnapshotCounters } = await import('./pvSnapshots')
+      resetSnapshotCounters()
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+      worker.__setSnapshotInstrumentationForTests(true)
+
+      const { payload } = await replayTranscript('divergence')
+
+      const counters = getSnapshotCounters()
+      // Root diverges (stale-depth); both post-move searches agree exactly.
+      expect(counters.legacy_selector_divergence).toBe(1)
+      expect(counters.divergence_by_reason['stale-depth']).toBe(1)
+      expect(counters.divergence_by_reason.accepted).toBe(0)
+      expect(counters.rejections['stale-depth']).toBe(1)
+
+      // The measured row was still emitted, unchanged, by the legacy selector.
+      expect(payload).toMatchObject({ bestMove: 'e2e4', reachedDepth: 17 })
+    })
+
+    it('counts nothing at all while instrumentation is disabled', async () => {
+      const worker = await import('./analysisWorker')
+      const { getSnapshotCounters, resetSnapshotCounters } = await import('./pvSnapshots')
+      resetSnapshotCounters()
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+      worker.__setSnapshotInstrumentationForTests(false)
+
+      await replayTranscript('no-instrumentation')
+
+      const counters = getSnapshotCounters()
+      expect(counters.legacy_selector_divergence).toBe(0)
+      expect(counters.batches_complete).toBe(0)
+    })
+
+    it('tallies a canceled search instead of scoring it as a divergence', async () => {
+      const worker = await import('./analysisWorker')
+      const { getSnapshotCounters, resetSnapshotCounters } = await import('./pvSnapshots')
+      resetSnapshotCounters()
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+      worker.__setSnapshotInstrumentationForTests(true)
+
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id: 'canceled',
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'd2d4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      // Depth 15 against a requested 17: were this search graded, the atomic
+      // selector would reject it `stale-depth` and the row would be counted.
+      engineMessageHandler?.('info depth 15 multipv 1 score cp 28 nodes 900 time 9 pv e2e4 e7e5')
+
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: { type: 'cancel-analysis', id: 'canceled' } satisfies AnalysisWorkerRequest,
+        }),
+      )
+      // Stockfish answers the cancel's `stop` with a truncated bestmove.
+      engineMessageHandler?.('bestmove e2e4')
+
+      await vi.waitFor(() => {
+        expect(getSnapshotCounters().searches_canceled).toBe(1)
+      })
+
+      // No row exists to disagree about: analyzeMove unwinds and posts nothing.
+      expect(postMessageMock).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'analysis', id: 'canceled' }),
+      )
+      const counters = getSnapshotCounters()
+      expect(counters.legacy_selector_divergence).toBe(0)
+      expect(counters.rejections['stale-depth']).toBe(0)
+    })
+
+    it('exempts a real one-move mating PV from the two-move minimum', async () => {
+      const worker = await import('./analysisWorker')
+      const { getSnapshotCounters, resetSnapshotCounters } = await import('./pvSnapshots')
+      resetSnapshotCounters()
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+      worker.__setSnapshotInstrumentationForTests(true)
+
+      // Ra1-a8 is mate, so it is both the played move and the best move: the two
+      // follow-up searches resolve terminally and the root search is the only one.
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id: 'mate-in-one',
+            fen: '6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1',
+            move: 'a1a8',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      // A mate in one has nothing to continue with, so its PV is one move long.
+      engineMessageHandler?.('info depth 17 multipv 1 score mate 1 nodes 800 time 8 pv a1a8')
+      engineMessageHandler?.('bestmove a1a8')
+
+      await vi.waitFor(() => {
+        expect(postMessageMock).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'analysis', id: 'mate-in-one' }),
+        )
+      })
+
+      // The worker supplies `endsGame` from the search's own root position, so
+      // the exemption is available in a real run and not only to a unit test that
+      // passes the callback by hand.
+      const counters = getSnapshotCounters()
+      expect(counters.rejections['pv-short']).toBe(0)
+      expect(counters.legacy_selector_divergence).toBe(0)
+    })
+
+    it('keeps the atomic selector out of every production path', () => {
+      const srcRoot = resolve(__dirname, '..')
+
+      // The shared worker does not even NAME the atomic selector: its only
+      // atomic-selector call goes through the void-returning divergence recorder,
+      // so no selection can reach an emitted value by accident.
+      expect(readFileSync(resolve(__dirname, 'analysisWorker.ts'), 'utf8')).not.toContain(
+        'selectAtomicSnapshot',
+      )
+
+      // Production modules only: a test may name the selector freely.
+      const productionSources = (dir: string): string[] =>
+        readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+          const full = resolve(dir, entry.name)
+          if (entry.isDirectory()) return productionSources(full)
+          return /\.tsx?$/.test(entry.name) && !/\.(test|spec)\.tsx?$/.test(entry.name)
+            ? [full]
+            : []
+        })
+
+      const referencing = productionSources(srcRoot)
+        .filter((file) => readFileSync(file, 'utf8').includes('selectAtomicSnapshot'))
+        .map((file) => relative(srcRoot, file))
+        .sort()
+
+      // Only the module that DEFINES it. Candidate arms (§12 step 3) will be its
+      // first callers and production takes it over at §12 step 9, not before —
+      // extending this list is a deliberate act, never an accident.
+      expect(referencing).toEqual(['workers/pvSnapshots.ts'])
+    })
   })
 })
