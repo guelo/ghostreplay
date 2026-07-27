@@ -1746,35 +1746,91 @@ def test_the_committed_derivation_is_recorded_not_applied():
     ) == 518
 
 
-def _committed_backfill_remaining_points() -> list[tuple[str, Fraction, Fraction]]:
-    """`(artifact, max_ms, N_copy)` for every committed point that timed it.
+#: The kinds that run a scan block, and so the cohort every `game_sessions` scan
+#: term is measured over. The cancel probes time a lock release and record no
+#: scans; the sweep domains are a page-count measurement and time nothing
+#: standalone.
+_SCAN_BEARING_KINDS = frozenset({"atomic", "batch"})
 
-    The atomic and batch artifacts, which are the ones that run a scan block. The
-    cancel probes time a lock release and record no scans; the sweep domains are a
-    page-count measurement and time nothing standalone.
+#: That cohort, BY IDENTITY. A derivation names its own inputs
+#: (`_COMMITTED_DERIVATION_SET`); this names which of them are entitled to price a
+#: `game_sessions` scan, so the two cannot drift into meaning different files.
+_SCAN_BEARING_ARTIFACTS = (
+    "docs/sizing/atomic_full_20260726.json",
+    "docs/sizing/atomic_empty_20260726.json",
+    "docs/sizing/batch_b100_r200_20260726.json",
+    "docs/sizing/batch_b250_r500_20260726.json",
+    "docs/sizing/batch_b500_r1000_20260726.json",
+    "docs/sizing/batch_b1000_r2000_20260726.json",
+)
 
-    `N_copy` is `game_sessions`' factor and not `session_moves`': the statement
-    filters `game_sessions` on the unindexed version predicate and never touches
-    `session_moves`, so it is carried onto the frozen basis by the same relation it
-    scans. Per point, against the copy each one actually ran on — the six copies
-    share 4,184 rows and their relations differ by 13%.
+
+def _committed_game_sessions_scan_points(scan: str) -> list[tuple[str, Fraction, Fraction]]:
+    """`(artifact, max_ms, N_copy)` for every committed point entitled to time `scan`.
+
+    `N_copy` is `game_sessions`' factor and not `session_moves`': both statements
+    read through here filter `game_sessions` on the unindexed version predicate and
+    never touch `session_moves`, so each is carried onto the frozen basis by the
+    same relation it scans. Per point, against the copy each one actually ran on —
+    the six copies share 4,184 rows and their relations differ by 13%.
+
+    The cohort is selected by `kind` and asserted by IDENTITY, not by size. A count
+    is satisfied by a substitution: a batch point that quietly stops timing the
+    statement, against a cancel probe that starts timing one, leaves six of
+    something while changing which six — and if the substitute does not itself
+    breach, every assertion downstream of it still passes. So membership is pinned
+    three ways: the cohort is exactly `_SCAN_BEARING_ARTIFACTS`, every member timed
+    `scan`, and nothing outside the cohort carries it. The last one matters most,
+    because a cancel probe with a `scans` block is not a cheap extra reading — it
+    is a measurement of a run that never executed a scan block at all.
+
+    Shared by the two gates below ON PURPOSE. `BACKFILL_REMAINING_SQL` was inferred
+    from `COVERAGE_ASSERT_SQL` precisely because they are the same shape against
+    the same relation, so pricing them by two different normalizations here would
+    make the pair of results incomparable — and the whole finding in
+    `g-b-coverage-assert-18` is that one of them clears the check and the other
+    does not.
     """
-    out = []
-    for doc in _committed_measurements():
-        scan = (doc.get("scans") or {}).get("backfill_remaining")
-        if scan is None:
-            continue
-        out.append(
-            (
-                doc["artifact"],
-                Fraction(scan["max_ms"]),
-                harness.sweep_copy_growth_factor(
-                    doc["dimensions_before"], _FROZEN_BASIS, artifact=doc["artifact"]
-                ),
-            )
+    assert set(_SCAN_BEARING_ARTIFACTS) <= set(_COMMITTED_DERIVATION_SET)
+    docs = _committed_measurements()
+
+    eligible = [doc for doc in docs if doc.get("kind") in _SCAN_BEARING_KINDS]
+    assert tuple(doc["artifact"] for doc in eligible) == _SCAN_BEARING_ARTIFACTS
+
+    missing = [doc["artifact"] for doc in eligible if scan not in (doc.get("scans") or {})]
+    assert not missing, f"scan-bearing artifacts that did not time {scan}: {missing}"
+    intruders = [
+        doc["artifact"]
+        for doc in docs
+        if doc.get("kind") not in _SCAN_BEARING_KINDS and scan in (doc.get("scans") or {})
+    ]
+    assert not intruders, f"artifacts that run no scan block yet time {scan}: {intruders}"
+
+    return [
+        (
+            doc["artifact"],
+            Fraction(doc["scans"][scan]["max_ms"]),
+            harness.sweep_copy_growth_factor(
+                doc["dimensions_before"], _FROZEN_BASIS, artifact=doc["artifact"]
+            ),
         )
-    assert len(out) == 6, f"expected every atomic/batch point to time it, got {len(out)}"
-    return out
+        for doc in eligible
+    ]
+
+
+def _committed_backfill_remaining_points() -> list[tuple[str, Fraction, Fraction]]:
+    return _committed_game_sessions_scan_points("backfill_remaining")
+
+
+def _committed_coverage_assert_points() -> list[tuple[str, Fraction, Fraction]]:
+    return _committed_game_sessions_scan_points("coverage_assert")
+
+
+def _demanded(points: list[tuple[str, Fraction, Fraction]]) -> dict[str, int]:
+    """The integer millisecond each point demands, on the frozen basis."""
+    return {
+        name: math.ceil(harness.MARGIN * max_ms * n_copy) for name, max_ms, n_copy in points
+    }
 
 
 def test_frozen_backfill_remaining_covers_every_committed_measurement():
@@ -1797,9 +1853,7 @@ def test_frozen_backfill_remaining_covers_every_committed_measurement():
     letting a term that is one rounding step from under-charging pass as measured.
     """
     points = _committed_backfill_remaining_points()
-    demanded = {
-        name: math.ceil(harness.MARGIN * max_ms * n_copy) for name, max_ms, n_copy in points
-    }
+    demanded = _demanded(points)
     for name, ms in demanded.items():
         assert mod.MARGINED_MS_BACKFILL_REMAINING >= ms, (name, ms)
 
@@ -1808,12 +1862,82 @@ def test_frozen_backfill_remaining_covers_every_committed_measurement():
     assert demanded[worst_name] == mod.MARGINED_MS_BACKFILL_REMAINING == 6
 
     # `ceil(3 * x) <= 6` iff `x <= 2`, so 2 ms at the frozen basis is the rounding
-    # boundary the literal sits against. Exact rationals, because the whole claim
-    # is about where a value falls relative to that boundary.
+    # boundary the literal sits against. Exact rationals THROUGHOUT, because the
+    # whole claim is about where a value falls relative to that boundary: an
+    # approximate comparison here would admit exactly the evidence drift the
+    # tightness is asserted against, on the side where 1.7% of headroom lives.
     normalized = worst_ms * worst_n_copy
     assert normalized < Fraction(2)
-    assert float(normalized) == pytest.approx(1.966944, abs=1e-6)
+    assert normalized == Fraction(368_802_052_573_300_879, 187_500_000_000_000_000)  # ~1.966944
     assert worst_n_copy == Fraction(10_010_624, 6_144_000)
+
+
+def test_frozen_coverage_assert_under_charges_its_own_measurement():
+    """`MARGINED_MS_COVERAGE_ASSERT = 6` does NOT survive that check — asserted.
+
+    The deliberate inverse of the test above, and it is green because the breach is
+    real (`g-b-coverage-assert-18`). The same pairing over the same six artifacts
+    puts `COVERAGE_ASSERT_SQL` — the statement `MARGINED_MS_BACKFILL_REMAINING` was
+    inferred FROM, the same shape against the same relation — at 2.104080 ms on the
+    frozen basis, which demands 7. The borrowed term qualifies and the SOURCE term
+    does not: on 18.4 the source statement costs slightly more than the value frozen
+    from it on 15.18 allows. Three of the six points demand 7, so this is not one
+    outlier copy.
+
+    A breach is ASSERTED rather than left to prose because the resolution moves
+    `SIZED_*` too. Re-freezing §3's literals against the 18.4 basis puts this term
+    at 4 (`docs/release_b_runbook.md` §7/§8) — so a re-freeze that carried the
+    shipped 6 across by inheritance would land it against a basis where nothing
+    demands more than 4, over-charging silently, with the record of why it was 6
+    closed as resolved. Both sides are pinned here, so either one moving fails, and
+    the bead gets closed by someone looking at it rather than by drift. The two
+    legitimate exits are (a) re-freeze the literals and `SIZED_*` together from one
+    committed set — Phase 3, `g-b-sizing-harness` — or (b) if that slips, patch the
+    single literal to 7 at the shipped basis and label it a patch, not a
+    qualification. Both edit this test on purpose.
+
+    What keeps it a qualification defect and not a live hazard is the last group:
+    `SCAN_STMT_TIMEOUT_MS` is `max(521, …)` and covers the demand with room, so no
+    statement is armed below its own measured cost and there is no self-cancellation
+    path — and the import-time budget still fits the deadline at 7, which is what
+    makes exit (b) available without re-running anything.
+    """
+    points = _committed_coverage_assert_points()
+    demanded = _demanded(points)
+    breaching = sorted(n for n, ms in demanded.items() if ms > mod.MARGINED_MS_COVERAGE_ASSERT)
+    assert breaching == [
+        "docs/sizing/atomic_full_20260726.json",
+        "docs/sizing/batch_b100_r200_20260726.json",
+        "docs/sizing/batch_b500_r1000_20260726.json",
+    ]
+
+    worst_name, worst_ms, worst_n_copy = max(points, key=lambda p: p[1] * p[2])
+    assert worst_name == "docs/sizing/atomic_full_20260726.json"
+    # Short by exactly one rounding step, and pinned as such: an evidence change
+    # that widened the gap would be a different finding than the one filed.
+    assert demanded[worst_name] == 7 == mod.MARGINED_MS_COVERAGE_ASSERT + 1
+
+    # `ceil(3 * x) <= 6` iff `x <= 2` — the same boundary the sibling term sits
+    # 1.7% under, this one sits 5.2% over. Exact rationals, same reason: the value
+    # is pinned as the rational the committed artifact actually carries, not as a
+    # float within a tolerance, so evidence drift is a failure rather than a round.
+    normalized = worst_ms * worst_n_copy
+    assert normalized > Fraction(2)
+    assert normalized == Fraction(263_010_034_939_118_987, 125_000_000_000_000_000)  # ~2.104080
+    assert worst_n_copy == Fraction(10_010_624, 6_144_000)
+
+    # Why this is a qualification defect and not a live hazard. Both halves matter:
+    # the armed timeout covers the term's own demand, so the under-charge cannot
+    # cancel the statement it prices, and the whole cost of the conservative patch
+    # is one millisecond per `G_sessions` in a budget with 814 s of headroom.
+    assert mod.SCAN_STMT_TIMEOUT_MS >= demanded[worst_name]
+    patched = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT,
+        demanded[worst_name],
+        pages=mod.IMPORT_WORST_CASE_SWEEP_PAGES,
+    )
+    assert patched - _budget() == 1
+    assert patched < mod.REVISION_DEADLINE_S * 1000
 
 
 def test_docs_sizing_holds_measurement_artifacts_named_for_their_kind():

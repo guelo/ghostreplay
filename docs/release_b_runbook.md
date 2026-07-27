@@ -573,12 +573,18 @@ notice a future run coming in 2% hotter, and 7 is the next integer.
 > **`MARGINED_MS_COVERAGE_ASSERT = 6` does not survive the same check**, and it is
 > not this bead's term. `COVERAGE_ASSERT_SQL` — the statement the provisional
 > derivation borrowed from — measures 1.291375 ms max on `gr_m_atomic_full`, which
-> normalizes to **2.104063 ms** and demands **7**. The two statements are the same
+> normalizes to **2.104080 ms** and demands **7**. The two statements are the same
 > shape against the same relation, so the borrowed inference was sound; what moved
 > is that on 18.4 the *source* statement now costs slightly more than the term
 > frozen from it on 15.18 allows. Impact is one millisecond per `G_sessions` in the
 > scan budget and the atomic stall projection, and none at all on
-> `SCAN_STMT_TIMEOUT_MS`, which is `max(521, …)` and unmoved. Filed as
+> `SCAN_STMT_TIMEOUT_MS`, which is `max(521, …)` and unmoved. Three of the six
+> points demand 7, so it is not one outlier copy. The breach is **asserted** by
+> `test_frozen_coverage_assert_under_charges_its_own_measurement`, the deliberate
+> inverse of the gate above and green because the breach is real: both the
+> measurement and the shipped literal are pinned, so a re-freeze that carried 6
+> across by inheritance — onto a basis where nothing demands more than 4 — fails
+> rather than closing the record quietly. Filed as
 > `g-b-coverage-assert-18` — deliberately NOT fixed here, because a term and the
 > basis it is frozen against have to move together and this one's basis is §3's
 > 15.18 snapshot.
