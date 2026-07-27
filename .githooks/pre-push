@@ -118,13 +118,21 @@ if [ ! -x backend/.venv/bin/python ]; then
   record_result "Backend tests" "FAILED" "$backend_log"
   overall_status=1
 else
+  # `-m "not release_seal"`: the release boundary's acceptance proofs attach a real ~900MB
+  # read-only disk image (~4 minutes measured), and they compare the sealed bytes against
+  # LIVE host trees that other agents are editing while this hook runs — which is the point
+  # of those checks during a release, and noise on a push. Everything that reasons about the
+  # boundary without building one still runs here, and the summary below names what did not.
   run_gate \
     "Backend tests" \
-    "Backend tests (warnings are errors)" \
+    "Backend tests (warnings are errors; release_seal proofs deselected)" \
     "$output_dir/backend-tests.out" \
     false \
-    backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini backend
+    backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini backend \
+    -m "not release_seal"
 fi
+
+release_seal_command='backend/.venv/bin/python -m pytest -c backend/pytest.ini backend -m release_seal'
 
 printf '\nTest Results\n------------\n'
 for index in "${!result_names[@]}"; do
@@ -133,6 +141,11 @@ for index in "${!result_names[@]}"; do
     "${result_statuses[$index]}" \
     "${result_logs[$index]}"
 done
+
+# Say what was NOT run, every time. A deselection nobody is reminded of is a deselection that
+# quietly becomes "we deleted those tests".
+printf '\nNot run by this gate: @release_seal (the release boundary acceptance proofs).\n'
+printf 'Run them before approving a release run:\n  %s\n' "$release_seal_command"
 
 if ((overall_status != 0)); then
   printf '\nOne or more pre-push checks failed.\n' >&2

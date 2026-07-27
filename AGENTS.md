@@ -23,6 +23,7 @@ If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backe
 ## Testing Guidance
 - Avoid overly detailed UI/interface tests (exact layout structure, cosmetic copy, or styling-specific assertions).
 - Prefer testing behavior contracts, data flow, and critical user outcomes instead of pixel-level or nav-chrome details.
+- A test that needs minutes of wall clock, or that reads host state other agents are editing, does not belong in the pre-push gate. Mark it `@pytest.mark.release_seal` (registered in `backend/pytest.ini`; `.githooks/pre-push` deselects it and prints what it skipped) and document when it must be run. Today that marker means "attaches a real read-only volume" — see `backend/scripts/CALIBRATE_OPENING_SCORES.md`.
 
 ## Multi-Agent Workspace Rules
 

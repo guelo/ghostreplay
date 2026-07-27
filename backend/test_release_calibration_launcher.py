@@ -33,6 +33,35 @@ _REPO_ROOT = Path(cal.__file__).resolve().parents[2]
 _BACKEND_ROOT = _REPO_ROOT / "backend"
 _LAUNCHER_PATH = Path(launcher.__file__).resolve()
 
+# The proofs that ATTACH A REAL VOLUME. They are the acceptance cases for the OS boundary and
+# they are not optional — but they are wrong to run on every push, for two reasons that are
+# properties of the thing under test rather than of how the tests are written:
+#
+#   COST      4m41s measured, most of it the one module-scoped sealed volume: it carries
+#             the interpreter, the dependency tree and the dylib closure, so it is ~900MB
+#             staged, copied into an image and attached. The other 3,466 backend tests run in
+#             2m57s, so these fifteen were more than half the gate.
+#   SHARING   the sealed bytes are compared against the LIVE host trees (py/, deps/, dylibs/)
+#             — deliberately, it is the concurrent-`pip install` detector — and this repo is
+#             worked in by several agents at once. Somebody else's install, or a .pyc landing
+#             mid-stage, fails the comparison for a reason that belongs to nobody's change.
+#             In a pre-push gate that reads as a flake; in a release run it reads correctly,
+#             as "the host moved under the seal, do it again".
+#
+# So they are deselected by `.githooks/pre-push` (`-m "not release_seal"`) and run on demand:
+#
+#     backend/.venv/bin/python -m pytest -c backend/pytest.ini backend -m release_seal
+#
+# which is part of approving a release — see "Release runs" in
+# backend/scripts/CALIBRATE_OPENING_SCORES.md.
+#
+# Everything else stays in the push gate, and the line is drawn at ATTACHING, not at the
+# subject matter: the ordering, staging, containment and refusal cases all fake `hdiutil` out
+# and cost milliseconds, and TestLaunchEndToEnd's real checkout and real child interpreter
+# come in at ~9s for the class. What is expensive is building the boundary, not reasoning
+# about it, so only the building is deferred.
+_RELEASE_SEAL = pytest.mark.release_seal
+
 
 def _disposable_repo(tmp_path: Path) -> Path:
     """A throwaway git repo with a minimal manifest, for the checkout tests.
@@ -616,13 +645,16 @@ _E2E_OVERLAY = (
 
 # Overlaid ABSENCES, kept apart from the bytes above because a deletion is a different fact and
 # folding it into that list made a test that reads every overlaid path try to read a file whose
-# whole point is that it is gone. HEAD tracks this path as a SYMLINK into a home directory
-# outside the repository (swept in by a `git add -A` in af02eac), so a sealed checkout of HEAD
-# carries a name whose bytes are off the volume — which the containment check refuses, correctly,
-# for every run. Removing it is part of this task, so the fixture's rev is HEAD without it.
-_E2E_OVERLAY_REMOVED = (
-    ".antigravitycli/71ef14de-fe59-4d58-aaa5-7fdde91a224c.json",
-)
+# whole point is that it is gone.
+#
+# Empty since 284d4b5, and the mechanism is kept rather than deleted because the entry it held
+# is the shape of the next one: HEAD tracked `.antigravitycli/<uuid>.json` as a SYMLINK into a
+# home directory outside the repository (swept in by a `git add -A` in af02eac), so a sealed
+# checkout of HEAD carried a name whose bytes were off the volume, which the containment check
+# refuses for every run. That removal is now COMMITTED, and a path git no longer has in the
+# index is not an absence to overlay — `git rm --cached` exits 128 on it and takes the whole
+# fixture, and every test that depends on it, down with it.
+_E2E_OVERLAY_REMOVED: tuple[str, ...] = ()
 
 
 def _overlay_commit(repo_root: Path, rel_paths: Sequence[str], index_path: Path, *,
@@ -688,9 +720,9 @@ class TestOverlayCommit:
         assert show(theirs) == "COMMITTED = 1\n"  # theirs cannot break or join my run
 
     def test_a_removed_path_is_dropped_from_the_rev_and_left_in_the_working_tree(self, tmp_path):
-        """The overlay carries absences as well as bytes, and the removal is confined to the
-        throwaway index: the file the fixture drops is still in the working tree afterwards,
-        because deleting it there is the task's commit to make, not the fixture's."""
+        """The overlay carries absences as well as bytes, and a removal is confined to the
+        throwaway index: a dropped file is still in the working tree afterwards, because
+        deleting it there is the task's commit to make, not the fixture's."""
         repo = _disposable_repo(tmp_path)
         doomed = "backend/app/other.py"
         (repo / doomed).write_text("COMMITTED = 1\n")
@@ -730,12 +762,13 @@ def worktree_rev(tmp_path_factory) -> str:
     snapshot makes the fixture validate a combined state, or fail for reasons belonging to
     somebody else's task. Neither is a property of the code under review.
 
-    So: seed a TEMPORARY index from HEAD, stage only _E2E_OVERLAY into it, and drop
-    _E2E_OVERLAY_REMOVED from it. Everything else in the checkout is HEAD's — and the removal
-    belongs here for the same reason the additions do: without it the fixture would seal a
-    checkout carrying a symlink off the volume, which the containment check refuses, so the
-    tests would fail on a path this task deletes rather than on anything under review. The temp
-    index matters as much as the selection — GIT_INDEX_FILE
+    So: seed a TEMPORARY index from HEAD, stage only _E2E_OVERLAY into it, and drop whatever
+    _E2E_OVERLAY_REMOVED names — an absence belongs in the overlay for the same reason a byte
+    does, when the task's deletion is not committed yet: a path HEAD still tracks but this
+    work removes would otherwise be sealed and fail the tests on something nobody is
+    reviewing. That list is EMPTY today, because the deletion it held is committed; see the
+    comment on it for what it caught and why the mechanism stays. Everything else in the
+    checkout is HEAD's. The temp index matters as much as the selection — GIT_INDEX_FILE
     keeps this out of the shared index entirely, so nothing here locks or mutates state another
     agent is using, and `git stash create` is not an option for the same reason it looked
     attractive: it snapshots everyone's work, not ours.
@@ -771,7 +804,9 @@ class TestLaunchEndToEnd:
         stale = [rel for rel in _E2E_OVERLAY
                  if checked_out[rel] != (_REPO_ROOT / rel).read_bytes()]
         assert not stale, f"checkout carries committed, not working-tree, bytes for: {stale}"
-        # The overlaid ABSENCES, which the sealed run refuses the checkout over.
+        # The overlaid ABSENCES, which the sealed run refuses the checkout over. Vacuous while
+        # _E2E_OVERLAY_REMOVED is empty, and kept for when it is not: it is the half that
+        # catches an uncommitted deletion silently failing to reach the checkout.
         assert not still_there, f"checkout still carries paths this task removes: {still_there}"
 
     def test_the_checkout_is_head_outside_the_overlay(self, worktree_rev):
@@ -1123,6 +1158,7 @@ class TestBoundaryConstants:
         assert launcher._boundary_mechanism() == expected
 
 
+@_RELEASE_SEAL
 @_MACOS_ONLY
 class TestReadOnlyVolume:
     """CRITERION 4: the denial is the OS's, not a mode bit's."""
@@ -1176,8 +1212,12 @@ class TestCrossVolumeInputs:
     the launcher unlinks the backing file of ITS image and nothing else's, so another attached
     image may still have a writable backing file on disk: even its read-only-ness is weaker
     than it reads.
+
+    Only the two cases that ATTACH an image are marked: the other two need no boundary to
+    make their point, and a class-wide mark would take them out of the push gate for nothing.
     """
 
+    @_RELEASE_SEAL
     def test_a_foreign_read_only_volume_passes_the_weak_test_and_fails_the_real_one(
             self, tmp_path):
         with _read_only_volume(tmp_path, {"m.py": "x = 1\n"}) as foreign:
@@ -1187,6 +1227,7 @@ class TestCrossVolumeInputs:
             assert cal._device_of(intruder) != sealed_device
             assert cal._on_sealed_volume(intruder, sealed_device) is False
 
+    @_RELEASE_SEAL
     def test_the_sealed_volumes_own_files_are_accepted(self, tmp_path):
         with _read_only_volume(tmp_path, {"m.py": "x = 1\n"}) as mount:
             device = cal._device_of(mount / "m.py")
@@ -2445,6 +2486,7 @@ def sealed_volume(worktree_rev):
         yield volume
 
 
+@_RELEASE_SEAL
 @_MACOS_ONLY
 class TestSealedCheckout:
     """The acceptance cases, against a real sealed volume.

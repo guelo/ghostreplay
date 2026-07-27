@@ -475,6 +475,34 @@ fully usable that way. The refusal lives at the release boundary:
 `require_preexec_verified_source()` rejects anything carrying `False`. Because the worktree
 comes from a commit, uncommitted edits can never reach a release run.
 
+### Testing the boundary: `@release_seal` is not in the push gate
+
+Most of `backend/test_release_calibration_launcher.py` reasons about the boundary with
+`hdiutil` faked out, and runs on every push like everything else. Fifteen tests instead
+**attach a real image**, and those carry `@pytest.mark.release_seal`, which
+`.githooks/pre-push` deselects (`-m "not release_seal"`). Two reasons, both properties of
+what is being proven:
+
+* **Cost.** 4m41s measured, against 2m57s for the *other 3,466 backend tests put together*. The volume carries the interpreter, the dependency tree and the dylib closure,
+  so it is ~900MB staged, imaged and attached; even paid once by a module-scoped fixture,
+  these fifteen tests more than doubled the backend gate.
+* **Sharing.** The sealed bytes are compared against the **live** host trees — that comparison
+  exists to catch a concurrent `pip install`, and it does. Several agents work in this repo at
+  once, so on a push it fires for somebody else's install or a `.pyc` landing mid-stage: a
+  correct answer to a question nobody asked, indistinguishable from a flake. During a release
+  it is the answer you want, and "the host moved under the seal, run it again" is the right
+  response to it.
+
+Run them on demand, and **before approving a release run**:
+
+```bash
+backend/.venv/bin/python -m pytest -c backend/pytest.ini backend -m release_seal
+```
+
+macOS only (elsewhere they skip: there is no mechanism), and expect minutes. Anything the
+push gate does not run, the hook prints at the end of every push so it cannot quietly become
+coverage nobody has.
+
 ## g-xnv7 calibration decision
 
 The 2026-07-09 g-xnv7 final run chose `lcb_z=1.0`,
