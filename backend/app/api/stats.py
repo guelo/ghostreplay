@@ -6,10 +6,10 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import case, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.accuracy import expected_total_moves_from_pgn, game_accuracy_for_rows
+from app.accuracy import accuracy_for_sessions
 from app.centipawn_loss import centipawn_loss, centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import (
@@ -435,52 +435,33 @@ def get_stats_summary(
     )
     mistake_free_game_rate = _rate(clean_ended, len(ended_sessions))
 
-    # --- Whole-game accuracy over ended sessions (mirrors history.py) ---
-    accuracy_by_session: dict[uuid.UUID, int | None] = {}
+    # --- Whole-game accuracy over ended sessions (cache-only; SPEC §7.3.1.3) ---
+    # Read straight off the already-loaded ``ended_sessions`` rows through the
+    # shared seam: no ordered evaluation query, no PGN parse, no live computation
+    # on this path. The ply-coordinate guard still decides the value — it just
+    # decided it in ``recompute_session_accuracy`` and the cache carries the
+    # verdict here. /api/session/{id}/analysis is the one endpoint still computing.
+    accuracy_by_session: dict[uuid.UUID, int | None] = accuracy_for_sessions(db, ended_sessions)
     ended_session_ids = [session.id for session in ended_sessions]
-    if ended_session_ids:
-        color_order = case((SessionMove.color == "white", 0), else_=1)
-        move_rows = (
-            db.query(
-                SessionMove.session_id,
-                SessionMove.move_number,
-                SessionMove.color,
-                SessionMove.eval_cp,
-                SessionMove.eval_mate,
-            )
-            .filter(SessionMove.session_id.in_(ended_session_ids))
-            .order_by(SessionMove.move_number.asc(), color_order.asc())
-            .all()
-        )
-        rows_by_session: dict[uuid.UUID, list] = {}
-        for row in move_rows:
-            rows_by_session.setdefault(row.session_id, []).append(row)
-        for session in ended_sessions:
-            accuracy_by_session[session.id] = game_accuracy_for_rows(
-                rows_by_session.get(session.id, []),
-                player_color=session.player_color,
-                expected_total_moves=expected_total_moves_from_pgn(session.pgn),
-                session_id=session.id,
-            )
 
     def _mean_accuracy(ids: list[uuid.UUID]) -> float | None:
         """Unweighted mean of per-game accuracy INTEGERS. See SPEC §18.2-18.3.
 
         Two deliberate properties, both kept:
 
-        1. Unweighted and double-rounded. compute_game_accuracy already rounds to a
-           0..100 int, so a 10-move game weighs the same as a 60-move game and the
-           mean re-rounds an already-rounded value. That is the honest weighting for
-           "how well do I play in a typical game" — and that per-game int is the same
-           value g-aeq8's cached game_sessions.player_accuracy column will serve, so a
-           move-weighted variant would collide with the Release B read switch.
+        1. Unweighted and double-rounded. Accuracy v1 already rounds to a 0..100 int
+           before it is cached, so a 10-move game weighs the same as a 60-move game
+           and the mean re-rounds an already-rounded value. That is the honest
+           weighting for "how well do I play in a typical game" — and that per-game
+           int IS what game_sessions.player_accuracy serves here, so a move-weighted
+           variant is foreclosed: the cache retains no per-move evidence to weight by.
         2. Games that did not SCORE drop out. The denominator is "ended games that
            scored", NOT "ended games" — so this does not share a denominator with
            mistake_free_game_rate, which counts every ended game. An ended game with
-           no resolved evals (and, once g-22t8.6 lands, one with broken ply
-           coordinates, which fails closed to None rather than a wrong number) is
-           absent here but present there. Do not "fix" this by treating None as 0:
-           that would report an unscored game as 0% accuracy.
+           no resolved evals, or one with broken ply coordinates (the ply-coordinate
+           guard fails closed and recompute_session_accuracy caches that NULL rather
+           than a wrong number), is absent here but present there. Do not "fix" this
+           by treating None as 0: that would report an unscored game as 0% accuracy.
         """
         values = [
             accuracy_by_session[sid]

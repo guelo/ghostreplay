@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import math
+import uuid
+from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import event
 
 # Public names come from the live surface (app.accuracy); private helpers are not
 # re-exported there and must be imported from the frozen v1 module directly.
 from app.accuracy import (
     AccuracyMove,
+    accuracy_for_sessions,
     accuracy_from_win_percents,
     compute_game_accuracy,
     expected_total_moves_from_pgn,
     win_percent_from_cp,
 )
 from app.accuracy_v1 import _MATE_CP, _white_relative_cp
+from app.models import GameSession
+from conftest import engine
 
 
 def _moves(cps: list[int | None], start: str = "white") -> list[AccuracyMove]:
@@ -251,3 +257,73 @@ def test_malformed_pgn_does_not_yield_accuracy():
 def test_half_up_rounding():
     # game_acc exactly .5 rounds up (banker's round() would give 50).
     assert math.floor(50.5 + 0.5) == 51
+
+
+# ===========================================================================
+# The Release B aggregate read seam (g-b-cache-reads).
+# ===========================================================================
+def test_accuracy_for_sessions_is_on_the_supported_surface():
+    """__all__ enumerates the supported public surface, and consumers import from
+    app.accuracy — never from app.accuracy_v1 — so the seam has to be listed here."""
+    import app.accuracy as accuracy_mod
+
+    assert "accuracy_for_sessions" in accuracy_mod.__all__
+    assert accuracy_for_sessions is accuracy_mod.accuracy_for_sessions
+
+
+def _insert_scored_session(db, *, accuracy):
+    session = GameSession(
+        id=uuid.uuid4(),
+        user_id=123,
+        started_at=datetime.now(timezone.utc),
+        ended_at=datetime.now(timezone.utc),
+        status="ended",
+        result="checkmate_win",
+        engine_elo=1500,
+        player_color="white",
+        session_mode="normal",
+        is_rated=True,
+        pgn="1. e4 e5",
+        player_accuracy=accuracy,
+        player_accuracy_algo_version=1,
+    )
+    db.add(session)
+    return session
+
+
+def test_accuracy_for_sessions_issues_no_sql_over_preloaded_sessions(db_session):
+    """The seam's zero-SQL contract, pinned here and not only in the bench script.
+
+    Both consumers already hold the ORM rows they are about to return, so reading
+    ``player_accuracy`` must not trigger a lazy load or a refresh. The converse is
+    asserted too — an EXPIRED session does reload — so a listener that silently
+    stopped counting could not make the first half pass vacuously.
+    """
+    expected = {}
+    for accuracy in (91, None, 40):
+        session = _insert_scored_session(db_session, accuracy=accuracy)
+        expected[session.id] = accuracy
+    db_session.commit()
+
+    # One preload, then nothing: this mirrors what stats/history hand to the seam.
+    db_session.expunge_all()
+    sessions = (
+        db_session.query(GameSession).filter(GameSession.id.in_(list(expected))).all()
+    )
+
+    statements: list[str] = []
+
+    def _on_cursor(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _on_cursor)
+    try:
+        assert accuracy_for_sessions(db_session, sessions) == expected
+        assert statements == [], statements
+
+        # Converse: the counter is live, and an expired attribute DOES cost SQL.
+        db_session.expire_all()
+        assert accuracy_for_sessions(db_session, sessions) == expected
+        assert statements != []
+    finally:
+        event.remove(engine, "before_cursor_execute", _on_cursor)

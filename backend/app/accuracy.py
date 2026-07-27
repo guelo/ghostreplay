@@ -19,6 +19,8 @@ part of this surface; tests that need them import from :mod:`app.accuracy_v1`.
 from __future__ import annotations
 
 import logging
+import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import case
 from sqlalchemy.orm import Session
@@ -50,6 +52,7 @@ __all__ = [
     "ACCURACY_ALGO_VERSION",
     "CHESS_VERSION_PIN",
     "AccuracyMove",
+    "accuracy_for_sessions",
     "accuracy_from_win_percents",
     "compute_game_accuracy",
     "expected_total_moves_from_pgn",
@@ -59,6 +62,35 @@ __all__ = [
     "recompute_session_accuracy",
     "win_percent_from_cp",
 ]
+
+
+def accuracy_for_sessions(
+    db: Session, sessions: Iterable[GameSession]
+) -> dict[uuid.UUID, int | None]:
+    """Whole-game accuracy per session id, read from the cached column.
+
+    Release B's aggregate read seam: ``/api/stats/summary`` and ``/api/history``
+    reach accuracy ONLY through here, never through :func:`game_accuracy_for_rows`.
+
+    **Issues no SQL.** Both callers already hold the ORM ``GameSession`` rows they
+    are about to return, so this reads a loaded column attribute and must not
+    trigger a lazy load. ``test_accuracy.py`` pins that with a statement counter.
+
+    ``db`` is unused today and deliberately kept: it is what lets a future accuracy
+    vN.0 swap this one body back to a bulk live computation without touching either
+    consumer. See ``docs/session-accuracy-versioning.md``.
+
+    **Version-agnostic by contract.** This does not read, filter on, or interpret
+    ``player_accuracy_algo_version``, and neither consumer does. Version currency
+    belongs to the migration: revision ``20260719_01``'s invalidation predicate
+    (``player_accuracy_algo_version IS NULL OR < ACCURACY_ALGO_VERSION``) plus its
+    coverage assertion guarantee every ended-visible row is stamped at the current
+    version before any cache-only read serves. A reader therefore sees exactly two
+    states — an integer 0..100, or None meaning "no accuracy was derivable", which
+    includes the ply-coordinate guard's fail-closed verdict. Hidden sessions never
+    reach here at all; ``visible_session_filter`` excludes them upstream.
+    """
+    return {session.id: session.player_accuracy for session in sessions}
 
 
 def game_accuracy_for_rows(

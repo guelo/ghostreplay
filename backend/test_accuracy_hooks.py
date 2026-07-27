@@ -2,8 +2,7 @@
 
 Release A maintains ``game_sessions.player_accuracy`` /
 ``player_accuracy_algo_version`` inside the serving writers — ``/api/game/end``
-and post-end ``/api/session/{id}/moves`` — while stats and history keep computing
-accuracy live. These tests pin:
+and post-end ``/api/session/{id}/moves``. These tests pin:
 
 * the bounded ``recompute_session_accuracy`` helper matches frozen v1, stamps a
   legitimate computed ``None``, and only ever touches an ended, VISIBLE session;
@@ -21,7 +20,8 @@ accuracy live. These tests pin:
   /game/end transactions (holder/waiter proof with threads + events);
 * a continued (converted, still active) drill defers to terminal-only
   computation;
-* stats and history still use the live calculation with no read-time backfill.
+* after Release B's read switch, stats and history SERVE this cached column and
+  still never backfill it on read — the write hook stays its only author.
 
 The SQLite tests run everywhere; the interleaving proofs are ``@pg_required`` and
 skip cleanly without a Postgres URL.
@@ -546,41 +546,50 @@ def test_generic_orm_path_flushes_moves_then_recompute_then_accuracy_then_cursor
 
 
 # ===========================================================================
-# 6. Reads stay live: no cache-read switch, no read-time backfill.
+# 6. Reads serve the CACHE, and still never backfill on read.
+#
+# Release B (g-b-cache-reads) switched both aggregate consumers onto
+# game_sessions.player_accuracy. These two are the inverse of what they pinned
+# under Release A, and deliberately so: the write hook is the only thing that may
+# put a value in that column, and a GET must never repair one.
 # ===========================================================================
-def test_history_reads_live_accuracy_and_does_not_backfill(
+def test_history_reads_cached_accuracy_and_does_not_backfill(
     client, auth_headers, create_game_session, db_session
 ):
-    """History computes accuracy live: a poisoned cache column is ignored on read and
-    is not rewritten (no backfill)."""
+    """History serves the cache: a poisoned cache column is what the read RETURNS,
+    and the read does not rewrite it."""
     sid = create_game_session(user_id=123)
     _upload(client, auth_headers, sid, MOVES_HIGH)
     _end(client, auth_headers, sid)
-    live = client.get("/api/history", headers=auth_headers(user_id=123)).json()["games"][0]["summary"]["accuracy"]
-    assert live is not None
+    served = client.get("/api/history", headers=auth_headers(user_id=123)).json()["games"][0]["summary"]["accuracy"]
+    assert served == _get(db_session, sid).player_accuracy is not None
 
-    # Poison the cache with a value the live calculation cannot produce here.
-    poisoned = (live + 1) % 100
+    # Poison the cache with a value the live calculation would NOT produce here, so
+    # a read that recomputed from the moves would come back to the original number.
+    poisoned = (served + 1) % 100
     row = _get(db_session, sid)
     row.player_accuracy = poisoned
     db_session.commit()
 
     again = client.get("/api/history", headers=auth_headers(user_id=123)).json()["games"][0]["summary"]["accuracy"]
-    assert again == live  # read ignored the poisoned cache
-    assert _get(db_session, sid).player_accuracy == poisoned  # read did not backfill/rewrite
+    assert again == poisoned  # the read served the cache, not a live recomputation
+    assert _get(db_session, sid).player_accuracy == poisoned  # and did not rewrite it
 
 
-def test_stats_summary_reads_live_accuracy_and_does_not_backfill(
+def test_stats_summary_reads_cached_accuracy_and_does_not_backfill(
     client, auth_headers, db_session
 ):
-    """Stats summary computes accuracy live and never stamps a pre-existing NULL cache
-    on read."""
+    """Stats summary serves the cache: a scoreable-but-unstamped session contributes
+    nothing, and the read does not stamp it."""
     session = _insert_session(db_session, pgn=PGN_TWO_PLY, player_accuracy=None,
                               player_accuracy_algo_version=None)
     _add_moves(db_session, session.id, MOVES_HIGH)
 
     data = client.get("/api/stats/summary", headers=auth_headers(user_id=123)).json()
-    assert data["moves"]["accuracy_pct"] is not None  # computed live from the moves
+    # The moves ARE scoreable — the Release A hook would stamp a real integer for
+    # them (test_recompute_matches_frozen_v1) — so a non-None here would mean the
+    # read recomputed rather than read the cache.
+    assert data["moves"]["accuracy_pct"] is None
 
     row = _get(db_session, session.id)
     assert row.player_accuracy is None  # read did not backfill the NULL cache

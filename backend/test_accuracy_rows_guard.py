@@ -16,8 +16,12 @@ These tests pin:
   ``AccuracyMove`` construction, so the guard can never validate a grid the
   algorithm then reads differently;
 * the guard wired into the live WRITE hook (``recompute_session_accuracy``) and
-  into every read path that computes accuracy — ``/api/history``,
-  ``/api/stats/summary``, ``/api/session/{id}/analysis``;
+  into ``/api/session/{id}/analysis``, the one endpoint that still COMPUTES after
+  Release B's read switch. ``/api/history`` and ``/api/stats/summary`` now prove
+  the guard's verdict TRANSITIVELY: they serve ``game_sessions.player_accuracy``,
+  so the NULL the guard stamped is what reaches the wire. That is why their
+  fixtures below call ``_recompute_cache`` — the cache has to hold the guard's own
+  decision about these rows, not an empty-rowset artifact;
 * the surplus-row scope boundary in BOTH directions: a coordinate-contiguous
   surplus still scores (frozen v1 accepts ``n > expected``; tightening that is an
   accuracy-v2 decision, g-i6st), a coordinate-BREAKING surplus fails closed;
@@ -321,12 +325,11 @@ def _recompute_cache(db_session, session_id) -> GameSession:
     inserts afterwards bypass the hook entirely. That leaves the cache holding a
     NULL the guard never produced.
 
-    While history/stats compute accuracy LIVE the distinction is invisible. After
-    g-aeq8 switches them to read ``game_sessions.player_accuracy``, it is the whole
-    test: a broken-grid case would pass on a REMOVED guard (the cache says None
-    either way), and the /stats case would flip to accuracy_pct = None and fail,
-    pressuring g-aeq8 to "fix" the assertion rather than keep it honest. Recompute
-    so the cached value is what the guard actually decided about these rows.
+    Now that history/stats READ ``game_sessions.player_accuracy`` (g-b-cache-reads),
+    this is the whole test: without it a broken-grid case would pass on a REMOVED
+    guard (the cache says None either way), and the /stats case would report
+    accuracy_pct = None for the wrong reason. Recompute so the cached value is what
+    the guard actually decided about these rows.
     """
     db_session.expire_all()
     session = (
@@ -347,8 +350,8 @@ def test_history_accuracy_is_none_on_broken_grid(
     _add_moves(db_session, session_id, BROKEN_WHITE_WHITE)
     session = _recompute_cache(db_session, session_id)
 
-    # The CACHE now holds the guard's own verdict, not an empty-rowset artifact —
-    # so this pins the value g-aeq8's read switch will serve.
+    # The CACHE holds the guard's own verdict, not an empty-rowset artifact — so
+    # this pins the value the read switch serves.
     assert session.player_accuracy is None
     assert session.player_accuracy_algo_version == ACCURACY_ALGO_VERSION
 
@@ -398,8 +401,8 @@ def test_stats_summary_drops_broken_game_from_accuracy_but_keeps_mistake_free(
     broken_session = _recompute_cache(db_session, broken)
 
     # Pin the CACHE both ways first: without this the fixture caches None for BOTH
-    # games (empty rowset at game-end), and the accuracy_pct assertion below would
-    # flip to None the moment g-aeq8 switches /stats to the cached column.
+    # games (empty rowset at game-end), and since /stats now serves that column the
+    # accuracy_pct assertion below would read None for the wrong reason.
     assert clean_session.player_accuracy == 100
     assert broken_session.player_accuracy is None
     assert clean_session.player_accuracy_algo_version == ACCURACY_ALGO_VERSION

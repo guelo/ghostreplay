@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.accuracy import expected_total_moves_from_pgn, game_accuracy_for_rows
+from app.accuracy import accuracy_for_sessions
 from app.centipawn_loss import centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import GameSession, SessionMove
@@ -98,26 +98,23 @@ def get_history(
         .all()
     )
 
-    # Ordered per-move evals per session, for accuracy (counts come from the
-    # GROUP BY above; accuracy needs the full ordered eval series).
+    # Per-move FENs per session, for opening-name derivation only (counts come from
+    # the GROUP BY above; accuracy comes from the cache — SPEC §7.3.1.3).
+    #
+    # move_number and color have LEFT the select list but MUST stay in the ORDER BY:
+    # deepest_opening_name walks the fens in play order, so dropping the ordering
+    # would silently derive a different opening rather than fail. Ordering on
+    # non-selected columns is legal in SQLite and Postgres for this non-DISTINCT
+    # query.
     color_order = case((SessionMove.color == "white", 0), else_=1)
     move_rows = (
-        db.query(
-            SessionMove.session_id,
-            SessionMove.move_number,
-            SessionMove.color,
-            SessionMove.eval_cp,
-            SessionMove.eval_mate,
-            SessionMove.fen_after,
-        )
+        db.query(SessionMove.session_id, SessionMove.fen_after)
         .filter(SessionMove.session_id.in_(session_ids))
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
-    rows_by_session: dict[uuid.UUID, list] = {}
     fens_by_session: dict[uuid.UUID, list[str | None]] = {}
     for row in move_rows:
-        rows_by_session.setdefault(row.session_id, []).append(row)
         fens_by_session.setdefault(row.session_id, []).append(row.fen_after)
 
     deepest_by_session: dict[uuid.UUID, str | None] = {}
@@ -128,34 +125,22 @@ def get_history(
             sid: deepest_opening_name(fens, roots) for sid, fens in fens_by_session.items()
         }
 
-    player_color_by_session = {s.id: s.player_color for s in sessions}
-    expected_by_session = {s.id: expected_total_moves_from_pgn(s.pgn) for s in sessions}
+    # Keyed on ``sessions`` — the rows this response RETURNS — not on the grouped
+    # move rows, so an ended-visible session with zero session_moves rows (absent
+    # from the GROUP BY above) still gets its own cached accuracy.
+    accuracy_by_session = accuracy_for_sessions(db, sessions)
 
     stats_by_session: dict[uuid.UUID, GameSummary] = {}
     for row in stats_rows:
         avg_cpl = round_half_up_cpl(row.avg_cpl) if row.avg_cpl is not None else None
-        accuracy = game_accuracy_for_rows(
-            rows_by_session.get(row.session_id, []),
-            player_color=player_color_by_session.get(row.session_id, "white"),
-            expected_total_moves=expected_by_session.get(row.session_id),
-            session_id=row.session_id,
-        )
         stats_by_session[row.session_id] = GameSummary(
             total_moves=int(row.total_moves),
             blunders=int(row.blunders or 0),
             mistakes=int(row.mistakes or 0),
             inaccuracies=int(row.inaccuracies or 0),
             average_centipawn_loss=avg_cpl,
-            accuracy=accuracy,
+            accuracy=accuracy_by_session.get(row.session_id),
         )
-
-    empty_summary = GameSummary(
-        total_moves=0,
-        blunders=0,
-        mistakes=0,
-        inaccuracies=0,
-        average_centipawn_loss=None,
-    )
 
     return HistoryResponse(
         games=[
@@ -167,7 +152,23 @@ def get_history(
                 engine_elo=s.engine_elo,
                 player_color=s.player_color,
                 opening_name=deepest_by_session.get(s.id),
-                summary=stats_by_session.get(s.id, empty_summary),
+                # The zero-move summary is built PER SESSION rather than shared: a
+                # single hoisted instance cannot carry a per-session accuracy, and a
+                # map wrongly scoped to the grouped move rows would go unnoticed.
+                # Release A's hook stamps such a session (an eligible session with an
+                # empty row set stamps a computed None), so this reads NULL today —
+                # but it must READ, not hard-code None.
+                summary=stats_by_session.get(
+                    s.id,
+                    GameSummary(
+                        total_moves=0,
+                        blunders=0,
+                        mistakes=0,
+                        inaccuracies=0,
+                        average_centipawn_loss=None,
+                        accuracy=accuracy_by_session.get(s.id),
+                    ),
+                ),
             )
             for s in sessions
         ]
