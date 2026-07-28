@@ -2163,7 +2163,12 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
     db_session.expire_all()
     session = db_session.get(GameSession, sid)
     import json
-    assert json.loads(session.opening_score_baseline) == {"opening-x": 41.0}
+    assert json.loads(session.opening_score_baseline) == {
+        "schema_version": 1,
+        "model_version": oc.SCORE_MODEL_VERSION,
+        "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "scores": {"opening-x": 41.0},
+    }
 
 
 def test_game_start_baseline_null_when_date_guard_loses_race(client, auth_headers, db_session):

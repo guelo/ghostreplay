@@ -576,6 +576,13 @@ class TestArmGrid:
 
 
 class TestGridCellConfig:
+    def test_sm_v2_4_cell_matches_served_default(self):
+        assert cal.SM_V2_4_DEFAULT_CELL.config == RootCalcConfig()
+        assert cal._cfg_fp(cal.SM_V2_4_DEFAULT_CELL) == root_calc_config_fingerprint(
+            RootCalcConfig()
+        )
+        assert cal.CURRENT_SM_V2_3_CELL.config != RootCalcConfig()
+
     def test_all_six_axes_map_through_config(self):
         cell = cal.GridCell(
             lcb_z=1.28,
@@ -1232,6 +1239,16 @@ class TestUser14Fixture:
         target = tmp_path / "user14.json"
         cal.write_user14_fixture(payload, path=target)
         assert cal.DEFAULT_USER14_FIXTURE_PATH != target
+
+    def test_emit_mode_is_bound_to_sm_v2_4_default(self):
+        with patch.object(cal, "write_user14_fixture") as writer:
+            assert cal.main(["emit-user14-fixture"]) == 0
+        payload = writer.call_args.args[0]
+        assert payload == cal.build_user14_fixture(
+            cal.SM_V2_4_DEFAULT_CELL, cal.SCORE_MODEL_VERSION
+        )
+        assert payload["model_version"] == "sm-v2-4"
+        assert payload["config_fingerprint"] == root_calc_config_fingerprint()
 
 
 # --- orchestration end-to-end (default + demo) ------------------------------
@@ -3819,6 +3836,12 @@ class TestSubcommandGrammar:
         assert args.artifact == Path("/abs/a.json")
         assert args.result_output == Path("/abs/r.json")
 
+    def test_emit_fixture_mode_takes_no_options(self):
+        assert cal._parse_args(["emit-user14-fixture"]).mode == "emit-user14-fixture"
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(["emit-user14-fixture", "--json"])
+        assert exc.value.code == 2
+
     @pytest.mark.parametrize("argv", [
         ["--help"], ["report", "--help"], ["capture-cohort", "--help"],
         ["select-release", "--help"],
@@ -3833,7 +3856,7 @@ class TestSubcommandGrammar:
         assert "release-guard-user" not in text
         assert "987654" not in text  # the guard value never reaches any stream
 
-    def test_root_help_lists_the_three_subcommands(self, capsys):
+    def test_root_help_lists_all_subcommands(self, capsys):
         with pytest.raises(SystemExit):
             cal._parse_args(["--help"])
         out = capsys.readouterr().out

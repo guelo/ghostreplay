@@ -2063,7 +2063,12 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
     db_session.expire_all()
     session = db_session.get(GameSession, sid)
     import json
-    assert json.loads(session.opening_score_baseline) == {"opening-x": 55.0}
+    assert json.loads(session.opening_score_baseline) == {
+        "schema_version": 1,
+        "model_version": oc.SCORE_MODEL_VERSION,
+        "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "scores": {"opening-x": 55.0},
+    }
 
 
 # ===========================================================================

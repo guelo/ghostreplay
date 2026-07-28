@@ -1,5 +1,7 @@
+import json
 import math
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import chess
 import pytest
@@ -99,12 +101,30 @@ def _quality(
 
 
 def _neutral_config(**overrides) -> RootCalcConfig:
-    return RootCalcConfig(
+    values = dict(
         lcb_z=0.0,
         coverage_fold="off",
         coverage_live_threshold=2,
-        **overrides,
+        report_fold_p=0.0,
+        report_fold_scope="all",
+        report_self_term="keep",
     )
+    values.update(overrides)
+    return RootCalcConfig(**values)
+
+
+def _sm_v2_3_config(**overrides) -> RootCalcConfig:
+    """Historical served config, explicit so default changes cannot move it."""
+    values = dict(
+        lcb_z=1.0,
+        coverage_fold="gate",
+        coverage_live_threshold=1,
+        report_fold_p=0.0,
+        report_fold_scope="all",
+        report_self_term="keep",
+    )
+    values.update(overrides)
+    return RootCalcConfig(**values)
 
 
 def _prepared(
@@ -1135,47 +1155,63 @@ def test_position_score_hard_zero_for_all_gate_failing_opponent_turn():
 # a change here is a cache-invalidating fingerprint change and must be intentional.
 # ---------------------------------------------------------------------------
 
-# root_calc_config_fingerprint(RootCalcConfig()) — the production default config.
-GOLDEN = "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
+# root_calc_config_fingerprint(RootCalcConfig()) — the sm-v2-4 production default.
+GOLDEN = "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090"
+# The literal historical sm-v2-3 config remains byte-stable for comparisons.
+SM_V2_3_GOLDEN = (
+    "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
+)
 # root_calc_config_fingerprint(RootCalcConfig(lcb_z=0.0, coverage_fold="off")) — the
 # historical pre-readiness baseline cell.
 BASELINE_GOLDEN = "7dd8d067f55f88c26c150c192203bd58de57762aadaf43ab8b6752e3fa6b1bde"
 
 
-def test_report_fold_axes_have_identity_defaults():
+def test_report_fold_axes_have_sm_v2_4_defaults():
     config = RootCalcConfig()
-    assert config.report_fold_p == 0.0
-    assert config.report_fold_scope == "all"
+    assert config.report_fold_p == 0.5
+    assert config.report_fold_scope == "user"
     assert config.report_self_term == "keep"
-    # The contract id ships at v1 (the dormant axes are config-captured).
+    # The contract id stays at v1 because the behavior is config-captured.
     assert REPORT_SCORER_CONTRACT_ID == "report-fold-v1"
     assert REPORT_FOLD_SCOPES == frozenset({"all", "user"})
     assert REPORT_SELF_TERM_MODES == frozenset({"keep", "drop_user"})
 
 
 def test_config_fingerprint_pins_golden_hashes():
-    # Both goldens are byte-stable after adding the dormant axes: the identity
-    # config and the historical baseline cell hash exactly as before Phase 1a.
+    # The served default intentionally moves, while both historical comparator
+    # configs remain byte-stable.
     assert root_calc_config_fingerprint() == GOLDEN
     assert root_calc_config_fingerprint(RootCalcConfig()) == GOLDEN
+    assert root_calc_config_fingerprint(_sm_v2_3_config()) == SM_V2_3_GOLDEN
     assert (
-        root_calc_config_fingerprint(RootCalcConfig(lcb_z=0.0, coverage_fold="off"))
+        root_calc_config_fingerprint(
+            _sm_v2_3_config(lcb_z=0.0, coverage_fold="off")
+        )
         == BASELINE_GOLDEN
     )
 
 
 def test_config_fingerprint_omits_inert_report_fold_fields():
     # At p == 0 the fold is off, so report_fold_p and report_fold_scope select
-    # nothing: an identity-config scope/p change stays on GOLDEN. Signed and int zero
-    # canonicalize to the same +0.0.
-    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_scope="user")) == GOLDEN
-    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_p=-0.0)) == GOLDEN
-    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_p=0)) == GOLDEN
+    # nothing: historical identity configs stay on SM_V2_3_GOLDEN. Signed and int
+    # zero canonicalize to the same +0.0.
+    assert (
+        root_calc_config_fingerprint(_sm_v2_3_config(report_fold_scope="user"))
+        == SM_V2_3_GOLDEN
+    )
+    assert (
+        root_calc_config_fingerprint(_sm_v2_3_config(report_fold_p=-0.0))
+        == SM_V2_3_GOLDEN
+    )
+    assert (
+        root_calc_config_fingerprint(_sm_v2_3_config(report_fold_p=0))
+        == SM_V2_3_GOLDEN
+    )
     assert (
         root_calc_config_fingerprint(
-            RootCalcConfig(report_fold_p=0.0, report_fold_scope="user")
+            _sm_v2_3_config(report_fold_p=0.0, report_fold_scope="user")
         )
-        == GOLDEN
+        == SM_V2_3_GOLDEN
     )
 
 
@@ -1188,24 +1224,26 @@ def test_config_fingerprint_moves_for_active_axes():
     active_user = root_calc_config_fingerprint(
         RootCalcConfig(report_fold_p=0.5, report_fold_scope="user")
     )
-    assert active_all != GOLDEN
-    assert active_user != GOLDEN
+    assert active_all != SM_V2_3_GOLDEN
+    assert active_user == GOLDEN
     assert active_all != active_user
 
-    drop_user = root_calc_config_fingerprint(RootCalcConfig(report_self_term="drop_user"))
-    assert drop_user != GOLDEN
+    drop_user = root_calc_config_fingerprint(
+        _sm_v2_3_config(report_self_term="drop_user")
+    )
+    assert drop_user != SM_V2_3_GOLDEN
 
 
 def test_config_fingerprint_scope_inert_when_only_drop_user_active():
     # drop_user moves the fingerprint, but with p == 0 the scope is still inert: two
     # drop_user configs differing only in scope share one fingerprint.
     drop_all = root_calc_config_fingerprint(
-        RootCalcConfig(report_self_term="drop_user", report_fold_scope="all")
+        _sm_v2_3_config(report_self_term="drop_user", report_fold_scope="all")
     )
     drop_user_scope = root_calc_config_fingerprint(
-        RootCalcConfig(report_self_term="drop_user", report_fold_scope="user")
+        _sm_v2_3_config(report_self_term="drop_user", report_fold_scope="user")
     )
-    assert drop_all != GOLDEN
+    assert drop_all != SM_V2_3_GOLDEN
     assert drop_all == drop_user_scope
 
 
@@ -1344,8 +1382,8 @@ def _fold_fixture():
 
 @pytest.mark.parametrize(
     "config",
-    [RootCalcConfig(), RootCalcConfig(lcb_z=0.0, coverage_fold="off")],
-    ids=["default", "historical-baseline"],
+    [_sm_v2_3_config(), _neutral_config(coverage_live_threshold=1)],
+    ids=["sm-v2-3", "historical-baseline"],
 )
 def test_report_fold_p0_matches_legacy_oracle(config):
     # p == 0 is byte-identical to the pre-fold scorer on ALL four channels, for both
@@ -1380,7 +1418,7 @@ def test_report_fold_uses_raw_fraction_not_percent():
     # At 50% coverage the raw fold SHRINKS the score; a percent fold (50 ** p) would
     # blow it up by orders of magnitude.
     graph, overlay, roots, root, opp, covered = _fold_fixture()
-    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    base = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
     quality, _, cov_pct, _ = base._direct_metrics(root)
     frac = cov_pct / 100.0
     assert frac == pytest.approx(0.5)  # displayed 50%, raw fraction 0.5
@@ -1413,7 +1451,7 @@ def test_report_fold_isolates_opening_score(p, scope, fen_key, in_scope):
     graph, overlay, roots, root, opp, covered = _fold_fixture()
     fen = {"root": root, "opp": opp}[fen_key]
 
-    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    base = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
     quality, confidence, cov_pct, depth = base._direct_metrics(fen)
     frac = cov_pct / 100.0
     # Every fixture row is genuinely fractional and positive before we assert motion.
@@ -1439,7 +1477,7 @@ def test_report_fold_out_of_scope_multiplier_is_identity():
     # Semantic multiplier-1.0 check: a user-scope fold leaves the opponent-turn row
     # exactly at its p == 0 value even though that row IS fractionally covered.
     graph, overlay, roots, root, opp, covered = _fold_fixture()
-    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    base = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
     dormant = base._direct_metrics(opp)
     assert 0.0 < dormant[2] / 100.0 < 1.0  # fractional, so a fold WOULD have moved it
 
@@ -1450,6 +1488,53 @@ def test_report_fold_out_of_scope_multiplier_is_identity():
         RootCalcConfig(report_fold_p=1.5, report_fold_scope="user"),
     )
     assert user_scope._direct_metrics(opp) == dormant
+
+
+def test_sm_v2_4_full_coverage_user_turn_fold_is_identity():
+    graph, overlay, roots, root, _opp, _covered = _fold_fixture()
+    uncovered = _positions(["e2e4", "c7c5"])[2]
+    overlay.nodes[uncovered] = _quality(
+        uncovered, 4.0, count=4, at=FOLD_NOW
+    )
+
+    historical = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
+    current = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    historical_metrics = historical._direct_metrics(root)
+    current_metrics = current._direct_metrics(root)
+
+    assert historical_metrics[2] == pytest.approx(100.0)
+    assert current_metrics == pytest.approx(historical_metrics)
+
+
+def test_sm_v2_4_zero_coverage_user_turn_hard_zeros_positive_quality():
+    # A user-turn row can have structural book children but no prepared edge. Its
+    # own mastery still gives the historical p=0 scorer positive quality, while the
+    # coverage channel is exactly zero. The active sqrt fold intentionally makes
+    # that readiness score a hard 0.0 without changing the other reported channels.
+    root, child = _positions(["e2e4"])
+    graph = _graph([["e2e4"]])
+    roots = _roots(_root(root, "Unprepared Root"))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[root] = _quality(root, 2.0, count=2, at=FOLD_NOW)
+
+    structural_children = graph.get_children(root)
+    assert set(structural_children) == {"e2e4"}
+    assert structural_children["e2e4"].fen == child
+    assert not overlay.edges
+
+    historical = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
+    current = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    historical_quality, confidence, coverage, depth = historical._direct_metrics(root)
+    current_quality, current_confidence, current_coverage, current_depth = (
+        current._direct_metrics(root)
+    )
+
+    assert historical_quality > 0.0
+    assert coverage == pytest.approx(0.0)
+    assert current_quality == pytest.approx(0.0)
+    assert (current_confidence, current_coverage, current_depth) == pytest.approx(
+        (confidence, coverage, depth)
+    )
 
 
 def test_report_fold_invalid_active_coverage_fails_closed():
@@ -1472,7 +1557,7 @@ def test_report_fold_invalid_active_coverage_fails_closed():
             active._direct_metrics(root)
 
         # p == 0 never evaluates the power or validates coverage: same poison passes.
-        dormant = _fold_calc(graph, overlay, roots, RootCalcConfig())
+        dormant = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
         dormant._metrics[(key, False)] = (0.6, 0.0, bad, 0.5)
         dormant._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
         _, _, cov, _ = dormant._direct_metrics(root)
@@ -1507,7 +1592,7 @@ def test_report_fold_named_root_and_position_row_agree():
     assert row.weighted_depth == pytest.approx(named.weighted_depth)
 
     unfolded = compute_root_score(
-        root, "white", graph, overlay, roots, RootCalcConfig(), now=FOLD_NOW
+        root, "white", graph, overlay, roots, _sm_v2_3_config(), now=FOLD_NOW
     )
     assert named.opening_score < unfolded.opening_score
 
@@ -1562,7 +1647,7 @@ def test_drop_user_selects_child_only_ratio():
     graph, overlay, roots, root, opp, covered = _fold_fixture()
     key = _normalized(root)
 
-    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    base = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
     weights = base._get_weights(key)
     assert weights  # nonempty prepared-child set
     child_natural = sum(w * base._calc(c, False)[0] for c, w in weights.items())
@@ -1570,7 +1655,12 @@ def test_drop_user_selects_child_only_ratio():
     assert child_perfect > 0.0
     child_only = 100.0 * child_natural / child_perfect
 
-    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    drop = _fold_calc(
+        graph,
+        overlay,
+        roots,
+        _sm_v2_3_config(report_self_term="drop_user"),
+    )
     dropped_q = drop._direct_metrics(root)[0]
     assert dropped_q == pytest.approx(child_only)
     # It is genuinely the child-only ratio, not the ordinary aggregate node ratio.
@@ -1810,7 +1900,7 @@ def test_report_debug_multiplier_scope_and_dormant():
 
     # Dormant fold (p==0): multiplier is exactly 1.0 for every reported row and
     # reported_score equals the plain pre-fold quality.
-    dormant = _debug_calc(graph, overlay, roots, RootCalcConfig())
+    dormant = _debug_calc(graph, overlay, roots, _sm_v2_3_config())
     for fen in (root, opp, covered):
         dormant._direct_metrics(fen)
         node = _debug_node(dormant, fen)
@@ -1952,3 +2042,41 @@ def test_user14_clock_invariant(user14_scenario):
     )
     assert at_other.opening_score == pytest.approx(at_synth.opening_score)
     assert at_other.coverage == pytest.approx(at_synth.coverage)
+
+
+def test_checked_in_user14_fixture_matches_sm_v2_4_and_behavior():
+    fixture_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "openings"
+        / "__fixtures__"
+        / "user14_synthetic.json"
+    )
+    checked_in = json.loads(fixture_path.read_text(encoding="utf-8"))
+    regenerated = cal.build_user14_fixture(
+        cal.SM_V2_4_DEFAULT_CELL,
+        cal.SCORE_MODEL_VERSION,
+        as_of=cal.SYNTHETIC_AS_OF,
+    )
+
+    for key, expected in regenerated.items():
+        if isinstance(expected, float):
+            assert checked_in[key] == pytest.approx(expected, abs=1e-12)
+        else:
+            assert checked_in[key] == expected
+
+    historical = cal.build_user14_fixture(
+        cal.CURRENT_SM_V2_3_CELL,
+        "sm-v2-3",
+        as_of=cal.SYNTHETIC_AS_OF,
+    )
+    assert checked_in["model_version"] == "sm-v2-4"
+    assert checked_in["config_fingerprint"] == root_calc_config_fingerprint()
+    assert checked_in["black_root_score"] <= checked_in["caro_child_score"] + 1.0
+    assert checked_in["black_root_score"] < historical["black_root_score"]
+    assert checked_in["caro_child_score"] == pytest.approx(
+        historical["caro_child_score"], abs=1e-12
+    )
+    assert checked_in["white_root_score"] == pytest.approx(
+        historical["white_root_score"], abs=1e-12
+    )

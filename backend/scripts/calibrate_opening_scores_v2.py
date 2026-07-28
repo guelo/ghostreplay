@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""One-off opening-score v2 calibration over historical evidence.
+"""Historical opening-score v2 calibration tooling and synthetic regression.
 
-v2 is the only live scoring model (no v1 baseline exists), so this script
-*calibrates v2 directly*: it scores every candidate ``(user_id, player_color)``
-pair fully in memory and reports the distributions, source mix, phase-horizon
-behaviour, and recursion accounting needed to choose grade thresholds and the
-``tau`` parameters.
+The report and release-selection paths preserve the evidence used to develop v2,
+but are not authority for the explicit sm-v2-4 product decision. The
+``emit-user14-fixture`` mode regenerates its shared synthetic regression without
+reading a database.
 
 Safety:
   * The default run performs **zero database writes**. It only reads evidence via
@@ -824,9 +823,9 @@ class GridCell:
 # The two pinned LITERAL anchors (fixed comparators every historical grid report and
 # behavior-diff diagnostic is keyed off). ORIGINAL_CELL is the pre-g-zc3p original
 # comparator (value unchanged from the former BASELINE_CELL). CURRENT_SM_V2_3_CELL is
-# today's deployed sm-v2-3 model (== RootCalcConfig() today) — pinned by literal field
-# values so it keeps meaning "the historical current model" after the phase-3 default
-# flip (g-p4ih-model-flip). Because p == 0 the scope is canonicalized, giving the
+# historical deployed sm-v2-3 model — pinned by literal field values so it keeps
+# meaning "the historical current model" after the sm-v2-4 default flip. Because
+# p == 0 the scope is canonicalized, giving the
 # anti-drift property: each anchor compares equal to any other p=0 cell of the same
 # (lcb_z, coverage_fold, threshold, self_term) regardless of the scope literal passed.
 CURRENT_SM_V2_3_CELL = GridCell(
@@ -835,6 +834,14 @@ CURRENT_SM_V2_3_CELL = GridCell(
     coverage_live_threshold=1,
     report_fold_p=0.0,
     report_fold_scope="all",
+    report_self_term="keep",
+)
+SM_V2_4_DEFAULT_CELL = GridCell(
+    lcb_z=1.0,
+    coverage_fold="gate",
+    coverage_live_threshold=1,
+    report_fold_p=0.5,
+    report_fold_scope="user",
     report_self_term="keep",
 )
 ORIGINAL_CELL = GridCell(
@@ -7442,13 +7449,13 @@ def select_candidate(inputs: SelectionInputs) -> SelectionResult:
 
 
 # ---------------------------------------------------------------------------
-# User-14 fixture builder + writer (settled path consumed by g-p4ih-cutoff-fixture)
+# User-14 fixture builder + writer
 # ---------------------------------------------------------------------------
 
 # The settled repo-relative fixture path, computed from __file__ (NOT the process CWD,
-# so it is stable regardless of where the CLI is invoked). g-p4ih-cutoff-fixture adds
-# the --emit-user14-fixture CLI mode that binds the builder+writer to SM_V2_4_DEFAULT_CELL
-# and performs the one real emission here; this bead never touches the checked-in file.
+# so it is stable regardless of where the CLI is invoked). The explicit
+# --emit-user14-fixture mode binds the builder+writer to SM_V2_4_DEFAULT_CELL and
+# SCORE_MODEL_VERSION; ordinary report/release paths never write the checked-in file.
 DEFAULT_USER14_FIXTURE_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -8480,7 +8487,12 @@ def _path_redactor(paths: Sequence[str]) -> Callable[[str], str]:
 # the live --min-observations) silently coexist with a release-path run and be
 # accepted-and-ignored — exactly the class of operator error a release CLI must not permit.
 # Each subcommand exposes ONLY its compatible options.
-_SUBCOMMANDS: tuple[str, ...] = ("report", "capture-cohort", "select-release")
+_SUBCOMMANDS: tuple[str, ...] = (
+    "report",
+    "capture-cohort",
+    "select-release",
+    "emit-user14-fixture",
+)
 
 
 # The CLOSED vocabulary of tokens this CLI is permitted to ECHO. It is populated ONLY
@@ -8675,6 +8687,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         argv := [ "report" ] REPORT_OPTS*
               | "capture-cohort" CAPTURE_OPTS*
               | "select-release" SELECT_OPTS*
+              | "emit-user14-fixture"
 
     The ROOT parser carries NO options at all. Keeping the report options on the root would
     make ``--limit 5 capture-cohort`` parse, which is the accepted-and-ignored hazard the
@@ -8770,6 +8783,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--result-output", required=True, type=Path,
         help="ABSOLUTE path the FULL SelectionResult JSON is written to, OUTSIDE every "
              "worktree. Never overwritten: an existing file is a refusal, not a republish.",
+    )
+    subparsers.add_parser(
+        "emit-user14-fixture",
+        help="Write the deterministic sm-v2-4 synthetic User-14 product regression.",
     )
 
     # LEGACY COMPATIBILITY. A bare invocation (`--json`, `--limit 5`, or nothing at all) is
@@ -9084,6 +9101,10 @@ def main(argv: list[str] | None = None, *, session_factory=None):
         return _run_capture_cohort(args, session_factory=session_factory)
     if args.mode == "select-release":
         return _run_select_release(args)
+    if args.mode == "emit-user14-fixture":
+        payload = build_user14_fixture(SM_V2_4_DEFAULT_CELL, SCORE_MODEL_VERSION)
+        write_user14_fixture(payload)
+        return 0
 
     if args.write_bench:
         if not args.allow_writes:
@@ -9134,9 +9155,9 @@ def main(argv: list[str] | None = None, *, session_factory=None):
             bench_user, bench_color = selected[0]
             write_bench = run_write_bench(db, bench_user, bench_color, args.database_url)
 
-    # The CURRENT model cell (today's deployed model) drives the top-level
-    # distribution/telemetry; the grid section adds every other cell plus per-key deltas
-    # vs that current-model reference.
+    # The historical sm-v2-3 cell drives this dormant report's top-level
+    # distribution/telemetry; the grid section adds every other cell plus per-key
+    # deltas vs that literal comparator.
     reference_scores = [pg[CURRENT_SM_V2_3_CELL] for pg in pair_grids]
     report = build_report(
         reference_scores,

@@ -27,12 +27,11 @@ SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 # coverage channel (the double-counting arm kept only for the calibration grid).
 COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 
-# Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). These axes are
-# DORMANT at their identity defaults (report_fold_p=0.0, report_fold_scope="all",
-# report_self_term="keep"): a default RootCalcConfig() is byte-identical to the
-# pre-Phase-1 model and its fingerprint is unchanged (see
-# root_calc_config_fingerprint). The scorer leaves consume them later; this bead
-# only lands the validated, first-class surface.
+# Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). The identity
+# values (report_fold_p=0.0, report_fold_scope="all", report_self_term="keep")
+# remain available for historical comparison and keep their pre-Phase-1
+# fingerprint (see root_calc_config_fingerprint). The served sm-v2-4 default
+# activates the user-turn-only square-root fold while retaining the self-term.
 #
 #   - report_fold_scope: which turns the report-time coverage fold applies to.
 #     "all" folds both turns; "user" folds only user-turn rows (g-report-fold-score).
@@ -64,7 +63,7 @@ ReportSelfTermEffective = Literal["keep", "drop_user", "keep_fallback"]
 # captured by a RootCalcConfig field (config changes move
 # root_calc_config_fingerprint on their own) MUST bump BOTH this id and
 # SCORE_MODEL_VERSION (app.opening_cache) to force a full recompute. Adding the
-# dormant axes above is config-captured, so this stays at v1.
+# report-stage behavior above is config-captured, so this stays at v1.
 REPORT_SCORER_CONTRACT_ID = "report-fold-v1"
 
 
@@ -119,11 +118,12 @@ class RootCalcConfig:
     #     grid can confirm the double-count empirically (see _calc).
     lcb_z: float = 1.0
     coverage_fold: str = "gate"
-    # Dormant report-fold axes (identity defaults; see REPORT_FOLD_SCOPES /
-    # REPORT_SELF_TERM_MODES). Omitted from the fingerprint at identity so adding
-    # them perturbs no pre-existing config fingerprint or production cache key.
-    report_fold_p: float = 0.0
-    report_fold_scope: str = "all"
+    # Report-stage axes (see REPORT_FOLD_SCOPES / REPORT_SELF_TERM_MODES).
+    # sm-v2-4 folds only user-turn reported rows by sqrt(coverage), preserving
+    # opponent-turn rows already governed by the recursive coverage gate. The
+    # historical p=0 identity remains fingerprint-compatible with sm-v2-3.
+    report_fold_p: float = 0.5
+    report_fold_scope: str = "user"
     report_self_term: str = "keep"
 
     def __post_init__(self) -> None:
@@ -213,8 +213,8 @@ def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
     Rejects every non-RootCalcConfig argument (including falsy values and a raw
     GridCell) with ``TypeError`` via an explicit ``None`` branch — a GridCell must be
     routed through its ``.config`` (the calibration script's ``_cfg_fp`` is the sole
-    sanctioned router), never fingerprinted directly. The dormant report-fold axes
-    are canonicalized so an identity config keeps its pre-Phase-1 fingerprint (see
+    sanctioned router), never fingerprinted directly. The report-fold axes are
+    canonicalized so the historical identity keeps its pre-Phase-1 fingerprint (see
     :func:`_report_fold_fingerprint_tokens`).
     """
     if config is None:

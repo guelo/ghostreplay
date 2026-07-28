@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 import uuid
 from unittest.mock import patch
@@ -1051,22 +1052,29 @@ def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
     assert _count_batches(db_session, 123, "black") <= 2
 
 
-def test_pre_readiness_config_and_model_version_recomputes_once(db_session):
-    """A batch stamped under the pre-readiness config/version drifts once, then
+def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
+    """A batch stamped under sm-v2-3's config/version drifts once, then
     the rebuilt batch serves the fast path."""
     _seed_black_opening_session(db_session)
     first = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert first is not None
 
     old_config_fp = root_calc_config_fingerprint(
-        RootCalcConfig(lcb_z=0.0, coverage_fold="off", coverage_live_threshold=2)
+        RootCalcConfig(
+            lcb_z=1.0,
+            coverage_fold="gate",
+            coverage_live_threshold=1,
+            report_fold_p=0.0,
+            report_fold_scope="all",
+            report_self_term="keep",
+        )
     )
     current_config_fp = root_calc_config_fingerprint()
     assert old_config_fp != current_config_fp
-    assert oc.SCORE_MODEL_VERSION == "sm-v2-3"
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-4"
     first.registry_fingerprint = first.registry_fingerprint.replace(
         current_config_fp, old_config_fp
-    ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-2")
+    ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-3")
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
@@ -1112,23 +1120,20 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
 
 
 # ---------------------------------------------------------------------------
-# Report-fold config compatibility at the cache boundary (g-report-cfg-fp).
+# Report-fold config compatibility at the cache boundary.
 #
-# Adding the dormant report-fold axes must not disturb the production registry
-# fingerprint: the default runtime embeds the identity GOLDEN config fingerprint, so
-# a pre-Phase-1 batch stays on the fast path, while a batch stamped under an ACTIVE
-# axis (report_fold_p>0 / drop_user) is a genuine registry drift that recomputes once.
+# The sm-v2-4 default embeds its active user-scope fold fingerprint. A batch
+# stamped under any non-default report-stage shape is registry drift and
+# recomputes once.
 # ---------------------------------------------------------------------------
 
 # root_calc_config_fingerprint(RootCalcConfig()) — the production default config fp,
 # embedded verbatim in the registry fingerprint.
-GOLDEN = "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
+GOLDEN = "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090"
 
 
 def test_registry_fingerprint_composes_golden_config():
-    # Pin the EXACT registry composition, with GOLDEN as the config-fp segment. The
-    # default runtime fingerprints the identity config, so the dormant axes leave the
-    # production registry (and therefore every persisted batch's stamp) unchanged.
+    # Pin the exact sm-v2-4 registry composition, with GOLDEN as the config-fp segment.
     graph = _make_graph()
     roots = _make_roots()
     assert root_calc_config_fingerprint() == GOLDEN
@@ -1145,10 +1150,9 @@ def test_registry_fingerprint_composes_golden_config():
 
 
 def test_golden_stamped_expired_batch_stays_on_fast_path(db_session):
-    # A batch stamped with the GOLDEN-config registry fingerprint is exactly what a
-    # pre-Phase-1 build produced (identity fp is byte-unchanged). Even aged well past
-    # the decay interval ("expired"), the cheap freshness predicate — which ignores
-    # wall-clock decay — proves it fresh, so the fast path serves it without a rebuild.
+    # Even aged well past the decay interval ("expired"), a current-config batch's
+    # cheap freshness predicate — which ignores wall-clock decay — proves it fresh,
+    # so the fast path serves it without a rebuild.
     _seed_black_opening_session(db_session)
     batch = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert batch is not None
@@ -1169,13 +1173,13 @@ def test_golden_stamped_expired_batch_stays_on_fast_path(db_session):
 @pytest.mark.parametrize(
     "active_config",
     [
-        RootCalcConfig(report_fold_p=0.5),
+        RootCalcConfig(report_fold_p=0.5, report_fold_scope="all"),
         RootCalcConfig(report_self_term="drop_user"),
     ],
-    ids=["active_p", "drop_user"],
+    ids=["all_scope", "drop_user"],
 )
-def test_active_axis_stamped_batch_recomputes_once(db_session, active_config):
-    # A batch stamped under an active report-fold axis carries a non-GOLDEN config fp
+def test_nondefault_report_axis_stamped_batch_recomputes_once(db_session, active_config):
+    # A batch stamped under a non-default report-fold shape carries a non-GOLDEN config fp
     # in its registry fingerprint, which the default runtime (GOLDEN) cannot match →
     # registry drift → exactly ONE recompute, after which the rebuilt GOLDEN-stamped
     # batch serves the fast path. (The batch is also aged past decay; registry drift
@@ -1552,7 +1556,12 @@ def test_active_only_user_baseline_is_empty_no_evidence(db_session):
         skip_when_inflight=False,
     )
     assert source == "empty_no_evidence"
-    assert json_str == "{}"
+    assert json.loads(json_str) == {
+        "schema_version": 1,
+        "model_version": oc.SCORE_MODEL_VERSION,
+        "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+        "scores": {},
+    }
 
 
 def test_manual_blunder_counts_as_evidence_regardless_of_session_status(db_session):

@@ -12,10 +12,11 @@ import {
   getPriorityLabel,
   getPriorityTone,
 } from './format'
+import user14Synthetic from './__fixtures__/user14_synthetic.json'
 
-// Grade/tone boundaries re-centred onto the readiness-fold score distribution
-// (g-xnv7, 2026-07-09 final grid: pooled p50≈10, p75≈21, p95≈44). These tests
-// pin the boundaries so any future shift is a deliberate, reviewed change.
+// The g-xnv7 grade/tone boundaries remain frozen through sm-v2-4
+// (2026-07-09 final grid: pooled p50≈10, p75≈21, p95≈44). These tests pin the
+// boundaries so any future shift is a deliberate, reviewed change.
 describe('getPriorityLabel', () => {
   it('grades at the re-centred boundaries (F<2, D 2–8, C 8–29, B 29–44, A≥44)', () => {
     expect(getPriorityLabel(null)).toBe('No Data')
@@ -49,6 +50,15 @@ describe('getPriorityTone', () => {
 
     expect(getPriorityTone(29)).toBe('steady')
     expect(getPriorityTone(100)).toBe('steady')
+  })
+})
+
+describe('sm-v2-4 synthetic product regression', () => {
+  it('keeps the low-coverage user-turn root below ready bands', () => {
+    expect(['C', 'D', 'F']).toContain(
+      getPriorityLabel(user14Synthetic.black_root_score),
+    )
+    expect(getPriorityTone(user14Synthetic.black_root_score)).not.toBe('steady')
   })
 })
 

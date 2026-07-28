@@ -1,12 +1,12 @@
 # Calibrate Opening Scores (v2)
 
-`calibrate_opening_scores_v2.py` produces reproducible calibration evidence for
-the opening-score **v2** model. v2 is the only live scoring model — there is no
-v1 baseline — so this script *calibrates v2 directly* rather than comparing two
-models. It scores every candidate `(user_id, player_color)` pair **in memory**
-and reports the distributions, source mix, phase-horizon behaviour, recursion
-accounting, readiness-fold grid, and PASS/FAIL diagnostics needed to decide
-score defaults and grade thresholds.
+`calibrate_opening_scores_v2.py` preserves the reproducible calibration and
+release tooling developed for the opening-score **v2** model. Its large
+candidate selector is now historical/dormant: it is not release authority for
+the sm-v2-4 product decision and no new production capture, grid, approval
+handoff, or sealed run is required. The ordinary report remains useful for
+diagnostics, and the explicit `emit-user14-fixture` mode regenerates the shared
+synthetic product regression.
 
 ## No-write default
 
@@ -102,7 +102,7 @@ cache.
 
 ## CLI reference
 
-The script takes three **subcommands**, and each exposes *only* its own options — an
+The script takes four **subcommands**, and each exposes *only* its own options — an
 option belonging to another mode is rejected as unrecognized (exit 2) rather than
 accepted and ignored, in either token order:
 
@@ -110,6 +110,7 @@ accepted and ignored, in either token order:
 argv := [ "report" ] REPORT_OPTS*
       | "capture-cohort" CAPTURE_OPTS*
       | "select-release" SELECT_OPTS*
+      | "emit-user14-fixture"
 ```
 
 ### `report` (the default)
@@ -118,7 +119,7 @@ The legacy bare form still works unchanged: `--json`, `--limit 5`, or no argumen
 all are all `report`. The test is on `argv[0]` only, so an option *value* that happens
 to spell a subcommand name (`--users capture-cohort`) is not a mode switch. One stated
 exception: a leading `-h`/`--help` is *not* rewritten, so bare `--help` shows the root
-help where the three subcommands are discoverable rather than `report --help`.
+help where the four subcommands are discoverable rather than `report --help`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -293,6 +294,22 @@ authorise its cutoffs.
 | `4` | input rejection: the load guard refused the artifact/record pair, a fail-closed binding check refused the inputs, or the artifact could not be read |
 | `5` | output failure: the result failed its own serialization or redaction schema, a result already exists at the requested path, or the write failed |
 | `6` | unexpected internal error (the catch-all) |
+
+### `emit-user14-fixture`
+
+Regenerates `src/openings/__fixtures__/user14_synthetic.json` from the fixed
+synthetic scenario at `SYNTHETIC_AS_OF`, bound to
+`SM_V2_4_DEFAULT_CELL` and `SCORE_MODEL_VERSION="sm-v2-4"`:
+
+```bash
+cd backend
+python scripts/calibrate_opening_scores_v2.py emit-user14-fixture
+```
+
+It accepts no options and touches no database. Review the resulting fixture
+diff; backend tests independently recompute every numeric field, while
+`src/openings/format.test.ts` consumes the same file through the unchanged
+grade/tone functions.
 
 ## Release runs: use the launcher
 
@@ -546,3 +563,24 @@ reported pooled named-root stats mean `14.6`, p5 `0.4`, p25 `5.1`, p50 `9.8`,
 p75 `20.8`, p95 `43.9` across 478 rows; all three diagnostics passed. Display
 grades were recalibrated once from that combined distribution:
 `A>=44`, `B>=29`, `C>=8`, `D>=2`, `F<2`; tones `alert<5`, `watch<29`.
+
+## sm-v2-4 product decision
+
+g-rescope-p4ih-fix retains the recursive g-xnv7 gate and ships the already-tested
+ARM-2 shape directly:
+
+```text
+lcb_z=1.0
+coverage_fold="gate"
+coverage_live_threshold=1
+report_fold_p=0.5
+report_fold_scope="user"
+report_self_term="keep"
+SCORE_MODEL_VERSION="sm-v2-4"
+```
+
+The large selector, private cohort, approval binding, and sealed release path
+above remain historical tooling; none is authority for this decision and no new
+run is required. The shared synthetic fixture is the product regression.
+Display grades remain the g-xnv7 boundaries above until representative
+post-release recalibration; no provisional or private-cohort cutoff is emitted.

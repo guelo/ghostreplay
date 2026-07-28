@@ -46,13 +46,69 @@ from app.models import (
     UserOpeningScore,
 )
 from app.opening_cache import (
+    SCORE_MODEL_VERSION,
     _is_batch_fresh,
     has_opening_evidence,
     list_cached_opening_scores,
 )
+from app.opening_rootcalc import root_calc_config_fingerprint
 from app.opening_roots import get_opening_roots, played_opening_chain
 
 logger = logging.getLogger(__name__)
+
+OPENING_BASELINE_SCHEMA_VERSION = 1
+
+
+def _serialize_baseline(scores: dict[str, float]) -> str:
+    """Serialize a baseline with the score model/config compatibility boundary."""
+    return json.dumps(
+        {
+            "schema_version": OPENING_BASELINE_SCHEMA_VERSION,
+            "model_version": SCORE_MODEL_VERSION,
+            "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+            "scores": scores,
+        }
+    )
+
+
+def _parse_compatible_baseline(payload: str | None) -> dict[str, float] | None:
+    """Return same-model scores, or None when deltas must be suppressed.
+
+    Legacy bare maps and every malformed, unknown-version, cross-model, or
+    cross-config envelope fail closed. The current after-score may still render;
+    only the before/new/delta claims are suppressed.
+    """
+    if payload is None:
+        return None
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    schema_version = parsed.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != OPENING_BASELINE_SCHEMA_VERSION
+        or parsed.get("model_version") != SCORE_MODEL_VERSION
+        or parsed.get("root_calc_config_fingerprint")
+        != root_calc_config_fingerprint()
+    ):
+        return None
+    scores = parsed.get("scores")
+    if not isinstance(scores, dict):
+        return None
+    compatible: dict[str, float] = {}
+    for key, value in scores.items():
+        if (
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= value <= 100.0
+        ):
+            return None
+        compatible[key] = float(value)
+    return compatible
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -95,17 +151,18 @@ def _capture_baseline_json(
     not_after: datetime | None,
     skip_when_inflight: bool,
 ) -> tuple[str | None, str]:
-    """Capture the current opening scores as a JSON ``{key: score}`` map — PURE.
+    """Capture current scores in the versioned baseline envelope — PURE.
 
     Returns ``(json_or_none, source)``. No ``try/except``, no rollback, no logging,
     no timing ``finally`` — the two best-effort wrappers own those, and unexpected
-    DB errors propagate to them. ``json_or_none`` is ``"{}"`` (valid empty baseline
-    for a user with no evidence, so the session's first openings later read as new),
-    a JSON score map, or None (no confident baseline — delta then omitted).
+    DB errors propagate to them. ``json_or_none`` is a same-model envelope whose
+    ``scores`` may be empty (valid baseline for a user with no evidence, so the
+    session's first openings later read as new), or None (no confident baseline).
 
     Guards, in order:
 
-    - No cached batch: ``("{}", "empty_no_evidence")`` when ``has_opening_evidence``
+    - No cached batch: an empty envelope with ``"empty_no_evidence"`` when
+      ``has_opening_evidence``
       is false, else ``(None, "skipped_cold")`` (a cold cache with evidence cannot
       prove a baseline; persisting one would falsely mark every existing opening
       "new" at session end).
@@ -145,7 +202,7 @@ def _capture_baseline_json(
             # valid empty baseline. Confined to the batch-is-None case.
             if has_opening_evidence(db, user_id, player_color):
                 return None, "skipped_recompute_inflight"
-            return "{}", "empty_no_evidence"
+            return _serialize_baseline({}), "empty_no_evidence"
 
     if batch is None:
         # No batch yet. Distinguish a brand-new user (no evidence -> valid empty
@@ -153,7 +210,7 @@ def _capture_baseline_json(
         # baseline -> skip, else session-end falsely marks every opening "new").
         if has_opening_evidence(db, user_id, player_color):
             return None, "skipped_cold"
-        return "{}", "empty_no_evidence"
+        return _serialize_baseline({}), "empty_no_evidence"
 
     # Date guard (g-mxeo): reject a batch that may already reflect this session's
     # evidence BEFORE paying the O(evidence) freshness digest. Strict ``>=``: a
@@ -165,7 +222,9 @@ def _capture_baseline_json(
         # Cache exists but is provably stale (evidence/registry drift or legacy
         # branch keys). Persisting it would reintroduce the misattribution.
         return None, "skipped_stale"
-    return json.dumps({row.opening_key: row.opening_score for row in rows}), "cached_fresh"
+    return _serialize_baseline(
+        {row.opening_key: row.opening_score for row in rows}
+    ), "cached_fresh"
 
 
 def snapshot_opening_baseline(
@@ -392,14 +451,19 @@ def _delta_items_from_cache(
       appear, so the poll stops after one read.
     - ``"skipped_cold"``: no batch yet -> ``items == []``; the poll keeps going
       until a batch builds (no all-``None`` banner is shown meanwhile).
-    - ``"warm"``: ``items`` built from the batch rows for ANY freshness. A warm
-      "after" is best-effort: ``opening_score`` is a 0-100 mastery score the
+    - ``"warm"``: ``items`` built from the batch rows for ANY freshness with a
+      compatible same-model baseline.
+    - ``"warm_suppressed"``: same warm after-score behavior, but the baseline is
+      absent, legacy, malformed, or from another score configuration/model.
+      Before/new/delta claims are suppressed.
+
+    A warm "after" is best-effort: ``opening_score`` is a 0-100 mastery score the
       just-played plies can move either way, so a slightly stale "after" may
       transiently over- or under-state the eventual fresh delta — corrected once
       the poll's freshness read lands.
 
     ``batch`` / ``rows`` are returned so the poll caller can run ``_is_batch_fresh``
-    on them without a second query (both empty for the non-``"warm"`` cases).
+    on them without a second query (both empty for the cold/no-chain cases).
     """
     chain = played_opening_chain(
         _session_played_fens(db, session.id), get_opening_roots()
@@ -415,14 +479,7 @@ def _delta_items_from_cache(
 
     rows_by_key = {row.opening_key: row for row in rows}
 
-    baseline: dict[str, float] | None = None
-    if session.opening_score_baseline:
-        try:
-            parsed = json.loads(session.opening_score_baseline)
-            if isinstance(parsed, dict):
-                baseline = parsed
-        except (ValueError, TypeError):
-            baseline = None
+    baseline = _parse_compatible_baseline(session.opening_score_baseline)
 
     items: list[OpeningScoreDeltaItem] = []
     for root in chain:
@@ -452,7 +509,8 @@ def _delta_items_from_cache(
                 is_new=is_new,
             )
         )
-    return items, batch, rows, "warm"
+    status = "warm" if baseline is not None else "warm_suppressed"
+    return items, batch, rows, status
 
 
 def compute_opening_score_delta(
@@ -488,7 +546,12 @@ def compute_opening_score_delta(
         items, _batch, _rows, status = _delta_items_from_cache(db, session)
         # The terminal POST never proves freshness: warm items are UNVERIFIED and
         # reconciled by the poll. ``no_chain`` / ``skipped_cold`` log as-is.
-        source = "cached_unverified" if status == "warm" else status
+        if status == "warm":
+            source = "cached_unverified"
+        elif status == "warm_suppressed":
+            source = "cached_suppressed"
+        else:
+            source = status
         # Enqueue a BACKGROUND recompute so the cache converges (cold builds its
         # first batch; stale refreshes) for the poll to read. Lazy import mirrors
         # the historical load_cached_rows pattern: opening_score_scheduler imports
@@ -542,8 +605,8 @@ def read_opening_score_delta(
             return items, True  # nothing will ever appear -> stop polling
         if status == "skipped_cold":
             return items, False  # batch still building -> keep polling
-        # status == "warm": items are served for any freshness; decide the poll-stop
-        # signal. Cheap NOT-fresh gate first (lazy import: the scheduler imports
+        # Warm and warm_suppressed items are served for any freshness; decide the
+        # poll-stop signal. Cheap NOT-fresh gate first (lazy import: the scheduler imports
         # opening_cache at module load, so a top-level import risks a cycle).
         from app.opening_score_scheduler import is_recompute_scheduled
 

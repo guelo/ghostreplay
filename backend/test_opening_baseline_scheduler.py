@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import json
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -35,12 +36,14 @@ from app.opening_baseline_scheduler import (
     enqueue_baseline_snapshot,
 )
 from app.opening_cache import (
+    SCORE_MODEL_VERSION,
     capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
+from app.opening_rootcalc import root_calc_config_fingerprint
 from app.opening_score_delta import run_baseline_snapshot_job
 
 # Fixed timeline: a batch dated at T_BEFORE is provably pre-session for a session
@@ -48,6 +51,15 @@ from app.opening_score_delta import run_baseline_snapshot_job
 T_BEFORE = datetime(2026, 6, 1, tzinfo=timezone.utc)
 T_START = datetime(2026, 6, 15, tzinfo=timezone.utc)
 T_AFTER = datetime(2026, 6, 20, tzinfo=timezone.utc)
+
+
+def _baseline_envelope(scores):
+    return {
+        "schema_version": 1,
+        "model_version": SCORE_MODEL_VERSION,
+        "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+        "scores": scores,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +180,7 @@ def test_fresh_pre_session_batch_is_persisted(db_session):
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
     assert source == "cached_fresh"
-    import json
-    assert json.loads(_baseline(db_session, sid)) == {"k": 42.0}
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 42.0})
 
 
 def test_review_race_rejected_by_date_guard(db_session):
@@ -213,14 +224,14 @@ def test_move_race_rejected_by_date_guard(db_session):
 
 
 def test_brand_new_user_persists_empty_baseline(db_session):
-    # (5) No batch, no evidence -> a valid empty baseline "{}" (empty_no_evidence),
+    # (5) No batch, no evidence -> a valid empty envelope (empty_no_evidence),
     # so the session's first openings later read as new.
     sid = _make_session(db_session)
 
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
     assert source == "empty_no_evidence"
-    assert _baseline(db_session, sid) == "{}"
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({})
 
 
 def test_already_set_baseline_is_a_noop(db_session):
@@ -296,8 +307,7 @@ def test_naive_computed_at_strictly_before_is_accepted(db_session):
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
     assert source == "cached_fresh"
-    import json
-    assert json.loads(_baseline(db_session, sid)) == {"k": 7.0}
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 7.0})
 
 
 def test_naive_computed_at_equal_to_started_at_is_rejected(db_session):
@@ -331,7 +341,6 @@ def test_untrusted_queued_identity_captures_from_the_row(db_session):
     # DIFFERENT user/color (999/black) with theirs. A job carrying the WRONG pair
     # must NOT capture the other user's scores; a correct-pair job captures the
     # session owner's batch — proving capture keys off the ROW, not the payload.
-    import json
     sid = _make_session(db_session, user_id=123, player_color="white")
     _seed_batch(
         db_session, user_id=123, player_color="white", computed_at=T_BEFORE,
@@ -348,7 +357,9 @@ def test_untrusted_queued_identity_captures_from_the_row(db_session):
 
     ok = run_baseline_snapshot_job(db_session, sid, 123, "white")
     assert ok == "cached_fresh"
-    assert json.loads(_baseline(db_session, sid)) == {"owner": 42.0}
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope(
+        {"owner": 42.0}
+    )
 
 
 # ---------------------------------------------------------------------------

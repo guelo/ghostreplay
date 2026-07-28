@@ -33,15 +33,12 @@ export function formatGames(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
-// Grade/tone boundaries re-centred onto the readiness-fold score distribution
-// (g-xnv7, 2026-07-09 final grid: lcb_z=1, coverage_fold=gate,
-// coverage_live_threshold=1; pooled p50≈10, p75≈21, p95≈44 across five
-// included pairs). Bands keep the prior percentile intent after the score now
-// folds sample sufficiency and opponent breadth: A≥44 (~p95), B≥29 (~p82),
-// C≥8 (~p40), D≥2 (~p12), F<2; tone alert<5 (~p25), watch<29. The raw score is
-// still displayed unchanged (formatScore), so grade is the relative signal and
-// the number is the absolute readiness score. See docs/openingscore_final.md
-// "Calibration Outcome (v2)".
+// The g-xnv7 boundaries remain intentionally frozen through sm-v2-4 while
+// representative post-release population data accumulates. sm-v2-4 adds a
+// user-turn-only square-root coverage fold, so the old distribution cannot be
+// algebraically remapped into new global bands. Recalibration is separate,
+// reviewed follow-up work; these exact A/B/C/D/F and tone thresholds stay pinned
+// here and in format.test.ts until then. See docs/openingscore_final.md.
 export function getPriorityTone(score: number | null): OpeningTone {
   if (score === null) {
     return "muted";

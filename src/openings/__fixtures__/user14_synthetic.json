@@ -1,0 +1,11 @@
+{
+  "black_root_score": 15.680578594967917,
+  "caro_child_score": 34.383717801179955,
+  "config_fingerprint": "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090",
+  "coverage_implied_score": 28.867513459481287,
+  "model_version": "sm-v2-4",
+  "report_fold_p": 0.5,
+  "root_coverage_fraction": 0.08333333333333331,
+  "schema_version": 1,
+  "white_root_score": 9.763107293781747
+}

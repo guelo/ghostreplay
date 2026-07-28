@@ -659,6 +659,9 @@ None of those are required for MVP tuning.
 | `k_evidence` | 5 |
 | `half_life_days` | 45 |
 | `coverage_live_threshold` | 1 |
+| `report_fold_p` | 0.5 |
+| `report_fold_scope` | `user` |
+| `report_self_term` | `keep` |
 | `coverage_review_threshold` | `1 live + 1 review` |
 | `tau_wc` | 0.20 |
 | `tau_cp` | 100.0 |
@@ -687,7 +690,7 @@ discontinuity across the old 49↔50cp pass/fail boundary (asserted by
 `test_no_49_50_discontinuity` / `test_context_sensitivity` in
 `backend/test_opening_quality.py`). No change.
 
-### Readiness fold parameters — **chosen** (g-xnv7, 2026-07-09)
+### Recursive readiness parameters — **retained** (g-xnv7, 2026-07-09)
 
 `lcb_z = 1.0`, `coverage_fold = "gate"`, `coverage_live_threshold = 1`.
 
@@ -703,25 +706,61 @@ At the chosen cell (`lcb_z=1`, `coverage_fold=gate`, live threshold 1), pooled
 named-root stats were mean **14.6**, p5 **0.4** / p25 **5.1** / p50 **9.8** /
 p75 **20.8** / p95 **43.9** (n=478), synthetic-hero mean **27.6**.
 
-`SCORE_MODEL_VERSION` is bumped to `sm-v2-3`; combined with the
-`RootCalcConfig` default change, this causes registry drift and one recompute per
-`(user, color)` on first read. In-flight sessions during deploy can show a
-one-time crop of negative score deltas if their baseline was captured under
-`sm-v2-2`; the next baseline capture self-corrects.
+That transition bumped `SCORE_MODEL_VERSION` to `sm-v2-3`; combined with the
+then-current `RootCalcConfig` change, it caused registry drift and one recompute
+per `(user, color)` on first read.
 
 The stats page strongest/weakest top-3 lists sort persisted `opening_score`, so
 specialist openings can reshuffle downward under the readiness fold. That is a
 coherent score-model change, not a stats regression.
 
-### Grade thresholds — **re-centred** (g-xnv7, 2026-07-09)
+### User-turn report fold — **served in sm-v2-4** (g-rescope-p4ih-fix, 2026-07-28)
+
+The served configuration is exactly:
+
+```text
+lcb_z                    = 1.0
+coverage_fold            = "gate"
+coverage_live_threshold = 1
+report_fold_p            = 0.5
+report_fold_scope        = "user"
+report_self_term         = "keep"
+SCORE_MODEL_VERSION      = "sm-v2-4"
+```
+
+`_calc` and its recursive opponent coverage gate are unchanged. The shared
+named-root/tree-position reporting funnel applies
+`reported = pre_fold_quality × coverage_fraction**0.5` only when the reported
+row is the user's turn. Opponent-turn rows keep multiplier `1.0`, avoiding a
+second coverage penalty, and full coverage is identity on either turn.
+
+This was an explicit product decision using an already-tested synthetic ARM-2
+cell, not another percentile selection run. The pre-release cohort was not
+representative enough to approve display boundaries, and coverage differs per
+opening, so no global remapping of the old bands can preserve grades. The shared
+checked-in synthetic fixture is emitted with
+`emit-user14-fixture` and pins the intended raw behavior without production
+data.
+
+The model bump moves the cache registry fingerprint, forcing exactly one
+recompute per `(user, color)` before the new batch becomes the fast path. Newly
+captured session baselines carry
+`{schema_version, model_version, root_calc_config_fingerprint, scores}`.
+Legacy, malformed, non-sm-v2-4, or non-current-config baselines cannot be
+subtracted from current scores; their after-scores may render, but
+before/delta/new claims are suppressed. The model version protects scorer
+changes outside `RootCalcConfig`; the config fingerprint separately protects
+config-only retunes that legitimately keep the same model version.
+
+### Grade thresholds — **frozen pending post-release recalibration**
 
 `A ≥ 44`, `B ≥ 29`, `C ≥ 8`, `D ≥ 2`, `F < 2`; tones `alert < 5`,
 `watch < 29` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
 
-The boundaries are re-centred onto the final combined readiness distribution so
-grades differentiate after the score folds in sample sufficiency and opponent
-breadth: `A ≥ 44` (~p95), `B ≥ 29` (~p82), `C ≥ 8` (~p40), `D ≥ 2` (~p12),
-`F < 2`; tones `alert < 5` (~p25) / `watch < 29`.
+These are the g-xnv7 boundaries, intentionally kept unchanged through sm-v2-4.
+Their original percentile interpretation belongs to the sm-v2-3 distribution;
+it is not claimed for the new user-turn-folded distribution. Representative
+post-release data owns any later recalibration.
 
 > **The raw score is still displayed unchanged** (`formatScore`). Grade and
 > number can read e.g. "**A · 50**" — the grade is the *relative* position on the
@@ -731,7 +770,7 @@ breadth: `A ≥ 44` (~p95), `B ≥ 29` (~p82), `C ≥ 8` (~p40), `D ≥ 2` (~p12
 >
 > Grade/tone are display of an unchanged stored score, so this re-centre does
 > **not** bump `QUALITY_VERSION`. The score-model semantic change itself is
-> represented by `RootCalcConfig` drift and `SCORE_MODEL_VERSION = sm-v2-3`.
+> represented by `RootCalcConfig` drift and `SCORE_MODEL_VERSION = sm-v2-4`.
 > The cohort is still volume-dominated by one user, so the central tendency is
 > useful but the fine 5-band *shape* should be revisited when more high-observation
 > users exist.

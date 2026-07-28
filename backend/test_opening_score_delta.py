@@ -5,6 +5,7 @@ and the endpoint wiring that surfaces ``opening_score_changes`` on game end, dri
 natural-end, drill accuracy-fail, and the off-route route-check failure path.
 """
 
+import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from conftest import TestingSessionLocal
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
+    SCORE_MODEL_VERSION,
     capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
@@ -29,7 +31,10 @@ from app.opening_graph import (
     get_opening_graph,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
+from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
 from app.opening_score_delta import (
+    OPENING_BASELINE_SCHEMA_VERSION,
+    _parse_compatible_baseline,
     compute_opening_score_delta,
     read_opening_score_delta,
     run_baseline_snapshot_job,
@@ -88,6 +93,105 @@ def _stub_scheduler():
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
+
+def _baseline_envelope(
+    scores: dict[str, float],
+    *,
+    model_version: str = SCORE_MODEL_VERSION,
+    config_fingerprint: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": OPENING_BASELINE_SCHEMA_VERSION,
+        "model_version": model_version,
+        "root_calc_config_fingerprint": (
+            root_calc_config_fingerprint()
+            if config_fingerprint is None
+            else config_fingerprint
+        ),
+        "scores": scores,
+    }
+
+
+def _baseline_json(
+    scores: dict[str, float],
+    *,
+    model_version: str = SCORE_MODEL_VERSION,
+    config_fingerprint: str | None = None,
+) -> str:
+    return json.dumps(
+        _baseline_envelope(
+            scores,
+            model_version=model_version,
+            config_fingerprint=config_fingerprint,
+        )
+    )
+
+
+@pytest.mark.parametrize("scores", [{}, {"a": 0.0, "b": 42.5, "c": 100.0}])
+def test_baseline_parser_accepts_same_model_envelopes(scores):
+    assert _parse_compatible_baseline(_baseline_json(scores)) == scores
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        "",
+        "not-json",
+        "[]",
+        "{}",
+        json.dumps({"legacy": 42.0}),
+        json.dumps(
+            {
+                "schema_version": True,
+                "model_version": SCORE_MODEL_VERSION,
+                "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+                "scores": {},
+            }
+        ),
+        json.dumps(
+            {
+                "schema_version": 2,
+                "model_version": SCORE_MODEL_VERSION,
+                "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+                "scores": {},
+            }
+        ),
+        _baseline_json({}, model_version="sm-v2-3"),
+        json.dumps(
+            {
+                "schema_version": OPENING_BASELINE_SCHEMA_VERSION,
+                "model_version": SCORE_MODEL_VERSION,
+                "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+                "scores": [],
+            }
+        ),
+        _baseline_json({"bad": True}),
+        _baseline_json({"bad": -0.1}),
+        _baseline_json({"bad": 100.1}),
+        _baseline_json({"bad": float("nan")}),
+        _baseline_json({"bad": float("inf")}),
+        _baseline_json({"bad": 10**400}),
+    ],
+)
+def test_baseline_parser_suppresses_legacy_cross_model_and_invalid_payloads(payload):
+    assert _parse_compatible_baseline(payload) is None
+
+
+def test_baseline_parser_suppresses_same_model_different_root_config():
+    old_config_fingerprint = root_calc_config_fingerprint(
+        RootCalcConfig(report_fold_p=0.75)
+    )
+    assert old_config_fingerprint != root_calc_config_fingerprint()
+
+    payload = _baseline_json(
+        {"a": 42.0},
+        model_version=SCORE_MODEL_VERSION,
+        config_fingerprint=old_config_fingerprint,
+    )
+    assert _parse_compatible_baseline(payload) is None
+
 
 def _fens_after(sans: list[str]) -> list[str]:
     board = chess.Board()
@@ -250,15 +354,16 @@ def test_snapshot_returns_json_score_map(db_session):
     _add_score_row(db_session, batch_id=batch_id, opening_key=MORPHY_KEY, opening_score=75.0)
     db_session.commit()
 
-    import json
     snap = snapshot_opening_baseline(db_session, 123, "white")
-    assert json.loads(snap) == {RUY_KEY: 41.0, MORPHY_KEY: 75.0}
+    assert json.loads(snap) == _baseline_envelope(
+        {RUY_KEY: 41.0, MORPHY_KEY: 75.0}
+    )
 
 
 def test_snapshot_empty_map_when_no_batch_no_evidence(db_session):
-    # No batch AND no evidence -> a brand-new user -> a valid empty baseline ("{}"),
+    # No batch AND no evidence -> a brand-new user -> a valid empty envelope,
     # NOT None, so the session's first openings later read as new rather than unknown.
-    assert snapshot_opening_baseline(db_session, 123, "white") == "{}"
+    assert snapshot_opening_baseline(db_session, 123, "white") == _baseline_json({})
 
 
 def test_snapshot_skips_cold_cache_with_evidence(db_session):
@@ -290,8 +395,7 @@ def test_snapshot_does_not_call_refresh_now(db_session):
     with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
         snap = snapshot_opening_baseline(db_session, 123, "white")
 
-    import json
-    assert json.loads(snap) == {RUY_KEY: 41.0}
+    assert json.loads(snap) == _baseline_envelope({RUY_KEY: 41.0})
     mock_refresh.assert_not_called()
 
 
@@ -401,7 +505,6 @@ def test_snapshot_inflight_no_batch_with_evidence_skips(db_session, caplog):
 def test_snapshot_inflight_no_batch_no_evidence_empty(db_session, caplog):
     # In-flight, no batch, no evidence (brand-new user): still a valid empty
     # baseline so the session's first openings read as new, NOT skipped.
-    import json
     import logging
 
     spy_fresh = Mock(side_effect=AssertionError("digest must not run in-flight"))
@@ -412,7 +515,7 @@ def test_snapshot_inflight_no_batch_no_evidence_empty(db_session, caplog):
     ):
         result = snapshot_opening_baseline(db_session, 123, "white")
 
-    assert json.loads(result) == {}
+    assert json.loads(result) == _baseline_envelope({})
     spy_fresh.assert_not_called()
     assert "source=empty_no_evidence" in caplog.text
 
@@ -421,8 +524,6 @@ def test_snapshot_quiescent_with_batch_still_proves_freshness(db_session):
     # The in-flight gate is IN-FLIGHT-ONLY: a quiescent scheduler (default stub
     # False) must STILL reach the digest and capture the confident baseline. A
     # pending-but-not-running recompute is deliberately not gated here.
-    import json
-
     from app import opening_score_delta as osd
 
     batch_id = _make_batch(db_session)  # fresh fingerprints
@@ -434,7 +535,7 @@ def test_snapshot_quiescent_with_batch_still_proves_freshness(db_session):
         snap = snapshot_opening_baseline(db_session, 123, "white")
 
     spy_fresh.assert_called_once()
-    assert json.loads(snap) == {RUY_KEY: 41.0}
+    assert json.loads(snap) == _baseline_envelope({RUY_KEY: 41.0})
 
 
 def test_delta_does_not_call_refresh_now(db_session):
@@ -442,7 +543,7 @@ def test_delta_does_not_call_refresh_now(db_session):
     # batch yields the delta WITHOUT a single refresh_now call (no 5s timeout
     # exposure on the terminal action).
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -464,7 +565,7 @@ def test_delta_enqueues_background_recompute(db_session):
     # The immediate compute serves the warm delta and enqueues a BACKGROUND
     # recompute so the cache converges for the reconcile-poll to read.
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -488,7 +589,7 @@ def test_delta_terminal_post_never_proves_freshness(db_session):
     # built from list_cached_opening_scores (digest is OFF the terminal path).
     # compute swallows exceptions, so assert_not_called() is the load-bearing check.
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # seeds fingerprints BEFORE the patch
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -513,7 +614,7 @@ def test_delta_empty_when_cold_no_batch(db_session):
     # Cold cache (an opening was crossed but no batch exists yet): the compute
     # returns NO items rather than an all-None banner — the poll fills it in once
     # the background recompute builds the first batch.
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
 
     with patch(PATCH_ROOTS, return_value=_ruy_roots()):
@@ -526,7 +627,7 @@ def test_delta_logs_source_and_compute_ms(db_session, caplog):
     import json
     import logging
 
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -541,6 +642,42 @@ def test_delta_logs_source_and_compute_ms(db_session, caplog):
     # proof), so it logs source=cached_unverified, not cached_fresh.
     assert "source=cached_unverified" in caplog.text
     assert "compute_ms=" in caplog.text
+
+
+def test_legacy_baseline_suppresses_terminal_delta_and_poll_keeps_freshness(
+    db_session, caplog
+):
+    import logging
+
+    session = _make_session(
+        db_session,
+        baseline=json.dumps({RUY_KEY: 41.0}),  # pre-sm-v2-4 bare map
+    )
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(
+        db_session,
+        batch_id=batch_id,
+        opening_key=RUY_KEY,
+        opening_score=44.0,
+    )
+    db_session.commit()
+
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        terminal = compute_opening_score_delta(db_session, session)
+        polled, is_fresh = read_opening_score_delta(db_session, session)
+
+    for items in (terminal, polled):
+        item = {candidate.opening_key: candidate for candidate in items}[RUY_KEY]
+        assert item.before is None
+        assert item.after == pytest.approx(44.0)
+        assert item.delta is None
+        assert item.is_new is False
+    assert is_fresh is True
+    assert "source=cached_suppressed" in caplog.text
 
 
 def test_baseline_job_swallows_capture_failure(db_session):
@@ -608,7 +745,9 @@ def test_game_start_does_not_block_on_scheduler(client, auth_headers, db_session
     db_session.expire_all()
     session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
-    assert json.loads(session.opening_score_baseline) == {RUY_KEY: 41.0}
+    assert json.loads(session.opening_score_baseline) == _baseline_envelope(
+        {RUY_KEY: 41.0}
+    )
     mock_refresh.assert_not_called()
 
 
@@ -631,7 +770,9 @@ def test_drill_start_does_not_block_on_scheduler(client, auth_headers, db_sessio
     db_session.expire_all()
     session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
-    assert json.loads(session.opening_score_baseline) == {KP_KEY: 33.0}
+    assert json.loads(session.opening_score_baseline) == _baseline_envelope(
+        {KP_KEY: 33.0}
+    )
     mock_refresh.assert_not_called()
 
 
@@ -643,7 +784,7 @@ def test_delta_numeric_when_baseline_has_key(db_session):
     import json
     session = _make_session(
         db_session,
-        baseline=json.dumps({RUY_KEY: 41.0, MORPHY_KEY: 75.0}),
+        baseline=_baseline_json({RUY_KEY: 41.0, MORPHY_KEY: 75.0}),
     )
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -672,7 +813,7 @@ def test_delta_numeric_when_baseline_has_key(db_session):
 def test_delta_is_new_when_baseline_lacks_key(db_session):
     # Empty baseline ("{}") -> every crossed opening is new; after-scores shown,
     # no numeric delta.
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=30.0)
@@ -707,7 +848,7 @@ def test_delta_null_baseline_shows_after_only(db_session):
 
 
 def test_delta_empty_when_no_opening_crossed(db_session):
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     # Registry has only an unrelated root the game never reaches.
     other = _make_roots({
@@ -721,7 +862,7 @@ def test_delta_empty_when_no_opening_crossed(db_session):
 
 def test_delta_after_none_when_opening_unscored(db_session):
     # Opening crossed but no cached row yet (after unknown) and baseline empty.
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     _make_batch(db_session)  # empty batch, no rows
     db_session.commit()
@@ -736,7 +877,7 @@ def test_delta_after_none_when_opening_unscored(db_session):
 
 
 def test_delta_never_raises_on_internal_failure(db_session):
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     with patch(PATCH_ROOTS, side_effect=RuntimeError("boom")):
         assert compute_opening_score_delta(db_session, session) == []
@@ -748,7 +889,7 @@ def test_delta_never_raises_on_internal_failure(db_session):
 
 def test_read_delta_fresh_returns_items_and_true(db_session):
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # fresh fingerprints
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -766,7 +907,7 @@ def test_read_delta_fresh_returns_items_and_true(db_session):
 def test_read_delta_stale_returns_items_and_false(db_session):
     # Items are served for ANY warm batch; is_fresh only drives the poll-stop signal.
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session, fresh=False)  # stale fingerprints
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -782,7 +923,7 @@ def test_read_delta_stale_returns_items_and_false(db_session):
 
 def test_read_delta_cold_returns_empty_and_false(db_session):
     # No batch yet but an opening crossed -> keep polling (False), no all-None banner.
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     with patch(PATCH_ROOTS, return_value=_ruy_roots()):
         items, is_fresh = read_opening_score_delta(db_session, session)
@@ -792,7 +933,7 @@ def test_read_delta_cold_returns_empty_and_false(db_session):
 
 def test_read_delta_no_chain_returns_empty_and_true(db_session):
     # No opening crossed -> nothing will ever appear, so stop the poll (True).
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     other = _make_roots({
         "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -": {
@@ -807,7 +948,7 @@ def test_read_delta_no_chain_returns_empty_and_true(db_session):
 
 def test_read_delta_never_touches_scheduler(db_session):
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -833,7 +974,7 @@ def test_read_delta_skips_digest_while_recompute_scheduled(db_session):
     # are still served. read swallows exceptions, so assert_not_called() is the
     # load-bearing check (a stray digest call would degrade items to []).
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -863,7 +1004,7 @@ def test_read_delta_proves_freshness_cheaply_when_quiescent(db_session):
     # raw digest/fingerprint must NOT run on the verdict path, yet is_fresh is
     # still asserted True for a genuinely current batch.
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # fresh fingerprints + signal
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -917,7 +1058,9 @@ def test_game_start_populates_baseline(client, auth_headers, db_session):
     db_session.expire_all()
     session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
-    assert json.loads(session.opening_score_baseline) == {RUY_KEY: 41.0}
+    assert json.loads(session.opening_score_baseline) == _baseline_envelope(
+        {RUY_KEY: 41.0}
+    )
 
 
 def test_game_end_returns_opening_score_changes(client, auth_headers, db_session):
@@ -929,7 +1072,9 @@ def test_game_end_returns_opening_score_changes(client, auth_headers, db_session
     )
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0, MORPHY_KEY: 75.0})
+    session.opening_score_baseline = _baseline_json(
+        {RUY_KEY: 41.0, MORPHY_KEY: 75.0}
+    )
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
 
@@ -1000,7 +1145,9 @@ def test_drill_start_populates_baseline(client, auth_headers, db_session):
     db_session.expire_all()
     session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
-    assert json.loads(session.opening_score_baseline) == {KP_KEY: 33.0}
+    assert json.loads(session.opening_score_baseline) == _baseline_envelope(
+        {KP_KEY: 33.0}
+    )
 
 
 def test_drill_natural_end_returns_opening_score_changes(client, auth_headers, db_session):
@@ -1008,7 +1155,7 @@ def test_drill_natural_end_returns_opening_score_changes(client, auth_headers, d
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    session.opening_score_baseline = _baseline_json({KP_KEY: 40.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     _seed_drill_after_scores(db_session)
@@ -1033,7 +1180,7 @@ def test_drill_accuracy_fail_returns_opening_score_changes(client, auth_headers,
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     session.drill_state = "root_reached"
-    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    session.opening_score_baseline = _baseline_json({KP_KEY: 40.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     _seed_drill_after_scores(db_session)
@@ -1110,7 +1257,7 @@ def test_drill_offroute_route_check_omits_opening_score_changes(
         session = db_session.query(GameSession).filter(
             GameSession.id == uuid.UUID(session_id)
         ).one()
-        session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+        session.opening_score_baseline = _baseline_json({KP_KEY: 40.0})
         db_session.commit()
         _insert_moves(db_session, session_id, RUY_SANS)
         _seed_drill_after_scores(db_session)
@@ -1168,7 +1315,7 @@ def test_game_end_abandon_skips_opening_score_changes(client, auth_headers, db_s
     )
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0})
+    session.opening_score_baseline = _baseline_json({RUY_KEY: 41.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -1207,7 +1354,7 @@ def test_game_end_does_not_block_on_scheduler(client, auth_headers, db_session):
     )
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0})
+    session.opening_score_baseline = _baseline_json({RUY_KEY: 41.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -1245,7 +1392,7 @@ def test_game_end_never_proves_freshness(client, auth_headers, db_session):
     )
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0})
+    session.opening_score_baseline = _baseline_json({RUY_KEY: 41.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     batch_id = _make_batch(db_session)  # seeds fingerprints BEFORE the patch
@@ -1279,7 +1426,7 @@ def test_drill_natural_end_does_not_block_on_scheduler(client, auth_headers, db_
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    session.opening_score_baseline = _baseline_json({KP_KEY: 40.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     _seed_drill_after_scores(db_session)
@@ -1307,7 +1454,7 @@ def test_drill_accuracy_fail_does_not_block_on_scheduler(client, auth_headers, d
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     session.drill_state = "root_reached"
-    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    session.opening_score_baseline = _baseline_json({KP_KEY: 40.0})
     db_session.commit()
     _insert_moves(db_session, session_id, RUY_SANS)
     _seed_drill_after_scores(db_session)
@@ -1333,7 +1480,7 @@ def test_drill_accuracy_fail_does_not_block_on_scheduler(client, auth_headers, d
 
 def test_get_score_delta_returns_fresh_changes(client, auth_headers, db_session):
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
@@ -1354,7 +1501,7 @@ def test_get_score_delta_returns_fresh_changes(client, auth_headers, db_session)
 
 def test_get_score_delta_cold_is_not_fresh_with_no_changes(client, auth_headers, db_session):
     # Cold cache, opening crossed: is_fresh False (keep polling), no banner yet.
-    session = _make_session(db_session, baseline="{}")
+    session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)
     with patch(PATCH_ROOTS, return_value=_ruy_roots()):
         resp = client.get(
@@ -1376,7 +1523,7 @@ def test_get_score_delta_unknown_session_404(client, auth_headers):
 
 
 def test_get_score_delta_wrong_owner_403(client, auth_headers, db_session):
-    session = _make_session(db_session, user_id=123, baseline="{}")
+    session = _make_session(db_session, user_id=123, baseline=_baseline_json({}))
     resp = client.get(
         f"/api/openings/score-delta/{session.id}",
         headers=auth_headers(user_id=999),
@@ -1386,7 +1533,7 @@ def test_get_score_delta_wrong_owner_403(client, auth_headers, db_session):
 
 def test_get_score_delta_never_blocks_on_scheduler(client, auth_headers, db_session):
     import json
-    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)

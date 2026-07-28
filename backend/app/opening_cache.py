@@ -61,7 +61,13 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 
 # Explicit score-model version. Bump on any change to the scoring model that is
 # not already captured by graph/roots/config/quality fingerprints, to force a
-# full recompute and invalidate stale snapshots.
+# full recompute and invalidate stale snapshots. Session-baseline compatibility
+# independently stamps root_calc_config_fingerprint(), so a config-only retune can
+# keep this version without allowing cross-config delta subtraction.
+#
+# sm-v2-4: user-turn reported rows additionally fold their whole pre-fold
+# quality by sqrt(coverage); opponent-turn rows retain the recursive coverage
+# gate without a second report-time fold.
 #
 # sm-v2-3: readiness fold calibration (lcb_z=1.0, coverage_fold="gate",
 # coverage_live_threshold=1) shifts the public score semantics from posterior
@@ -73,7 +79,7 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # (recompute_opening_scores_if_needed) would serve them with no direct rows. The
 # bump changes registry_fingerprint -> registry drift -> exactly one recompute per
 # (user, color) on first read after deploy, backfilling position rows.
-SCORE_MODEL_VERSION = "sm-v2-3"
+SCORE_MODEL_VERSION = "sm-v2-4"
 
 # Persisted-read-model schema version. Bump when the SET of persisted batch
 # read-model tables/columns changes (NOT the scoring math — that is
