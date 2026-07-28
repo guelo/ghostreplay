@@ -301,6 +301,18 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_runtime.py::test_pg_the_repair_nulls_a_broken_row_when_no_hook_intervenes",
     "test_release_b_pg_runtime.py::"
     "test_pg_per_batch_repair_selection_already_holds_the_lock_the_hook_needs",
+    # The Phase 3 fixture digest, moved one bound column at a time against a real
+    # database (g-b-sizing-harness). The static test beside it says the digest is
+    # SCOPED to the revision's input columns; only this one says the SQL built from
+    # them actually varies with each — in both directions, so an unbound column may
+    # not move it either. PostgreSQL-only by construction: the digest runs over uuid
+    # session ids, and the run drops and restores `ck_game_sessions_mode_drill_state`
+    # / `ck_game_sessions_drill_rating_boundary` by reading their definitions back
+    # from `pg_get_constraintdef`, so that `session_mode` and `drill_state` can each
+    # be moved ALONE. Pinned because the digest is the whole expiry rule for the
+    # sizing artifacts: uncollected, the fixture claim silently weakens to row counts.
+    "test_release_b_sizing.py::"
+    "test_the_fixture_digest_moves_for_every_input_and_for_nothing_else",
     # Release-B single-runner guard + stall observation (g-b-runner-guard). The
     # session-scoped two-key advisory guard on a dedicated connection, its survival
     # across 20260709_02's autocommit-block commit, cross-process serialization

@@ -1020,10 +1020,11 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
     The frozen pair is measured across the whole domain it is evaluated over:
     ``docs/sizing/sweep_batch_domain_20260725.json`` (gr_p1_sweep) reaches 1,647
     pages and ``docs/sizing/sweep_batch_domain_endpoint_20260725.json``
-    (gr_p2_sweep6000) reaches ``IMPORT_WORST_CASE_SWEEP_PAGES`` = 6,001, the exact
-    page count the import-time budget charges and past the atomic rejection
-    boundary near 5,137. That is a claim about the SIZING host, made once, on two
-    production-shaped copies. This gate makes the same claim about the host it
+    (gr_p2_sweep6000) reaches 6,001 — which WAS
+    ``IMPORT_WORST_CASE_SWEEP_PAGES`` exactly when it was commissioned, and since
+    the 2026-07-27 re-freeze moved ``SIZED_TOTAL_ROWS`` to 4,184 is 1,816 pages
+    PAST the count the import-time budget charges. That is a claim about the SIZING
+    host, made once, on two production-shaped copies. This gate makes the same claim about the host it
     happens to be running on, every time it runs.
 
     That is not redundant with the artifacts. A model frozen from measurements on
@@ -1125,8 +1126,8 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
 
     # The runbook's eight-point domain, on this host, swept in alternating order.
     # Six retained rounds rather than MIN_SWEEP_TRIALS: this is a GATE over a frozen
-    # pair, not evidence steering a fit, and 6,001 pages per round is the expensive
-    # part. Six is enough for a median that no single reading can move — the
+    # pair, not evidence steering a fit, and IMPORT_WORST_CASE_SWEEP_PAGES pages per
+    # round is the expensive part. Six is enough for a median that no single reading can move — the
     # comparisons below need that, not a tail estimate — and EVEN, which is what
     # makes the forward/reverse alternation balance position exactly.
     samples, pages_of = _sweep_rounds(
@@ -1136,13 +1137,20 @@ def test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count(
         assert pages == mod.backfill_sweep_pages(
             n_stale=n_stale, batch_size=batch_size
         ), (batch_size, pages)
-    assert max(samples) == mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
+    # The endpoint this gate executes is the one the IMPORT-TIME BUDGET declares,
+    # which is what makes it a gate over the charged worst case rather than over a
+    # page count someone liked. Written against the constant and not against its
+    # value: it was 6,001 at the retired basis and is 4,185 at this one, and pinning
+    # the literal would have made a re-freeze look like a linearity failure.
+    assert max(samples) == mod.IMPORT_WORST_CASE_SWEEP_PAGES
 
     # Where the LOWER range ends and the UPPER one begins. 1,647 is gr_p1_sweep's
     # ceiling — the page count past which this pair was once extrapolated, and the
     # range gr_p2_sweep6000 went on to measure. Kept as the split because it leaves
-    # both sides with pairs the _MIN_SLOPE_SPAN_PAGES rule below can actually use:
-    # six samples at or below it (7 … 1,201) and two above (3,001 and 6,001).
+    # both sides with pairs the _MIN_SLOPE_SPAN_PAGES rule below can actually use.
+    # The assertion below is what enforces that, rather than the sample list, which
+    # moves with SIZED_TOTAL_ROWS: at 4,184 rows the eight batch sizes give six
+    # samples at or below the split (6 … 838) and two above (2,093 and 4,185).
     domain_max_pages = 1_647
     _MIN_SLOPE_SPAN_PAGES = 500
     inside = sorted(p for p in samples if p <= domain_max_pages)

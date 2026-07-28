@@ -153,9 +153,10 @@ Deviations from the plan, stated rather than hidden
   ``GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`` moves that page count by a factor of
   ``MAX_BATCH_SIZE`` and the measured cost across that domain spans 42x
   (g-b-sweep-batch-cost).
-- The model is MEASURED across the whole domain it is evaluated over, out to and
-  including the ``IMPORT_WORST_CASE_SWEEP_PAGES = 6,001`` pages the import-time
-  budget charges. It was extrapolated past 1,647 pages when it was frozen;
+- The model is MEASURED across the whole domain it is evaluated over, out past
+  the ``IMPORT_WORST_CASE_SWEEP_PAGES = 4,185`` pages the import-time budget
+  charges: the domain reaches 6,001. It was extrapolated past 1,647 pages when it
+  was first frozen;
   g-b-sweep-endpoint-measure closed that gap on a production-shaped copy and the
   fit did not move. See ``MARGINED_US_BACKFILL_SWEEP_PER_PAGE``'s docstring.
 
@@ -361,10 +362,22 @@ BACKFILL_REMAINING_UNDER_LOCK = 1
 # against are frozen here, and the growth factors divide by them. A dimension
 # that lived only in the runbook could not be divided by anything.
 
-SIZED_TOTAL_ROWS = 6_000
-SIZED_SESSIONS_BYTES = 10_010_624
-SIZED_M_TOTAL = 357_000
-SIZED_MOVES_BYTES = 93_241_344
+# Re-frozen 2026-07-27 (g-b-sizing-harness, Phase 2 re-freeze) from the committed
+# measurement set of docs/release_b_runbook.md §8 — the atomic full point's own
+# POST-SYNTHESIS reading, docs/sizing/atomic_full_20260726.json. Every constant
+# below moved with it, in one derivation, from artifacts in this repo:
+# docs/sizing/derived_20260726.json is `--derive`'s output over that set and
+# test_the_committed_measurement_set_re_derives_its_published_output re-runs it.
+# The basis this replaces (6,000 / 10,010,624 / 357,000 / 93,241,344) was a
+# PostgreSQL 15.18 reading of a locally synthesized snapshot that no longer
+# exists, so no run on any fixture could return it and no test could fail closed
+# on an edit to it. This one is smaller than that basis on every axis, which the
+# growth factors carry in the conservative direction: G = live / sized is LARGER,
+# so every scan term is charged MORE against the same live relation.
+SIZED_TOTAL_ROWS = 4_184
+SIZED_SESSIONS_BYTES = 6_144_000
+SIZED_M_TOTAL = 130_676
+SIZED_MOVES_BYTES = 45_817_856
 
 # --- measured, margined 3x -------------------------------------------------
 
@@ -389,12 +402,27 @@ MARGINED_MS_PER_REPAIR_ROW = 2
 #:
 #: Scales with the whole session_moves relation, not with either population, and
 #: is nonzero when both populations are zero.
-MARGINED_MS_PER_SCAN_STMT = 521
+#:
+#: ceil(3 * 56.823157) over docs/sizing/atomic_full_20260726.json's
+#: REPAIR_POPULATE_SQL, the worst of the four.
+MARGINED_MS_PER_SCAN_STMT = 171
 
 #: One COVERAGE_ASSERT_SQL execution (a whole-game_sessions scan), x3. Priced
 #: separately because it scans a DIFFERENT relation and scales by a DIFFERENT
 #: ratio. In atomic mode it runs under every row lock the backfill took.
-MARGINED_MS_COVERAGE_ASSERT = 6
+#:
+#: RE-DERIVED at the re-freeze, never inherited across it — the obligation
+#: g-b-coverage-assert-18 carried, and it had to be discharged in both directions
+#: at once. At the OLD 15.18 basis the shipped 6 UNDER-charged its own statement:
+#: COVERAGE_ASSERT_SQL measured 1.291375 ms on docs/sizing/atomic_full_20260726
+#: .json, which normalized onto that basis is 2.104080 ms and demands 7, and three
+#: of the six committed points demanded 7. At THIS basis the same evidence derives
+#: ceil(3 * 1.291375) = 4, because the copy the statement ran on IS the frozen
+#: basis and there is nothing to normalize. So 6 was wrong high AND wrong low
+#: depending on which basis it landed on, and carrying it across would have been
+#: wrong either way. The number moved because its basis did; that is the whole
+#: rule. docs/release_b_runbook.md §3 and §9.
+MARGINED_MS_COVERAGE_ASSERT = 4
 
 #: One execution of BACKFILL_REMAINING_SQL, x3. Scan-bearing even though it never
 #: touches session_moves: it filters game_sessions on
@@ -406,26 +434,23 @@ MARGINED_MS_COVERAGE_ASSERT = 6
 #: correctly-stamped row raises this cost while leaving the population term
 #: unchanged. Omitting it priced a growing relation at zero.
 #:
-#: MEASURED, and covering its worst measurement with NO integer headroom.
+#: MEASURED, over the six committed points entitled to time it, each carried onto
+#: this basis by the growth factor of the copy IT ran on. It shipped INFERRED —
+#: the original Phase 1 run predates the discovery above, so the literal was taken
+#: from that run's COVERAGE_ASSERT_SQL reading, the same shape against the same
+#: relation — and the inference landed on the right integer at that basis and
+#: lands on the right integer at this one.
 #:
-#: It shipped inferred rather than timed: the Phase 1 run predates the discovery
-#: above, so the literal was taken from that run's COVERAGE_ASSERT_SQL reading —
-#: the same shape against the same relation, a count over game_sessions whose
-#: predicate no index covers — at ceil(3 * 1.74) = 6. g-b-size-derive-backfill-terms
-#: timed the statement itself on PostgreSQL 18.4 against a production restore, six
-#: points of one measurement set, each carried onto this basis by the growth factor
-#: of the copy IT ran on. The inference landed on the right integer.
-#:
-#: It landed on the LAST right integer. The worst point (docs/sizing/
-#: atomic_full_20260726.json, 1.207208 ms at 4,184 rows / 6,144,000 bytes)
-#: normalizes to 1.966944 ms against the 2 ms where ceil(3 * x) turns 7 — 1.7% of
-#: headroom, against MARGINED_MS_PER_SCAN_STMT's 10.7% over the same measurement
-#: set. Being inside the margin is not the same as being comfortably inside it, so
-#: the fact is asserted rather than recorded: test_release_b_sizing.py's
+#: Worst point: docs/sizing/atomic_full_20260726.json at 1.207208 ms, which is
+#: this basis's own copy and so normalizes to itself. ceil(3 * x) <= 4 iff
+#: x <= 1.333…, so the worst point sits 9.5% below the rounding boundary — where
+#: at the retired 15.18 basis the same evidence sat 1.7% below it. The tightness
+#: is asserted rather than recorded, because a table cannot notice a future run
+#: coming in hotter: test_release_b_sizing.py's
 #: test_frozen_backfill_remaining_covers_every_committed_measurement re-derives
-#: all six points from the committed artifacts and pins the equality at the worst.
-#: See docs/release_b_runbook.md §3 and §8.
-MARGINED_MS_BACKFILL_REMAINING = 6
+#: all six points from the committed artifacts and pins the worst.
+#: See docs/release_b_runbook.md §3, §8 and §9.
+MARGINED_MS_BACKFILL_REMAINING = 4
 
 #: The RELATION-SCAN component of one full backfill selection SWEEP — every
 #: SELECT_BATCH_* page of one pass together — x3, in MILLISECONDS.
@@ -450,8 +475,14 @@ MARGINED_MS_BACKFILL_REMAINING = 6
 #: exactly in frozen-basis coordinates, not a least-squares fit, because a
 #: regression through a set of maxima sits below some of them and tripling its
 #: coefficients then spends the margin covering fit error instead of variance.
-#: A = 23.867343… ms; ceil(3 * A) = 72. See docs/release_b_runbook.md §7.
-MARGINED_MS_BACKFILL_SWEEP_SCAN = 72
+#: A = 23.592979… ms; ceil(3 * A) = 71. See docs/release_b_runbook.md §7 and §9.
+#:
+#: The SAME two sweep artifacts produced 72 at the retired basis and produce 71 at
+#: this one, from one LP with no new measurement between them, because the
+#: coefficients are solved IN frozen-basis coordinates and the basis moved. That is
+#: not two readings of one quantity, and it is the sharpest available statement of
+#: why a term and its basis have to move together.
+MARGINED_MS_BACKFILL_SWEEP_SCAN = 71
 
 #: The PER-PAGE component of the same sweep, x3, in MICROSECONDS.
 #:
@@ -464,34 +495,50 @@ MARGINED_MS_BACKFILL_SWEEP_SCAN = 72
 #: is applied, and a constant test pins it.
 #:
 #: Denominated in µs for the same reason as MARGINED_US_ATOMIC_TEARDOWN_PER_ROW:
-#: the measured slope is ~0.52 ms/page, and rounding a sub-millisecond slope up to
-#: an integer millisecond nearly doubles it and manufactures ~2.9 s of phantom
-#: stall at the 6,001-page worst case. :func:`backfill_sweep_ms` divides it by
+#: the margined slope is ~0.49 ms/page, and rounding a sub-millisecond slope up to
+#: an integer millisecond more than doubles it and manufactures ~2.1 s of phantom
+#: stall at the 4,185-page worst case. :func:`backfill_sweep_ms` divides it by
 #: 1000 at exactly one call site; a constant test pins that, so a "tidy-up" into
 #: milliseconds fails loudly rather than inflating every projection by three
-#: orders of magnitude. Frozen as ceil(3 * b * 1000) with b = 0.172439… ms/page.
+#: orders of magnitude. Frozen as ceil(3 * b * 1000) with b = 0.163396… ms/page.
 #:
-#: MEASURED TO THE ENDPOINT, on TWO production-shaped bases. The domain reaches
-#: IMPORT_WORST_CASE_SWEEP_PAGES = 6,001 pages — the exact page count the
-#: import-time budget charges, and past the atomic rejection boundary near 5,137 —
-#: so no figure downstream of this pair rests on extrapolation. This pair was
-#: frozen from a domain that stopped at 1,647 pages
+#: MEASURED PAST THE ENDPOINT, on TWO production-shaped bases. The domain reaches
+#: 6,001 pages — past the atomic rejection boundary near 5,137, and now past
+#: IMPORT_WORST_CASE_SWEEP_PAGES itself, which the re-freeze moved to
+#: ceil(4,184 / MIN_ADMITTED_BATCH) + 1 = 4,185. So no figure downstream of this
+#: pair rests on extrapolation, and the margin over the charged page count is
+#: 1,816 measured pages rather than the exact equality it used to be. This pair
+#: was frozen from a domain that stopped at 1,647 pages
 #: (docs/sizing/sweep_batch_domain_20260725.json, gr_p1_sweep) and was linearly
 #: extrapolated beyond it; g-b-sweep-endpoint-measure closed the gap with
 #: docs/sizing/sweep_batch_domain_endpoint_20260725.json — gr_p2_sweep6000, a
-#: fresh restore of the same production dump grown to N_stale = SIZED_TOTAL_ROWS
-#: = 6,000, every row stale, swept at MIN_ADMITTED_BATCH for exactly 6,001 pages.
-#: The LP re-solved over both bases returns the SAME vertex and the same two
-#: active constraints, and no point of the new basis binds: at 6,001 pages this
-#: pair models 3,180.518 ms against the 3 x 1,004.131 = 3,012.394 ms coverage
-#: demands. The extrapolation was correct, and is no longer load-bearing.
+#: fresh restore of the same production dump grown to N_stale = 6,000 (which WAS
+#: SIZED_TOTAL_ROWS when that run was taken, and is 1.43x it now), every row
+#: stale, swept at MIN_ADMITTED_BATCH for exactly 6,001 pages.
+#: WHEN THE ENDPOINT RUN WAS COMMISSIONED it changed nothing: the LP re-solved
+#: over both bases returned the same vertex and the same two active constraints,
+#: no point of the new basis bound, and the extrapolation it was meant to check
+#: turned out to have been correct. THE 2026-07-27 RE-FREEZE INVERTED THAT, and
+#: this pair is now the endpoint run's line. Its N_copy clamps to 1 at either
+#: basis — that copy is larger than the frozen basis on both axes — so its demand
+#: on `a` is basis-independent at 23.592979 ms (71), while gr_p1_sweep's factor
+#: fell from 1.848714 to 1.134644 with the basis and took a baseline-only fit
+#: down to 44 / 518. So the endpoint measurement is now LOAD-BEARING in the
+#: strict sense: delete that artifact and this pair drops below 3x a maximum a
+#: host actually produced at 6,001 pages. Same two artifacts, same solver, no new
+#: measurement — only the basis moved, and the roles inverted with it. At 6,001
+#: pages the shipped pair models 71 + 491 * 6,001 / 1000 = 3,017.491 ms against
+#: the 3 x 1,004.131 = 3,012.394 ms coverage demand; that 5.1 ms is integer-
+#: rounding slack and nothing more — the exact LP covers by construction, and
+#: what the ceil() leaves over is 0.17% here against 5.6% at the retired basis.
+#: It is not headroom to spend.
 #:
 #: test_release_b_pg_runtime.py's endpoint gate is a separate, live-host claim and
 #: still earns its place: it re-runs the linearity check on WHATEVER host the gate
 #: runs on, comparing the per-page slope past 1,647 pages against the slope inside
 #: it ON THAT HOST. It cannot speak for these frozen numbers — its relation is a
 #: fixture of clones rather than a production-shaped copy — and no longer has to.
-MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518
+MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 491
 
 #: The per-statement cap for EVERY scan-bearing statement: the repair population
 #: count, REPAIR_POPULATE_SQL, REPAIR_REMAINING_SQL, SOUNDNESS_ASSERT_SQL, the
@@ -504,7 +551,12 @@ MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518
 #: deadline in force), so a scan starting late in the revision's clock gets only
 #: what is left rather than a fresh allowance. These statements are not inside a
 #: BATCH budget and MAX_BATCH_MS must never be armed on them.
-SCAN_STMT_TIMEOUT_MS = 521
+#:
+#: max(171, 4, 4) — MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT and
+#: MARGINED_MS_BACKFILL_REMAINING. The session_moves term dominates by 40x, as it
+#: did at the retired basis, so the maximum is unchanged in composition and only
+#: in value.
+SCAN_STMT_TIMEOUT_MS = 171
 
 #: Margined worst-case Python compute for ONE session (parse + validate +
 #: score). A maximum, not a mean: what the compute watchdog has to survive is the
@@ -515,7 +567,7 @@ SCAN_STMT_TIMEOUT_MS = 521
 #: revision remaining, atomic remaining), so no session's compute can push a
 #: batch past MAX_BATCH_MS and MAX_BATCH_MS already covers every session's
 #: compute. Adding it there would double-count.
-MAX_SINGLE_SESSION_COMPUTE_MS = 79
+MAX_SINGLE_SESSION_COMPUTE_MS = 61
 
 #: Margined worst-case teardown of ONE PER-BATCH-MODE BATCH TRANSACTION, taken as
 #: the larger of observed commit and observed CANCEL-TO-UNLOCK, because locks are
@@ -534,21 +586,21 @@ MAX_SINGLE_SESSION_COMPUTE_MS = 79
 #:
 #: Its scope is exactly a BATCH — but a batch of EITHER phase, and the larger of
 #: the two is not necessarily the backfill's. REPAIR_BATCH_SIZE divides by a
-#: cheaper per-row cost, so it can exceed MAX_BATCH_SIZE (it does here: 2500
-#: against 1000), and the repair phase's per-batch transactions hold row locks
+#: cheaper per-row cost, so it can exceed MAX_BATCH_SIZE (it does here: 1,000
+#: against 646), and the repair phase's per-batch transactions hold row locks
 #: until their own commits return. The breach path is therefore measured on a
 #: transaction of at least max(MAX_BATCH_SIZE, REPAIR_BATCH_SIZE) rows, which
 #: the sizing derivation enforces rather than trusts.
 #:
 #: It neither covers nor pretends to cover the teardown of atomic mode's single
 #: whole-population transaction — that has its own two constants below.
-TEARDOWN_ALLOWANCE_MS = 7
+TEARDOWN_ALLOWANCE_MS = 6
 
 #: Margined teardown of an atomic transaction that mutated NO rows: the COMMIT
 #: (or ROLLBACK) of a run that still executed VALIDATE and the scans. The
 #: population-independent floor of atomic teardown, and never zero — an atomic
 #: transaction that mutated nothing still commits.
-MARGINED_MS_ATOMIC_TEARDOWN_FIXED = 2
+MARGINED_MS_ATOMIC_TEARDOWN_FIXED = 4
 
 #: Margined marginal teardown cost per MUTATED ROW in the atomic transaction, in
 #: MICROSECONDS. Denominated in µs on purpose: the marginal cost of one more
@@ -558,7 +610,7 @@ MARGINED_MS_ATOMIC_TEARDOWN_FIXED = 2
 #: :func:`atomic_teardown_reserve_ms` divides it by 1000; a constant test pins
 #: that, so a future "tidy-up" into milliseconds fails rather than silently
 #: inflating every atomic projection by three orders of magnitude.
-MARGINED_US_ATOMIC_TEARDOWN_PER_ROW = 2
+MARGINED_US_ATOMIC_TEARDOWN_PER_ROW = 3
 
 #: The largest backfill batch sizing ACTUALLY DEMONSTRATED — the largest size
 #: exercised in Phase 1 whose observed maximum single-batch duration satisfied
@@ -567,8 +619,8 @@ MARGINED_US_ATOMIC_TEARDOWN_PER_ROW = 2
 #: ran; admitting that would mean the deployment's maximum batch was never
 #: demonstrated to fit the deadline, which is precisely what MAX_BATCH_SIZE
 #: exists to prevent.
-B_TESTED = 1_000
-R_TESTED = 3_000
+B_TESTED = 646
+R_TESTED = 1_000
 
 
 def _admitted_batch_size(margined_ms_per_row: int, tested: int, *, constant: str) -> int:

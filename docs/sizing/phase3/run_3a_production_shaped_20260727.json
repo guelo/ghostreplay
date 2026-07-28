@@ -1,0 +1,90 @@
+{
+ "kind": "phase3_run",
+ "mode": "none",
+ "runner_mode": "atomic",
+ "revision": "20260719_01",
+ "down_revision": "20260718_01",
+ "database": "gr_p3a",
+ "frozen_files": {
+  "alembic/versions/20260719_01_backfill_session_player_accuracy.py": "9f14dd9b277b09aa9f9c15e19214db8a7f846d11923c26dea4e849e7b780cb82",
+  "app/accuracy_v1.py": "d20df6114df06f3cb5aff5eeb53c94e76675bdad8d8f08691ae6464f03255f1c",
+  "app/accuracy_rows_v1.py": "955528cb2918e92c3d4a469f9f69acf80e46ac7d34214332a01155222b7c3375",
+  "app/migration_guard.py": "cac1bf7d8827eab89070b732996542bf05b303c635990b86a49a9f40a860f64b",
+  "alembic/env.py": "b8549447056ce90db71968c39026b0f066f0657c2e5f7d5c36aca8160c5514c0",
+  "scripts/phase3_cancellation_probe.py": "77ea42336bfa89f43f9050633d6dcfdbf5366c97d555c1b144aa474416ede890",
+  "scripts/phase3_fixture_guard.py": "ab25ec45817224039942ae0a871d28aa65036f1cc3f4c9874a301913295adee6",
+  "scripts/phase3_seed_populations.py": "2bd3c63894a9e62ac612c783309ee7447fbf8e8f8445e7481ab60864a6fc4c99",
+  "scripts/phase3_prepare.py": "e96def94a9b4ebcb643d6a78895d7c8a0fa32393df777c1e8843371c85581ac3"
+ },
+ "frozen_fingerprints": {
+  "alembic/versions/20260719_01_backfill_session_player_accuracy.py": "6b3856b3f3ab04cb0b9271fbc930d7cb98aad13f650fc538cdf001541de355f8",
+  "app/accuracy_v1.py": "16595e8f70ce60e42d50040621263651ff2ef8fec4216c0773ec949e930e3b46",
+  "app/accuracy_rows_v1.py": "5b118e398415a710b081292d6ac83d0283e159b6ee4a171c1c39f9a8f2491534",
+  "app/migration_guard.py": "4f03d4e71655eca40eb447827d3e188636fcefa428b20eec17519cba2b564e65",
+  "alembic/env.py": "865e7b6f51a5217b9bac7e7b046b588e3d51bb9df145831227715b9f66b17ee7",
+  "scripts/phase3_cancellation_probe.py": "b54b70798b97aa3e7a55490c7a39f8325a289163c53145653f0590c990ee35c3",
+  "scripts/phase3_fixture_guard.py": "775b37d390f47e1181f7cff2ebc07d6f5a64439fa405ab2056987649e7a102b5",
+  "scripts/phase3_seed_populations.py": "ac9efb0a1065fa40d293ee3fac1663eedecbce5b7928f9b78d92b0439e95e823",
+  "scripts/phase3_prepare.py": "f9dc816a906d3119edf3152d56605c8fda6f4a9a9247632ce2f041328b89d89f"
+ },
+ "frozen_symbols": {
+  "scripts/size_accuracy_backfill.py::synthesize_stale": "9d041d3a1de34d5f6b30aca2055bd22e67ae4d1f38abbd17154308ee5dfd5670",
+  "scripts/size_accuracy_backfill.py::MIN_SYNTHESIZED_REPAIR": "077af82bf330fef1a6d6b5810418810708e883b97689e1ee4c2aa3371fe09841",
+  "scripts/size_accuracy_backfill.py::check_repair_sample_size": "3828ba26e6e649b9f1f226257c4e92ee9532a827f69d9b01a7e3c98a0b086eed",
+  "scripts/size_accuracy_backfill.py::synthesize_repair": "ab0fbbfebcec9f5b9ae33ebb4665095f2750d592ef591e03e6d6bd7ae4df5562",
+  "scripts/size_accuracy_backfill.py::analyze_after_synthesis": "b2bac550968500df4d2fdedd30e6b71b52a97118e703ea2d56ca0a32b0a726a0"
+ },
+ "constants": {
+  "MAX_BATCH_SIZE": 646,
+  "REPAIR_BATCH_SIZE": 1000,
+  "TEARDOWN_ALLOWANCE_MS": 6,
+  "MAX_WRITER_STALL_MS": 30000
+ },
+ "server_version": "PostgreSQL 18.4 (Postgres.app) on aarch64-apple-darwin23.6.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit",
+ "dimensions_before": {
+  "sessions_bytes": 4096000,
+  "moves_bytes": 45817856,
+  "total_rows": 4184,
+  "m_total": 131676
+ },
+ "fixture_identity": {
+  "sessions_rows": 4184,
+  "sessions_digest": "e1ded7f6262692b2ada7726f42e72ef4",
+  "moves_rows": 131676,
+  "moves_digest": "bd66ad9ae669932ec1ff782a94170cc9"
+ },
+ "fixture_provenance": {
+  "template": "gr_p3_base",
+  "sessions_rows": 4184,
+  "sessions_digest": "e1ded7f6262692b2ada7726f42e72ef4",
+  "moves_rows": 131676,
+  "moves_digest": "bd66ad9ae669932ec1ff782a94170cc9",
+  "prepared_at": "2026-07-27 22:18:49.425419-07:00"
+ },
+ "populations_before": {
+  "n_stale": 0,
+  "n_repair": 0
+ },
+ "dirty_rows_at_cancel": null,
+ "alembic_returncode": 0,
+ "log": [
+  "INFO  [alembic.runtime.migration] Running upgrade 20260718_01 -> 20260719_01, Backfill + repair cached session accuracy, fail closed (Release B).",
+  "INFO  [alembic.runtime.migration] 20260719_01: VALIDATE elapsed_ms=4",
+  "INFO  [alembic.runtime.migration] 20260719_01: n_stale=0 n_repair=0 batch_size=646 sweep_pages=1 g_moves=1.008 g_sessions=1.000 live={'sessions_bytes': 4096000, 'moves_bytes': 45817856, 'total_rows': 4184.0, 'm_total': 131676.0} sized={'sessions_bytes': 6144000, 'moves_bytes': 45817856, 'total_rows': 4184, 'm_total': 130676} dialect=postgresql",
+  "INFO  [alembic.runtime.migration] 20260719_01: atomic admitted projected_stall_ms=600 teardown_reserve_ms=4 work_budget_ms=29996 max_stall_ms=30000 batch_size=646 sweep_pages=1",
+  "INFO  [alembic.runtime.migration] 20260719_01: mode=atomic batch=646 dialect=postgresql",
+  "INFO  [alembic.runtime.migration] 20260719_01: both populations empty; skipping the runner",
+  "INFO  [alembic.runtime.migration] 20260719_01: complete mode=atomic runner=skipped elapsed_s=0.1"
+ ],
+ "cancel_cause": null,
+ "terminal": {
+  "alembic_version": "20260719_01",
+  "check_convalidated": true,
+  "n_stale": 0,
+  "n_repair": 0,
+  "probe_trigger_left": 0,
+  "advisory_locks_left": 0
+ },
+ "valid": true,
+ "invalid_reasons": []
+}

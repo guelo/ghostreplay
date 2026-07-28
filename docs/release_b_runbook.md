@@ -103,14 +103,18 @@ moves either way. Row counts transfer from a dump. Timings do not.
 
 What remains unqualified, and which way each one leans:
 
+Updated by the 2026-07-27 re-freeze (§9), which moved every row of this table:
+the constants are no longer 15.18 readings of a synthesized snapshot but 18.4
+readings of this very restore.
+
 | Constant | Status |
 |---|---|
-| `SIZED_TOTAL_ROWS`, `SIZED_M_TOTAL` | snapshot is 1.4-2.7x production's **row** counts |
-| `SIZED_SESSIONS_BYTES`, `SIZED_MOVES_BYTES` | **not obtainable from a logical dump.** A production-restore run measures the restore's own footprint. Only the live database can supply these. |
-| `MARGINED_MS_PER_SCAN_STMT`, `MARGINED_MS_COVERAGE_ASSERT`, `MARGINED_MS_BACKFILL_*` | measured on **PostgreSQL 15.18**; production runs **18.4**. These price a *plan*, not an intrinsic relation cost, and a planner two majors newer is free to choose differently — in either direction. See `g-b-size-pg18-major`, and trap #2 below for what a plan change is worth. §7 re-measures them on 18.4. |
+| `SIZED_TOTAL_ROWS`, `SIZED_M_TOTAL` | **now production's own row counts** (4,184 / 130,676 — the second is post-synthesis, 1,000 plies below the restore's 131,676, which `synthesize_repair` deleted). The retired basis was 1.4-2.7x them. |
+| `SIZED_SESSIONS_BYTES`, `SIZED_MOVES_BYTES` | **still not obtainable from a logical dump.** These are the restore's own locally rebuilt footprint, not production's on-disk size. Only the live database can supply that. Being *smaller* than production's, they scale the runtime growth factors **up**, which is the safe direction. |
+| `MARGINED_MS_PER_SCAN_STMT`, `MARGINED_MS_COVERAGE_ASSERT`, `MARGINED_MS_BACKFILL_*` | **now measured on PostgreSQL 18.4**, production's own major version, closing `g-b-size-pg18-major`'s exposure for these terms. They still price a *plan* on this host's storage and CPU. |
 | `TEARDOWN_ALLOWANCE_MS`, `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` / `_PER_ROW` | an Apple-silicon laptop with a local SSD and no fsync contention is the best case for both commit and cancel-to-unlock — **up** against a real host |
 | `MARGINED_MS_PER_ROW` | CPU-bound PGN parse; laptop cores are fast — **up** |
-| `B_TESTED` / `R_TESTED` | bounded by what was exercised — up **or** down |
+| `B_TESTED` / `R_TESTED` | bounded by what was exercised, and both are now **fixture-bound** rather than deadline-bound: 646 is the whole synthesized stale population and 1,000 the whole repair population, so neither is evidence about a larger page. **Down** — see §9. |
 
 ---
 
@@ -411,30 +415,32 @@ budget and a demonstration, and here the budget binds.
 ## 3. Phase 2 — frozen
 
 Full restore assumed (`r_sessions = r_moves = 1.0`); no production dimensions
-file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
+file was supplied, so `SIZED_*` are the measuring copy's own dimensions. Margin is
 **3x** throughout.
 
-> **Which of these numbers has an artifact behind it.** Two do. Every other
-> measured constant in this section is a **transcription**: the §2 run's eight
-> measurement JSONs were never committed and its snapshot no longer exists, so the
-> arithmetic below can be re-read but not re-executed, and an error in it is
-> visible only by re-reading prose (`g-b-size-measurement-json`).
+> **RE-FROZEN 2026-07-27 (`g-b-sizing-harness`).** Every literal in this section
+> now comes from the committed measurement set of [§8](#8-the-measurements-are-on-disk-g-b-size-measurement-json-2026-07-26)
+> — one `--derive` over ten artifacts in this repo, on PostgreSQL **18.4** against
+> a production restore — and `SIZED_*` moved with them, in the same derivation. The
+> full before/after table and the reasoning are in
+> [§9](#9-the-re-freeze-g-b-sizing-harness-phase-2-2026-07-27).
 >
-> | | Backed by | Re-derived by |
-> |---|---|---|
-> | `MARGINED_MS_BACKFILL_SWEEP_SCAN`, `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | `docs/sizing/sweep_*.json` | `test_frozen_sweep_model_matches_the_published_envelope` |
-> | everything else in this section | §2's tables only | nothing — no artifact to re-derive from |
+> **Which of these numbers has an artifact behind it: all of them.** Until the
+> re-freeze, two did. Every other measured constant here was a **transcription** —
+> the §2 run's eight measurement JSONs were never committed and its snapshot no
+> longer exists, so the arithmetic could be re-read but not re-executed, and an
+> error in it was visible only by re-reading prose (`g-b-size-measurement-json`).
+> That is now closed: `test_the_committed_derivation_is_applied_whole_with_the_basis_it_arrived_with`
+> compares the **whole** constants block against `--derive`'s live output, and
+> `test_the_committed_measurement_set_re_derives_its_published_output` re-runs the
+> derivation itself from the artifacts. An edit to any literal here, to any
+> artifact, or to any formula fails the gate.
 >
-> This is not a statement about whether the numbers are *right*. It is a statement
-> about what could catch them being wrong, and for the sweep pair that turned out
-> to matter twice: once when it retired the withdrawn OLS line, and once when it
-> was the only row of §7's derived table anything could check — which is how §8
-> found the two that were not.
->
-> §8 commits a full measurement set for the **18.4 production restore** and makes
-> that derivation reproducible end to end. It does not make *these* literals
-> reproducible and nothing can: their fixture is gone. Re-freezing them from
-> committed evidence is `g-b-sizing-harness` (Phase 3).
+> The numbers below are therefore **not** the 15.18 ones this section carried
+> before. Those were measured against a locally synthesized 6,000-row snapshot that
+> no longer exists; no run on any other fixture could return them, and no test
+> could fail closed on an edit to them. They are recorded in §9 beside what
+> replaced them.
 
 ### Policy bounds (chosen, not measured)
 
@@ -453,30 +459,30 @@ file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 
 | Constant | Value | Derivation |
 |---|---|---|
-| `SIZED_TOTAL_ROWS` | 6,000 | recorded dimension |
-| `SIZED_SESSIONS_BYTES` | 10,010,624 | recorded dimension |
-| `SIZED_M_TOTAL` | 357,000 | recorded dimension |
-| `SIZED_MOVES_BYTES` | 93,241,344 | recorded dimension |
-| `MARGINED_MS_PER_ROW` | 5 | `ceil(3 * 1.350 per-session * 1.0 plies-growth)` |
-| `MARGINED_MS_PER_REPAIR_ROW` | 2 | `ceil(3 * 0.358)` |
-| `MARGINED_MS_PER_SCAN_STMT` | 521 | `ceil(3 * 173.49)` |
-| `MARGINED_MS_COVERAGE_ASSERT` | 6 | `ceil(3 * 1.74)` |
-| `MARGINED_MS_BACKFILL_REMAINING` | 6 | `ceil(3 * 1.966944)` — the worst of six committed 18.4 measurements, each on its own copy's basis. Shipped inferred from `COVERAGE_ASSERT_SQL` at the same integer; **measured 2026-07-26 and tight** (see below). §8. |
-| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | `ceil(3 * 23.867343)` — the relation-scan coefficient of the covering LP over the sweep domain, **at the frozen basis**. Milliseconds. §7. |
-| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | `ceil(3 * 0.172440 * 1000)` — the per-page slope of the same LP. **Microseconds**, divided by 1000 in `backfill_sweep_ms`. §7. |
+| `SIZED_TOTAL_ROWS` | 4,184 | recorded dimension, `atomic_full_20260726.json` post-synthesis |
+| `SIZED_SESSIONS_BYTES` | 6,144,000 | recorded dimension, same reading |
+| `SIZED_M_TOTAL` | 130,676 | recorded dimension, same reading |
+| `SIZED_MOVES_BYTES` | 45,817,856 | recorded dimension, same reading |
+| `MARGINED_MS_PER_ROW` | 5 | `ceil(3 * 1.532 per-session * 1.0 plies-growth)` |
+| `MARGINED_MS_PER_REPAIR_ROW` | 2 | `ceil(3 * 0.360)` |
+| `MARGINED_MS_PER_SCAN_STMT` | 171 | `ceil(3 * 56.823157)` — `REPAIR_POPULATE_SQL`, the worst of the four complete `session_moves` statements |
+| `MARGINED_MS_COVERAGE_ASSERT` | 4 | `ceil(3 * 1.291375)`. **Re-derived, not inherited** — the `g-b-coverage-assert-18` obligation. At the retired basis this evidence demanded 7 against a shipped 6; here the copy it ran on *is* the basis and it demands 4. §9. |
+| `MARGINED_MS_BACKFILL_REMAINING` | 4 | `ceil(3 * 1.207208)` — the worst of six committed 18.4 measurements, each on its own copy's basis. §8. |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 71 | `ceil(3 * 23.592979)` — the relation-scan coefficient of the covering LP over the sweep domain, **at the frozen basis**. Milliseconds. §7, §9. |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 491 | `ceil(3 * 0.163396 * 1000)` — the per-page slope of the same LP. **Microseconds**, divided by 1000 in `backfill_sweep_ms`. §7, §9. |
 | `BACKFILL_SELECT_SWEEPS_UNDER_LOCK` | 1 | structural per-pass count (atomic backfill converges in one unlocked-selection pass) |
 | `BACKFILL_REMAINING_UNDER_LOCK` | 1 | structural per-pass count (same argument) |
-| `SCAN_STMT_TIMEOUT_MS` | 521 | `max(521, 6, 6)` — the maximum over **every** statement it is armed on: the four complete `session_moves` scans (which already include `REPAIR_REMAINING_SQL`), the coverage assertion, **and `BACKFILL_REMAINING_SQL`** via `MARGINED_MS_BACKFILL_REMAINING`. The two convergence scans are priced by *different* terms — the repair one by `MARGINED_MS_PER_SCAN_STMT`/`G_moves`, the backfill one by `MARGINED_MS_BACKFILL_REMAINING`/`G_sessions` — and only the latter needed adding. **Neither** sweep component is in that maximum: each page of the sweep is armed by the mode's batch cap, so the two sweep constants price a multi-statement unit no single armed value has to cover — the scan component is a relation walk spread across every page rather than the cost of any one of them, and the per-page component is a per-statement slope in microseconds. |
-| `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | `ceil(3 * 26.28)` |
-| `TEARDOWN_ALLOWANCE_MS` | 7 | `ceil(3 * max(1.408 commit, 2.230 cancel-to-unlock))` — **cancel-to-unlock won** |
-| `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | `ceil(3 * 0.646)` (empty-population point, own restore) |
-| `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` | 2 | `ceil(3 * 1000 * (max(0.748, 4.098) - 0.646) / 6000)` — **microseconds** |
-| `B_TESTED` | 1,000 | largest **demonstrated** backfill page |
-| `R_TESTED` | 3,000 | largest **demonstrated** repair page |
-| `MAX_BATCH_SIZE` | 1,000 | `min(B_formula = 1000, B_tested = 1000)` — **bound by formula** (tie) |
-| `DEFAULT_BATCH_SIZE` | 1,000 | `== MAX_BATCH_SIZE` |
-| `REPAIR_BATCH_SIZE` | 2,500 | `min(R_formula = 2500, R_tested = 3000)` — **bound by formula** |
-| `EST_MAX_LOCK_HOLD_MS` | 5,007 | `MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS = 5000 + 7`, derived at import. **No `MAX_SINGLE_SESSION_COMPUTE_MS` addend**: the per-session compute watchdog is armed to `min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining, atomic remaining)`, so no session's compute can pass the batch deadline and `MAX_BATCH_MS` is already batch-wide over SQL *and* Python. Adding the ceiling on top would double-count it; it survives only as that watchdog ceiling. |
+| `SCAN_STMT_TIMEOUT_MS` | 171 | `max(171, 4, 4)` — the maximum over **every** statement it is armed on: the four complete `session_moves` scans (which already include `REPAIR_REMAINING_SQL`), the coverage assertion, **and `BACKFILL_REMAINING_SQL`** via `MARGINED_MS_BACKFILL_REMAINING`. The two convergence scans are priced by *different* terms — the repair one by `MARGINED_MS_PER_SCAN_STMT`/`G_moves`, the backfill one by `MARGINED_MS_BACKFILL_REMAINING`/`G_sessions` — and only the latter needed adding. **Neither** sweep component is in that maximum: each page of the sweep is armed by the mode's batch cap, so the two sweep constants price a multi-statement unit no single armed value has to cover — the scan component is a relation walk spread across every page rather than the cost of any one of them, and the per-page component is a per-statement slope in microseconds. |
+| `MAX_SINGLE_SESSION_COMPUTE_MS` | 61 | `ceil(3 * 20.32)` |
+| `TEARDOWN_ALLOWANCE_MS` | 6 | `ceil(3 * max(0.760 commit, 1.962 cancel-to-unlock))` — **cancel-to-unlock won** |
+| `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 4 | `ceil(3 * 1.200)` (empty-population point, own restore) |
+| `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` | 3 | `ceil(3 * 1000 * (max(1.173, 2.424) - 1.200) / 1646)` — **microseconds** |
+| `B_TESTED` | 646 | largest **demonstrated** backfill page — the whole stale population, **fixture-bound** |
+| `R_TESTED` | 1,000 | largest **demonstrated** repair page — the whole repair population, **fixture-bound** |
+| `MAX_BATCH_SIZE` | 646 | `min(B_formula = 1000, B_tested = 646)` — **bound by what was demonstrated** |
+| `DEFAULT_BATCH_SIZE` | 646 | `== MAX_BATCH_SIZE` |
+| `REPAIR_BATCH_SIZE` | 1,000 | `min(R_formula = 2500, R_tested = 1000)` — **bound by what was demonstrated** |
+| `EST_MAX_LOCK_HOLD_MS` | 5,006 | `MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS = 5000 + 6`, derived at import. **No `MAX_SINGLE_SESSION_COMPUTE_MS` addend**: the per-session compute watchdog is armed to `min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining, atomic remaining)`, so no session's compute can pass the batch deadline and `MAX_BATCH_MS` is already batch-wide over SQL *and* Python. Adding the ceiling on top would double-count it; it survives only as that watchdog ceiling. |
 
 `MARGINED_MS_PER_ROW` is derived **per row first, then multiplied by the
 production population** — never by projecting a total and dividing by the
@@ -545,49 +551,64 @@ no population, no zero branch" for exactly that reason. The one true observation
 in the paragraph — that 4,184 sessions is smaller than the 6,000-row basis — is a
 reason to *normalize* the result, which §7 does, not a reason not to measure.
 
-Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 6` is
+Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 4` is
 **no longer provisional**, and the label came off against the committed set of §8
 rather than against §7's transcription: six atomic and batch points, each carried
-onto the frozen basis by its own copy's `N_copy`, all covered by the shipped 6.
-§7's seven-measurement run reached the same integer first; what §8 adds is that
-the check is now re-derivable from artifacts in the repo, so
+onto the frozen basis by its own copy's `N_copy`, all covered by the shipped 4.
+What §8 adds is that the check is re-derivable from artifacts in the repo, so
 `test_frozen_backfill_remaining_covers_every_committed_measurement` fails closed
 if either the literal or the evidence moves.
 
+Both tables below are **at the re-frozen basis** (§9). Five of the six copies read
+6,144,000 bytes, which is now the basis itself, so their `N_copy` is 1 and they are
+carried by nothing; only `gr_m_atomic_empty` is leaner and takes a factor.
+
 | Copy | `game_sessions` bytes | `N_copy` | Max (ms) | Normalized | `ceil(3x)` |
 |---|---|---|---|---|---|
-| `gr_m_atomic_full` | 6,144,000 | 1.62933 | 1.207208 | **1.966944** | **6** ← worst |
-| `gr_m_batch_100` | 6,144,000 | 1.62933 | 1.194125 | 1.945628 | 6 |
-| `gr_m_batch_250` | 6,144,000 | 1.62933 | 1.071958 | 1.746577 | 6 |
-| `gr_m_batch_500` | 6,144,000 | 1.62933 | 1.028000 | 1.674955 | 6 |
-| `gr_m_batch_1000` | 6,144,000 | 1.62933 | 0.983333 | 1.602177 | 5 |
-| `gr_m_atomic_empty` | 5,431,296 | 1.84314 | 0.634083 | 1.168702 | 4 |
+| `gr_m_atomic_full` | 6,144,000 | 1.00000 | 1.207208 | **1.207208** | **4** ← worst |
+| `gr_m_batch_100` | 6,144,000 | 1.00000 | 1.194125 | 1.194125 | 4 |
+| `gr_m_batch_250` | 6,144,000 | 1.00000 | 1.071958 | 1.071958 | 4 |
+| `gr_m_batch_500` | 6,144,000 | 1.00000 | 1.028000 | 1.028000 | 4 |
+| `gr_m_batch_1000` | 6,144,000 | 1.00000 | 0.983333 | 0.983333 | 3 |
+| `gr_m_atomic_empty` | 5,431,296 | 1.13122 | 0.634083 | 0.717288 | 3 |
 
-**Qualified, not comfortable.** `ceil(3 * x) <= 6` iff `x <= 2`, so the worst point
-sits 1.7% below the rounding boundary — against 10.7% for
-`MARGINED_MS_PER_SCAN_STMT` over the same six artifacts. The inference this
-replaces was correct, and it was correct by one rounding step. That is the reason
-the tightness is asserted in the gate rather than recorded here: a table cannot
-notice a future run coming in 2% hotter, and 7 is the next integer.
+`ceil(3 * x) <= 4` iff `x <= 1.333…`, so the worst point sits **9.5%** below the
+rounding boundary. At the retired basis the same evidence sat 1.7% below its own
+boundary and this section called it "qualified, not comfortable"; the re-freeze
+bought that room back, because the copy the statement ran on is now the basis
+rather than something 1.63x leaner than it. The tightness is still asserted in the
+gate rather than only recorded here, for the reason it always was: a table cannot
+notice a future run coming in hotter.
 
-> **`MARGINED_MS_COVERAGE_ASSERT = 6` does not survive the same check**, and it is
-> not this bead's term. `COVERAGE_ASSERT_SQL` — the statement the provisional
-> derivation borrowed from — measures 1.291375 ms max on `gr_m_atomic_full`, which
-> normalizes to **2.104080 ms** and demands **7**. The two statements are the same
-> shape against the same relation, so the borrowed inference was sound; what moved
-> is that on 18.4 the *source* statement now costs slightly more than the term
-> frozen from it on 15.18 allows. Impact is one millisecond per `G_sessions` in the
-> scan budget and the atomic stall projection, and none at all on
-> `SCAN_STMT_TIMEOUT_MS`, which is `max(521, …)` and unmoved. Three of the six
-> points demand 7, so it is not one outlier copy. The breach is **asserted** by
-> `test_frozen_coverage_assert_under_charges_its_own_measurement`, the deliberate
-> inverse of the gate above and green because the breach is real: both the
-> measurement and the shipped literal are pinned, so a re-freeze that carried 6
-> across by inheritance — onto a basis where nothing demands more than 4 — fails
-> rather than closing the record quietly. Filed as
-> `g-b-coverage-assert-18` — deliberately NOT fixed here, because a term and the
-> basis it is frozen against have to move together and this one's basis is §3's
-> 15.18 snapshot.
+> **`MARGINED_MS_COVERAGE_ASSERT` now survives the same check — `g-b-coverage-assert-18`
+> is closed by the re-freeze.** It did not before. `COVERAGE_ASSERT_SQL` measures
+> 1.291375 ms max on `gr_m_atomic_full`; against the retired 15.18 basis that
+> normalized to **2.104080 ms** and demanded **7** where 6 shipped, and three of the
+> six points demanded 7, so it was not one outlier copy. Against this basis the same
+> reading is carried by nothing and demands **4**, which is what ships.
+>
+> The bead's requirement was that the term be **re-derived at the re-freeze, never
+> inherited across it**, and the reason is visible in those two numbers: 6 was wrong
+> *high* at one basis and wrong *low* at the other, so carrying it across would have
+> been wrong either way — silently over-charging on a basis where nothing demands
+> more than 4, with the record of why it was 6 closed as resolved. Both sides stay
+> pinned by `test_frozen_coverage_assert_now_covers_its_own_measurement`, the
+> deliberate inverse of the gate above, rewritten from asserting the breach to
+> asserting its closure by the exit its own docstring named.
+>
+> One thing did **not** move with it: this term is now the tighter of the two
+> against the same rounding boundary — 3.1% below, against
+> `MARGINED_MS_BACKFILL_REMAINING`'s 9.5% — so it is the one a future re-measure has
+> to be checked against first. That ordering is asserted, not left to this table.
+
+| Copy | `game_sessions` bytes | `N_copy` | Max (ms) | Normalized | `ceil(3x)` |
+|---|---|---|---|---|---|
+| `gr_m_atomic_full` | 6,144,000 | 1.00000 | 1.291375 | **1.291375** | **4** ← worst |
+| `gr_m_batch_500` | 6,144,000 | 1.00000 | 1.286708 | 1.286708 | 4 |
+| `gr_m_batch_100` | 6,144,000 | 1.00000 | 1.234709 | 1.234709 | 4 |
+| `gr_m_atomic_empty` | 5,431,296 | 1.13122 | 1.076334 | 1.217572 | 4 |
+| `gr_m_batch_1000` | 6,144,000 | 1.00000 | 1.205416 | 1.205416 | 4 |
+| `gr_m_batch_250` | 6,144,000 | 1.00000 | 1.123208 | 1.123208 | 4 |
 
 The sweep scalar did not survive that measurement. The label "PROVISIONAL" came to
 mean something specific and worse than "not yet measured": a **scalar cannot price
@@ -595,13 +616,13 @@ this statement at all**, because its cost depends on the operator-chosen batch
 size and the runtime admits batch sizes down to `MIN_ADMITTED_BATCH = 1`.
 `g-b-sweep-batch-cost` (P1) **deleted** `MARGINED_MS_BACKFILL_SELECT_SWEEP` and
 replaced it with the two-component model of §7:
-`MARGINED_MS_BACKFILL_SWEEP_SCAN = 72` ms on the relation and
-`MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 518` µs per page, evaluated by
+`MARGINED_MS_BACKFILL_SWEEP_SCAN = 71` ms on the relation and
+`MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 491` µs per page, evaluated by
 `backfill_sweep_ms` over the page count `backfill_sweep_pages` derives from the
 live population and the resolved batch size.
 
 `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` is denominated in **microseconds** on
-purpose. The measured slope is 0.000575 ms/row; rounded up to an integer
+purpose. The measured slope is 0.000744 ms/row; rounded up to an integer
 millisecond it would be `1`, adding a phantom second of projected stall per
 thousand rows and making atomic mode inadmissible on populations it comfortably
 handles. `g-b-runtime-envelope`'s projection divides it by 1000, and a constant
@@ -619,9 +640,18 @@ empty-point run that did not.
 The empty point has no cancel-to-unlock counterpart and needs none — an atomic
 run that mutated nothing holds no row lock, so there is no lock for a competing
 writer to wait on and the commit is the whole of its teardown. The **full**
-point's teardown takes the larger of its commit (0.748 ms) and the atomic-scope
-cancel-to-unlock (4.098 ms), because an atomic run that breaches rolls back the
+point's teardown takes the larger of its commit (1.173 ms) and the atomic-scope
+cancel-to-unlock (2.424 ms), because an atomic run that breaches rolls back the
 whole population.
+
+At this basis the empty point's `COMMIT` came in **above** the full point's —
+1.200 ms against 1.173 ms — which is what a 27 µs difference between two
+single-sample commits looks like on a laptop. It does not corrupt the slope,
+because the full point's teardown is `max(commit, cancel-to-unlock)` = 2.424 ms and
+the slope is `(2.424 - 1.200) / 1,646` = 0.744 µs/row. It is worth naming rather
+than smoothing: it is direct evidence that a single commit sample cannot resolve
+the floor from the slope at this transaction size, and that the frozen pair rests
+on the cancel path instead.
 
 ### Invariants (checked at import, in the revision)
 
@@ -629,14 +659,14 @@ whole population.
 |---|---|---|---|
 | Zero-batch, backfill: `MARGINED_MS_PER_ROW <= MAX_BATCH_MS` | 5 | 5,000 | ✅ |
 | Zero-batch, repair: `MARGINED_MS_PER_REPAIR_ROW <= MAX_BATCH_MS` | 2 | 5,000 | ✅ |
-| Scan budget: `(2*20 + 2) * 521 + 6 + 20 * (sweep(6001 pages) + 6)` | 85,618 ms | 900,000 ms | ✅ |
-| `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` | 5,007 | 30,000 | ✅ |
+| Scan budget: `(2*20 + 2) * 171 + 4 + 20 * (sweep(4185 pages) + 4)` | 49,782.7 ms | 900,000 ms | ✅ |
+| `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` | 5,006 | 30,000 | ✅ |
 | `BATCH_LOCK_WAIT_MS < MAX_BATCH_MS` | 1,000 | 5,000 | ✅ |
-| `SCAN_STMT_TIMEOUT_MS >= max(per_scan_stmt, coverage, backfill_remaining)` | 521 | 521 | ✅ |
+| `SCAN_STMT_TIMEOUT_MS >= max(per_scan_stmt, coverage, backfill_remaining)` | 171 | 171 | ✅ |
 
 The scan budget charges the sweep at the **declared worst case** —
 `IMPORT_WORST_CASE_SWEEP_PAGES = ceil(SIZED_TOTAL_ROWS / MIN_ADMITTED_BATCH) + 1
-= 6,001` pages — because module load has no database, no population and no
+= 4,185` pages — because module load has no database, no population and no
 resolved batch size. `assert_runtime_scan_budget` re-derives it from the live
 `N_stale` and the resolved `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` before the first
 row lock, which is the only check that sees a live population past the sized basis
@@ -659,18 +689,29 @@ commit**. `VALIDATE` and the pre-flight population counts are outside it:
 `FOR NO KEY UPDATE` locks the `/moves` hook takes, and both complete before the
 first row lock.
 
-```
-T_stall_prod = T_backfill_prod                                  4051.4 ms
-             + T_repair_prod                                    1074.2 ms
-             + ATOMIC_SCANS_UNDER_LOCK * T_scan_stmt_prod        520.5 ms   (3 x 173.49)
-             + T_coverage_assert_prod                              1.7 ms
-             + T_atomic_teardown_floor_prod                        0.6 ms
-             + T_atomic_teardown_per_row_prod * (N_stale + N_repair)
-                                                                   3.5 ms   (0.000575 x 6000)
-             = 5651.9 ms
+Re-derived 2026-07-27 with §3's re-frozen constants, from the same committed set
+(`docs/sizing/derived_20260726.json`, `decision_1`). The verdict is unchanged and
+clears the bound by more room than it did before.
 
-3 * T_stall_prod = 16,956 ms  <=  MAX_WRITER_STALL_MS = 30,000 ms
 ```
+T_stall_prod = T_backfill_prod                                   989.6 ms
+             + T_repair_prod                                     359.8 ms
+             + ATOMIC_SCANS_UNDER_LOCK * T_scan_stmt_prod        170.5 ms   (3 x 56.818)
+             + T_coverage_assert_prod                              1.3 ms
+             + T_backfill_sweep_prod                              23.9 ms   (2 pages at B = 646)
+             + T_backfill_remaining_prod                           1.2 ms
+             + T_atomic_teardown_floor_prod                        1.2 ms
+             + T_atomic_teardown_per_row_prod * (N_stale + N_repair)
+                                                                   1.2 ms   (0.000744 x 1646)
+             = 1548.7 ms
+
+3 * T_stall_prod =  4,646 ms  <=  MAX_WRITER_STALL_MS = 30,000 ms
+```
+
+At `MIN_ADMITTED_BATCH = 1` — 647 sweep pages instead of 2 — it is 1,654.1 ms,
+margined 4,962.2 ms, still admitted. Both ends of the admitted batch range clear
+the bound, which is what makes the verdict independent of an operator's
+`GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` override.
 
 **Verdict on the recorded snapshot: `atomic`.**
 
@@ -678,11 +719,14 @@ T_stall_prod = T_backfill_prod                                  4051.4 ms
 GHOSTREPLAY_ACCURACY_BACKFILL_MODE=atomic
 ```
 
-**This verdict is NOT executable against production yet.** It is the verdict for
-a 6,000-session database on a laptop, and it clears the bound by 43 %. The
-production verdict is `g-b-sizing-harness`'s to record, from a re-derivation
-against a real restore and the real audit counts, and it must be set on the
-Railway service before the deploy with the exact value written back here.
+**This verdict is still not a production deploy setting on its own.** It is now
+derived on a **production restore** at production's own major version rather than
+on a 6,000-session synthesized snapshot, and it clears the bound by 85 % rather
+than the 43 % this paragraph used to record — but it is still a laptop, and the
+populations it projects are the *synthesized* ones (`N_stale` = 646,
+`N_repair` = 1,000), not production's, which are both zero. Confirming it against
+the live audit counts and setting it on the Railway service is Phase 3's, and it
+must be set with the exact value written back here.
 
 The three non-row terms are not rounding. On a clean audit with a small stale
 set they are the **whole** stall — three full `session_moves` scans plus a
@@ -731,23 +775,29 @@ from-scratch environment will approach as it fills.
 - [ ] Re-run the cancel probe at **both scopes** on production-like storage;
       `TEARDOWN_ALLOWANCE_MS` and the two atomic-teardown constants are the ones
       a laptop SSD most flatters, and §0 leaves them the constants still leaning
-      **up**.
-- [ ] Run the frozen shipped revision with its guards **armed** on fresh
+      **up**. *(Still open: §10's 3c runs are on the same laptop storage. What
+      they add is coverage of the shipped revision at all three transaction
+      shapes — including the repair batch, the larger of the two per-batch ones —
+      not a different storage class.)*
+- [x] Run the frozen shipped revision with its guards **armed** on fresh
       restores — twice: once production-shaped, once seeded to force the
       full-size batches a small population cannot produce. This is the only
       remaining check that exercises the runtime envelope at all, since
-      production never did.
+      production never did. **Done 2026-07-27 — §10** (3a and 3a′), plus three
+      cancellation runs covering both teardown scopes. Artifacts under
+      `docs/sizing/phase3/`. **3b is not done and is blocked**
+      (`g-b-fixture-moves-clone`), so full-size batches are evidenced and
+      *partial* ones are not.
 - [ ] Record the health-window verdict and the final
       `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` for a from-scratch deploy.
-- [ ] **Commit every measurement `--derive` consumes**, and re-freeze the shipped
-      constants from that committed set rather than from a table. The artifacts
-      go in `docs/sizing/` alongside 2026-07-26's, as their own set and their own
-      `derived_…` rather than appended to that one, since a derivation's atomic
-      and batch timings have to come from a single fixture state.
-      §8 does this for the 18.4 production restore and it is the pattern to
-      follow, but it cannot reach §3's literals — their 15.18 snapshot is gone,
-      so only a re-freeze makes them reproducible. Until then §3's constants have
-      no artifact behind them and §3 says so (`g-b-size-measurement-json`).
+- [x] **Commit every measurement `--derive` consumes**, and re-freeze the shipped
+      constants from that committed set rather than from a table. **Done
+      2026-07-27 — §9.** §8's ten committed artifacts were already one derivation
+      over one fixture state on 18.4, so the re-freeze applied that set's
+      `derived_20260726.json` whole rather than commissioning an eleventh
+      artifact: a new set would have had to come from a new fixture, and there is
+      no defect in the committed one that a new fixture would fix. §3's literals
+      now all have an artifact behind them and a gate that re-derives them.
 
 ---
 
@@ -1970,5 +2020,628 @@ solver is pure. A test cannot fail closed when someone edits
 `MARGINED_MS_PER_SCAN_STMT` without re-measuring; what it can now do, and does, is
 fail closed when the *artifact-backed* table drifts from the artifacts. Closing
 the remaining gap means re-freezing the shipped constants from a committed
-measurement set, which is `g-b-sizing-harness` (Phase 3) and its from-scratch
-scope in §5.
+measurement set, which **§9 does**.
+
+---
+
+## 9. The re-freeze (`g-b-sizing-harness`, Phase 2, 2026-07-27)
+
+Every literal in [§3](#3-phase-2--frozen) is now `--derive`'s output over the ten
+artifacts [§8](#8-the-measurements-are-on-disk-g-b-size-measurement-json-2026-07-26)
+commits, and `SIZED_*` moved with them in the same derivation.
+
+**What this closes.** Before it, §3's constants were a *transcription*: measured on
+PostgreSQL 15.18 against a locally synthesized 6,000-row snapshot that no longer
+exists. No run on any other fixture could return them, so no test could fail closed
+on an edit to one, and an error in the arithmetic was visible only by re-reading
+prose. Two constants — the sweep pair — were the exception, and that exception is
+what found the mixed-basis rows §8 records. Now the whole block is re-derivable:
+`test_the_committed_derivation_is_applied_whole_with_the_basis_it_arrived_with`
+compares **every** shipped literal against a live `--derive`, and
+`test_the_committed_measurement_set_re_derives_its_published_output` re-runs the
+derivation from the artifacts.
+
+**Why this set and not a new one.** §5 asked for a committed set and a re-freeze
+from it. §8's set already is one: one `--derive`, one fixture state, on 18.4,
+against a production restore, with both dimension readings recorded per artifact. A
+new set would have to come from a new fixture — the atomic and batch timings of a
+derivation must share one — and there is no defect in the committed one that a new
+fixture would repair. What a new fixture *would* change is `B_TESTED` / `R_TESTED`,
+which is a separate matter taken up under "what this does not fix" below.
+
+### What moved
+
+| Constant | Retired (15.18, 6,000-row snapshot) | Shipped (18.4, production restore) |
+|---|---|---|
+| `SIZED_TOTAL_ROWS` | 6,000 | **4,184** |
+| `SIZED_SESSIONS_BYTES` | 10,010,624 | **6,144,000** |
+| `SIZED_M_TOTAL` | 357,000 | **130,676** |
+| `SIZED_MOVES_BYTES` | 93,241,344 | **45,817,856** |
+| `MARGINED_MS_PER_ROW` | 5 | 5 |
+| `MARGINED_MS_PER_REPAIR_ROW` | 2 | 2 |
+| `MARGINED_MS_PER_SCAN_STMT` | 521 | **171** |
+| `MARGINED_MS_COVERAGE_ASSERT` | 6 | **4** |
+| `MARGINED_MS_BACKFILL_REMAINING` | 6 | **4** |
+| `MARGINED_MS_BACKFILL_SWEEP_SCAN` | 72 | **71** |
+| `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` | 518 | **491** |
+| `SCAN_STMT_TIMEOUT_MS` | 521 | **171** |
+| `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | **61** |
+| `TEARDOWN_ALLOWANCE_MS` | 7 | **6** |
+| `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | **4** |
+| `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` | 2 | **3** |
+| `B_TESTED` / `R_TESTED` | 1,000 / 3,000 | **646 / 1,000** |
+| `MAX_BATCH_SIZE` / `DEFAULT_BATCH_SIZE` | 1,000 | **646** |
+| `REPAIR_BATCH_SIZE` | 2,500 | **1,000** |
+| `EST_MAX_LOCK_HOLD_MS` | 5,007 | **5,006** |
+| `IMPORT_WORST_CASE_SWEEP_PAGES` (derived) | 6,001 | **4,185** |
+
+Most terms fell, and the reason is not that 18.4 is faster: it is that the basis is
+a **smaller relation**. A term is an elapsed time at its own basis, and the runtime
+guard divides the live relation by the frozen one — so a smaller basis makes every
+growth factor **larger** and charges more against the same production relation. The
+direction is conservative on both halves.
+
+Two terms rose. `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` (2 → 4) and
+`MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` (2 → 3) come from single-sample commits on a
+laptop; §3 records why the pair rests on the cancel path rather than on the commit
+difference.
+
+### The three findings the re-freeze produced
+
+**1. `g-b-coverage-assert-18` is closed, by the exit its own tripwire named.** The
+shipped 6 under-charged `COVERAGE_ASSERT_SQL` at the 15.18 basis (2.104080 ms
+normalized, demanding 7, at three of six committed points) and would have
+over-charged it at this one (1.291375 ms, demanding 4). Wrong in both directions
+depending on where it landed, which is exactly why the bead required it be
+**re-derived rather than inherited**. It ships at 4.
+`test_frozen_coverage_assert_under_charges_its_own_measurement` was rewritten to
+`…_now_covers_its_own_measurement` — kept rather than deleted, because the finding
+it recorded was never "6 is too small" but that a term and its basis move together,
+and deleting it would leave the re-freeze's most load-bearing case unguarded.
+
+**2. The sweep endpoint measurement became load-bearing.** `gr_p2_sweep6000` is
+larger than the frozen basis on both axes at either basis, so `max(1, …)` clamps its
+`N_copy` to 1 and its demand on the scan coefficient is **basis-independent**:
+23.592979 ms, i.e. 71. `gr_p1_sweep`'s is not — its factor fell from 1.848714 to
+1.134644, and a baseline-only fit fell with it from 23.867343 (72) to 14.648533
+(44). So the roles inverted. At the retired basis the joint fit *was* the baseline's
+line and the endpoint run merely confirmed an extrapolation; here the joint fit **is**
+the endpoint's line, and dropping that run would put the frozen pair at 44 / 518 —
+below 3x what a host produced at 6,001 pages. Same two artifacts, same solver, no
+new measurement; only the basis moved.
+
+**3. Three growth-factor tests had stopped being able to fail.** `g_moves=25`,
+`g_moves=100`, `g_sessions=2000` were chosen against constants ~3x larger, and when
+the constants shrank those factors no longer breached anything, so three "the guard
+rejects this" tests went red. That is the lucky direction — a little larger and they
+would have kept passing while testing nothing, and a guard whose rejection path is
+never exercised is indistinguishable from one that cannot reject. They now derive
+their factors from the term each is about.
+
+### What this does not fix
+
+`B_TESTED` = 646 and `R_TESTED` = 1,000 are **fixture-bound, not deadline-bound**.
+Both are the whole synthesized population on a copy of a 1,646-ended-visible-session
+restore, so neither is evidence about a larger page — the formula bounds are 1,000
+and 2,500, and `MAX_BATCH_SIZE` / `REPAIR_BATCH_SIZE` are held below them only by
+what the fixture could demonstrate. Shipping smaller batches is safe (shorter lock
+holds, more of them) and honest, but it is a capability regression driven by a
+fixture limit.
+
+Lifting it needs a fixture with more ended-visible sessions **carrying
+`session_moves`**, which the harness cannot currently build:
+`--synthesize-sessions` clones `game_sessions` rows *without* moves and marks the
+result `sessions_synthesized`, valid for the sweep domain and nothing else. That
+same gap is what blocks **Phase 3b**, which needs `3 * MAX_BATCH_SIZE + 1` stale
+rows and `3 * REPAIR_BATCH_SIZE + 1` repair rows — 1,939 and 3,001 at these
+constants, against a 1,646 ceiling. One piece of harness work unblocks both.
+
+`SIZED_SESSIONS_BYTES` / `SIZED_MOVES_BYTES` remain the *restore's* footprint and
+not production's, for the reason §0 gives: a logical dump does not carry physical
+size. They are smaller than production's, so the growth factors err upward.
+
+---
+
+## 10. Phase 3 — qualification runs (`g-b-sizing-harness`, 2026-07-27)
+
+The first time the runtime envelope has executed anywhere. Production ran
+`20260719_01` before the constants existed (§0), so until these runs **no armed
+timeout, no admission projection, no compute watchdog and no observed-lock-hold
+tripwire had ever been exercised against a real database**.
+
+**Fixture.** `tmp/ghostreplay-20260724T101501Z.dump` restored with Postgres.app's
+own `pg_restore` 18.4 (`--no-owner --no-privileges`, port 5432) into `gr_p3_base`;
+one disposable copy per run, `CREATE DATABASE … TEMPLATE`. Each copy is returned to
+the pre-`20260719_01` state the same way §8's copies were: `alembic_version` set to
+`20260718_01` and the CHECK dropped and re-added `NOT VALID` with `20260709_01`'s
+condition verbatim, so every run performs the real `NOT VALID` → validated
+transition. The base restore reproduces §0 exactly — 4,184 `game_sessions`, 131,676
+`session_moves`, 1,646 ended-visible, `convalidated`, and the 95 fail-closed rows.
+
+**Revision under test.** The shipped revision at the re-frozen constants of §9,
+unmodified — no bypass, no relaxed guard. Recorded by content digest rather than by
+commit SHA, because all five runs were taken at one working-tree state before that
+state was committed:
+
+| File | sha256 |
+|---|---|
+| `alembic/env.py` | `b8549447056ce90db71968c39026b0f066f0657c2e5f7d5c36aca8160c5514c0` |
+| `alembic/versions/20260719_01_backfill_session_player_accuracy.py` | `9f14dd9b277b09aa9f9c15e19214db8a7f846d11923c26dea4e849e7b780cb82` |
+| `app/accuracy_rows_v1.py` | `955528cb2918e92c3d4a469f9f69acf80e46ac7d34214332a01155222b7c3375` |
+| `app/accuracy_v1.py` | `d20df6114df06f3cb5aff5eeb53c94e76675bdad8d8f08691ae6464f03255f1c` |
+| `app/migration_guard.py` | `cac1bf7d8827eab89070b732996542bf05b303c635990b86a49a9f40a860f64b` |
+| `scripts/phase3_cancellation_probe.py` | `77ea42336bfa89f43f9050633d6dcfdbf5366c97d555c1b144aa474416ede890` |
+| `scripts/phase3_fixture_guard.py` | `ab25ec45817224039942ae0a871d28aa65036f1cc3f4c9874a301913295adee6` |
+| `scripts/phase3_prepare.py` | `e96def94a9b4ebcb643d6a78895d7c8a0fa32393df777c1e8843371c85581ac3` |
+| `scripts/phase3_seed_populations.py` | `2bd3c63894a9e62ac612c783309ee7447fbf8e8f8445e7481ab60864a6fc4c99` |
+
+All five runs share those 9 digests, recorded in every artifact and verified
+unchanged after the last of them. When this lands, the commit SHA is the durable
+handle and these are what tie it to the runs; any later edit to the runner or the
+constants invalidates all five. The digests are PROVENANCE — what the gate compares
+is `frozen_fingerprints` (the same files, semantically) and `frozen_symbols` (the
+synthesis, per symbol), both described below.
+
+Every run is driven through `alembic upgrade 20260719_01`, i.e. through `env.py`,
+the migration guard and the stall probe — not by calling the runner directly.
+
+### The controller and the artifacts
+
+Phase 3 is **committed evidence, not prose**, for the same reason the measurement set
+is (§8): a qualification that survives only as a summary cannot be re-checked, and
+this probe hit two failure modes (below) that look exactly like clean results from
+outside. Nothing here is on a deployment path; all three scripts are measurement
+tools in the same category as `size_accuracy_backfill.py`.
+
+| Path | What it is |
+|---|---|
+| `backend/scripts/phase3_prepare.py` | one disposable copy, returned to the pre-`20260719_01` state, stamped with its provenance |
+| `backend/scripts/phase3_seed_populations.py` | seeds either population *through the harness's own synthesis* |
+| `backend/scripts/phase3_cancellation_probe.py` | drives the run; in the cancel modes, gates and cancels from a second session |
+| `docs/sizing/phase3/run_3a_production_shaped_20260727.json` | 3a |
+| `docs/sizing/phase3/run_3a_populated_20260727.json` | 3a′ |
+| `docs/sizing/phase3/run_3c_cancel_backfill_batch_20260727.json` | 3c, backfill batch |
+| `docs/sizing/phase3/run_3c_cancel_repair_batch_20260727.json` | 3c, repair batch |
+| `docs/sizing/phase3/run_3c_cancel_atomic_20260727.json` | 3c, atomic |
+
+Each artifact carries the three binding maps, the four constants that bound its
+transactions, the pre-run dimensions and populations, every gate observation, the
+full trace length and a sample of it, the filtered runner log, `cancel_cause`, and
+the terminal state read back afterwards. Fifteen tests in `test_release_b_sizing.py`
+make them load-bearing rather than decorative — the cohort is pinned by identity, the
+recorded constants must equal the module's today, the per-batch coverage check fails
+if `REPAIR_BATCH_SIZE` is raised past what a committed run actually cancelled, and
+`validate()` and both halves of the name fence are exercised directly rather than
+only in passing.
+
+**What expires these runs, and how that is enforced.** Two things are recorded for
+each of **9** behaviour-bearing files — the revision, the two frozen algorithm
+modules it imports (`app/accuracy_v1.py`, `app/accuracy_rows_v1.py`), `env.py`, the
+migration guard, **the controller itself**, the preparer, the seeder, and the guard
+that computes these fingerprints:
+
+- `frozen_files` — the raw sha256. Provenance: *which bytes produced these numbers.*
+  Deliberately **not** a gate. It moves when a docstring is reflowed, so enforcing it
+  would demand a full re-run for edits that cannot affect a measurement, and a gate
+  that fires on prose is a gate people learn to override.
+- `frozen_fingerprints` — the parsed **AST with docstrings stripped**, hashed.
+  Comments never reach the AST and `ast.dump` drops line and column numbers, so this
+  is stable under reformatting and prose and moves on any change to a statement, a
+  literal or an expression. **This is the gate.**
+  `test_phase3_evidence_is_invalidated_by_a_behavioural_edit_to_what_it_ran`
+  compares it against the live tree, so a behavioural edit fails the suite with an
+  instruction to re-run §10 — which is what "any later edit to the runner
+  invalidates these runs" has to mean to be worth writing down. All three maps are
+  compared across all five artifacts as well as against the tree, so a run taken
+  under a different synthesis cannot compose with the cohort by agreeing on the
+  revision alone.
+
+Three of those nine are in the set for reasons worth stating. **The controller**,
+because it decides *when the gates hold and what gets recorded*: a probe that cancels
+at the wrong moment produces a number wrong in the one way nothing downstream can
+detect. That also means the runs must be taken **last**, after the controller is
+final — editing it afterwards invalidates them. **The two frozen algorithm modules**,
+because `20260719_01` deliberately pins `app.accuracy_v1` / `app.accuracy_rows_v1`
+rather than importing `app.accuracy`, and every per-row cost these runs measured is
+that algorithm executing — the batch sizes are quotients of it, so a set naming the
+revision but not what it imports stays green through an edit that changes both what
+the migration computes and how long a batch holds its rows. **The guard**, because a
+verification protocol that does not cover its own comparator can be weakened by
+editing the comparator.
+
+**The fixture is bound three ways, because counts do not identify one.**
+`synthesize_repair`'s own docstring records the case: taking candidates by
+`ORDER BY id` instead of `ORDER BY md5(id)` produces exactly K candidates and deletes
+exactly K plies — identical `populations_before`, identical `dimensions_before` —
+while selecting the K *lowest* ids, which lets a merge join terminate a few percent
+into `session_moves` and measures every scan-bearing statement at a fraction of its
+real cost. Two fixtures can agree on every number and be different fixtures.
+
+- `frozen_symbols` — the synthesis itself: `synthesize_stale`, `synthesize_repair`,
+  `check_repair_sample_size`, `analyze_after_synthesis`, `MIN_SYNTHESIZED_REPAIR`.
+  Bound **per symbol**, not per file: `size_accuracy_backfill.py` is ~2,500 lines of
+  Phase 1 and Phase 2 machinery, and expiring every qualification run whenever
+  `derive` changed would be the over-broad gate again. `symbol_fingerprint` **raises**
+  on a name it cannot find, because a binding that silently covers nothing is worse
+  than none — a rename would turn it off and leave the block still looking like
+  coverage.
+- `fixture_identity` — content digests of the migration's **exact input columns** in
+  `game_sessions` and `session_moves`, read at run time. *Which rows*, not how many.
+  The column lists are wrong in both directions if they are guessed. Too narrow and
+  the digest agrees while the algorithm's input differs — `player_color` decides
+  which side's plies are scored and `eval_cp` / `eval_mate` *are* the scores, so a
+  copy with flipped colours or different eval density computes different accuracies
+  at a different cost under an identical digest. Too broad and it expires runs for
+  nothing: `move_san` was in this list and no statement in the revision reads it, and
+  a `SELECT *` digest is the same mistake at full size. So the lists are not
+  asserted against a remembered pair of `SELECT`s: every SQL constant the revision
+  defines is swept for the column names it *references as identifiers* — both
+  payload projections, both population predicates, the coverage assertion, the ply
+  detector, the remaining-counts and the updates — and that set must equal the
+  digest's columns EXACTLY, keys aside. Substring containment would not do it:
+  `"player_accuracy" in sql` is satisfied by a statement mentioning only
+  `player_accuracy_algo_version`, which is how a containment check quietly stops
+  being a check. A PostgreSQL-gated test then moves every bound column against a
+  real database — each one ALONE, and restored before the next — and asserts the
+  digest follows, with a coverage assertion so a column added to the digest cannot be
+  asserted about statically and never exercised. `session_mode` and `drill_state`
+  cannot be moved singly against the shipped schema (`ck_game_sessions_mode_drill_state`,
+  `ck_game_sessions_drill_rating_boundary`), and moving them together would prove
+  neither — a digest that had stopped encoding `session_mode` would still follow
+  `drill_state` — so the test reads both CHECK definitions back, drops them for the
+  duration, and restores them. Nothing rides along either: `status` moves on its own
+  rather than with the `ended_at` beside it, and `ended_at` is then mutated separately
+  and required *not* to move the digest. The two digest KEYS are checked too, rather
+  than merely excluded from the column comparison. The moves key is what puts a ply's
+  *ownership* inside the tuple, so the test re-parents a ply to a second session and
+  requires the digest to move, which keying on the surrogate `session_moves.id` would
+  not do. For the sessions key, a second row digesting differently from one is
+  multiplicity and would hold with `id` dropped from the tuple entirely, so the test
+  instead changes only the ID of a move-free second session — row count and every
+  bound column constant, nothing else left to move. It finally mutates `move_san`,
+  `fen_after`, `classification`, `engine_elo`, `started_at` and `ended_at` and asserts
+  the digest does not move.
+- `fixture_provenance` — what `phase3_prepare.py` stamped onto the copy before
+  anything seeded it (template name and the template's own digests), in a
+  `_ghostreplay_phase3_provenance` table. No post-seed read can recover this:
+  synthesis deletes plies and rewrites accuracy columns, so the copy no longer
+  resembles what it was cloned from. A run on an unstamped copy is **discarded**.
+  The stamp is *verified*, not copied: the preparer opens the template read-only and
+  refuses to stamp unless the fresh clone digests identically. A stamp that only
+  repeats the name it was handed is a claim about the copy rather than a measurement
+  of it — a preparer cloning a different base while passing `gr_p3_base` would
+  produce five artifacts that agree with each other about a template none of them
+  was taken from.
+
+Together those make three previously-unverifiable claims checkable, and
+`test_the_five_runs_measured_one_fixture_and_can_prove_which` checks them: all five
+copies carry the same base digests (one template, five independent clones); the
+unseeded run's observed fixture *is* its base, which is also the digest function
+checking itself against two independent reads; and the four seeded runs are
+**identical to each other on every column the revision reads** — the digest is that
+projection deliberately — and differ from the base by exactly the K deleted plies:
+synthesis determinism observed rather than assumed.
+
+The four constants each artifact carries are checked separately and against the
+module as it is now, so moving `REPAIR_BATCH_SIZE` also fails until Phase 3 is
+re-run.
+
+**The helpers are fenced.** All three take `--confirm-mutates` and refuse a target
+whose name is not an obviously disposable Phase 3 copy (`\Agr_p3[a-z0-9_]*\Z`, no
+`*_base` / `*_template`, never its own template) — the same fence
+`size_accuracy_backfill.py` carries, because these are strictly more destructive: one
+drops and recreates a database, one rewrites both populations, one runs a migration
+and cancels backends. The naming rule lives in `scripts/phase3_fixture_guard.py` and
+is *called* by each of them rather than restated in any, since two spellings of
+one fence drift and the one that drifts is the one in front of the `DROP DATABASE`.
+The realistic failure here is a typo in a hand-typed database name, which
+`--confirm-mutates` alone would be typed straight past.
+
+`CREATE DATABASE <target> TEMPLATE <template>` has **two** identifiers in it and both
+are checked, by opposite rules: the target must not carry a fixture suffix, the
+template must (`\Agr_[a-z0-9_]*(_base|_template)\Z`). Fencing only the target leaves
+the other half reaching the same DDL — which cannot take a bind parameter — and
+cloning from a working database is a `CREATE DATABASE` against something that may be
+in use. The template is validated *before* the drop, since the drop and the create
+are two statements and a rejection between them leaves no database at all. Both
+patterns anchor with `\A`/`\Z` and are applied with `fullmatch`, never `^`/`$` with
+`match`: Python's `$` also matches immediately *before* a final newline, so the
+obvious spelling of these rules accepts `gr_p3x\n` — not injection, but whitespace
+through a fence that promises none, and the newline-suffixed *template* is precisely
+the case that fails after the target has already been dropped.
+
+The name each artifact records is the one `current_database()` returned, not the one
+typed: `--url` is a full override, so the positional argument and the database
+actually measured can differ while both pass the fence, and the record would then
+identify a database it never touched. The helpers additionally refuse the divergence.
+
+**An invalid trial writes no artifact and exits nonzero.** The "discarded, not
+recorded" contract used to depend on the operator reading the output. It is enforced
+in `validate()` now: gates that never held, a `pg_cancel_backend` that returned
+false, a held row that never unlocked, a `none` run that failed, a `cancel_cause`
+that is not `user_request`, or a leaked trigger or advisory lock. Every one of those
+produces an artifact that *looks* fine, which is why none of them may reach the
+`--out` path — the rejected run is written to `<out>.rejected` for diagnosis, and the
+real path is written through `os.replace` so a reader never sees a half-written file.
+A **breach** of `TEARDOWN_ALLOWANCE_MS` is explicitly not a discard: that is a real
+finding and is recorded.
+
+**A landed cancel and a broken run are two different claims**, and the cancel modes
+are validated on both. `pg_cancel_backend` returns true against a backend that was
+already finishing; the held row then unlocks *because the transaction committed*, the
+migration goes on to stamp `alembic_version` and validate the CHECK, and the artifact
+carries a real-looking `cancel_to_unlock_ms` measured off a teardown that never
+happened. Every cancel-side field in that trial is correct. So a cancel trial must
+also show a nonzero exit, the stamp still at the revision's own `down_revision`, the
+CHECK still `NOT VALID`, and the populations of a rolled-back transaction — which
+differ by mode: both unchanged for `atomic` and `batch`, and for `repair`, `n_stale`
+at 0 (the backfill phase must have converged and committed to reach the repair phase
+at all) with `n_repair` untouched.
+
+The commands, in the order they were run:
+
+```bash
+cd backend && source .venv/bin/activate   # no client tools needed: all SQLAlchemy
+
+python scripts/phase3_prepare.py gr_p3a --confirm-mutates
+python scripts/phase3_cancellation_probe.py gr_p3a none --confirm-mutates \
+  --out ../docs/sizing/phase3/run_3a_production_shaped_20260727.json
+
+python scripts/phase3_prepare.py gr_p3a_pop --confirm-mutates
+python scripts/phase3_seed_populations.py gr_p3a_pop --repair 1000 --confirm-mutates
+python scripts/phase3_cancellation_probe.py gr_p3a_pop none --confirm-mutates \
+  --out ../docs/sizing/phase3/run_3a_populated_20260727.json
+
+python scripts/phase3_prepare.py gr_p3c_batch --confirm-mutates
+python scripts/phase3_seed_populations.py gr_p3c_batch --repair 1000 --confirm-mutates
+python scripts/phase3_cancellation_probe.py gr_p3c_batch batch --confirm-mutates --park 0.4 \
+  --out ../docs/sizing/phase3/run_3c_cancel_backfill_batch_20260727.json
+
+python scripts/phase3_prepare.py gr_p3_repair --confirm-mutates
+python scripts/phase3_seed_populations.py gr_p3_repair --repair 1000 --confirm-mutates
+python scripts/phase3_cancellation_probe.py gr_p3_repair repair --confirm-mutates --park 0.4 \
+  --out ../docs/sizing/phase3/run_3c_cancel_repair_batch_20260727.json
+
+python scripts/phase3_prepare.py gr_p3c_atomic --confirm-mutates
+python scripts/phase3_seed_populations.py gr_p3c_atomic --repair 1000 --confirm-mutates
+python scripts/phase3_cancellation_probe.py gr_p3c_atomic atomic --confirm-mutates --park 0.005 \
+  --out ../docs/sizing/phase3/run_3c_cancel_atomic_20260727.json
+```
+
+Every seeded copy reports `n_stale = 646`, `n_repair = 1000` and dimensions
+`4,184 / 6,144,000 / 130,676 / 45,817,856` — *at* the re-frozen basis, which is why
+every run logs `g_moves = g_sessions = 1.000`.
+
+### 3a — production-shaped (the timing evidence)
+
+Nothing seeded. `GHOSTREPLAY_ACCURACY_BACKFILL_MODE=atomic`, no batch override.
+
+```
+VALIDATE elapsed_ms=3
+n_stale=0 n_repair=0 batch_size=646 sweep_pages=1 g_moves=1.008 g_sessions=1.000
+atomic admitted projected_stall_ms=600 teardown_reserve_ms=4 work_budget_ms=29996
+both populations empty; skipping the runner
+complete mode=atomic runner=skipped elapsed_s=0.1
+```
+
+Terminal state: `alembic_version` `20260719_01`, CHECK `convalidated`, both
+populations 0, no advisory lock left held, no guard tripped.
+
+**This run takes the `S_scans_total = 2` path**, and it is worth being explicit
+that this is the *expected* production shape rather than a degenerate one: a clean
+audit with nothing unstamped means both populations are zero, the runner is
+skipped, and only the pre-flight repair count and the soundness assertion run. §5's
+Decision-2 note that "4 is the deploy run, 2 is the re-entry" is false in exactly
+this case, and here is the case.
+
+**What 3a cannot supply, and why that is structural.** The design asks this run for
+`observed_atomic_stall_ms` from the `env.py` probe. It produced none, and no
+production-shaped run can: the probe reports from the first row lock, `report()`
+returns immediately when no lock was ever taken, and a run that skips the runner
+takes none. This is the same hole the design already identifies for 3c — a clean
+run cancels nothing, so it cannot observe a cancellation — one level up: **a run
+that locks nothing cannot observe a stall.** The observation therefore needs its
+own populated run, below.
+
+### 3a′ — populated atomic (the stall observation)
+
+Same fixture, populations established through the harness's own
+`synthesize_stale` / `synthesize_repair` (`K = 1000`) and `analyze_after_synthesis`,
+giving `N_stale = 646` / `N_repair = 1000` — §8's fixture ceiling exactly.
+
+The copy's dimensions came out at **6,144,000 / 130,676 / 45,817,856 on 4,184
+rows**: the re-frozen basis, reproduced on a fresh restore. The revision logged
+`g_moves=1.000 g_sessions=1.000`, which is the basis of §9 validating itself
+against an independent rebuild rather than against the artifact it was read from.
+
+```
+atomic admitted projected_stall_ms=5832 teardown_reserve_ms=9 work_budget_ms=29991
+atomic residual stall deadline armed work_budget_ms=29991 teardown_reserve_ms=9
+phase=backfill batch rows=646  elapsed_ms=1069  phase=backfill batch rows=0
+phase=repair   batch rows=1000 elapsed_ms=1053  phase=repair   batch rows=0
+complete mode=atomic n_stale=646 n_repair=1000 elapsed_s=2.4
+atomic migration row-lock hold=1279.2ms observed_atomic_stall_ms=1279.2
+  projected_stall_ms=5831.9 max_stall_ms=30000.0
+```
+
+**`observed (1279.2) <= projected (5831.9) <= MAX_WRITER_STALL_MS (30000)`** — both
+inequalities the design requires, and the projection is 4.6x the observation, so
+the margin is being spent on conservatism rather than consumed. (Successive takings of this
+same run gave 1,171.6, 1,231.4, 1,250.3, 1,254.6, 1,079.2 and 1,178.3 ms against the same projection: the observation is
+a wall-clock hold and moves with host load, the projection does not.)
+
+The revision's own assertions were re-run read-only afterwards: `COVERAGE_ASSERT`
+0, `SOUNDNESS_ASSERT` 0, both populations 0. 949 sessions ended at version 1 with a
+`NULL` accuracy, which is the correct fail-closed outcome — `synthesize_repair`
+deletes a ply, so those grids are permanently unsound and no recompute can score
+them; `SOUNDNESS_ASSERT` returning 0 is the statement that this is the intended
+state and not corruption.
+
+**It also demonstrates the `3n + 1` argument empirically.** `N_stale = 646` is
+*exactly* `MAX_BATCH_SIZE`, so the backfill ran one full-size batch and then a
+**zero-row page** — no partial batch, exactly as §"Phase 3b" predicts for an exact
+multiple. Same for repair at 1,000. This run therefore evidences full-size batches
+and evidences nothing about partial ones.
+
+### 3c — cancellation probe, all three shapes (the breach-path evidence)
+
+A second session cancels the backend holding the row locks; the shipped revision is
+untouched. A cancelled backend raises SQLSTATE **57014**, the same error a
+`statement_timeout` breach raises, so this is the real breach path.
+
+The 3c copies only — and no other — carry an `AFTER … FOR EACH STATEMENT` trigger
+that takes an externally visible `pg_advisory_xact_lock` and then `pg_sleep`. An
+after-statement trigger fires once the statement has updated **every** row it will
+update, so while it parks the transaction holds a complete dirty batch and the
+guarded statement is still active. It is dropped after each run, alters no revision
+SQL, relaxes no guard, and is on no deployment path.
+
+**Three shapes, not two, and the third is the one the constant is sized for.**
+`TEARDOWN_ALLOWANCE_MS` is scoped to a batch of *either* phase, and the larger of
+the two is **not** the backfill's: `REPAIR_BATCH_SIZE` divides by a cheaper per-row
+cost, so it exceeds `MAX_BATCH_SIZE` — 1,000 against 646. The revision requires the
+breach path be measured on a transaction of at least
+`max(MAX_BATCH_SIZE, REPAIR_BATCH_SIZE)`, and `derive` enforces exactly that on the
+Phase 2 side (`cancel_probe_batch_20260726.json` carries `rows_locked = 1000`). A
+Phase 3 built only from a backfill cancel therefore breaks the **smaller** of the
+two admitted transactions and leaves the larger unqualified *against the shipped
+code* — which is what this phase originally did.
+
+| | batch (backfill) | **repair** | atomic |
+|---|---|---|---|
+| Target connection | `ghostreplay_accuracy_backfill` | `ghostreplay_accuracy_backfill` | `ghostreplay_alembic_migration` |
+| Statement cancelled (marker) | `guarded_update` | `repair_update` | `soundness_assert` |
+| (a) granted `transactionid` `ExclusiveLock` | ✅ | ✅ | ✅ |
+| (b) held row raises 55P03 under `NOWAIT` | ✅ | ✅ | ✅ |
+| (c) statement identity by marker comment | ✅ | ✅ | ✅ |
+| (d) park advisory lock | ✅ concurrent | ✅ **`objid = 1000`** | ✅ as precondition |
+| Rows dirty at cancel | 646 (full batch) | **1,000 (full batch)** | 1,646 (whole population) |
+| Runner `lock_hold_ms` / `teardown_ms` | 984 / 0.2 | 1034 / 0.1 | n/a / n/a |
+| **`cancel_to_unlock_ms`** | **1.365** | **0.562** | **0.895** |
+| SQLSTATE / `cancel_cause` | 57014 / `user_request` | 57014 / `user_request` | 57014 / `user_request` |
+
+**`max per-batch cancel_to_unlock_ms = 1.365 ms <= TEARDOWN_ALLOWANCE_MS = 6`**, at
+`max(MAX_BATCH_SIZE, REPAIR_BATCH_SIZE)` coverage. `EST_MAX_LOCK_HOLD_MS = 5006` was
+not approached (1,034 ms the worst observed hold).
+
+**Do not read the 3c atomic artifact's stall line as a breach.** It logs
+`observed_atomic_stall_ms = 9955.2` against `projected 5831.9` — because the atomic
+park has no counting guard and so fires on *every* statement, adding `--park` seconds
+to each of the 1,000 single-row repair updates: its repair phase took 9,743 ms against
+1,053 ms in the uninstrumented 3a′. That is the probe inflating its own run, not the
+revision missing a projection. The stall observation of record comes from **3a′**,
+which installs no trigger; this run exists only for the cancel. It is recorded rather
+than dropped because it is exactly the shape of an optimistic-looking artifact a later
+reader could quote in the wrong direction — and stated once, here, because the same
+warning written twice is how the number went stale the first time.
+
+**Gate (d) has to be built differently for the repair phase, and that is the whole
+difficulty of the run.** The backfill applies one `UPDATE … WHERE id = ANY(...)` per
+batch, so a statement-level trigger fires once with the batch already written and
+the lock's *existence* is the evidence. The repair phase applies one **single-row**
+`UPDATE` per candidate inside one transaction, so the same trigger fires
+`REPAIR_BATCH_SIZE` times, each with one more row dirty — parking on the first would
+be a measurement of a **one-row** transaction wearing the label of a 1,000-row one.
+The repair trigger therefore *counts*: a transaction-local `set_config(…, true)`
+increments per `repair_update`, the park happens only on the Nth, and the count is
+published as the advisory lock's **OBJID**, so the prober reads the batch size off
+the lock from outside rather than assuming it. `park_objid = 1000` in the artifact is
+that chain closed.
+
+**The atomic cancel does not substitute for the repair one.** It holds more rows
+(1,646), but atomic teardown is priced by `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` and
+`MARGINED_US_ATOMIC_TEARDOWN_PER_ROW`, and the revision says in as many words that
+`TEARDOWN_ALLOWANCE_MS` "neither covers nor pretends to cover" it. A bigger
+transaction of the wrong kind is not coverage.
+`test_phase3_cancel_evidence_covers_the_largest_admitted_transaction` asserts each
+scope against its own runs, so deleting the repair artifact fails rather than
+passing on the atomic one's row count.
+
+The gap between the two clocks is the point of measuring from outside: on the repair
+batch `teardown_ms` is 0.1 ms and `cancel_to_unlock_ms` is 0.562 ms, so **~0.46 ms —
+roughly four times the rollback itself — is interrupt latency and statement unwind
+that a clock the cancelled process starts cannot contain.** A constant frozen from
+`teardown_ms` would have been under-sized by most of its value.
+
+All three runs rolled back completely: `alembic_version` back at `20260718_01`, CHECK
+not validated, no advisory lock held, no probe trigger left behind, runner logged
+`ERROR` and raised. The atomic run additionally shows `env.py`'s stall probe **firing
+on the rollback path** — confirming the design's claim that reporting from a
+`finally` covers both paths. In atomic mode the cancel landed inside
+`_assert_fail_closed` with `phase=backfill` (646 updated) and `phase=repair` (1,000
+updated) both already complete, so the transaction held the whole population dirty by
+construction, which is why the soundness assertion is the right statement to cancel
+there.
+
+**The repair run is also the one place the committed evidence shows a per-batch
+transaction's work surviving a later failure.** It cancels the repair phase *after*
+the backfill's batch committed, and the copy is left with `n_stale = 0` **durable**
+while `alembic_version` is still `20260718_01` and `n_repair` is back at its full
+1,000 — per-batch commits are not undone by a later abort, and the migration
+transaction's own work is. The backfill cancel is the contrast: it breaks the first
+batch of the run, so `n_stale` is unchanged at 646. Neither demonstrates a *partial*
+batch, which needs a population past one batch (below).
+
+### Two traps this phase hit
+
+Both made a probe silently do nothing while looking like a clean result — the same
+family as §1's three.
+
+1. **`pg_stat_activity` is snapshotted per transaction.**
+   `pgstat_read_current_status()` builds a backend-local copy on first access and
+   holds it until the transaction ends. The first 3c controller polled it from a
+   long-lived transactional connection opened *before* the migration subprocess
+   connected, so it re-read a process table that predated the runner — for the whole
+   run. It reported "gates never held; nothing cancelled" and exited 0 with a
+   perfectly healthy-looking log. Every system-view read now goes through a separate
+   `AUTOCOMMIT` connection; only the `NOWAIT` lock probe, which genuinely needs a
+   transaction, stays transactional.
+2. **The park must fit inside the armed budget, and the repair phase divides it by
+   the row count.** At `park = 2.0 s` the repair batch reached `elapsed_ms=5003` and
+   raised 57014 from the runner's **own** `statement_timeout` rather than from the
+   probe's cancel — a trial that looks like a successful breach and measures the
+   wrong thing. The design's rule (discard and rerun with a shorter park) was
+   applied. In batch mode the park is bounded by `MAX_BATCH_MS`; in **atomic** mode
+   it is bounded by the residual stall budget divided by `N_repair`, because the
+   trigger fires per repair row — 0.005 s here, not 0.4 s.
+
+   In **`repair`** mode the park is effectively unbounded, and it is worth knowing
+   why rather than assuming the 0.4 s was load-bearing: the counting trigger parks
+   exactly ONCE, on the Nth row, and the controller's 2 ms poll observes the gates
+   and cancels almost immediately after. A deliberate 6 s park was re-run to check
+   this and still produced a clean `user_request` cancel at
+   `cancel_to_unlock_ms = 0.608`. The park only has to outlast one poll interval; it
+   is the per-row parks of atomic mode that accumulate into a budget.
+
+   A cancel and a `statement_timeout` breach raise the **same SQLSTATE** and differ
+   only in message text, so this trap cannot be caught by return code or SQLSTATE.
+   Every artifact therefore records `cancel_cause`, read out of the log
+   (`user_request` / `statement_timeout` / `lock_timeout`), and
+   `test_every_phase3_cancel_died_of_the_cancel_and_under_the_allowance` requires
+   `user_request`. Without it a timed-out trial is indistinguishable from a
+   qualified one after the fact.
+
+### What Phase 3 still owes
+
+- **3b (max-batch synthetic) — BLOCKED**, `g-b-fixture-moves-clone`. It needs
+  `3 * MAX_BATCH_SIZE + 1` = 1,939 stale and `3 * REPAIR_BATCH_SIZE + 1` = 3,001
+  repair rows; the fixture caps at 1,646 ended-visible sessions and the harness can
+  only clone `game_sessions` rows *without* `session_moves`. So **no partial batch
+  has been demonstrated for either phase**, and `B_TESTED` / `R_TESTED` stay
+  fixture-bound (§9).
+- **Partial-batch behaviour, specifically.** The repair-batch cancel *does* now show
+  an earlier per-batch transaction's work surviving a later abort (`n_stale = 0`
+  durable while the migration transaction rolled back), so the cross-phase half of
+  "earlier batches stayed committed" is evidenced. What is still missing is a
+  cancelled batch with **committed siblings in its own phase** and a page that is
+  neither full nor empty — both need `N > MAX_BATCH_SIZE`, so both wait on 3b.
+- **Decision 2 (health window) and `T_boot`.** `T_window_prod` for the shape 3a
+  actually took is **~100 ms** (`elapsed_s=0.1`, the `S_scans_total = 2` path), so
+  under branch 2 the requirement `3 * T_window_prod + T_boot <= 0.5 *
+  healthcheckTimeout` is `0.3 + T_boot <= 15 s` at `healthcheckTimeout = 30`
+  (`railway.toml:15`). That leaves `T_boot <= 14.7 s`, and `T_boot` must be measured
+  **on the deployed image**, which cannot be done from here.
+- **The Railway restart-policy rehearsal** (branch 2): whether a healthcheck timeout
+  feeds `restartPolicyType = "on_failure"` / `restartPolicyMaxRetries = 3` is an
+  operational assumption, not a documented guarantee, and must be observed on a
+  disposable service before shipping branch 2.

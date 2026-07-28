@@ -25,6 +25,7 @@ Two things about how these tests reach the code, both deliberate:
 from __future__ import annotations
 
 import logging
+import math
 import pathlib
 import signal
 import threading
@@ -268,6 +269,51 @@ def test_the_compute_watchdog_raise_becomes_the_template_with_no_sqlstate():
 #: convenient. Tests that DO care pass their own.
 _BATCH = mod.DEFAULT_BATCH_SIZE
 
+# --- growth factors large enough to breach, DERIVED from the frozen constants ---
+#
+# Every one of these was a magic number until the 2026-07-27 re-freeze, and the
+# re-freeze is what showed why that was wrong. They were chosen against constants
+# roughly 3x larger (MARGINED_MS_PER_SCAN_STMT was 521, now 171), so when the
+# constants shrank the same factors stopped breaching anything and three "the guard
+# rejects this" tests failed — which is the LUCKY direction. Had they been a little
+# larger they would have kept passing while testing nothing, and a guard whose
+# rejection path is never exercised is indistinguishable from one that cannot
+# reject. Derived from the term each test is about, so they track a re-freeze
+# instead of quietly decoupling from it.
+#
+# Each is a SUFFICIENT factor, not the smallest one: the named term alone exceeds
+# the bound at this factor, so every other term in the projection can only add to
+# the breach. The tests assert admission at g = 1 beside it, which is what keeps
+# "sufficient" from degenerating into "trivially large".
+
+#: One term — ATOMIC_SCANS_UNDER_LOCK session_moves scans — over MAX_WRITER_STALL_MS.
+_G_MOVES_BREACHING_THE_STALL = float(
+    math.ceil(
+        mod.MAX_WRITER_STALL_MS / (mod.ATOMIC_SCANS_UNDER_LOCK * mod.MARGINED_MS_PER_SCAN_STMT)
+    )
+    + 1
+)
+
+#: The scan BUDGET's session_moves term — (2 * MAX_PASSES + 2) scans — over the
+#: revision deadline. A different bound from the stall, so a different factor.
+_G_MOVES_BREACHING_THE_BUDGET = float(
+    math.ceil(
+        mod.REVISION_DEADLINE_S
+        * 1000
+        / ((2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT)
+    )
+    + 1
+)
+
+#: The budget's game_sessions side, through the sweep's RELATION component — the
+#: term that scales with g_sessions and that the session_moves factors never touch.
+_G_SESSIONS_BREACHING_THE_BUDGET = float(
+    math.ceil(
+        mod.REVISION_DEADLINE_S * 1000 / (mod.MAX_PASSES * mod.MARGINED_MS_BACKFILL_SWEEP_SCAN)
+    )
+    + 1
+)
+
 
 def _scan_budget(*, g_moves, g_sessions, n_stale=0, batch_size=_BATCH):
     return mod.assert_runtime_scan_budget(
@@ -369,7 +415,7 @@ def test_atomic_projection_charges_the_session_moves_scan_terms(monkeypatch):
     naive = 1 * mod.MARGINED_MS_PER_ROW
     assert naive < mod.MAX_WRITER_STALL_MS
     with pytest.raises(mod.MigrationError, match="g_moves"):
-        _admit(monkeypatch, n_stale=1, n_repair=0, g_moves=25.0, g_sessions=1.0)
+        _admit(monkeypatch, n_stale=1, n_repair=0, g_moves=_G_MOVES_BREACHING_THE_STALL, g_sessions=1.0)
 
 
 def test_atomic_projection_charges_the_backfills_own_game_sessions_terms(monkeypatch):
@@ -447,7 +493,12 @@ def test_atomic_projection_charges_the_growth_factors_alone(monkeypatch):
     admitted = dict(n_stale=3_000, n_repair=3_000)
     assert _admit(monkeypatch, g_moves=1.0, g_sessions=1.0, **admitted) is mod.ATOMIC_ENV
     with pytest.raises(mod.MigrationError, match="projected writer stall"):
-        _admit(monkeypatch, g_moves=10.0, g_sessions=10.0, **admitted)
+        _admit(
+            monkeypatch,
+            g_moves=_G_MOVES_BREACHING_THE_STALL,
+            g_sessions=_G_MOVES_BREACHING_THE_STALL,
+            **admitted,
+        )
 
 
 def test_atomic_projection_admits_growth_within_the_margin(monkeypatch):
@@ -643,10 +694,10 @@ def test_runtime_scan_budget_raises_when_the_relations_outgrew_their_sizing():
     """Batch mode has no stall projection, so this is the check that catches it."""
     _scan_budget(g_moves=1.0, g_sessions=1.0)  # the frozen shape fits
     with pytest.raises(mod.MigrationError, match="live scan budget"):
-        _scan_budget(g_moves=100.0, g_sessions=1.0)
+        _scan_budget(g_moves=_G_MOVES_BREACHING_THE_BUDGET, g_sessions=1.0)
     with pytest.raises(mod.MigrationError, match="live scan budget"):
         # game_sessions ALONE — the relation the session_moves terms never touch.
-        _scan_budget(g_moves=1.0, g_sessions=2_000.0)
+        _scan_budget(g_moves=1.0, g_sessions=_G_SESSIONS_BREACHING_THE_BUDGET)
 
 
 # ---------------------------------------------------------------------------

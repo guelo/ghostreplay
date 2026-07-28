@@ -30,13 +30,17 @@ import ast
 import json
 import math
 import pathlib
+import re
 from decimal import Decimal
 from fractions import Fraction
 
+import pg_gate_plugin
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
+from scripts import phase3_cancellation_probe as probe
+from scripts import phase3_fixture_guard as probe_guard
 from scripts import size_accuracy_backfill as harness
 
 _BACKEND_DIR = pathlib.Path(__file__).resolve().parent
@@ -1510,14 +1514,31 @@ def test_shipped_sweep_artifact_matches_the_derive_schema():
     assert {p.trials for p in points if p.run == "B"} == {3}
     assert {p.trials for p in points if p.run == "C"} == {7}
 
-    # The copy's basis, exact and agreeing with its own recorded factor.
+    # The copy's basis, exact, RECOMPUTED against the live frozen basis.
     n_copy = harness.sweep_copy_growth_factor(
         doc["dimensions_before"], _FROZEN_BASIS, artifact="shipped"
     )
-    assert n_copy == Fraction(1222, 661)
-    assert float(n_copy) == pytest.approx(
-        float(doc["frozen_basis"]["growth_factor_for_this_copy"])
-    )
+    assert n_copy == Fraction(750, 661)
+
+    # And NOT the factor the artifact carries, which is a different number for a
+    # good reason. `frozen_basis.growth_factor_for_this_copy` is what this copy's
+    # factor was against the basis in force WHEN THE RUN WAS TAKEN — the retired
+    # 6,000 / 10,010,624 — and it is provenance, not an input: `derive` recomputes
+    # from `dimensions_before` against whatever basis it is freezing. The 2026-07-27
+    # re-freeze is what made the two differ, and the evidence was deliberately not
+    # rewritten to match: an artifact records what a host did on a date, and
+    # back-dating its arithmetic to a basis that did not exist yet would destroy the
+    # one property the committed set has.
+    retired_basis = {
+        "total_rows": doc["frozen_basis"]["SIZED_TOTAL_ROWS"],
+        "sessions_bytes": doc["frozen_basis"]["SIZED_SESSIONS_BYTES"],
+    }
+    assert retired_basis == {"total_rows": 6_000, "sessions_bytes": 10_010_624}
+    assert float(
+        harness.sweep_copy_growth_factor(
+            doc["dimensions_before"], retired_basis, artifact="shipped"
+        )
+    ) == pytest.approx(float(doc["frozen_basis"]["growth_factor_for_this_copy"]))
 
     # The record of why a least-squares fit is not a cost model is still there.
     assert "withdrawn" in doc["fits"]
@@ -1538,17 +1559,15 @@ def test_frozen_sweep_model_matches_the_published_envelope():
         harness.MARGIN * fit["b"] * 1000
     )
     # Exact rationals, not floats: the vertex is picked at the last digits.
-    assert fit["a"] == Fraction(16_170_721_723, 677_525_000)
-    assert fit["b"] == Fraction(1_414_007, 8_200_000)
-    # The line TOUCHES its worst points, which is what "least conservative" means
-    # — and one of them is run B's, the only evidence at 4 pages.
+    assert fit["a"] == Fraction(35_354_079_496_799_386_439, 1_498_500_000_000_000_000)
+    assert fit["b"] == Fraction(244_848_624_992_300_761, 1_498_500_000_000_000_000)
+    # The line TOUCHES its worst points, which is what "least conservative" means.
+    # Both are the ENDPOINT copy's, at the two ends of its domain — see
+    # test_the_endpoint_basis_now_determines_the_fit for why that changed at the
+    # re-freeze and why it is a finding rather than a regression.
     active = {(c["run"], c["pages"]) for c in fit["active_constraints"]}
-    assert active == {("B", 4), ("C", 824)}
-    # Over BOTH bases now. The endpoint artifact added ten points, all of them
-    # covered and none of them active, so the objective's total over-charge grows
-    # while the line itself does not move — see
-    # test_the_endpoint_basis_enters_the_fit_without_moving_it.
-    assert fit["sum_overcharge_ms"] == pytest.approx(276.580163, abs=1e-5)
+    assert active == {("", 7), ("", 6_001)}
+    assert fit["sum_overcharge_ms"] == pytest.approx(238.370280, abs=1e-5)
 
 
 def test_frozen_sweep_model_covers_every_retained_measurement():
@@ -1579,11 +1598,20 @@ def test_frozen_sweep_model_covers_every_retained_measurement():
         required = harness.MARGIN * float(p.max_ms)
         assert modelled >= required, (p.artifact, p.run, p.pages, modelled, required)
         slacks.append((modelled - required, p.run, p.pages))
-    # The two tightest points are the ones the LP made active — run C at 824 pages
-    # and run B's outlier at 4 — so the margin is genuinely being spent on
-    # variance rather than on fit error.
+    # The tightest point is one the LP made active — the endpoint copy at 7 pages —
+    # so the margin is genuinely being spent on variance rather than on fit error.
+    # Only the first, not the first two: the OTHER active constraint is the same
+    # copy's 6,001-page endpoint, and at 6,001 pages the ceil() rounding of a
+    # per-page slope is worth 5.1 ms of slack while at 7 pages it is worth 0.2 ms.
+    # An active constraint is tight in the EXACT LP; the shipped integers are
+    # rounded up from it, and that rounding is worth more where the page count is
+    # larger. Ranking the shipped model's slack is therefore not the same as
+    # listing the LP's active set, and asserting it were would pin an accident.
     slacks.sort()
-    assert {(run, pages) for _, run, pages in slacks[:2]} == {("C", 824), ("B", 4)}
+    assert (slacks[0][1], slacks[0][2]) == ("", 7)
+    assert {(c["run"], c["pages"]) for c in harness.solve_sweep_envelope(points)[
+        "active_constraints"
+    ]} == {("", 7), ("", 6_001)}
 
 
 # ---------------------------------------------------------------------------
@@ -1696,23 +1724,60 @@ def test_the_committed_derivation_selects_exactly_the_shipped_sweep_artifacts():
     )
 
 
-def test_the_committed_derivation_is_recorded_not_applied():
-    """A term and the basis it was measured against have to move together.
+#: Every name `--derive` is required to emit under `constants`, BY IDENTITY. This
+#: is the contract between the derivation and the revision, and it is written out
+#: rather than read off `derive`'s return value on purpose: a set derived from the
+#: thing under test cannot notice that thing dropping a member.
+_DERIVED_CONSTANT_NAMES = (
+    "SIZED_TOTAL_ROWS",
+    "SIZED_SESSIONS_BYTES",
+    "SIZED_M_TOTAL",
+    "SIZED_MOVES_BYTES",
+    "MARGINED_MS_PER_ROW",
+    "MARGINED_MS_PER_REPAIR_ROW",
+    "MARGINED_MS_PER_SCAN_STMT",
+    "MARGINED_MS_COVERAGE_ASSERT",
+    "MARGINED_MS_BACKFILL_REMAINING",
+    "MARGINED_MS_BACKFILL_SWEEP_SCAN",
+    "MARGINED_US_BACKFILL_SWEEP_PER_PAGE",
+    "SCAN_STMT_TIMEOUT_MS",
+    "MAX_SINGLE_SESSION_COMPUTE_MS",
+    "TEARDOWN_ALLOWANCE_MS",
+    "MARGINED_MS_ATOMIC_TEARDOWN_FIXED",
+    "MARGINED_US_ATOMIC_TEARDOWN_PER_ROW",
+    "MAX_BATCH_SIZE",
+    "DEFAULT_BATCH_SIZE",
+    "REPAIR_BATCH_SIZE",
+    "EST_MAX_LOCK_HOLD_MS",
+)
 
-    This run is a production restore on PostgreSQL 18.4; the shipped constants
-    were frozen on 15.18 against a 6,000-row synthesized snapshot. The two tables
-    are NOT alternative readings of one quantity, and the guard against reading
-    them as such is that the derived basis is traceable to an artifact rather than
-    to prose: `SIZED_*` here is the atomic full point's own post-synthesis
-    reading, and it is not the shipped one.
 
-    The sweep pair makes the point sharpest, because it is the one term both
-    tables contain and the same LP produces both. Solved in frozen-basis
-    coordinates, its coefficients are a function of the basis declared — so
-    `derive` returns 71 / 491 µs at THIS run's 4,184 rows / 6,144,000 bytes and
-    the shipped 72 / 518 µs at 6,000 / 10,010,624, from the very same two sweep
-    artifacts. Copying one row of this table onto the other basis is the error the
-    arrangement is built to prevent.
+def test_the_committed_derivation_is_applied_whole_with_the_basis_it_arrived_with():
+    """A term and the basis it was measured against have to move together — APPLIED.
+
+    This test is the inverse of the one it replaces. Until 2026-07-27 it asserted
+    that the committed 18.4 derivation was RECORDED and not applied, and that the
+    shipped literals were still the 15.18 ones: `SIZED_TOTAL_ROWS == 4_184 !=
+    mod.SIZED_TOTAL_ROWS`. `g-b-sizing-harness`'s Phase 2 re-freeze applied it, so
+    that `!=` became false by design and the test had to be rewritten rather than
+    repaired. The claim it makes now is the stronger one and the one the whole
+    arrangement was built to reach: EVERY shipped literal equals what `--derive`
+    returns over evidence committed to this repo, and they are all from the SAME
+    derivation.
+
+    Whole, not row by row, and that is the entire point. The failure this guards is
+    not a wrong number, it is a MIXED basis — a scan term taken from one run beside
+    a dimension from another, each defensible alone and jointly describing no
+    database that ever existed. `docs/sizing/derived_20260726.json` is one output of
+    one `--derive` over one fixture state, so applying it whole is the only
+    application that cannot be mixed, and comparing the whole constants block is the
+    only comparison that notices a row nobody thought to name.
+
+    The sweep pair still makes the point sharpest, because it is the one term whose
+    two published values came from the SAME two artifacts and the same LP: 72 / 518
+    at 6,000 / 10,010,624 and 71 / 491 at 4,184 / 6,144,000, no new measurement
+    between them. What ships now is the second, and `test_frozen_sweep_model_
+    matches_the_published_envelope` re-derives it from the artifacts on every run.
     """
     out = harness.derive(_committed_measurements(), None)
     consts, basis = out["constants"], out["scaling"]["frozen_basis"]
@@ -1726,24 +1791,65 @@ def test_the_committed_derivation_is_recorded_not_applied():
         k: int(atomic_full["dimensions_before"][k]) for k in harness.DIMENSION_KEYS
     }
 
-    # Recorded, not applied — asserted so that applying a row without its basis
-    # cannot pass quietly.
-    assert consts["SIZED_TOTAL_ROWS"] == 4_184 != mod.SIZED_TOTAL_ROWS
-    assert consts["SIZED_SESSIONS_BYTES"] == 6_144_000 != mod.SIZED_SESSIONS_BYTES
+    # The basis, applied — the atomic full point's own post-synthesis reading, which
+    # is what its statements were timed against.
+    assert (mod.SIZED_TOTAL_ROWS, mod.SIZED_SESSIONS_BYTES) == (4_184, 6_144_000)
+    assert (mod.SIZED_M_TOTAL, mod.SIZED_MOVES_BYTES) == (130_676, 45_817_856)
+    assert basis["dimensions"] == {
+        "total_rows": mod.SIZED_TOTAL_ROWS,
+        "sessions_bytes": mod.SIZED_SESSIONS_BYTES,
+        "m_total": mod.SIZED_M_TOTAL,
+        "moves_bytes": mod.SIZED_MOVES_BYTES,
+    }
 
-    # The same two artifacts, the same LP, two bases. Neither pair is a correction
-    # of the other.
-    assert (
-        consts["MARGINED_MS_BACKFILL_SWEEP_SCAN"],
-        consts["MARGINED_US_BACKFILL_SWEEP_PER_PAGE"],
-    ) == (71, 491)
-    at_shipped_basis = harness.solve_sweep_envelope(_shipped_sweep_points())
-    assert mod.MARGINED_MS_BACKFILL_SWEEP_SCAN == math.ceil(
-        harness.MARGIN * at_shipped_basis["a"]
-    ) == 72
-    assert mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE == math.ceil(
-        harness.MARGIN * at_shipped_basis["b"] * 1000
-    ) == 518
+    # THE KEY SET FIRST, and pinned to a literal rather than to whatever `derive`
+    # happened to return. Iterating `consts` alone is FORWARD-ONLY: it compares the
+    # names the derivation emits today, so a term that disappears from `derive`
+    # — and from the regenerated JSON with it — stops being compared, silently, and
+    # the module literal it used to pin is then free to drift. Nothing downstream
+    # notices, because `test_measured_constants_are_declared_and_positive` only
+    # asserts the module's literals are declared and positive; it does not know
+    # what any of them should equal. So a dropped name has to fail HERE.
+    assert set(consts) == set(_DERIVED_CONSTANT_NAMES), sorted(
+        set(consts) ^ set(_DERIVED_CONSTANT_NAMES)
+    )
+
+    # And every term with it, compared as the WHOLE block. A derived name with no
+    # counterpart on the module is a derivation that grew a constant the revision
+    # never adopted.
+    derived = {name: getattr(mod, name) for name in _DERIVED_CONSTANT_NAMES}
+    assert derived == consts, {
+        k: (consts[k], derived[k]) for k in consts if consts[k] != derived[k]
+    }
+
+    # B_TESTED / R_TESTED are NOT in `constants` — they live under `batch_sizing`,
+    # because they are the sizing DECISION's inputs rather than the revision's
+    # admission arithmetic. The whole-block comparison above therefore cannot reach
+    # them, and until they are bound explicitly they are the two shipped literals
+    # with no committed counterpart at all. `min(formula, tested)` is what makes
+    # `MAX_BATCH_SIZE` mean "a size sizing demonstrated", so an unpinned `B_TESTED`
+    # is exactly the term that could raise the admitted batch past what any run
+    # ever exercised.
+    assert (mod.B_TESTED, mod.R_TESTED) == (
+        out["batch_sizing"]["B_tested"],
+        out["batch_sizing"]["R_tested"],
+    )
+    assert (out["batch_sizing"]["B_bound_by"], out["batch_sizing"]["R_bound_by"]) == (
+        "tested",
+        "tested",
+    ), "both batch sizes are fixture-bound, not deadline-bound (g-b-fixture-moves-clone)"
+
+    # Spelled out for the rows a reader will actually look for, so a diff of this
+    # file shows what the re-freeze moved rather than only that it moved something.
+    assert (mod.MARGINED_MS_BACKFILL_SWEEP_SCAN, mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE) == (
+        71,
+        491,
+    )
+    assert (mod.MARGINED_MS_PER_SCAN_STMT, mod.SCAN_STMT_TIMEOUT_MS) == (171, 171)
+    assert (mod.MARGINED_MS_COVERAGE_ASSERT, mod.MARGINED_MS_BACKFILL_REMAINING) == (4, 4)
+    assert (mod.MAX_BATCH_SIZE, mod.REPAIR_BATCH_SIZE) == (646, 1_000)
+    assert (mod.B_TESTED, mod.R_TESTED) == (646, 1_000)
+    assert mod.TEARDOWN_ALLOWANCE_MS == 6 and mod.EST_MAX_LOCK_HOLD_MS == 5_006
 
 
 #: The kinds that run a scan block, and so the cohort every `game_sessions` scan
@@ -1834,23 +1940,25 @@ def _demanded(points: list[tuple[str, Fraction, Fraction]]) -> dict[str, int]:
 
 
 def test_frozen_backfill_remaining_covers_every_committed_measurement():
-    """`MARGINED_MS_BACKFILL_REMAINING = 6` is MEASURED, and it is exactly tight.
+    """`MARGINED_MS_BACKFILL_REMAINING = 4` is MEASURED, and it is exactly tight.
 
     The term shipped PROVISIONAL: the run that produced every other constant
     predates the discovery that the backfill's own `game_sessions` work is
     relation-scaled, so it never timed `BACKFILL_REMAINING_SQL` and the literal was
-    inferred from `COVERAGE_ASSERT_SQL` — the same shape against the same relation
-    — at `ceil(3 * 1.74) = 6`. `g-b-size-derive-backfill-terms` timed it directly
-    on PostgreSQL 18.4, and this is that measurement carried as a gate rather than
-    as a table: six points, each divided onto the frozen basis by its own copy's
-    `N_copy`, all covered by the shipped literal.
+    inferred from `COVERAGE_ASSERT_SQL` — the same shape against the same relation.
+    `g-b-size-derive-backfill-terms` timed it directly on PostgreSQL 18.4, and this
+    is that measurement carried as a gate rather than as a table: six points, each
+    divided onto the frozen basis by its own copy's `N_copy`, all covered by the
+    shipped literal.
 
-    The inference landed on the right integer. That is the interesting part and the
-    reason this asserts EQUALITY at the worst point rather than mere coverage: the
-    worst normalized measurement demands exactly 6, so the frozen value has no
-    integer headroom at all. It is qualified, not comfortable. A future run that
-    comes in 1.7% hotter at the same basis needs 7, and this fails rather than
-    letting a term that is one rounding step from under-charging pass as measured.
+    The inference landed on the right integer at the 15.18 basis (6) and lands on
+    the right integer at the re-frozen 18.4 basis (4), which is why this asserts
+    EQUALITY at the worst point rather than mere coverage. What the re-freeze
+    changed is the amount of room behind that equality: at the retired basis the
+    worst point sat 1.7% below the rounding boundary, and here it sits 9.5% below
+    it, because the copy the statement ran on IS the basis now and its
+    `N_copy` is 1 rather than 1.629. The term that is one rounding step from
+    under-charging is no longer this one — see the sibling test.
     """
     points = _committed_backfill_remaining_points()
     demanded = _demanded(points)
@@ -1859,85 +1967,87 @@ def test_frozen_backfill_remaining_covers_every_committed_measurement():
 
     worst_name, worst_ms, worst_n_copy = max(points, key=lambda p: p[1] * p[2])
     assert worst_name == "docs/sizing/atomic_full_20260726.json"
-    assert demanded[worst_name] == mod.MARGINED_MS_BACKFILL_REMAINING == 6
+    assert demanded[worst_name] == mod.MARGINED_MS_BACKFILL_REMAINING == 4
 
-    # `ceil(3 * x) <= 6` iff `x <= 2`, so 2 ms at the frozen basis is the rounding
-    # boundary the literal sits against. Exact rationals THROUGHOUT, because the
-    # whole claim is about where a value falls relative to that boundary: an
-    # approximate comparison here would admit exactly the evidence drift the
-    # tightness is asserted against, on the side where 1.7% of headroom lives.
+    # `ceil(3 * x) <= 4` iff `x <= 4/3`, so 1.333… ms at the frozen basis is the
+    # rounding boundary the literal sits against. Exact rationals THROUGHOUT,
+    # because the whole claim is about where a value falls relative to that
+    # boundary: an approximate comparison would admit exactly the evidence drift
+    # the tightness is asserted against.
     normalized = worst_ms * worst_n_copy
-    assert normalized < Fraction(2)
-    assert normalized == Fraction(368_802_052_573_300_879, 187_500_000_000_000_000)  # ~1.966944
-    assert worst_n_copy == Fraction(10_010_624, 6_144_000)
+    assert normalized < Fraction(4, 3)
+    assert normalized == Fraction(603_604_014_031_589, 500_000_000_000_000)  # ~1.207208
+    # This copy IS the frozen basis, so it is carried by nothing. That is the whole
+    # difference between the two readings of this term, and pinning it as an
+    # equality with 1 keeps a future re-basing from passing here unnoticed.
+    assert worst_n_copy == Fraction(1)
 
 
-def test_frozen_coverage_assert_under_charges_its_own_measurement():
-    """`MARGINED_MS_COVERAGE_ASSERT = 6` does NOT survive that check — asserted.
+def test_frozen_coverage_assert_now_covers_its_own_measurement():
+    """`MARGINED_MS_COVERAGE_ASSERT` survives the sibling's check — CLOSED, via (a).
 
-    The deliberate inverse of the test above, and it is green because the breach is
-    real (`g-b-coverage-assert-18`). The same pairing over the same six artifacts
-    puts `COVERAGE_ASSERT_SQL` — the statement `MARGINED_MS_BACKFILL_REMAINING` was
-    inferred FROM, the same shape against the same relation — at 2.104080 ms on the
-    frozen basis, which demands 7. The borrowed term qualifies and the SOURCE term
-    does not: on 18.4 the source statement costs slightly more than the value frozen
-    from it on 15.18 allows. Three of the six points demand 7, so this is not one
-    outlier copy.
+    This asserted the opposite until 2026-07-27, and it was green because the breach
+    was real (`g-b-coverage-assert-18`): at the 15.18 basis the same pairing over
+    the same six artifacts put `COVERAGE_ASSERT_SQL` at 2.104080 ms, demanding 7
+    against a shipped 6, with three of the six points demanding 7. The term
+    `MARGINED_MS_BACKFILL_REMAINING` was INFERRED FROM under-charged itself while
+    the borrowed term qualified.
 
-    A breach is ASSERTED rather than left to prose because the resolution moves
-    `SIZED_*` too. Re-freezing §3's literals against the 18.4 basis puts this term
-    at 4 (`docs/release_b_runbook.md` §7/§8) — so a re-freeze that carried the
-    shipped 6 across by inheritance would land it against a basis where nothing
-    demands more than 4, over-charging silently, with the record of why it was 6
-    closed as resolved. Both sides are pinned here, so either one moving fails, and
-    the bead gets closed by someone looking at it rather than by drift. The two
-    legitimate exits are (a) re-freeze the literals and `SIZED_*` together from one
-    committed set — Phase 3, `g-b-sizing-harness` — or (b) if that slips, patch the
-    single literal to 7 at the shipped basis and label it a patch, not a
-    qualification. Both edit this test on purpose.
+    The old docstring named two legitimate exits: (a) re-freeze the literals and
+    `SIZED_*` together from one committed set, or (b) patch the single literal to 7
+    at the shipped basis and call it a patch. `g-b-sizing-harness`'s Phase 2
+    re-freeze took (a). At the 18.4 basis the statement's own copy IS the basis, so
+    its 1.291375 ms is carried by nothing and demands `ceil(3 x 1.291375) = 4` —
+    which is what ships. Nothing about the measurement changed; the basis did.
 
-    What keeps it a qualification defect and not a live hazard is the last group:
-    `SCAN_STMT_TIMEOUT_MS` is `max(521, …)` and covers the demand with room, so no
-    statement is armed below its own measured cost and there is no self-cancellation
-    path — and the import-time budget still fits the deadline at 7, which is what
-    makes exit (b) available without re-running anything.
+    Why the inverted test is kept rather than deleted. The finding it recorded was
+    never "6 is too small" — it was that a term and its basis have to move together,
+    demonstrated on the one term where inheriting across a re-basing would have been
+    wrong in BOTH directions (7 demanded at the old basis, 4 at the new). Deleting
+    it would leave the re-freeze's most load-bearing case unguarded, and a future
+    re-basing that carried 4 across onto a hotter basis would pass silently. So the
+    pairing stays, pointed at the state that now holds.
+
+    The tightness moved with it, and that is the live fact worth keeping: this term,
+    not its sibling, is now the one nearest its rounding boundary — 3.1% below,
+    against the sibling's 9.5%.
     """
     points = _committed_coverage_assert_points()
     demanded = _demanded(points)
     breaching = sorted(n for n, ms in demanded.items() if ms > mod.MARGINED_MS_COVERAGE_ASSERT)
-    assert breaching == [
-        "docs/sizing/atomic_full_20260726.json",
-        "docs/sizing/batch_b100_r200_20260726.json",
-        "docs/sizing/batch_b500_r1000_20260726.json",
-    ]
+    assert breaching == []
+    # Every one of the six, not merely the worst — the old finding was that three of
+    # them breached, so "none of them does" is the statement that retires it.
+    assert set(demanded.values()) == {mod.MARGINED_MS_COVERAGE_ASSERT} == {4}
 
     worst_name, worst_ms, worst_n_copy = max(points, key=lambda p: p[1] * p[2])
     assert worst_name == "docs/sizing/atomic_full_20260726.json"
-    # Short by exactly one rounding step, and pinned as such: an evidence change
-    # that widened the gap would be a different finding than the one filed.
-    assert demanded[worst_name] == 7 == mod.MARGINED_MS_COVERAGE_ASSERT + 1
+    assert demanded[worst_name] == mod.MARGINED_MS_COVERAGE_ASSERT == 4
 
-    # `ceil(3 * x) <= 6` iff `x <= 2` — the same boundary the sibling term sits
-    # 1.7% under, this one sits 5.2% over. Exact rationals, same reason: the value
-    # is pinned as the rational the committed artifact actually carries, not as a
-    # float within a tolerance, so evidence drift is a failure rather than a round.
+    # `ceil(3 * x) <= 4` iff `x <= 4/3` — the boundary the sibling term sits 9.5%
+    # under and this one sits 3.1% under. Exact rationals, same reason as there: the
+    # value is pinned as the rational the committed artifact actually carries, not
+    # as a float within a tolerance, so evidence drift is a failure rather than a
+    # round.
     normalized = worst_ms * worst_n_copy
-    assert normalized > Fraction(2)
-    assert normalized == Fraction(263_010_034_939_118_987, 125_000_000_000_000_000)  # ~2.104080
-    assert worst_n_copy == Fraction(10_010_624, 6_144_000)
+    assert normalized < Fraction(4, 3)
+    assert normalized == Fraction(1_291_374_966_967_851, 1_000_000_000_000_000)  # ~1.291375
+    assert worst_n_copy == Fraction(1)
 
-    # Why this is a qualification defect and not a live hazard. Both halves matter:
-    # the armed timeout covers the term's own demand, so the under-charge cannot
-    # cancel the statement it prices, and the whole cost of the conservative patch
-    # is one millisecond per `G_sessions` in a budget with 814 s of headroom.
+    # This term is now the tighter of the two against the same boundary, which is
+    # the fact a future re-measure has to be checked against. Asserted as an
+    # ordering rather than as two percentages so it cannot drift into agreeing with
+    # a stale comment.
+    sibling_worst = max(_committed_backfill_remaining_points(), key=lambda p: p[1] * p[2])
+    assert normalized > sibling_worst[1] * sibling_worst[2]
+
+    # The armed timeout still covers the term's own demand by a wide margin, so no
+    # statement is armed below its measured cost and there is no self-cancellation
+    # path — the property that kept the old breach a qualification defect rather
+    # than a live hazard, and that has to keep holding after the re-freeze moved
+    # both numbers.
     assert mod.SCAN_STMT_TIMEOUT_MS >= demanded[worst_name]
-    patched = mod._scan_budget_ms(
-        mod.MARGINED_MS_PER_SCAN_STMT,
-        demanded[worst_name],
-        pages=mod.IMPORT_WORST_CASE_SWEEP_PAGES,
-    )
-    assert patched - _budget() == 1
-    assert patched < mod.REVISION_DEADLINE_S * 1000
+    assert _budget() < mod.REVISION_DEADLINE_S * 1000
 
 
 def test_docs_sizing_holds_measurement_artifacts_named_for_their_kind():
@@ -1995,9 +2105,18 @@ def test_measured_sweep_domain_reaches_the_page_count_the_budget_charges():
 
     The page count is the whole claim. A domain that stops short of the budget's
     own worst case cannot bound it, whichever direction the prose leans.
+
+    The relation is ``>=``, not ``==``, and the re-freeze is why it has to be. The
+    two were equal by construction when the endpoint run was commissioned: it was
+    aimed at ``IMPORT_WORST_CASE_SWEEP_PAGES``, which was 6,001 at the 6,000-row
+    basis. Re-freezing ``SIZED_TOTAL_ROWS`` to 4,184 moved the charged worst case
+    down to 4,185 while the measured domain stayed where the host actually walked
+    it, at 6,001. Measuring PAST the charged endpoint is the safe direction and the
+    only one an equality would have rejected.
     """
     measured_max_pages = max(p.pages for p in _shipped_sweep_points())
-    assert measured_max_pages == mod.IMPORT_WORST_CASE_SWEEP_PAGES == 6_001
+    assert measured_max_pages == 6_001
+    assert measured_max_pages >= mod.IMPORT_WORST_CASE_SWEEP_PAGES == 4_185
 
     source = pathlib.Path(mod.__file__).read_text()
     tree = ast.parse(source)
@@ -2011,24 +2130,38 @@ def test_measured_sweep_domain_reaches_the_page_count_the_budget_charges():
     # The word survives only in the past tense, describing how the pair was frozen
     # and what closed the gap. What must NOT survive is the live declaration.
     assert "EXTRAPOLATION, NAMED AS ONE" not in declaration
-    assert "MEASURED TO THE ENDPOINT" in declaration
+    assert "MEASURED PAST THE ENDPOINT" in declaration
+    assert f"{mod.IMPORT_WORST_CASE_SWEEP_PAGES:,}" in declaration
     assert isinstance(tree, ast.Module)  # the source parsed; the split is over real code
 
 
-def test_the_endpoint_basis_enters_the_fit_without_moving_it():
-    """The second basis is a MEASUREMENT, not a re-basing of the first.
+def test_the_endpoint_basis_now_determines_the_fit():
+    """The second basis is a MEASUREMENT, not a re-basing of the first — and at the
+    re-frozen basis it is the one that BINDS.
 
     ``gr_p2_sweep6000`` is its own copy with its own ``dimensions_before``, and its
     points enter the same LP through their own ``N_copy`` alongside
-    ``gr_p1_sweep``'s. Nothing is rebased, dropped or merged — which is exactly
-    what makes "the fit did not move" a finding rather than a construction.
+    ``gr_p1_sweep``'s. Nothing is rebased, dropped or merged.
 
-    Its ``N_copy`` is the clamp: the copy is LARGER than the frozen basis on both
-    axes (8,538 rows / 14,008,320 bytes against 6,000 / 10,010,624), so
-    ``max(1, ...)`` binds at 1 and its timings enter undiscounted. That is what
-    makes it admissible where the fixture-scale linearity probe is not — a copy
-    whose relation sits far BELOW the basis would have its scan coefficient
-    multiplied by a factor with no measurement behind it.
+    Its ``N_copy`` is the clamp, and the clamp is why the roles swapped. The copy is
+    LARGER than the frozen basis on both axes — 8,538 rows / 14,008,320 bytes — so
+    ``max(1, ...)`` binds at 1 and its timings enter undiscounted, at BOTH the
+    retired basis and this one. That makes its demand on ``a`` BASIS-INDEPENDENT:
+    23.592979 ms, i.e. 71, either way. ``gr_p1_sweep``'s is not — its factor fell
+    from 1.848714 to 1.134644 when the basis moved, and a baseline-only fit falls
+    with it, from 23.867343 (72) to 14.648533 (44).
+
+    So at the retired basis the baseline demanded MORE than the endpoint and the
+    joint fit was the baseline's line, with the endpoint covered and inactive; at
+    this one the baseline demands less and the joint fit IS the endpoint's line.
+    This test used to be called ``…enters_the_fit_without_moving_it`` and asserted
+    the first arrangement. Same two artifacts, same solver, no new measurement — the
+    only thing that changed is the basis, which is the rule this whole file is built
+    around, observed rather than argued.
+
+    It also retires the reading that the endpoint run merely confirmed an
+    extrapolation. It is now load-bearing: drop it and the frozen pair drops to
+    44 / 518, below 3x what a host produced at 6,001 pages.
     """
     # The two fields `derive` keys on, pinned at the DOCUMENT rather than inferred
     # from the points it yields. `kind` is how `derive` selects a sweep input;
@@ -2057,16 +2190,31 @@ def test_the_endpoint_basis_enters_the_fit_without_moving_it():
     baseline = by_artifact[_SWEEP_ARTIFACT.name]
 
     assert {p.n_copy for p in endpoint} == {Fraction(1)}
-    assert {p.n_copy for p in baseline} == {Fraction(1222, 661)}
+    assert {p.n_copy for p in baseline} == {Fraction(750, 661)}
     assert all(p.steers and p.trials >= harness.MIN_SWEEP_TRIALS for p in endpoint)
-    assert max(p.pages for p in endpoint) == mod.IMPORT_WORST_CASE_SWEEP_PAGES
+    assert max(p.pages for p in endpoint) > mod.IMPORT_WORST_CASE_SWEEP_PAGES
 
-    # The same vertex, from the baseline alone and from both bases together.
+    # The joint vertex is the ENDPOINT's, and the baseline no longer reaches it.
     alone = harness.solve_sweep_envelope(baseline)
+    endpoint_alone = harness.solve_sweep_envelope(endpoint)
     both = harness.solve_sweep_envelope(baseline + endpoint)
-    assert (both["a"], both["b"]) == (alone["a"], alone["b"])
+    assert (both["a"], both["b"]) == (endpoint_alone["a"], endpoint_alone["b"])
+    assert (both["a"], both["b"]) != (alone["a"], alone["b"])
+    assert both["a"] > alone["a"]
     assert both["coverage_points"] == 34 and both["objective_points"] == 22
     assert both["max_pages"] == 6_001
+
+    # What the two fits are worth as SHIPPED integers, which is the form the claim
+    # "load-bearing" has to be made in — a vertex that moved by less than a
+    # millisecond would round to the same pair and change nothing.
+    assert (
+        math.ceil(harness.MARGIN * both["a"]),
+        math.ceil(harness.MARGIN * both["b"] * 1000),
+    ) == (mod.MARGINED_MS_BACKFILL_SWEEP_SCAN, mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE) == (71, 491)
+    assert (
+        math.ceil(harness.MARGIN * alone["a"]),
+        math.ceil(harness.MARGIN * alone["b"] * 1000),
+    ) == (44, 518)
 
     # And the frozen pair covers 3x the endpoint's own maximum, which is the claim
     # the whole bead exists to make: 6,001 pages priced by measurement.
@@ -2078,26 +2226,45 @@ def test_the_endpoint_basis_enters_the_fit_without_moving_it():
     assert modelled >= harness.MARGIN * float(worst.max_ms)
 
 
-def test_legacy_maxima_constrain_the_fit_without_steering_it():
+def test_legacy_maxima_enter_the_coverage_set_without_steering_the_fit():
     """A published maximum is a measurement, and a bound has to cover it.
 
-    Trial count decides whether a point may STEER a fit, never whether the bound
-    may sit below a number a host actually produced. Run B's 3-trial points carry
-    no retained trials, so they are accepted, land in the coverage set only — and
-    ``(4 pages, 13.60 ms)`` is nonetheless an ACTIVE constraint of the shipped
-    solution, and the only evidence at that page count.
+    Trial count decides whether a point may STEER a fit, never whether the bound may
+    sit below a number a host actually produced. Run B's 3-trial points carry no
+    retained trials, so they are accepted and land in the COVERAGE set only: 34
+    coverage constraints against 22 in the objective, the difference being exactly
+    run B's twelve.
+
+    At the retired basis run B also happened to BIND — ``(4 pages, 13.60 ms)`` was an
+    active constraint of the solution, and this test asserted that. It no longer is,
+    and nothing about run B changed. Its copy's ``N_copy`` fell from 1.848714 to
+    1.134644 at the re-freeze, so every demand it makes on ``a`` fell by the same
+    factor, while the endpoint copy's stayed clamped at 1. The distinction the test
+    exists for is unaffected: coverage-only points are still CHECKED, and a bound
+    that dropped below one would still fail — see
+    ``test_frozen_sweep_model_covers_every_retained_measurement``, which walks every
+    point of every artifact including these.
     """
     points = _shipped_sweep_points()
     with_b = harness.solve_sweep_envelope(points)
     assert with_b["coverage_points"] == 34
     assert with_b["objective_points"] == 22
-    assert any(c["run"] == "B" and not c["steers"] for c in with_b["active_constraints"])
+    b_points = [p for p in points if p.run == "B"]
+    assert len(b_points) == 12 and not any(p.steers for p in b_points)
 
-    # Dropping run B changes the solution — the proof that it constrains rather
-    # than decorates.
+    # Not active, and not binding: dropping them leaves the vertex where it was.
+    assert not any(c["run"] == "B" for c in with_b["active_constraints"])
     without_b = harness.solve_sweep_envelope([p for p in points if p.run != "B"])
-    assert (without_b["a"], without_b["b"]) != (with_b["a"], with_b["b"])
-    assert without_b["a"] < with_b["a"]
+    assert (without_b["a"], without_b["b"]) == (with_b["a"], with_b["b"])
+
+    # Still covered, which is the part that was never about steering. Every run-B
+    # maximum sits under the shipped model carried back onto run B's own copy.
+    for p in b_points:
+        modelled = (
+            mod.MARGINED_MS_BACKFILL_SWEEP_SCAN / float(p.n_copy)
+            + mod.MARGINED_US_BACKFILL_SWEEP_PER_PAGE * p.pages / 1000
+        )
+        assert modelled >= harness.MARGIN * float(p.max_ms), (p.pages, modelled)
 
 
 def test_under_trialled_objective_run_is_refused():
@@ -2521,9 +2688,16 @@ def test_sweep_batch_size_list_is_deduplicated_and_range_checked():
 
     Measuring one point twice would enter the fit as two constraints at the same
     page count, double-weighting one host reading in the objective.
+
+    Written against ``mod.MAX_BATCH_SIZE`` rather than against its value. It was
+    spelled ``1_000`` here until the 2026-07-27 re-freeze moved it to 646, at which
+    point the literal made this test fail for a reason that had nothing to do with
+    deduplication — and the range check below would have started rejecting its own
+    fixture.
     """
-    assert mod.MAX_BATCH_SIZE == 1_000
-    assert harness.resolve_sweep_batch_sizes([1000, 1, mod.MAX_BATCH_SIZE, 1]) == [1, 1000]
+    assert harness.resolve_sweep_batch_sizes(
+        [mod.MAX_BATCH_SIZE, 1, mod.MAX_BATCH_SIZE, 1]
+    ) == [1, mod.MAX_BATCH_SIZE]
     assert harness.resolve_sweep_batch_sizes(None) == sorted(
         set(harness.DEFAULT_SWEEP_BATCH_SIZES)
     )
@@ -2643,3 +2817,974 @@ def test_repair_synthesis_floor_falls_back_to_the_whole_eligible_set():
     harness.check_repair_sample_size(40, 40)
     with pytest.raises(SystemExit, match="below the contract floor of 40"):
         harness.check_repair_sample_size(39, 40)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — QUALIFICATION evidence
+#
+# Phase 2 derives the constants; Phase 3 runs the SHIPPED revision with them
+# armed and breaks it on purpose. The artifacts under docs/sizing/phase3/ are the
+# machine-readable record of those runs, taken by
+# `scripts/phase3_cancellation_probe.py`. They are committed for the same reason
+# the measurement set is: a qualification recorded only as prose cannot be
+# re-checked, and the two silent-success failure modes this probe hit — a
+# transaction-snapshotted `pg_stat_activity` that polls a process table from
+# before the runner existed, and a park that outlives its own batch budget so the
+# run dies of `statement_timeout` under the same SQLSTATE a cancel raises — both
+# look exactly like clean results from the outside.
+# ---------------------------------------------------------------------------
+
+_PHASE3_DIR = _SIZING_DIR / "phase3"
+
+#: The committed qualification runs, BY IDENTITY and by what each one is FOR.
+_PHASE3_RUNS = {
+    "run_3a_production_shaped_20260727.json": "none",
+    "run_3a_populated_20260727.json": "none",
+    "run_3c_cancel_backfill_batch_20260727.json": "batch",
+    "run_3c_cancel_repair_batch_20260727.json": "repair",
+    "run_3c_cancel_atomic_20260727.json": "atomic",
+}
+
+
+def _phase3(name: str) -> dict:
+    return json.loads((_PHASE3_DIR / name).read_text())
+
+
+def _phase3_cancels() -> list[tuple[str, dict]]:
+    return [(n, _phase3(n)) for n, m in _PHASE3_RUNS.items() if m != "none"]
+
+
+def test_committed_phase3_runs_are_the_named_set_at_the_shipped_constants():
+    """The evidence is exactly these runs, and they are evidence about THESE constants.
+
+    Both halves matter. Selecting by glob would let a stray artifact join the
+    cohort and satisfy a coverage check that no qualified run actually satisfies.
+    And a qualification run is only evidence about the constants it ran against —
+    every artifact records the four that bound its transactions, so raising
+    `REPAIR_BATCH_SIZE` without re-running Phase 3 fails here rather than leaving a
+    stale JSON quietly vouching for a batch size nothing ever cancelled.
+    """
+    assert {p.name for p in _PHASE3_DIR.glob("*.json")} == set(_PHASE3_RUNS)
+    for name, expected_mode in _PHASE3_RUNS.items():
+        doc = _phase3(name)
+        assert (doc["kind"], doc["mode"], doc["revision"]) == ("phase3_run", expected_mode, "20260719_01")
+        assert doc["valid"] is True and doc["invalid_reasons"] == [], name
+        assert doc["down_revision"] == mod.down_revision, name
+        # The database each run RESOLVED to, which is what the probe records — with
+        # `--url` the name typed on the command line need not be the one measured.
+        # It came through the fence, so it is a disposable copy by construction.
+        assert probe_guard.DISPOSABLE_RE.fullmatch(doc["database"]), (name, doc["database"])
+        assert doc["constants"] == {
+            "MAX_BATCH_SIZE": mod.MAX_BATCH_SIZE,
+            "REPAIR_BATCH_SIZE": mod.REPAIR_BATCH_SIZE,
+            "TEARDOWN_ALLOWANCE_MS": mod.TEARDOWN_ALLOWANCE_MS,
+            "MAX_WRITER_STALL_MS": mod.MAX_WRITER_STALL_MS,
+        }, name
+        # One frozen state across all five, so the runs compose — and that has to
+        # cover EVERY binding, not the file-level ones only. A cancel run taken
+        # under a different synthesis or a different ANALYZE would otherwise sit in
+        # the cohort agreeing on the revision and disagreeing on the fixture that
+        # produced its numbers, which is exactly the composition this cohort claims.
+        reference = _phase3("run_3a_populated_20260727.json")
+        for key in ("frozen_files", "frozen_fingerprints", "frozen_symbols"):
+            assert doc[key] == reference[key], (name, key)
+
+
+def test_phase3_evidence_is_invalidated_by_a_behavioural_edit_to_what_it_ran():
+    """The recorded fingerprints are compared to the LIVE files, or they mean nothing.
+
+    Agreeing with each other only proves the five runs were taken together. What
+    makes a qualification expire is the code moving underneath it, and that needs a
+    comparison against the tree as it is now. Without this, a behavioural edit to
+    the runner leaves every Phase 3 test green so long as the four constants happen
+    to be unchanged — which is precisely the case the runbook claims invalidates the
+    runs.
+
+    Compared on the SEMANTIC fingerprint, not the content digest. The digest moves
+    when a docstring is reflowed, so gating on it would demand a full Phase 3 re-run
+    for edits that cannot affect a measurement, and a gate that fires on prose is a
+    gate people learn to override. The fingerprint is the parsed AST with docstrings
+    stripped: comments never reach it, `ast.dump` drops line and column numbers, and
+    anything that changes a statement, a literal or an expression changes it.
+
+    The CONTROLLER is in the set, not just the revision. It decides when the gates
+    hold and what gets written, so a probe that cancels at the wrong moment produces
+    a wrong number in the one way nothing downstream can detect.
+
+    So are the revision's FROZEN IMPORTS. `20260719_01` pins `app.accuracy_v1` and
+    `app.accuracy_rows_v1` rather than importing `app.accuracy`, and every per-row
+    cost these runs measured is that algorithm executing — the batch sizes are
+    literally quotients of it. A set naming the revision but not what it imports
+    would stay green through an edit that changes both what the migration computes
+    and how long a batch holds its rows. And the guard is in the set because it
+    computes these fingerprints: a protocol that does not cover its own comparator
+    can be weakened by editing the comparator.
+
+    The SEEDING path is bound too, and counts are why. `populations_before` and
+    `dimensions_before` do not identify a fixture: `synthesize_repair`'s own
+    docstring records that taking candidates by `ORDER BY id` instead of
+    `ORDER BY md5(id)` produces exactly K candidates and deletes exactly K plies —
+    identical populations, identical relation sizes — while selecting the K lowest
+    ids, which lets a merge join terminate a few percent into `session_moves` and
+    measures every scan-bearing statement at a fraction of its real cost. Same
+    numbers, different rows, different plans.
+
+    That one is bound PER SYMBOL rather than per file. `size_accuracy_backfill.py`
+    is ~2,500 lines of Phase 1 and Phase 2 machinery of which only the synthesis
+    functions decide what a fixture is; fingerprinting the whole module would expire
+    every qualification run whenever `derive` changed, and a gate that fires on
+    unrelated edits is one people learn to override.
+    """
+    recorded = _phase3("run_3a_populated_20260727.json")["frozen_fingerprints"]
+    assert set(recorded) == {
+        "alembic/versions/20260719_01_backfill_session_player_accuracy.py",
+        "app/accuracy_v1.py",
+        "app/accuracy_rows_v1.py",
+        "app/migration_guard.py",
+        "alembic/env.py",
+        "scripts/phase3_cancellation_probe.py",
+        "scripts/phase3_fixture_guard.py",
+        "scripts/phase3_seed_populations.py",
+        "scripts/phase3_prepare.py",
+    }
+    # The preparer is Python, and it is in the set for that reason. It chooses the
+    # template, decides that stamping happens after the clone and before seeding,
+    # and reconstructs the pre-revision state — and `ast.parse` has nothing to say
+    # about the shell script it used to be, so a component that cannot be
+    # fingerprinted cannot be part of what expires these runs.
+    assert not (_BACKEND_DIR / "scripts/phase3_prepare.sh").exists()
+    live = {rel: probe_guard.semantic_fingerprint(_BACKEND_DIR / rel) for rel in recorded}
+    assert live == recorded, (
+        "a behaviour-bearing file changed since Phase 3 was taken: "
+        f"{sorted(k for k in recorded if live[k] != recorded[k])}. "
+        "Re-run the Phase 3 qualification (docs/release_b_runbook.md §10)."
+    )
+
+    symbols = _phase3("run_3a_populated_20260727.json")["frozen_symbols"]
+    assert set(symbols) == {
+        f"scripts/size_accuracy_backfill.py::{n}"
+        for n in (
+            "MIN_SYNTHESIZED_REPAIR",
+            "analyze_after_synthesis",
+            "check_repair_sample_size",
+            "synthesize_repair",
+            "synthesize_stale",
+        )
+    }
+    live_symbols = {
+        f"{rel}::{name}": digest
+        for rel, names in probe.FROZEN_SYMBOLS.items()
+        for name, digest in probe_guard.symbol_fingerprint(_BACKEND_DIR / rel, names).items()
+    }
+    assert live_symbols == symbols, (
+        "the synthesis that built the Phase 3 fixture changed: "
+        f"{sorted(k for k in symbols if live_symbols.get(k) != symbols[k])}. "
+        "Re-run the Phase 3 qualification (docs/release_b_runbook.md §10)."
+    )
+
+
+def test_the_fixture_digest_binds_the_migrations_own_input_columns():
+    """The digest's column lists are checked against the revision's SQL, not a memory.
+
+    A fixture digest is only "which rows" for the columns it covers, and it is wrong
+    in both directions. TOO NARROW and it agrees while the algorithm's input differs:
+    `player_color` decides which side's plies are scored and `eval_cp` / `eval_mate`
+    ARE the scores, so a copy with flipped colours or different eval density computes
+    different accuracies, at a different cost, under an identical digest. TOO BROAD
+    and it expires runs for nothing: `move_san` was in this list and is read by no
+    statement in the revision.
+
+    So the lists are derived from the revision's OWN SQL and compared for EQUALITY,
+    in both directions and over every statement it holds — not a subset check against
+    the two `SELECT`s I happened to remember. Editing what the revision touches
+    without re-scoping the digest fails here.
+    """
+    from app.models import GameSession, SessionMove
+
+    def selected(sql: str) -> list[str]:
+        body = sql.split("SELECT", 1)[1].split("FROM", 1)[0]
+        return [c.strip() for c in body.split(",")]
+
+    def referenced(sql: str, table) -> set[str]:
+        """Columns of `table` this statement NAMES — as tokens, not as substrings.
+
+        `"player_accuracy" in sql` is satisfied by a statement that only mentions
+        `player_accuracy_algo_version`, which is how a containment check quietly
+        stops being a check. String literals are stripped first, so a value like
+        `'converted'` cannot be mistaken for an identifier.
+        """
+        tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", re.sub(r"'[^']*'", " ", sql)))
+        return tokens & {c.name for c in table.__table__.columns}
+
+    # EVERY SQL constant the revision defines, not a chosen three. The population
+    # predicate, the repair predicate, the coverage assertion, the ply detector, the
+    # remaining-count queries and the updates all decide which rows exist, which are
+    # in a population, and what gets written — and any of them can start reading a
+    # column the digest does not cover.
+    statements = [
+        v
+        for name, v in vars(mod).items()
+        if isinstance(v, str)
+        and not name.startswith("__")
+        and re.search(r"\b(SELECT|UPDATE|INSERT|DELETE|WHERE|FROM)\b", v)
+    ]
+    assert len(statements) > 20, len(statements)
+    touched_sessions = set().union(*(referenced(s, GameSession) for s in statements))
+    touched_moves = set().union(*(referenced(s, SessionMove) for s in statements))
+
+    # Keys are excluded from the comparison because the digest binds them separately,
+    # as the leading term of each tuple rather than as an input — and `id` is a column
+    # of BOTH tables, so a bare token cannot be attributed. Excluded is not unchecked:
+    # `_digest_sql` takes the key as an argument, and the moves key is what puts a
+    # ply's OWNERSHIP inside the digest. Keyed by `session_id`, re-parenting plies to
+    # another session changes it; keyed by the surrogate `session_moves.id`, that move
+    # is invisible while every column list above stays correct.
+    assert "SELECT id::text || '|' || " in probe_guard._SESSIONS_DIGEST_SQL
+    assert "FROM game_sessions" in probe_guard._SESSIONS_DIGEST_SQL
+    assert "SELECT session_id::text || '|' || " in probe_guard._MOVES_DIGEST_SQL
+    assert "FROM session_moves" in probe_guard._MOVES_DIGEST_SQL
+    assert touched_sessions - {"id"} == set(probe_guard.SESSION_INPUT_COLUMNS), (
+        "the revision's SQL and the fixture digest disagree about which session "
+        "columns are inputs: "
+        f"only in SQL {sorted(touched_sessions - {'id'} - set(probe_guard.SESSION_INPUT_COLUMNS))}, "
+        f"only in digest {sorted(set(probe_guard.SESSION_INPUT_COLUMNS) - touched_sessions)}"
+    )
+    assert touched_moves - {"id", "session_id"} == set(probe_guard.MOVE_INPUT_COLUMNS), (
+        "the revision's SQL and the fixture digest disagree about which move columns "
+        "are inputs: "
+        f"only in SQL {sorted(touched_moves - {'id', 'session_id'} - set(probe_guard.MOVE_INPUT_COLUMNS))}, "
+        f"only in digest {sorted(set(probe_guard.MOVE_INPUT_COLUMNS) - touched_moves)}"
+    )
+
+    # And the payload projections specifically — the rows the algorithm is actually
+    # handed. These are the two statements whose cost the sizing was measured from.
+    assert selected(mod.SELECT_BATCH_FIRST_PG) == ["id", "player_color", "pgn"]
+    assert selected(mod.LOAD_MOVES_PG) == [
+        "session_id",
+        "move_number",
+        "color",
+        "eval_cp",
+        "eval_mate",
+    ]
+    assert set(selected(mod.LOAD_MOVES_PG)) - {"session_id"} <= set(
+        probe_guard.MOVE_INPUT_COLUMNS
+    )
+    assert set(selected(mod.SELECT_BATCH_FIRST_PG)) - {"id"} <= set(
+        probe_guard.SESSION_INPUT_COLUMNS
+    )
+
+    # Both predicates, by name, so neither can be dropped from the sweep unnoticed:
+    # the repair population is a different filter over the same table and was once
+    # missing from this test entirely.
+    assert referenced(mod.POPULATION_PREDICATE_SQL, GameSession) == {
+        "status",
+        "session_mode",
+        "drill_state",
+        "player_accuracy_algo_version",
+    }
+    assert referenced(mod.REPAIR_PREDICATE_SQL, GameSession) == {
+        "status",
+        "session_mode",
+        "drill_state",
+        "player_accuracy_algo_version",
+        "player_accuracy",
+    }
+
+    # And nothing the migration never reads. `move_san` is the one that was here.
+    for unread in ("move_san", "fen_after", "fen_before", "classification", "eval_delta"):
+        assert unread not in probe_guard.MOVE_INPUT_COLUMNS
+        assert unread not in probe_guard._SESSIONS_DIGEST_SQL + probe_guard._MOVES_DIGEST_SQL
+        assert not any(unread in s for s in statements), unread
+
+
+_DIGEST_FIXTURE_SESSION = (
+    "INSERT INTO game_sessions (id, user_id, started_at, ended_at, status, engine_elo, "
+    "is_rated, player_color, pgn, session_mode, drill_state, player_accuracy, "
+    "player_accuracy_algo_version) VALUES (CAST(:id AS uuid), 970001, :ts, :ts, 'ended', "
+    "1500, true, :color, :pgn, 'normal', NULL, :accuracy, :version)"
+)
+_DIGEST_FIXTURE_MOVE = (
+    "INSERT INTO session_moves (session_id, move_number, color, move_san, fen_after, "
+    "eval_cp, eval_mate) VALUES (CAST(:sid AS uuid), :mn, :c, :san, 'fen', :cp, :mate)"
+)
+
+
+@pg_gate_plugin.pg_gate
+def test_the_fixture_digest_moves_for_every_input_and_for_nothing_else(
+    pg_migration_db, monkeypatch
+):
+    """The binding, exercised against a real database one column at a time.
+
+    Asserting the column lists (above) says the digest is *scoped* correctly. It
+    does not say the SQL built from them actually varies with those columns — a
+    projection can name a column and still be blind to it, and this digest is the
+    only thing standing between "same counts" and "same fixture".
+
+    Both directions are the test. Every bound column must move it, or the fixture
+    claim is weaker than it reads. No unbound column may move it, or the artifacts
+    expire on edits that cannot change a measurement — and an expiry that fires on
+    noise is one people learn to override.
+    """
+    from alembic import command
+    from sqlalchemy import create_engine, text
+
+    monkeypatch.setenv("DATABASE_URL", pg_migration_db)
+    command.upgrade(_alembic_config(), "20260718_01")
+    eng = create_engine(pg_migration_db)
+
+    sid = "aaaaaaaa-0000-4000-8000-00000000000f"
+    ts = __import__("datetime").datetime(2026, 1, 1, tzinfo=__import__("datetime").timezone.utc)
+    with eng.begin() as c:
+        c.execute(
+            text(_DIGEST_FIXTURE_SESSION),
+            {"id": sid, "ts": ts, "color": "white", "pgn": "1. e4 e5", "accuracy": 55.5,
+             "version": 1},
+        )
+        for mn, color, cp in ((1, "white", 10), (1, "black", -20), (2, "white", 30)):
+            c.execute(
+                text(_DIGEST_FIXTURE_MOVE),
+                {"sid": sid, "mn": mn, "c": color, "san": "e4", "cp": cp, "mate": None},
+            )
+
+    def digest() -> dict:
+        with eng.connect() as c:
+            return probe_guard.fixture_digest(c)
+
+    def mutate(sql: str, **params) -> dict:
+        with eng.begin() as c:
+            c.execute(text(sql), params)
+        return digest()
+
+    base = digest()
+    assert base["sessions_rows"] == 1 and base["moves_rows"] == 3
+
+    # `session_mode` and `drill_state` cannot be moved one at a time against the
+    # shipped schema: `ck_game_sessions_mode_drill_state` refuses a `drill_state` on a
+    # normal session, and `ck_game_sessions_drill_rating_boundary` refuses a drill row
+    # without the rest of one. Moving BOTH together would prove NEITHER — a digest
+    # that had stopped encoding `session_mode` would still follow `drill_state`, and
+    # every assertion would pass. So the two CHECKs come off this copy for the
+    # duration and each column is moved alone. The definitions are read back rather
+    # than restated so they cannot drift, they are restored below, and the database is
+    # created per test and thrown away. The alternative is a gate blind to one of the
+    # three columns that decide ended-visible.
+    drill_checks = ("ck_game_sessions_mode_drill_state", "ck_game_sessions_drill_rating_boundary")
+    with eng.begin() as c:
+        check_defs = {
+            name: c.execute(
+                text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :n"),
+                {"n": name},
+            ).scalar()
+            for name in drill_checks
+        }
+        assert all(check_defs.values()), check_defs
+        for name in drill_checks:
+            c.execute(text(f"ALTER TABLE game_sessions DROP CONSTRAINT {name}"))
+
+    # Every bound input, one at a time, each restored before the next so the
+    # movement observed is attributable to that column alone.
+    bound = [
+        ("UPDATE game_sessions SET player_color = 'black'",
+         "UPDATE game_sessions SET player_color = 'white'"),
+        ("UPDATE game_sessions SET pgn = '1. d4 d5'", "UPDATE game_sessions SET pgn = '1. e4 e5'"),
+        ("UPDATE game_sessions SET player_accuracy = 61.25",
+         "UPDATE game_sessions SET player_accuracy = 55.5"),
+        ("UPDATE game_sessions SET player_accuracy_algo_version = 2",
+         "UPDATE game_sessions SET player_accuracy_algo_version = 1"),
+        # `status` ALONE. Clearing `ended_at` alongside it — which the schema does not
+        # require — would have made the movement attributable to either column, and a
+        # digest that needlessly encoded `ended_at` would have passed. `ended_at` is
+        # mutated on its own below and must NOT move it.
+        ("UPDATE game_sessions SET status = 'active'",
+         "UPDATE game_sessions SET status = 'ended'"),
+        # With `status`, the three columns that decide ended-VISIBLE, and so decide
+        # the population size the whole sizing is scaled by.
+        ("UPDATE game_sessions SET session_mode = 'drill'",
+         "UPDATE game_sessions SET session_mode = 'normal'"),
+        ("UPDATE game_sessions SET drill_state = 'converted'",
+         "UPDATE game_sessions SET drill_state = NULL"),
+        ("UPDATE session_moves SET eval_cp = 999 WHERE move_number = 2",
+         "UPDATE session_moves SET eval_cp = 30 WHERE move_number = 2"),
+        ("UPDATE session_moves SET eval_mate = 3 WHERE move_number = 2",
+         "UPDATE session_moves SET eval_mate = NULL WHERE move_number = 2"),
+        ("UPDATE session_moves SET move_number = 7 WHERE move_number = 2",
+         "UPDATE session_moves SET move_number = 2 WHERE move_number = 7"),
+        ("UPDATE session_moves SET color = 'black' WHERE move_number = 2",
+         "UPDATE session_moves SET color = 'white' WHERE move_number = 2"),
+    ]
+    for change, undo in bound:
+        assert mutate(change, ts=ts) != base, change
+        assert mutate(undo, ts=ts) == base, undo
+
+    with eng.begin() as c:
+        for name, definition in check_defs.items():
+            c.execute(text(f"ALTER TABLE game_sessions ADD CONSTRAINT {name} {definition}"))
+    assert digest() == base
+
+    # EVERY bound column, or the above is a sample rather than a proof. A column
+    # added to the digest without an exercise here would otherwise be asserted about
+    # statically and never moved. This counts what the statements NAME; what proves
+    # the digest encodes each one is that each statement above moved it ALONE.
+    covered = {c for change, _ in bound for c in re.findall(r"(?:SET|,)\s*(\w+)\s*=", change)}
+    unexercised = (
+        set(probe_guard.SESSION_INPUT_COLUMNS) | set(probe_guard.MOVE_INPUT_COLUMNS)
+    ) - covered
+    assert not unexercised, sorted(unexercised)
+
+    # The KEYS, behaviourally. The moves digest is keyed by `session_id`, which is what
+    # puts a ply's OWNERSHIP inside the digested tuple: re-parenting a ply to another
+    # session changes it. Keyed by the surrogate `session_moves.id` instead, the same
+    # move is invisible while every column list stays correct — so the keys are checked
+    # rather than merely excluded from the column comparison.
+    other_sid = "aaaaaaaa-0000-4000-8000-00000000001f"
+    with eng.begin() as c:
+        c.execute(
+            text(_DIGEST_FIXTURE_SESSION),
+            {"id": other_sid, "ts": ts, "color": "white", "pgn": "1. e4 e5",
+             "accuracy": 55.5, "version": 1},
+        )
+    with_two = digest()
+    assert with_two["sessions_rows"] == 2 and with_two["moves_rows"] == 3
+    reparented = mutate(
+        "UPDATE session_moves SET session_id = CAST(:other AS uuid) "
+        "WHERE move_number = 2 AND color = 'white'",
+        other=other_sid,
+    )
+    assert reparented["moves_rows"] == 3
+    assert reparented["moves_digest"] != with_two["moves_digest"]
+    assert mutate(
+        "UPDATE session_moves SET session_id = CAST(:sid AS uuid) "
+        "WHERE session_id = CAST(:other AS uuid)",
+        sid=sid, other=other_sid,
+    ) == with_two
+    # And the sessions digest is keyed by `id`. That two rows digest differently from
+    # one is multiplicity, not the key — it would hold with `id` dropped from the
+    # tuple entirely. What proves the key is moving ONLY the id: the second session is
+    # move-free and identical to the first in every bound column, so re-keying it
+    # holds the row count and every input constant and leaves nothing else to move.
+    third_sid = "aaaaaaaa-0000-4000-8000-00000000002f"
+    rekeyed = mutate(
+        "UPDATE game_sessions SET id = CAST(:new AS uuid) WHERE id = CAST(:other AS uuid)",
+        new=third_sid, other=other_sid,
+    )
+    assert rekeyed["sessions_rows"] == 2 and rekeyed["moves_rows"] == 3
+    assert rekeyed["sessions_digest"] != with_two["sessions_digest"]
+    assert mutate(
+        "UPDATE game_sessions SET id = CAST(:other AS uuid) WHERE id = CAST(:new AS uuid)",
+        new=third_sid, other=other_sid,
+    ) == with_two
+    assert mutate(
+        "DELETE FROM game_sessions WHERE id = CAST(:other AS uuid)", other=other_sid
+    ) == base
+
+    # And the eval columns specifically: an accuracy is COMPUTED from these, so a
+    # fixture that differs only in eval density scores differently at a different
+    # cost — the case a count-based identity calls identical.
+    assert mutate("UPDATE session_moves SET eval_cp = NULL")["moves_digest"] != base["moves_digest"]
+    assert mutate(
+        "UPDATE session_moves SET eval_cp = 10 WHERE move_number = 1 AND color = 'white'"
+    ) != base
+    with eng.begin() as c:
+        c.execute(text("UPDATE session_moves SET eval_cp = -20 WHERE color = 'black'"))
+        c.execute(text("UPDATE session_moves SET eval_cp = 30 WHERE move_number = 2"))
+    assert digest() == base
+
+    # A deleted ply is what `synthesize_repair` does, and it must be visible.
+    assert mutate("DELETE FROM session_moves WHERE move_number = 2")["moves_rows"] == 2
+    with eng.begin() as c:
+        c.execute(
+            text(_DIGEST_FIXTURE_MOVE),
+            {"sid": sid, "mn": 2, "c": "white", "san": "e4", "cp": 30, "mate": None},
+        )
+    assert digest() == base
+
+    # Nothing the migration never reads. `move_san` was in this digest once.
+    for change in (
+        "UPDATE session_moves SET move_san = 'd4'",
+        "UPDATE session_moves SET fen_after = 'other'",
+        "UPDATE session_moves SET classification = 'blunder'",
+        "UPDATE game_sessions SET engine_elo = 2400",
+        "UPDATE game_sessions SET started_at = now()",
+        # The migration reads `status`, never the timestamp beside it.
+        "UPDATE game_sessions SET ended_at = NULL",
+    ):
+        assert mutate(change) == base, change
+    eng.dispose()
+
+
+def test_the_symbol_binding_refuses_to_cover_nothing():
+    """A fingerprint gate that silently covers nothing is worse than no gate.
+
+    Renaming or moving a bound symbol is exactly the edit that would turn its
+    binding off, and the artifact would go on carrying a `frozen_symbols` block that
+    still looks like coverage. So the helper raises instead of recording partial
+    coverage — which is also what makes the set assertion above meaningful.
+    """
+    harness_path = _BACKEND_DIR / "scripts/size_accuracy_backfill.py"
+    with pytest.raises(SystemExit, match="cannot fingerprint"):
+        probe_guard.symbol_fingerprint(harness_path, ("synthesize_repair", "no_such_symbol"))
+
+    # And it is per-symbol in the sense that matters: the same module holds `derive`
+    # and the whole Phase 2 machinery, none of which is bound here.
+    bound = probe_guard.symbol_fingerprint(
+        harness_path, probe.FROZEN_SYMBOLS["scripts/size_accuracy_backfill.py"]
+    )
+    assert "derive" not in bound
+
+
+def test_the_five_runs_measured_one_fixture_and_can_prove_which():
+    """"Same fixture" is an OBSERVATION across the five runs, not a claim about them.
+
+    Counts cannot carry it. `synthesize_repair` documents the case in its own
+    docstring: `ORDER BY id` in place of `ORDER BY md5(id)` yields exactly K
+    candidates and exactly K deleted plies — `populations_before` identical,
+    `dimensions_before` identical — while selecting the K lowest ids and measuring
+    every scan-bearing statement at a fraction of its cost. Two fixtures can agree on
+    every number these artifacts previously recorded and still be different fixtures.
+
+    So each artifact carries content digests of the accuracy-bearing columns
+    (`fixture_identity` — *which* rows) and what `phase3_prepare.py` stamped on the
+    copy before anything seeded it (`fixture_provenance` — which base data). Those
+    make three things checkable that were previously only assertable.
+    """
+    docs = {name: _phase3(name) for name in _PHASE3_RUNS}
+    clean = "run_3a_production_shaped_20260727.json"
+
+    # 1. All five copies were cloned from ONE base. Five separate `CREATE DATABASE
+    #    ... TEMPLATE` runs, five separate stamps, one set of digests.
+    provenances = {n: d["fixture_provenance"] for n, d in docs.items()}
+    for name, prov in provenances.items():
+        assert prov is not None, f"{name} ran on a copy phase3_prepare.py never stamped"
+        assert prov["template"] == "gr_p3_base", name
+    base = provenances[clean]
+    for name, prov in provenances.items():
+        assert (prov["sessions_digest"], prov["moves_digest"]) == (
+            base["sessions_digest"],
+            base["moves_digest"],
+        ), f"{name} was cloned from different base data than {clean}"
+
+    # 2. The unseeded run's observed fixture IS its base — nothing touched it between
+    #    the stamp and the read. That is also the digest function checking itself:
+    #    two independent reads of unchanged data must agree.
+    assert docs[clean]["fixture_identity"]["sessions_digest"] == base["sessions_digest"]
+    assert docs[clean]["fixture_identity"]["moves_digest"] == base["moves_digest"]
+
+    # 3. The four seeded runs agree with EACH OTHER and differ from the base. Four
+    #    independently prepared copies, seeded by four separate `--repair 1000`
+    #    invocations, produced byte-identical populations — which is the synthesis
+    #    being deterministic, observed rather than assumed. And the moves digest
+    #    moving is `synthesize_repair` having actually deleted plies: the corruption
+    #    is visible in the record instead of being taken on trust.
+    seeded = {n: d["fixture_identity"] for n, d in docs.items() if n != clean}
+    one = next(iter(seeded.values()))
+    for name, ident in seeded.items():
+        assert ident == one, f"{name} seeded a different fixture than the other runs"
+    assert one["sessions_digest"] != base["sessions_digest"]
+    assert one["moves_digest"] != base["moves_digest"]
+    seeded_k = docs["run_3a_populated_20260727.json"]["populations_before"]["n_repair"]
+    assert one["moves_rows"] == base["moves_rows"] - seeded_k
+    assert one["sessions_rows"] == base["sessions_rows"]
+
+
+def test_phase3_cancel_evidence_covers_the_largest_admitted_transaction():
+    """The Phase 3 counterpart of `derive`'s own `rows_locked` refusal.
+
+    `TEARDOWN_ALLOWANCE_MS` is scoped to a batch of EITHER phase, and the larger is
+    not the backfill's: `REPAIR_BATCH_SIZE` divides by a cheaper per-row cost, so it
+    exceeds `MAX_BATCH_SIZE` (1,000 against 646). Phase 2 already refuses to freeze
+    the constant unless its probe locked at least `max(MAX_BATCH_SIZE,
+    REPAIR_BATCH_SIZE)` rows — `size_accuracy_backfill.derive` raises otherwise, and
+    `cancel_probe_batch_20260726.json` carries `rows_locked = 1000` for exactly that
+    reason.
+
+    Phase 3 owes the same coverage against the SHIPPED revision, and for one
+    revision of this work it did not have it: the only per-batch cancel took the
+    backfill's 646-row guarded UPDATE, which is the SMALLER of the two admitted
+    transactions. `repair` mode exists to close that, and this test is what stops it
+    reopening — raise `REPAIR_BATCH_SIZE` and the committed evidence no longer
+    reaches it.
+    """
+    # PER-BATCH-MODE runs only, and that restriction is the test. The atomic cancel
+    # holds 1,646 rows — more than either batch size — so counting it here would
+    # satisfy this check with the repair run deleted. It must not: TEARDOWN_
+    # ALLOWANCE_MS is "of ONE PER-BATCH-MODE BATCH TRANSACTION" and the revision
+    # says in as many words that it neither covers nor pretends to cover atomic
+    # mode's whole-population transaction, which has its own two constants. A
+    # bigger transaction of the WRONG KIND is not coverage; it is the substitution
+    # failure this file guards against everywhere else.
+    per_batch = [
+        (n, d) for n, d in _phase3_cancels() if d["runner_mode"] == "batch"
+    ]
+    largest = max(mod.MAX_BATCH_SIZE, mod.REPAIR_BATCH_SIZE)
+    covered = max(d["dirty_rows_at_cancel"]["value"] for _, d in per_batch)
+    assert covered >= largest, f"per-batch cancel evidence reaches {covered} rows, need {largest}"
+
+    # The atomic constants have the same obligation against their own scope, and
+    # `derive` enforces it on the Phase 2 side (the atomic probe must lock at least
+    # as many rows as the atomic transaction mutated). Its Phase 3 counterpart is
+    # that the atomic cancel held the WHOLE population dirty, not a batch of it.
+    atomic = _phase3("run_3c_cancel_atomic_20260727.json")
+    pops = atomic["populations_before"]
+    assert atomic["dirty_rows_at_cancel"]["value"] == pops["n_stale"] + pops["n_repair"]
+    assert atomic["dirty_rows_at_cancel"]["value"] > largest
+
+    # And the run that reaches it proves its own row count rather than asserting it.
+    # A single-row `UPDATE` per candidate means an AFTER-STATEMENT park fires
+    # `REPAIR_BATCH_SIZE` times, each with one more row dirty, so parking on the
+    # FIRST would be evidence about a ONE-ROW transaction. The trigger counts
+    # instead and publishes the count as the advisory lock's OBJID, which is what a
+    # second session reads. objid == value == the batch size is that chain closed.
+    repair = _phase3("run_3c_cancel_repair_batch_20260727.json")
+    assert repair["dirty_rows_at_cancel"]["value"] == mod.REPAIR_BATCH_SIZE
+    assert repair["park_objid"] == repair["dirty_rows_at_cancel"]["value"]
+    assert repair["populations_before"]["n_repair"] >= mod.REPAIR_BATCH_SIZE
+
+
+def test_every_phase3_cancel_died_of_the_cancel_and_under_the_allowance():
+    """All four gates, the right SQLSTATE for the right REASON, and the number.
+
+    `cancel_cause` is not decoration. A cancel and a `statement_timeout` breach both
+    raise SQLSTATE 57014 and differ only in message text, so a park that outlives
+    its batch's own budget produces a run that looks cancelled, reports a plausible
+    unlock time, and is measuring the timeout path instead. It happened here at a
+    2 s park. The discriminator has to be in the artifact or the trial cannot be
+    audited afterwards.
+    """
+    for name, doc in _phase3_cancels():
+        assert doc["result"] == "cancelled", name
+        assert doc["gates"] == {
+            "a_transactionid_xlock": True,
+            "b_55P03_on_held_row": True,
+            "c_statement_identity": True,
+            "d_dirty_batch_advisory": True,
+        }, name
+        assert doc["cancel_cause"] == "user_request", name
+        assert doc["pg_cancel_backend"] is True, name
+        assert doc["target_pid"] != doc["canceller_pid"], name
+        # The frozen constant has to cover what the shipped revision actually did.
+        assert 0 < doc["cancel_to_unlock_ms"] < mod.TEARDOWN_ALLOWANCE_MS, name
+
+
+def test_phase3_cancels_left_nothing_stamped_and_nothing_leaked():
+    """A cancelled run is a rolled-back run, and the probe cleans up after itself.
+
+    `alembic_version` unmoved and the CHECK still `NOT VALID` is the fail-closed
+    claim: a breach mid-run leaves the database in the state the revision found it,
+    so a rerun does the whole thing again. The two leak checks are about the
+    HARNESS rather than the revision — a park trigger or a session-scoped advisory
+    lock left behind on the copy would silently change every later run taken on it.
+    """
+    for name, doc in _phase3_cancels():
+        t = doc["terminal"]
+        assert t["alembic_version"] == doc["down_revision"] == "20260718_01", name
+        assert t["check_convalidated"] is False, name
+        assert (t["probe_trigger_left"], t["advisory_locks_left"]) == (0, 0), name
+        # The run DIED. A cancel that landed on a backend already finishing returns
+        # true, unlocks the row by committing, and exits 0.
+        assert doc["alembic_returncode"] != 0, name
+
+    # EVERY cancel's populations, against what it started with — the version stamp
+    # alone does not say the data is unchanged. Each of the three has a different
+    # expected relationship and all three have to be asserted, or the artifact that
+    # is silent becomes the one where a durable mutation could hide.
+    #
+    #   atomic   ONE transaction, so nothing survives: both populations back exactly
+    #            where they started. This is the load-bearing half of "fully rolled
+    #            back" — an atomic run that left rows changed would otherwise pass.
+    #   backfill the cancel breaks the FIRST batch of the run, so nothing had
+    #            committed yet and both populations are also unchanged.
+    #   repair   the cancel breaks a LATER transaction, so the backfill's batch had
+    #            already committed and STAYS committed: n_stale is 0 and durable
+    #            while the repair batch rolled back whole.
+    #
+    # Neither per-batch run demonstrates a PARTIAL batch — that needs a population
+    # past one batch and is blocked on g-b-fixture-moves-clone.
+    for name in (
+        "run_3c_cancel_atomic_20260727.json",
+        "run_3c_cancel_backfill_batch_20260727.json",
+    ):
+        doc = _phase3(name)
+        before, t = doc["populations_before"], doc["terminal"]
+        assert (t["n_stale"], t["n_repair"]) == (before["n_stale"], before["n_repair"]), name
+
+    repair = _phase3("run_3c_cancel_repair_batch_20260727.json")
+    assert repair["populations_before"]["n_stale"] == mod.MAX_BATCH_SIZE
+    assert repair["terminal"]["n_stale"] == 0, "the committed backfill batch did not survive"
+    assert repair["terminal"]["n_repair"] == repair["populations_before"]["n_repair"]
+
+
+def test_only_a_populated_run_can_observe_the_atomic_stall():
+    """The structural hole 3a found, pinned so a future reader does not re-find it.
+
+    The design asks the production-shaped run for `observed_atomic_stall_ms`. It
+    cannot supply it and no production-shaped run can: the stall probe reports from
+    the FIRST ROW LOCK, and a run whose populations are both empty skips the runner
+    and takes none. That is the same shape as the hole the design already names for
+    3c — a clean run cancels nothing, so it cannot observe a cancellation — one
+    level up. The observation needs its own populated run, which is what 3a' is.
+    """
+    clean = _phase3("run_3a_production_shaped_20260727.json")
+    populated = _phase3("run_3a_populated_20260727.json")
+
+    assert clean["populations_before"] == {"n_stale": 0, "n_repair": 0}
+    assert any("skipping the runner" in ln for ln in clean["log"])
+    assert not any("observed_atomic_stall_ms" in ln for ln in clean["log"])
+
+    assert populated["populations_before"]["n_stale"] > 0
+    stall = [ln for ln in populated["log"] if "observed_atomic_stall_ms" in ln]
+    assert len(stall) == 1, populated["log"]
+    observed = float(stall[0].split("observed_atomic_stall_ms=")[1].split()[0])
+    projected = float(stall[0].split("projected_stall_ms=")[1].split()[0])
+    assert 0 < observed < projected <= mod.MAX_WRITER_STALL_MS
+
+    # Both `none` runs completed: stamped, validated, both populations converged.
+    for doc in (clean, populated):
+        assert doc["alembic_returncode"] == 0
+        assert doc["terminal"]["alembic_version"] == "20260719_01"
+        assert doc["terminal"]["check_convalidated"] is True
+        assert (doc["terminal"]["n_stale"], doc["terminal"]["n_repair"]) == (0, 0)
+
+
+def test_the_probe_discards_every_trial_that_measured_the_wrong_thing():
+    """`validate()` directly, one rejection at a time.
+
+    The "discarded, not recorded" contract used to be enforced by whoever read the
+    output — the controller wrote its `--out` and exited 0 either way. Every failure
+    below produces an artifact that LOOKS fine, which is the entire problem: gates
+    that never held still leave `result` set and every other field populated, a
+    `pg_cancel_backend` that returned false still leaves a plausible unlock time
+    measured off a lock nobody was holding, and a `statement_timeout` raises the same
+    SQLSTATE 57014 a cancel does. Left unenforced, any one of them lands in
+    `docs/sizing/phase3/` and is indistinguishable from evidence.
+
+    A BREACH is deliberately not in here. `cancel_to_unlock_ms` over
+    `TEARDOWN_ALLOWANCE_MS` is a real finding and must be recorded loudly; this
+    function only throws away trials that measured the wrong thing.
+
+    THE CANCEL LANDING AND THE RUN DYING ARE TWO CLAIMS. A `pg_cancel_backend`
+    against a backend that was already finishing returns true, the held row unlocks
+    because the transaction COMMITTED, and the migration goes on to stamp
+    `alembic_version` and validate the CHECK. Every cancel-side field in that trial
+    is correct and the number in it is measured off a teardown that never happened.
+    So the outcome is checked too, and the fabricated record below — a clean cancel
+    on a run that SUCCEEDED — is the case that has to be rejected.
+    """
+    terminal_ok = {
+        "alembic_version": "20260718_01",
+        "check_convalidated": False,
+        "n_stale": 0,
+        "n_repair": 1000,
+        "probe_trigger_left": 0,
+        "advisory_locks_left": 0,
+    }
+    good_cancel = {
+        "mode": "repair",
+        "down_revision": "20260718_01",
+        "gates": {"a": True},
+        "pg_cancel_backend": True,
+        "cancel_to_unlock_ms": 0.7,
+        "cancel_cause": "user_request",
+        "alembic_returncode": 1,
+        "populations_before": {"n_stale": 646, "n_repair": 1000},
+        "fixture_identity": {"sessions_digest": "d", "moves_digest": "d"},
+        "fixture_provenance": {"template": "gr_p3_base", "sessions_digest": "b"},
+        "terminal": terminal_ok,
+    }
+    assert probe.validate(good_cancel) == []
+
+    # A breach is recorded, not discarded.
+    breach = dict(good_cancel, cancel_to_unlock_ms=float(mod.TEARDOWN_ALLOWANCE_MS) * 10)
+    assert probe.validate(breach) == []
+
+    # The whole point, stated as one record: a cancel that looks perfect on a
+    # migration that ran to completion. Nothing on the cancel side can tell.
+    stamped = {
+        **good_cancel,
+        "alembic_returncode": 0,
+        "terminal": {**terminal_ok, "alembic_version": "20260719_01", "check_convalidated": True},
+    }
+    reasons = probe.validate(stamped)
+    assert len(reasons) == 3, reasons
+    assert any("a cancelled run must fail" in r for r in reasons)
+    assert any("leaves the stamp where it found it" in r for r in reasons)
+    assert any("stayed NOT VALID" in r for r in reasons)
+
+    def one(**over) -> str:
+        problems = probe.validate({**good_cancel, **over})
+        assert len(problems) == 1, problems
+        return problems[0]
+
+    assert "gates never all held" in one(gates={}, result="gates never all held; nothing cancelled")
+    assert "pg_cancel_backend returned" in one(pg_cancel_backend=False)
+    assert "never unlocked" in one(cancel_to_unlock_ms=None)
+    assert "measured a timeout, not the cancel path" in one(cancel_cause="statement_timeout")
+    assert "cancel_cause" in one(cancel_cause=None)
+    assert "a cancelled run must fail" in one(alembic_returncode=0)
+    assert "nothing to check the version stamp against" in one(down_revision=None)
+    assert "leaves the stamp where it found it" in one(
+        terminal={**terminal_ok, "alembic_version": "20260719_01"}
+    )
+    assert "stayed NOT VALID" in one(terminal={**terminal_ok, "check_convalidated": True})
+    assert "trigger was left installed" in one(
+        terminal={**terminal_ok, "probe_trigger_left": 1}
+    )
+    assert "advisory lock(s) still held" in one(
+        terminal={**terminal_ok, "advisory_locks_left": 2}
+    )
+
+    # The populations, per mode — the half that says the CANCELLED TRANSACTION
+    # rolled back. The stamp cannot say it: a durable partial mutation leaves
+    # `alembic_version` exactly where a clean rollback does.
+    assert "the terminal counts prove nothing" in one(populations_before=None)
+
+    # A copy `phase3_prepare.py` never stamped cannot say what base data it
+    # measured, and no later read can recover it — synthesis deletes plies and
+    # rewrites the accuracy columns, so the copy no longer resembles its template.
+    assert "not prepared by" in one(fixture_provenance=None)
+    assert "the fixture is unobserved" in one(fixture_identity=None)
+    assert "did not roll back whole" in one(terminal={**terminal_ok, "n_repair": 400})
+    assert "did not cancel a repair-phase transaction" in one(
+        terminal={**terminal_ok, "n_stale": 646}
+    )
+
+    # And the two whole-rollback modes, where BOTH populations must be untouched.
+    for m in ("atomic", "batch"):
+        whole = {**good_cancel, "mode": m, "terminal": {**terminal_ok, "n_stale": 646}}
+        assert probe.validate(whole) == []
+        landed = probe.validate({**whole, "terminal": {**terminal_ok, "n_stale": 646, "n_repair": 0}})
+        assert len(landed) == 1 and "expected (646, 1000) unchanged" in landed[0], landed
+
+    # `none` runs are judged on a different contract: they must SUCCEED and stamp.
+    good_none = {
+        "mode": "none",
+        "alembic_returncode": 0,
+        "fixture_identity": {"sessions_digest": "d"},
+        "fixture_provenance": {"template": "gr_p3_base"},
+        "terminal": {
+            "alembic_version": "20260719_01",
+            "probe_trigger_left": 0,
+            "advisory_locks_left": 0,
+        },
+    }
+    assert probe.validate(good_none) == []
+    assert "expected 0" in probe.validate({**good_none, "alembic_returncode": 1})[0]
+    assert "terminal alembic_version" in probe.validate(
+        {**good_none, "terminal": {**good_none["terminal"], "alembic_version": "20260718_01"}}
+    )[0]
+
+
+def test_the_disposable_name_fence_refuses_what_it_should():
+    """The fence in front of `DROP DATABASE`, and the realistic failure it catches.
+
+    Not a deliberate misfire at production — a typo in a hand-typed database name.
+    `--confirm-mutates` alone would be typed straight past that, which is why the
+    naming rule exists beside it and why it is narrow rather than a blocklist.
+    """
+    probe_guard.check_disposable_name("gr_p3c_batch", template="gr_p3_base")
+
+    for bad in ("ghostreplay", "postgres", "gr_p1_sweep", "gr_m_probe_batch", "GR_P3A", "gr_p3a; drop"):
+        with pytest.raises(SystemExit, match="refusing to touch"):
+            probe_guard.check_disposable_name(bad)
+
+    # Fixtures other runs are restored from, even though they match the pattern.
+    with pytest.raises(SystemExit, match="fixtures other runs are restored from"):
+        probe_guard.check_disposable_name("gr_p3_base")
+    # A target that is its own template destroys the fixture it needs.
+    with pytest.raises(SystemExit, match="it is the template"):
+        probe_guard.check_disposable_name("gr_p3x", template="gr_p3x")
+
+    # Whatever survives the fence is safe to interpolate into DDL that cannot take
+    # a bind parameter, which is what the shell script relies on.
+    assert probe_guard.DISPOSABLE_RE.fullmatch("gr_p3c_batch")
+    assert not any(c in "gr_p3c_batch" for c in " '\";\\-")
+
+
+def test_neither_name_rule_admits_trailing_whitespace():
+    """`$` is not the end of the string in Python — it also matches before a final
+    newline, so `^gr_p3[a-z0-9_]*$` accepts `"gr_p3x\\n"`.
+
+    Not injection: a newline cannot start a second statement inside a quoted
+    identifier. But it defeats a fence that promises no whitespace at all, and the
+    damage is asymmetric — the target is dropped by the FIRST statement and a
+    newline-suffixed template then fails the second, leaving the operator with no
+    database rather than a rejected command. Both rules are `\\A…\\Z` and both are
+    applied with `fullmatch`; either alone would be sufficient.
+    """
+    for bad in ("gr_p3x\n", "gr_p3x\n\n", "gr_p3x ", " gr_p3x", "gr_p3x\t", "gr_p3x\r"):
+        with pytest.raises(SystemExit, match="refusing to touch"):
+            probe_guard.check_disposable_name(bad)
+    for bad in ("gr_p3_base\n", "gr_p3_base ", "\ngr_p3_base", "gr_p3_template\n"):
+        with pytest.raises(SystemExit, match="refusing to clone from"):
+            probe_guard.check_template_name(bad)
+
+    # The anchors themselves, so a future edit back to `^…$` fails here and not in
+    # front of a `DROP DATABASE`.
+    for rx in (probe_guard.DISPOSABLE_RE, probe_guard.TEMPLATE_RE):
+        assert "$" not in rx.pattern and rx.pattern.endswith(r"\Z"), rx.pattern
+
+
+def test_the_template_identifier_is_fenced_by_its_own_rule():
+    """`CREATE DATABASE <target> TEMPLATE <template>` has TWO identifiers in it.
+
+    Checking only the target leaves the other half unfenced, and the template is
+    interpolated into the same statement — so a name carrying a quote reaches DDL
+    that cannot take a bind parameter just as easily from that side. The rule is the
+    exact inverse of the target's: a target must NOT carry a fixture suffix, a
+    template MUST. That is a role check as well as a syntax one — cloning from a
+    working database is a `CREATE DATABASE` against something that may be in use,
+    and it silently makes whatever it copied into a fixture.
+
+    Checked BEFORE the drop, because the drop and the create are two statements and
+    a template rejected between them leaves the operator with no database at all.
+    """
+    probe_guard.check_pair("gr_p3c_batch", "gr_p3_base")
+    probe_guard.check_template_name("gr_p3_template")
+
+    for bad in (
+        "gr_p3_base\"; drop database ghostreplay; --",  # the reason this exists
+        "ghostreplay",  # a live database, not a fixture
+        "gr_p3c_batch",  # matches the TARGET rule, so it is a disposable copy
+        "postgres",
+        "GR_P3_BASE",
+    ):
+        with pytest.raises(SystemExit, match="refusing to clone from"):
+            probe_guard.check_template_name(bad)
+
+    # The pair check runs the target rule too.
+    with pytest.raises(SystemExit, match="refusing to touch"):
+        probe_guard.check_pair("ghostreplay", "gr_p3_base")
+    # And the two rules together make target == template unreachable rather than
+    # merely refused: the equality check that used to catch it now never fires here,
+    # because anything a template is allowed to be, a target is already refused for
+    # being. The suffix rule catches it first, one step earlier.
+    with pytest.raises(SystemExit, match="fixtures other runs are restored from"):
+        probe_guard.check_pair("gr_p3_base", "gr_p3_base")
+
+    assert not any(c in "gr_p3_base" for c in " '\";\\-")
+
+
+def test_the_fence_records_the_database_it_resolved_to():
+    """With `--url`, the name typed and the database measured can be different.
+
+    Both can be disposable and both can pass the name check, so nothing about the
+    fence catches it — and an artifact that records the positional argument then
+    identifies a database it never touched. `confirm_mutates` returns what
+    `current_database()` said and the helpers record THAT; `expect=` additionally
+    refuses the divergence, because the positional is what the runbook command line
+    and every message names.
+    """
+
+    class _Conn:
+        def execute(self, stmt):
+            sql = str(stmt)
+            return type("R", (), {"scalar": lambda _self: "gr_p3c_batch" if "current_database" in sql else "PostgreSQL 18.4"})()
+
+    resolved = probe_guard.confirm_mutates(_Conn(), confirmed=True, what="x")
+    assert resolved == "gr_p3c_batch"
+    assert probe_guard.confirm_mutates(_Conn(), confirmed=True, what="x", expect="gr_p3c_batch")
+
+    with pytest.raises(SystemExit, match="the record of this run would name the other"):
+        probe_guard.confirm_mutates(_Conn(), confirmed=True, what="x", expect="gr_p3a_clean")
+    # And the fence still comes first: consent is refused on the resolved name.
+    with pytest.raises(SystemExit, match="without --confirm-mutates"):
+        probe_guard.confirm_mutates(_Conn(), confirmed=False, what="x")
