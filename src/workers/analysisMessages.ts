@@ -29,6 +29,17 @@ import type { MoveClassification } from './analysisUtils'
 /** Why a search (or a whole analyze-move) stopped. */
 export type AnalysisStopReason = 'bestmove' | 'deadline'
 
+/**
+ * Which grading protocol produced an `analysis` response (g-two-search-grade
+ * §9.1).
+ *
+ * Declared HERE rather than in `candidates/`, so §15.2's deletion of that whole
+ * directory on a rejection verdict leaves no dangling import behind: the two
+ * response fields below outlive the prototype (§15.2 "keep"), and the candidate
+ * members simply stop being reachable.
+ */
+export type AnalysisProtocol = 'legacy' | 'variantA' | 'variantB'
+
 export type AnalysisWorkerResponse =
   | { type: 'ready' }
   | { type: 'analysis-started'; id: string; move: string }
@@ -92,6 +103,27 @@ export type AnalysisWorkerResponse =
       stopReason: AnalysisStopReason
       /** Deepest completed root iteration observed. Diagnostics only. */
       reachedDepth: number | null
+      /**
+       * Whether this tuple may carry a provenance/producer envelope
+       * (g-two-search-grade §9.1, §15.1 C8).
+       *
+       * REQUIRED, not optional, and deliberately an explicit discriminator
+       * rather than an inference: the worker builds no provenance — the three
+       * consumers do, and all three decide by OMISSION, so absent provenance is
+       * what *means* legacy v1. A prototype tuple reaching any of them would
+       * therefore be stamped `browser-game-v2` by default. Requiring the field
+       * forces every emitter to state a value, so no arm can become eligible by
+       * forgetting one.
+       *
+       * The legacy arm sets `!capFired && canonical`; candidate arms hardcode
+       * `false` on every path. INERT until a consumer gates on it — that gate and
+       * the envelope map are g-coord-noncanon-prov / g-grade-v3-wire's, which own
+       * the deliberate v2→v1 change for non-canonical legacy rows and its drift
+       * measurement.
+       */
+      evidenceEligible: boolean
+      /** Which protocol produced this tuple. Legacy rows say `'legacy'`. */
+      protocol: AnalysisProtocol
     }
   | { type: 'error'; error: string; id?: string }
   | { type: 'log'; message: string }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { configProblems, typedNumber, typedNumberField } from './config'
+import { BENCH_POSITION_SET_IDS, configProblems, typedNumber, typedNumberField } from './config'
 import type { BenchRunConfig } from './config'
+import { buildPositionSet } from './positions'
 import { planWarnings } from '../method'
 
 const valid: BenchRunConfig = {
@@ -62,6 +63,17 @@ describe('configProblems', () => {
         positionSetId: 'smoke6' as BenchRunConfig['positionSetId'],
       }).join(' '),
     ).toMatch(/positionSetId must be one of/)
+  })
+
+  it('accepts every set the runner can actually build', () => {
+    // The refusal above is only honest while the allowed list and
+    // `buildPositionSet` agree: a set the page offers but this list omits would
+    // be refused, and one this list allows but the builder does not know would
+    // be silently substituted.
+    for (const positionSetId of BENCH_POSITION_SET_IDS) {
+      expect(configProblems({ ...valid, positionSetId }), positionSetId).toEqual([])
+      expect(buildPositionSet(positionSetId).id, positionSetId).toBe(positionSetId)
+    }
   })
 
   it('refuses unknown, missing, or repeated arms', () => {

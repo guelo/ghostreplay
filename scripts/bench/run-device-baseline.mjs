@@ -19,7 +19,7 @@
  *
  * Usage:
  *   npm run bench:baseline -- --label "MacBook Pro M1, macOS 15, Chromium" \
- *     [--set thermal-40] [--plies 40] [--repeats 3] [--mode sequence] \
+ *     [--set thermal-40|smoke-6|best-30] [--plies 40] [--repeats 3] [--mode sequence] \
  *     [--arms current,variantA] [--warmup] [--cooldown 60000 (default)] \
  *     [--depth 17] [--out docs/analysis/<file>.jsonl] [--port 4180] [--skip-build]
  */
@@ -95,7 +95,12 @@ if (!label) {
 }
 
 const port = intOption('port', args.port, { min: 1, max: 65_535, fallback: 4180 })
-const positionSetId = enumOption('set', args.set, ['smoke-6', 'thermal-40'], 'thermal-40')
+const positionSetId = enumOption(
+  'set',
+  args.set,
+  ['smoke-6', 'thermal-40', 'best-30'],
+  'thermal-40',
+)
 // 60 is the stored game's length; `buildThermalPositions` caps rather than
 // refuses, so asking for more would quietly measure 60.
 const thermalPlies = intOption('plies', args.plies, { min: 1, max: 60, fallback: 40 })
@@ -127,6 +132,24 @@ const blockCooldownMs = intOption('cooldown', args.cooldown, {
   max: 86_400_000,
   fallback: 60_000,
 })
+
+/**
+ * A `best-30` run from THIS driver is a desktop diagnostic, and must not land in
+ * the evidence directory.
+ *
+ * `committedResults.test.ts` discovers gate files by `plan.positionSetId ===
+ * 'best-30'` and holds every discovered file to the phone-only preconditions —
+ * which a desktop control can never satisfy (§10.1 forbids quoting it as mobile
+ * evidence anyway). The default `--out` is under `docs/analysis/`, so without an
+ * explicit one the control would be graded as gate evidence it cannot be.
+ */
+if (positionSetId === 'best-30' && typeof args.out !== 'string') {
+  invalid.push(
+    '--set best-30 requires an explicit --out outside docs/analysis/ ' +
+      '(e.g. --out tmp/kill-gate-desktop-control.jsonl): a scripted run is a desktop ' +
+      'diagnostic, and the evidence directory holds gate evidence only.',
+  )
+}
 
 if (invalid.length > 0) {
   for (const problem of invalid) console.error(`! ${problem}`)

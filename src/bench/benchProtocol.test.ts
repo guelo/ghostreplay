@@ -7,6 +7,7 @@ import {
 } from './benchProtocol'
 import type { BenchWorkerLike } from './benchProtocol'
 import type { AnalyzeMoveMessage } from '../workers/analysisMessages'
+import { availableCandidateArms } from '../workers/candidates'
 
 const request: AnalyzeMoveMessage = {
   type: 'analyze-move',
@@ -108,5 +109,15 @@ describe('armUnavailableReason', () => {
 
   it('allows a candidate arm the worker advertised', () => {
     expect(armUnavailableReason('variantA', ['variantA', 'variantB'])).toBeNull()
+  })
+
+  it('agrees with what the worker build actually dispatches', () => {
+    // The handshake is only a guard while the two halves agree: a host list that
+    // drifted from the registry would either refuse a runnable arm or, far
+    // worse, admit one the worker falls back to `current` for.
+    const advertised = availableCandidateArms()
+
+    expect(armUnavailableReason('variantA', advertised)).toBeNull()
+    expect(armUnavailableReason('variantB', advertised)).toMatch(/not available in this worker build/)
   })
 })

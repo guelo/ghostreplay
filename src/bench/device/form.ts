@@ -16,6 +16,7 @@
 
 import type { BenchArm } from '../benchRecord'
 import { BENCH_ARMS } from '../benchRecord'
+import type { BenchPositionSetId } from './positions'
 import type { BenchRunConfig } from './config'
 import { typedNumberField } from './config'
 
@@ -85,6 +86,23 @@ export const selectedArms = (controls: BenchFormControls): BenchArm[] =>
   BENCH_ARMS.filter((arm) => controls.armBoxes.some((box) => box.value === arm && box.checked))
 
 /**
+ * The selected set, AS SELECTED — never narrowed to a known id here.
+ *
+ * This used to be `value === 'smoke-6' ? 'smoke-6' : 'thermal-40'`, a two-way
+ * test that answered every OTHER value with the thermal sequence. With a third
+ * set that stops being a harmless simplification: selecting `best-30` would have
+ * run 40 thermal positions while the run header recorded `best-30`, which is the
+ * silent substitution this module's own docstring exists to prevent.
+ *
+ * `configProblems` refuses an id outside `BENCH_POSITION_SET_IDS` before a
+ * single measurement runs. This function's only job is to not destroy the
+ * evidence that there is something to refuse — the same contract `typedNumber`
+ * has for numbers.
+ */
+const selectedPositionSetId = (control: { value: string }): BenchPositionSetId =>
+  control.value as BenchPositionSetId
+
+/**
  * Every number goes through `typedNumberField`, never `Number(x) || fallback`:
  * an unreadable or out-of-range entry has to reach `configProblems` intact to be
  * refused. Substituting a plausible default here would be a silent answer to a
@@ -94,7 +112,7 @@ export const readConfig = (controls: BenchFormControls): BenchRunConfig => ({
   deviceLabel: controls.deviceLabel.value.trim(),
   notes: controls.notes.value.trim(),
   mode: controls.mode.value === 'cold' ? 'cold' : 'sequence',
-  positionSetId: controls.positionSetId.value === 'smoke-6' ? 'smoke-6' : 'thermal-40',
+  positionSetId: selectedPositionSetId(controls.positionSetId),
   thermalPlies: typedNumberField(controls.thermalPlies),
   // `?? NaN` rather than `?? 1`: a cleared field is a mistake to report, not a
   // silent one-repeat run that §10.4 would then merely warn about.

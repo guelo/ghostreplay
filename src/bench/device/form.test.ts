@@ -87,6 +87,43 @@ describe('the bench page form', () => {
     expect(configProblems(readConfig(controls)).join(' ')).toMatch(/repeats must be a whole number/)
   })
 
+  it('routes best-30 through to the runner instead of substituting thermal-40', () => {
+    // The page offers the set; a mapping that answered every non-`smoke-6`
+    // selection with `thermal-40` would run 40 thermal positions while the
+    // header recorded `best-30` — 40 rows of the wrong corpus, on a phone, that
+    // nothing downstream could tell from the real thing.
+    const page = parsePage()
+    const options = [...page.querySelectorAll<HTMLOptionElement>('#positionSetId option')]
+    expect(options.map((option) => option.value)).toContain('best-30')
+
+    const controls = benchFormControls(page)
+    controls.deviceLabel.value = 'iPhone XR, iOS 17.7, Safari'
+    controls.positionSetId.value = 'best-30'
+
+    const config = readConfig(controls)
+    expect(config.positionSetId).toBe('best-30')
+    expect(configProblems(config)).toEqual([])
+  })
+
+  it('refuses an unrecognized set id rather than running another one', () => {
+    // The realistic way this happens: an option is added to the markup and the
+    // schema's list is not updated with it. `readConfig` must pass the value
+    // through INTACT so `configProblems` can refuse it — the two-way test it
+    // replaced would have answered `thermal-40` and run 40 positions.
+    const page = parsePage()
+    const select = page.querySelector<HTMLSelectElement>('#positionSetId')!
+    const drifted = page.createElement('option')
+    drifted.value = 'best-300'
+    select.append(drifted)
+
+    const controls = benchFormControls(page)
+    controls.deviceLabel.value = 'iPhone XR, iOS 17.7, Safari'
+    controls.positionSetId.value = 'best-300'
+
+    expect(readConfig(controls).positionSetId).toBe('best-300')
+    expect(configProblems(readConfig(controls)).join(' ')).toMatch(/positionSetId must be one of/)
+  })
+
   it('refuses a run with no arm selected', () => {
     const controls = benchFormControls(parsePage())
     controls.deviceLabel.value = 'MacBook Pro M1, macOS 15, Chromium'

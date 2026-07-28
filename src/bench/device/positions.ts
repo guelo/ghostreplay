@@ -3,9 +3,10 @@
  *
  * NOT the §10.3 corpus — the 200-position corpus, its threshold/terminal/mate
  * coverage, and the 1.e4 and g-kgiq regressions belong to g-grade-corpus-harness.
- * These two sets exist so a device baseline is reproducible: a cooled thermal
- * sequence long enough for §10.4's latency-by-move-index graph, and a short
- * instrument check for a new device.
+ * These three sets exist so a device baseline is reproducible: a cooled thermal
+ * sequence long enough for §10.4's latency-by-move-index graph, a short
+ * instrument check for a new device, and the `P === B` cohort the mobile kill
+ * gate (g-grade-kill-gate) is decided on.
  *
  * Positions are stored as MOVES, not FENs, and expanded with chess.js. A wrong
  * FEN is a silent measurement of the wrong position; a wrong move list throws at
@@ -156,22 +157,125 @@ export const SMOKE_POSITIONS: BenchPosition[] = [
   },
 ]
 
-export type BenchPositionSetId = 'smoke-6' | 'thermal-40'
+/**
+ * The engine's own depth-17 best move at each kept ply of the thermal game.
+ *
+ * Read out of the three committed thermal-40 baselines rather than re-derived:
+ * all 40 positions agree across iPhone XR, Pixel 7 Pro and desktop Chromium with
+ * zero errors, which is what single-threaded WASM at a fixed depth with a
+ * `ucinewgame` per analyze-move gives you. `positions.test.ts` cross-checks
+ * every entry back against `result.bestMove` in those files, so the corpus
+ * cannot drift from the evidence that produced it.
+ *
+ * Every 4th ply is dropped, landing on 30 positions spread evenly from opening
+ * to endgame — the kill gate needs about 30, and taking the first 30 would have
+ * measured only the opening.
+ */
+const BEST_MOVE_DROP_STRIDE = 4
+
+const RECORDED_BEST_MOVES: Readonly<Record<number, string>> = {
+  1: 'e2e4', 2: 'e7e5', 3: 'd2d4', 5: 'b1c3', 6: 'e7e5',
+  7: 'h2h3', 9: 'f2f3', 10: 'e8g8', 11: 'e3h6', 13: 'h2h4',
+  14: 'b8d7', 15: 'a2a3', 17: 'd2h6', 18: 'a7a5', 19: 'g2g4',
+  21: 'g2g4', 22: 'a7a5', 23: 'g2g4', 25: 'g2g4', 26: 'e5d4',
+  27: 'h6e3', 29: 'd1d4', 30: 'd7b6', 31: 'd4d1', 33: 'g2g3',
+  34: 'c8b8', 35: 'h6f4', 37: 'h6f4', 38: 'd6d5', 39: 'h1e1',
+}
+
+/** Which plies of the thermal game the best-move set covers. */
+export const bestMovePlies = (): number[] =>
+  Array.from({ length: DEFAULT_THERMAL_PLIES }, (_, index) => index + 1).filter(
+    (ply) => ply % BEST_MOVE_DROP_STRIDE !== 0,
+  )
+
+/**
+ * The `P === B` cohort, by construction under the CURRENT protocol
+ * (g-grade-kill-gate §4).
+ *
+ * Same positions as the thermal sequence, with the played move REPLACED by the
+ * engine's own recorded best move — so `pEqualsB` is true for every row of a
+ * current-protocol run, which is the cohort §3.4 says Variant A can only lose
+ * on. The gate is read off this fixed corpus, never off each arm's own
+ * `p-equals-b` cell.
+ *
+ * Two identity fields are load-bearing and deliberately NOT copied from the
+ * thermal rows:
+ *
+ * - `positionId` is `best30:`, never the `thermal:` id. These rows carry a
+ *   DIFFERENT played move at the same FEN, and reusing the id would give two
+ *   different measurements the same join key across files.
+ * - `thermalIndex` is null and the set declares `isThermalSequence: false`.
+ *   Retaining indices would let a set that is not a sequence be graphed as a
+ *   thermal curve, and would fire the 40-ply method warning on it.
+ */
+export const buildBestMovePositions = (): BenchPosition[] => {
+  const chess = new Chess()
+  const positions: BenchPosition[] = []
+
+  for (let index = 0; index < DEFAULT_THERMAL_PLIES; index += 1) {
+    const ply = index + 1
+    const bestMove = RECORDED_BEST_MOVES[ply]
+    if (bestMove !== undefined) {
+      const fen = chess.fen()
+      const playerColor = chess.turn() === 'w' ? 'white' : 'black'
+      // A throwaway copy: the game replay must continue down the GAME's moves,
+      // not the engine's. An illegal entry throws at load, exactly as a wrong
+      // thermal move does, rather than silently measuring another position.
+      const probe = new Chess(fen)
+      const played = probe.move({
+        from: bestMove.slice(0, 2),
+        to: bestMove.slice(2, 4),
+        ...(bestMove.length > 4 ? { promotion: bestMove.slice(4, 5) } : {}),
+      })
+      if (!played) {
+        throw new Error(`best-move set: illegal move ${bestMove} at ply ${ply}`)
+      }
+      positions.push({
+        positionId: `best30:ply-${String(ply).padStart(3, '0')}`,
+        fen,
+        playedMove: bestMove,
+        playerColor,
+        thermalIndex: null,
+        label: `${Math.floor(index / 2) + 1}${playerColor === 'white' ? '.' : '...'} ${played.san} (engine best)`,
+      })
+    }
+
+    const san = THERMAL_GAME_SAN[index]
+    if (!chess.move(san)) {
+      throw new Error(`thermal game: illegal move ${san} at ply ${ply}`)
+    }
+  }
+
+  return positions
+}
+
+export type BenchPositionSetId = 'smoke-6' | 'thermal-40' | 'best-30'
 
 export const buildPositionSet = (
   id: BenchPositionSetId,
   thermalPlies = DEFAULT_THERMAL_PLIES,
-): BenchPositionSet =>
-  id === 'smoke-6'
-    ? {
-        id,
-        label: 'Smoke (6 positions)',
-        positions: SMOKE_POSITIONS,
-        isThermalSequence: false,
-      }
-    : {
-        id,
-        label: `Thermal sequence (${Math.min(thermalPlies, THERMAL_GAME_SAN.length)} plies)`,
-        positions: buildThermalPositions(thermalPlies),
-        isThermalSequence: true,
-      }
+): BenchPositionSet => {
+  if (id === 'smoke-6') {
+    return {
+      id,
+      label: 'Smoke (6 positions)',
+      positions: SMOKE_POSITIONS,
+      isThermalSequence: false,
+    }
+  }
+  if (id === 'best-30') {
+    const positions = buildBestMovePositions()
+    return {
+      id,
+      label: `Best-move cohort (${positions.length} positions)`,
+      positions,
+      isThermalSequence: false,
+    }
+  }
+  return {
+    id,
+    label: `Thermal sequence (${Math.min(thermalPlies, THERMAL_GAME_SAN.length)} plies)`,
+    positions: buildThermalPositions(thermalPlies),
+    isThermalSequence: true,
+  }
+}

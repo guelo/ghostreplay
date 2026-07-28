@@ -9,42 +9,37 @@
  * §15.2 DELETES this module (and the runner plumbing that uses it) on a
  * rejection verdict.
  *
- * The worker half — the `bench-init` handler and the candidate dispatch point —
- * belongs to g-grade-kill-gate. Until it lands, `bench-init` goes unanswered:
- * an unknown message type falls through the worker's `switch` with no runtime
- * effect. `enableBenchMode` therefore resolves to NO arms, and the runner
- * refuses to run any non-default arm rather than silently measuring the current
- * protocol under a candidate's label. A benchmark that mislabels its arm is
- * worse than one that does not run.
+ * The MESSAGE TYPES live with the worker half, in
+ * `src/workers/candidates/benchMessages.ts`, and are re-exported here for this
+ * module's existing callers. One declaration, not two: a benchmark that
+ * mislabels its arm is worse than one that does not run, and two hand-kept
+ * copies of a wire format are how a mislabel gets in. `bench → workers` is the
+ * allowed import direction (`isolation.test.ts` forbids only the reverse), and
+ * §15.2 deletes the whole `candidates/` directory with this module.
+ *
+ * A build WITHOUT the worker-side half leaves `bench-init` unanswered — an
+ * unknown message type falls through the worker's `switch` with no runtime
+ * effect — so `enableBenchMode` resolves to NO arms and the runner refuses any
+ * non-default arm rather than silently measuring the current protocol under a
+ * candidate's label.
  */
 
 import type { AnalyzeMoveMessage } from '../workers/analysisMessages'
+import type {
+  BenchAnalyzeMoveMessage,
+  BenchInitMessage,
+  BenchReadyMessage,
+} from '../workers/candidates/benchMessages'
 import type { BenchArm } from './benchRecord'
+
+export type {
+  BenchAnalyzeMoveMessage,
+  BenchInitMessage,
+  BenchReadyMessage,
+} from '../workers/candidates/benchMessages'
 
 /** The arm that needs no opt-in: today's shipping three-search protocol. */
 export const DEFAULT_ARM: BenchArm = 'current'
-
-export type BenchInitMessage = {
-  type: 'bench-init'
-  bench: true
-}
-
-export type BenchReadyMessage = {
-  type: 'bench-ready'
-  /** The candidate arms this worker build can actually dispatch. */
-  arms: string[]
-}
-
-/**
- * An analyze-move carrying the per-message arm selector.
- *
- * Structurally a production `AnalyzeMoveMessage` plus one optional field, so the
- * worker's existing handler reads it unchanged and the default arm produces a
- * byte-identical message (C1).
- */
-export type BenchAnalyzeMoveMessage = AnalyzeMoveMessage & {
-  arm?: Exclude<BenchArm, 'current'>
-}
 
 /** The subset of `Worker` the handshake needs, so tests can pass a fake. */
 export type BenchWorkerLike = {
@@ -117,6 +112,6 @@ export const armUnavailableReason = (arm: BenchArm, availableArms: readonly stri
   return (
     `arm "${arm}" is not available in this worker build ` +
     `(bench mode advertised: ${availableArms.length > 0 ? availableArms.join(', ') : 'none'}). ` +
-    'The worker-side candidate dispatch lands in g-grade-kill-gate.'
+    'variantB lands in g-grade-variant-b; until then only variantA is dispatchable.'
   )
 }

@@ -23,6 +23,11 @@ Never quote Node timing as mobile evidence (§10.1).
 | `device-baseline-cold-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode cold` (fresh worker per measurement) |
 | `device-baseline-warm-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode sequence --warmup` — the warm pair for the file above |
 
+Gate evidence (`plan.positionSetId === 'best-30'`) is registered in
+`KILL_GATE_EVIDENCE` (`src/bench/killGate.ts`) and held to the preconditions
+below. The desktop control for that run is a diagnostic and lives outside this
+directory.
+
 Mobile baselines are added here as they are captured; each file names its device
 in the `run` record's `device.label`.
 
@@ -232,7 +237,9 @@ iPhone/Safari and Android/Chrome numbers are captured by hand.
    keep **repeats at 3 or more** (a multiple of the arm count for a comparison),
    leave the **cooldown at 60000** so each repeat starts from the same thermal
    state, and start. The page idles between blocks by itself; keep the tab in the
-   foreground through the cooldowns too.
+   foreground through the cooldowns too. For the kill-gate capture the settings
+   are fixed — see "The `best-30` set and the mobile kill gate" below, and tick
+   **Warm-up** as well.
 
 5. Watch the warning list under the status line. It appears before the first
    measurement, so a misconfigured run can be stopped in the first few seconds
@@ -244,6 +251,149 @@ iPhone/Safari and Android/Chrome numbers are captured by hand.
 Runs from `npm run bench:device:dev` are marked `"build": "dev"` in the run
 record. They are convenience checks only — §10.1 requires the bundled worker, so
 never report a `dev` run as a device baseline.
+
+## The `best-30` set and the mobile kill gate
+
+`best-30` exists for one measurement: g-grade-kill-gate, §12 step 4's go/no-go on
+the whole two-search idea.
+
+Variant A drops the post-best search on non-best moves but pays one extra root
+ply on **every** move — including the moves where the player already played the
+engine's choice. On that cohort §3.4 gives it no saving at all, only the extra
+ply, and the committed mobile baselines put `m` at 0.41. So if `P === B`
+regresses badly on a phone, Variant A is dead however good its correctness story
+is, and this is the cheapest place to find that out: one phone, ~30 positions,
+before the 200-position corpus, the golden vectors and all backend work.
+
+### What it is, and why the derivation is sound
+
+The thermal game's positions with the played move **replaced by the engine's own
+recorded depth-17 best move**, dropping every 4th ply to land on 30 spread evenly
+from opening to endgame. It is therefore the `P === B` cohort *by construction
+under the current protocol* — which is the baseline being regressed against.
+
+No new engine run was needed to derive it. The three committed thermal-40
+baselines already record `result.bestMove` for every position, and all 40 agree
+across iPhone XR, Pixel 7 Pro and desktop Chromium with zero errors: at a fixed
+depth, single-threaded WASM with a `ucinewgame` per analyze-move is
+deterministic. `positions.test.ts` cross-checks every `(fen, playedMove)` pair
+back against those files, so the corpus cannot drift from the evidence that
+produced it.
+
+Two identity fields are deliberately *not* copied from the thermal rows. The ids
+are `best30:ply-NNN`, never the `thermal:` ones — these rows carry a different
+played move at the same FEN, and reusing the id would give two different
+measurements the same join key across files. And `thermalIndex` is null with
+`isThermalSequence: false`, because a set that is not a sequence must not be
+graphable as a thermal curve.
+
+### The gate run
+
+Both arms, one run, on the declared phone:
+
+```
+--set best-30 --arms current,variantA --repeats 4 --warmup --cooldown 60000
+```
+
+- **`--warmup` is required.** Without it the block's cold row is always position
+  1, which every warm statistic then excludes — a "best-30" gate that actually
+  measured 29 warm positions.
+- **4 repeats, not 3**: `armOrderBalanced` needs a multiple of the arm count, and
+  3 repeats over 2 arms hands one arm the opening slot twice.
+- 8 blocks × (1 priming + 30 measured) = **248 rows**: 8 warm-up rows, which are
+  the run's only cold rows, plus 240 measured warm rows — 120 usable per arm.
+
+Roughly 14 minutes on an iPhone XR and 20 on a Pixel 7 Pro, including the seven
+60s cooldowns.
+
+A **desktop control** proves the arm end to end and gives an early signal, but
+§10.1 forbids quoting it as mobile evidence. It must be written outside this
+directory:
+
+```bash
+npm run bench:baseline -- --label "…" --set best-30 --arms current,variantA \
+  --repeats 4 --warmup --cooldown 60000 --out tmp/kill-gate-desktop-control.jsonl
+```
+
+The driver refuses `--set best-30` without an explicit `--out` for exactly that
+reason: gate files are discovered by `plan.positionSetId`, so a control landing
+here would be graded against preconditions it can never satisfy.
+
+### Which number the verdict is read off
+
+```
+regression = median(variantA, warm, all) / median(current, warm, all) - 1
+PASS when regression <= 0.10
+```
+
+Read off the **fixed corpus**, never off each arm's own `p-equals-b` cell.
+`pEqualsB` is computed from each arm's *own* returned best move and the summary
+splits each arm independently — so on the rows where Variant A's depth-18 root
+renames `B`, its row leaves the `p-equals-b` cell while `current`'s stays, and
+the two medians would describe different position sets. Those rows stay **in**:
+§3.4 gives Variant A the same cost on both splits, so excluding them would drop
+real measurements for a reason that does not affect cost. The disagreement count
+is reported as a finding for g-grade-variant-b, never used as a filter.
+
+### Preconditions — all must hold, or the run is VOID rather than failed
+
+`src/bench/killGate.ts` checks these, and `committedResults.test.ts` runs them
+over every committed `best-30` file.
+
+| # | Check |
+|---|---|
+| P1 | `build: 'bundled'`, `source.gitRevision` non-null, `gitDirty: false` |
+| P2 | `summary.completion === 'complete'`, `methodWarnings` empty, `summary.errors === 0` |
+| P3 | `harness === 'device'`; `run.device.label` equal to the phone declared in the bead **before** the capture; `environment.userAgent` / `platform` / `hardwareConcurrency` recorded |
+| P4 | plan: `best-30`, arms `[current, variantA]`, repeats 4, `armOrderBalanced`, `warmup`, `blockCooldownMs === 60000` exactly, requested depth === session depth (17); and **every row's own `requestedDepth === 17`** |
+| P5 | per arm, the usable warm rows' repeat values are exactly `[0,1,2,3]`, and each repeat measures each of the 30 ids exactly once |
+| P6 | every usable `current` row has `pEqualsB === true` |
+| P7 | every usable `variantA` row: exactly 2 phases; `phases[0].moves === []` at depth **18**; `phases[1].moves === [playedMove]` at depth **17** — absolute depths, not `N+1`/`N` |
+| P8 | **every row of both arms, warm-up rows included**: a `result` is present, `capFired: false`, `workerRestarted: false`, `engineRebuilt: false` |
+
+Four are deliberately tighter than the obvious version, for the same reason in
+every case — the loose form is satisfied by data that would move the median, or
+by a run measuring something other than what its header claims.
+
+`>= 30000` in P4 accepts a run whose thermal method is simply a different method,
+and the cooldown is the control on cross-block heat. Equal multisets in P5 are
+satisfied by both arms losing position 7 and double-counting position 8: matched,
+balanced, and describing a corpus that is not `best-30`.
+
+P4's row-level depth check and P7's absolute depths are one hole seen from two
+sides. Stated relatively, "root is `N+1`, post-played is `N`" says only that
+Variant A did what Variant A does at whatever depth it was handed — a run that
+actually measured depth 18 produces a self-consistent 19/18 pair and passes,
+while the header still claims 17 and the corpus is only the `P === B` cohort at
+17. Nothing else in the codebase binds a row's depth to its header:
+`validateBenchRecord` checks each row in isolation, `benchFileProblems` does not
+cross-reference depth, and `summarize` copies no depth at all. So both ends are
+pinned to the same constant.
+
+P8 covers the warm-ups because a priming search that fired the cap or rebuilt the
+engine leaves a cold engine underneath the 30 measured rows that follow it —
+excluded from the numbers is not the same as harmless to them. It requires the
+`result` to be *present* rather than reading `capFired` through an optional
+chain: a row with `result: null` and `error: null` is dropped by `usableRows`
+(so P5 never counts it), is not an error (so P2's `summary.errors` stays 0), and
+its absent cap flag is otherwise indistinguishable from an honest `false`.
+
+The phone is **declared before the run, not after**. Every precondition above is
+satisfiable by a desktop Chromium run, so without a declared identity the gate
+would accept the very control run that is explicitly not evidence. Matching a
+declared string rather than sniffing the user agent keeps the check honest in
+both directions: a desktop file fails, and so does a phone file relabelled to
+look like the declared one only in prose.
+
+Reported alongside, never as filters: the Variant A depth-18 disagreement count;
+both arms' `warm`/`p-equals-b` and `warm`/`p-differs` cells; p90 / p95 / worst;
+median nodes; and per-phase engine time and nodes for the root and post-played
+searches.
+
+A **failing** gate is a legitimate verdict, not a broken build — §11's rejection
+clause requires the finding survive either way, so the committed-results test
+asserts the verdict is *computable*, not that it passes. The verdict itself is
+recorded in `g-grade-kill-gate`'s notes and in the parent's.
 
 ## What a run contains
 

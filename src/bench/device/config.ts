@@ -59,7 +59,11 @@ export type BenchRunConfig = {
 
 export const BENCH_MODES: readonly BenchMode[] = ['sequence', 'cold']
 
-export const BENCH_POSITION_SET_IDS: readonly BenchPositionSetId[] = ['smoke-6', 'thermal-40']
+export const BENCH_POSITION_SET_IDS: readonly BenchPositionSetId[] = [
+  'smoke-6',
+  'thermal-40',
+  'best-30',
+]
 
 /**
  * Above this a single analyze-move can run for hours on a phone, which is a

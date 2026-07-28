@@ -165,6 +165,7 @@
             <select id="positionSetId">
               <option value="smoke-6">Smoke — 6 positions</option>
               <option value="thermal-40" selected>Thermal — game sequence</option>
+              <option value="best-30">Best-move — 30 positions (kill gate)</option>
             </select>
           </label>
           <label>
@@ -209,9 +210,10 @@
           counterbalanced order, which needs the repeat count to be a multiple of
           the number of arms. Every repeat and every arm is a block, and only the
           first block starts on a cooled device — so keep the cooldown, whether you
-          are comparing arms or just repeating one. Candidate arms need the
-          worker-side bench dispatch (g-grade-kill-gate); until it lands the runner
-          refuses them rather than mislabelling a current-protocol run.
+          are comparing arms or just repeating one. A candidate arm runs only if
+          this worker build advertises it in the bench handshake — variantB lands
+          in g-grade-variant-b, and until then the runner refuses it rather than
+          mislabelling a current-protocol run.
         </p>
       </fieldset>
     </form>

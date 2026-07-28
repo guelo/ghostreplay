@@ -4,12 +4,21 @@ import { Chess } from "chess.js";
 import stockfishEngineUrl from "stockfish/bin/stockfish-18-lite-single.js?url";
 import stockfishWasmUrl from "stockfish/bin/stockfish-18-lite-single.wasm?url";
 import type {
+  AnalysisProtocol,
   AnalysisStopReason,
   AnalysisWorkerRequest,
   AnalysisWorkerResponse,
   AnalyzeMoveMessage,
 } from "./analysisMessages";
 import type { EngineScore } from "./stockfishMessages";
+import { CANDIDATE_PROTOCOLS, availableCandidateArms } from "./candidates";
+import type {
+  BenchAnalyzeMoveMessage,
+  BenchInitMessage,
+  BenchReadyMessage,
+} from "./candidates/benchMessages";
+import { isCandidateArm } from "./candidates/benchMessages";
+import type { CandidateContext, CandidateOutcome, CandidateProtocol } from "./candidates/contract";
 import { parseUciInfoLine } from "./parseInfo";
 import {
   admitInfoLine,
@@ -32,6 +41,45 @@ const ctx = self as DedicatedWorkerGlobalScope;
 
 let engineReady = false;
 let engine: Worker | null = null;
+
+/**
+ * The engine instance a fatal error was reported for, so its later output can be
+ * ignored.
+ *
+ * `handleEngineError` deliberately does NOT terminate the engine (see its
+ * comment), which leaves it as the current engine with its listeners attached
+ * and still able to emit. Clearing `engineReady` is not enough on its own: a
+ * `readyok` still in flight arrives to an EMPTY `resetAckQueue` — `failAllRequestReady`
+ * just drained it — so `handleEngineLine` reads it as the init handshake, sets
+ * `engineReady` back to true, posts `ready`, and drains queued analyses onto the
+ * engine that just died. Identity is tracked rather than a bare boolean so the
+ * flag cannot outlive the instance it describes and poison its replacement.
+ */
+let failedEngine: Worker | null = null;
+
+/**
+ * The current engine's own listeners, kept so `terminate` can detach exactly the
+ * pair it attached. They are per-instance closures (see `ensureEngine`), so the
+ * function identities differ between engines and a shared reference would remove
+ * nothing.
+ */
+type EngineListeners = {
+  message: (event: MessageEvent<string>) => void;
+  error: (event: ErrorEvent) => void;
+};
+let engineListeners: EngineListeners | null = null;
+
+/**
+ * §15.1 C7's FIRST key: benchmark mode, set once at worker init by `bench-init`
+ * and answered with `bench-ready`.
+ *
+ * A module-level flag rather than a per-message one, so BOTH keys are required
+ * and neither is enough alone: without this, a stray `arm` on an analyze-move is
+ * never even read; with it but no `arm`, the current protocol still runs. A
+ * production build has no way to send `bench-init` — it is not on
+ * `AnalysisWorkerRequest` — and §15.2 deletes it with `candidates/`.
+ */
+let benchMode = false;
 
 /**
  * Total wall-clock budget for ONE analyze-move — reset + all three searches, not
@@ -301,7 +349,20 @@ const clearWaiterTimer = (waiter: ResetWaiter) => {
 };
 const resetAckQueue: ResetWaiter[] = [];
 
-const pendingAnalyses: AnalyzeMoveMessage[] = [];
+/**
+ * What this worker ACCEPTS: the production union, with the analyze-move widened
+ * by C7's optional selector, plus the bench handshake.
+ *
+ * Declared here rather than by widening `AnalysisWorkerRequest`, so production
+ * callers still cannot express either key (C7) and §15.2's deletion of
+ * `candidates/` takes both shapes with it.
+ */
+type AnalysisWorkerIncoming =
+  | Exclude<AnalysisWorkerRequest, AnalyzeMoveMessage>
+  | BenchAnalyzeMoveMessage
+  | BenchInitMessage;
+
+const pendingAnalyses: BenchAnalyzeMoveMessage[] = [];
 let analysisInFlight = false;
 
 // Stockfish's browser worker bootstrap reads the wasm asset from location.hash.
@@ -416,6 +477,12 @@ const destroyEngine = () => {
     engine = null;
   }
   engineReady = false;
+  // The tombstone describes an instance that no longer exists; keeping it would
+  // hold a reference to a terminated worker for the rest of this worker's life.
+  // Its listeners are deliberately NOT detached — they are bound to the instance
+  // that is going away, and their source guard makes anything still queued from
+  // it inert (see `ensureEngine`). `ensureEngine` replaces `engineListeners`.
+  failedEngine = null;
   // Boot a replacement immediately rather than waiting for the next search to
   // lazily call ensureEngine: the NEXT request's first act is `awaitRequestReady`,
   // which posts to the engine — against a null engine those commands would vanish
@@ -458,9 +525,24 @@ const ensureEngine = async () => {
   }
 
   try {
-    engine = new Worker(createEngineWorkerUrl());
-    engine.addEventListener("message", handleEngineMessage);
-    engine.addEventListener("error", handleEngineError);
+    // Listeners BOUND to the instance, not shared across every engine this
+    // worker ever builds. A `Worker`'s `error` is queued as a task on the
+    // owner's event loop, independently of the message port that `terminate()`
+    // empties — so an error raised by an instance we already replaced can be
+    // delivered AFTER its replacement exists. A shared handler reading the
+    // module-level `engine` would then tombstone the healthy replacement and
+    // park the worker for good. `event.currentTarget` would say the same thing,
+    // but only while the event is being dispatched, so the closure is both
+    // simpler and testable.
+    const created = new Worker(createEngineWorkerUrl());
+    const listeners: EngineListeners = {
+      message: (event) => handleEngineMessage(created, event),
+      error: (event) => handleEngineError(created, event),
+    };
+    created.addEventListener("message", listeners.message);
+    created.addEventListener("error", listeners.error);
+    engine = created;
+    engineListeners = listeners;
     sendEngineCommand("uci");
   } catch (error) {
     const message =
@@ -478,12 +560,26 @@ const ensureEngine = async () => {
 // with 21 (g-cache-stronger-evals); in-game callers omit depth and stay at 17.
 const DEFAULT_SEARCH_DEPTH = 17;
 
+/**
+ * §15.1 C5's NEUTRAL extension: every field is optional, and omitting all of
+ * them emits today's exact `position` / `go` pair with no `setoption` before it.
+ * That identity is what C1 is proved on, so nothing here may acquire a default
+ * that changes a command.
+ */
+type RunSearchOptions = {
+  onInfo?: (score: EngineScore, depth: number) => void;
+  depth?: number;
+  /** Restrict the search to these root moves (§3.2's restricted resolution). */
+  searchmoves?: string[];
+  /** Requested MultiPV. `1` and omission are the same thing: emit nothing. */
+  multipv?: number;
+  budget?: AnalysisBudget;
+};
+
 const runSearch = async (
   fen: string,
   moves: string[],
-  onInfo?: (score: EngineScore, depth: number) => void,
-  searchDepth?: number,
-  budget: AnalysisBudget = dormantBudget(),
+  options: RunSearchOptions = {},
 ) => {
   const pendingEngine = await ensureEngine();
 
@@ -495,9 +591,17 @@ const runSearch = async (
     sendEngineCommand("stop");
   }
 
-  const requestedDepth = searchDepth ?? DEFAULT_SEARCH_DEPTH;
+  const { onInfo, searchmoves } = options;
+  const budget = options.budget ?? dormantBudget();
+  const requestedDepth = options.depth ?? DEFAULT_SEARCH_DEPTH;
+  const multipv = options.multipv ?? 1;
+  // Only a RAISE needs undoing, and only the raiser may undo it: restoring
+  // unconditionally would post a `setoption` around every ordinary search and
+  // break the byte-identical UCI stream C1 is proved on.
+  const raisedMultiPv = multipv !== 1;
 
-  return new Promise<SearchResult>(
+  try {
+    return await new Promise<SearchResult>(
     (resolve, reject) => {
       const search = {
         resolve,
@@ -513,8 +617,9 @@ const runSearch = async (
         endsGame: makeEndsGame(fen, moves),
         canceled: false,
         // Fresh per search: `seq` is a per-search emission counter and batches
-        // never cross a search boundary. K is 1 until restricted MultiPV lands.
-        snapshots: createSnapshotAssembler(1),
+        // never cross a search boundary. K is whatever MultiPV this search asked
+        // for, so a restricted search's batch needs all of its slots.
+        snapshots: createSnapshotAssembler(multipv),
       };
       activeSearch = search;
       // Arm the wall-clock heartbeat for THIS search so a single long iteration
@@ -560,11 +665,64 @@ const runSearch = async (
           }, Math.max(0, graceExpiresAt - Date.now()));
         }, Math.max(0, budget.deadlineAt - Date.now()));
       }
+      // §8: a phase sets its OWN MultiPV immediately before `position`/`go` and
+      // never inherits the previous phase's value. Omission (K === 1) emits
+      // nothing at all — the engine is already at 1, set at `uciok` and restored
+      // by the `finally` below.
+      if (raisedMultiPv) {
+        sendEngineCommand(`setoption name MultiPV value ${multipv}`);
+      }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
+      const searchmovesSegment =
+        searchmoves && searchmoves.length > 0
+          ? ` searchmoves ${searchmoves.join(" ")}`
+          : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
-      sendEngineCommand(`go depth ${requestedDepth}`);
+      sendEngineCommand(`go depth ${requestedDepth}${searchmovesSegment}`);
     },
   );
+  } finally {
+    // C6: restoration is the WORKER's, not the candidate's, and it covers every
+    // exit — bestmove, cancel, deadline, rejection.
+    //
+    // Guarded on identity AND readiness. Identity alone is not enough: a fatal
+    // engine error does not terminate the engine, so the failed instance is
+    // still `engine` and an identity-only guard would post a `setoption` into
+    // it. `handleEngineError` clears `engineReady` BEFORE settling this promise,
+    // which is what makes the second condition reachable rather than a restated
+    // form of the first. A destroyed/rebuilt engine fails identity, and a fresh
+    // engine sets MultiPV 1 at `uciok` before its first `go` anyway.
+    if (raisedMultiPv && engine === pendingEngine && engineReady) {
+      sendEngineCommand("setoption name MultiPV value 1");
+    }
+  }
+};
+
+/**
+ * Test-only: drive ONE search with the C5 options.
+ *
+ * The minimal Variant A uses neither `searchmoves` nor `multipv` — §3.2's
+ * restricted resolution lands in g-grade-variant-b — so without this hook the
+ * emission and the C6 restoration would ship with no coverage at all until then,
+ * which is the wrong order for a `setoption` that outlives its own search.
+ * Unreachable from any message.
+ *
+ * `analysisId` binds the search to a cancelable request. `cancelAnalysis` keys on
+ * `activeAnalysisId`, which only `drainQueue` sets — so without this a test can
+ * imitate a cancel's OBSERVABLE ending (a truncated `bestmove`) but never take
+ * the real path through `stop`, `ActiveSearch.canceled` and the canceled-search
+ * tally. That path is the one C6's restoration has to survive.
+ */
+export const __runSearchForTests = (
+  fen: string,
+  moves: string[],
+  options: RunSearchOptions = {},
+  analysisId?: string,
+) => {
+  if (analysisId !== undefined) {
+    activeAnalysisId = analysisId;
+  }
+  return runSearch(fen, moves, options);
 };
 
 const parseUciMove = (uci: string) => {
@@ -665,26 +823,70 @@ const buildBestLine = (
   return [bestMove];
 };
 
-const handleEngineError = (event: ErrorEvent) => {
+/**
+ * A fatal engine failure, settled so nothing is left waiting on it.
+ *
+ * The unscoped error and the stopped heartbeat are as they always were — the
+ * bench runner's "worker compromised → rebuild" path reads that message and is
+ * unchanged. What follows is the settlement this used to skip: the active
+ * search's promise leaked, so `analyzeMove` never returned, `analysisInFlight`
+ * stayed true, and `drainQueue` was blocked for the rest of the worker's life. A
+ * `finally` inside `runSearch` would never have run either, which is why C6's
+ * MultiPV restoration depends on this fix.
+ *
+ * Deliberately NOT widened to terminate and recreate the engine: that risks a
+ * create → error-event → recreate loop, and the host already rebuilds the worker
+ * on an unscoped error. Leaving `engineReady` false parks the queue until it
+ * does — a broken engine serving requests is worse than a stalled one.
+ */
+const handleEngineError = (source: Worker, event: ErrorEvent) => {
+  // A stale instance's failure is not this worker's failure. Its request was
+  // already settled when it was replaced, and acting on it here would report an
+  // unscoped error for a live engine and tombstone it — see `ensureEngine` for
+  // why the delivery order makes this reachable.
+  if (source !== engine) {
+    return;
+  }
   const message = event.message || "Failed to initialize Stockfish";
-  // The engine is broken: settle all in-flight resets so analysisInFlight cannot
-  // stick and no placeholder waits for an ack that will never come. Stop the
-  // heartbeat too, so a dead engine cannot keep emitting liveness pings for a
-  // search that will never produce a bestmove.
   stopHeartbeat();
-  failAllRequestReady(new Error(message));
   ctx.postMessage({
     type: "error",
     error: message,
   } satisfies AnalysisWorkerResponse);
+  // Tombstone the instance BEFORE anything else, so a line already in flight from
+  // it — a `readyok`, most dangerously — cannot be acted on. See `failedEngine`.
+  failedEngine = source;
+  // Mark the engine unavailable BEFORE anything can observe the failure — the
+  // same idiom `destroyEngine` uses for the same condition, and what
+  // `drainQueue` guards on, so the next queued request cannot be started on it.
+  // It is also what makes C6's readiness guard reachable: without it the failed
+  // engine is still the current engine and "same instance" and "usable" are the
+  // same condition.
+  engineReady = false;
+  failAllRequestReady(new Error(message));
+  const current = activeSearch;
+  if (current) {
+    activeSearch = null;
+    clearSearchTimers(current);
+    current.reject(new Error(message));
+  }
 };
 
-const handleEngineMessage = (event: MessageEvent<string>) => {
-  handleEngineLine(event.data);
+const handleEngineMessage = (source: Worker, event: MessageEvent<string>) => {
+  handleEngineLine(source, event.data);
 };
 
-const handleEngineLine = (line: string) => {
+const handleEngineLine = (source: Worker, line: string) => {
   postLog(`[analysisWorker <-] ${line}`);
+
+  // Logged, then dropped: the transcript still shows what the engine said (the
+  // device harness reads it back), but nothing acts on it. Two ways a line gets
+  // here without being ours — a replaced instance still draining its port, and
+  // the tombstoned instance whose late `readyok` would otherwise resurrect it
+  // (see `failedEngine`).
+  if (source !== engine || source === failedEngine) {
+    return;
+  }
 
   if (line === "uciok") {
     sendEngineCommand("setoption name Hash value 128");
@@ -815,7 +1017,7 @@ const handleEngineLine = (line: string) => {
   }
 };
 
-const enqueueAnalysis = (message: AnalyzeMoveMessage) => {
+const enqueueAnalysis = (message: BenchAnalyzeMoveMessage) => {
   pendingAnalyses.push(message);
   drainQueue();
 };
@@ -852,7 +1054,7 @@ const drainQueue = () => {
     return;
   }
 
-  let next: AnalyzeMoveMessage | undefined;
+  let next: BenchAnalyzeMoveMessage | undefined;
   while (!next && pendingAnalyses.length > 0) {
     const candidate = pendingAnalyses.shift();
     if (!candidate) {
@@ -910,8 +1112,195 @@ const drainQueue = () => {
     });
 };
 
-const analyzeMove = async (request: AnalyzeMoveMessage) => {
+/**
+ * Today's three-search protocol, verbatim — the other branch of the ONE dispatch
+ * point below.
+ *
+ * Extracted rather than left inline so both arms hand the same
+ * `CandidateOutcome` to the same tail: everything from the `(none)` early return
+ * through `computeAnalysisResult`, the mate fields, the classification,
+ * `buildBestLine` and the `postMessage` lives below the dispatch and is shared
+ * (§15.1 C3). Nothing about the search sequence changed in the move.
+ */
+const runCurrentProtocol = async (
+  request: AnalyzeMoveMessage,
+  sideToMove: "w" | "b",
+  budget: AnalysisBudget,
+): Promise<CandidateOutcome> => {
+  // Any constituent search truncated by the deadline poisons the whole move's
+  // provenance: the tuple no longer describes a search that reached its limit.
+  let capFired = false;
+
+  const bestSearch = await runSearch(request.fen, [], {
+    depth: request.depth,
+    budget,
+  });
+  capFired = capFired || bestSearch.capFired;
   throwIfCanceled(request.id);
+  const bestMove = bestSearch.bestmove;
+
+  if (!bestMove || bestMove === "(none)") {
+    return {
+      bestMove: bestMove || "(none)",
+      rootPv: null,
+      continuationPv: null,
+      postPlayedScore: null,
+      postBestScore: null,
+      capFired,
+      reachedDepth: bestSearch.reachedDepth,
+    };
+  }
+
+  // Evaluate the position after the played move, streaming intermediate evals
+  const opponentToMove = sideToMove === "w" ? "b" : "w";
+  const terminalPlayedScore = terminalScoreAfterMove(request.fen, request.move);
+  const playedEvalSearch: SearchResult = terminalPlayedScore
+    ? {
+        bestmove: "(terminal)",
+        score: terminalPlayedScore,
+        pv: null,
+        // A deterministic terminal score is not a search: it can never be
+        // truncated, so it never poisons provenance.
+        capFired: false,
+        stopReason: "bestmove",
+        reachedDepth: null,
+      }
+    : await runSearch(request.fen, [request.move], {
+        onInfo: (score, depth) => {
+          if (canceledAnalyses.has(request.id)) {
+            return;
+          }
+          const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
+          if (cp !== null) {
+            ctx.postMessage({
+              type: "analysis-streaming",
+              id: request.id,
+              cp,
+              depth,
+            } satisfies AnalysisWorkerResponse);
+          }
+        },
+        depth: request.depth,
+        budget,
+      });
+  capFired = capFired || playedEvalSearch.capFired;
+  throwIfCanceled(request.id);
+
+  // When best != played, search after the best move too for an apples-to-apples
+  // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
+  // independent searches reach different depths, inflating the delta.
+  let postBestScore = playedEvalSearch.score;
+  let postBestSearch: SearchResult | null = null;
+  if (request.move !== bestMove) {
+    const terminalBestScore = terminalScoreAfterMove(request.fen, bestMove);
+    if (terminalBestScore) {
+      postBestScore = terminalBestScore;
+    } else {
+      postBestSearch = await runSearch(request.fen, [bestMove], {
+        depth: request.depth,
+        budget,
+      });
+      capFired = capFired || postBestSearch.capFired;
+      postBestScore = postBestSearch.score;
+    }
+  }
+  throwIfCanceled(request.id);
+
+  return {
+    bestMove,
+    rootPv: bestSearch.pv,
+    // Prefer the root PV when it begins with the final bestmove. If Stockfish's
+    // last root PV is stale or short, reuse the already-run continuation search
+    // after the best move so new sessions do not persist one-move lines.
+    continuationPv:
+      request.move === bestMove ? playedEvalSearch.pv : postBestSearch?.pv ?? null,
+    postPlayedScore: playedEvalSearch.score,
+    postBestScore,
+    capFired,
+    reachedDepth: bestSearch.reachedDepth,
+  };
+};
+
+/**
+ * Everything a candidate arm is allowed to touch (§15.1 C4), built per request.
+ *
+ * `search` closes over the ONE shared budget, so an arm cannot construct or
+ * extend one; every other field is a pure helper. There is no engine handle, no
+ * `activeSearch`, no heartbeat, no waiter queue, no `canceledAnalyses`, and no
+ * `ctx.postMessage`.
+ */
+const candidateContext = (
+  request: AnalyzeMoveMessage,
+  sideToMove: "w" | "b",
+  budget: AnalysisBudget,
+): CandidateContext => {
+  const opponentToMove = sideToMove === "w" ? "b" : "w";
+  return {
+    fen: request.fen,
+    playedMove: request.move,
+    playerColor: request.playerColor,
+    sideToMove,
+    requestedDepth: request.depth ?? DEFAULT_SEARCH_DEPTH,
+    // `budget` last, so the shared deadline is not something an arm can pass.
+    search: (moves, options) =>
+      runSearch(request.fen, moves, { ...options, budget }),
+    checkCanceled: () => throwIfCanceled(request.id),
+    terminalScoreAfterMove: (move) => terminalScoreAfterMove(request.fen, move),
+    streamPlayed: (score, depth) => {
+      if (canceledAnalyses.has(request.id)) {
+        return;
+      }
+      const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
+      if (cp !== null) {
+        ctx.postMessage({
+          type: "analysis-streaming",
+          id: request.id,
+          cp,
+          depth,
+        } satisfies AnalysisWorkerResponse);
+      }
+    },
+  };
+};
+
+/**
+ * §15.1 C7's SECOND key, read only while the first one is held.
+ *
+ * Returns the arm to dispatch, or null for the current protocol. Either key
+ * alone is inert: no `bench-init` means the selector is never read, and no
+ * selector means the current protocol runs even in bench mode. A named arm this
+ * build cannot dispatch THROWS, so the failure is scoped to the request rather
+ * than silently measuring the current protocol under a candidate's label.
+ */
+const selectCandidate = (
+  request: BenchAnalyzeMoveMessage,
+): CandidateProtocol | null => {
+  if (!benchMode || request.arm === undefined) {
+    return null;
+  }
+  const available = availableCandidateArms();
+  if (!isCandidateArm(request.arm)) {
+    throw new Error(
+      `unknown candidate arm ${JSON.stringify(request.arm)} ` +
+        `(this build dispatches: ${available.join(", ") || "none"})`,
+    );
+  }
+  const protocol = CANDIDATE_PROTOCOLS[request.arm];
+  if (!protocol) {
+    throw new Error(
+      `candidate arm "${request.arm}" is not available in this worker build ` +
+        `(this build dispatches: ${available.join(", ") || "none"})`,
+    );
+  }
+  return protocol;
+};
+
+const analyzeMove = async (request: BenchAnalyzeMoveMessage) => {
+  throwIfCanceled(request.id);
+
+  // Before `analysis-started`: a request labelled with an arm this build cannot
+  // run has not started, and must not look like it did.
+  const candidate = selectCandidate(request);
 
   ctx.postMessage({
     type: "analysis-started",
@@ -940,26 +1329,31 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     deadlineAt: MAX_ANALYSIS_MS === null ? Infinity : Date.now() + MAX_ANALYSIS_MS,
     graceExpiresAt: null,
   };
-  // Any constituent search truncated by the deadline poisons the whole move's
-  // provenance: the tuple no longer describes a search that reached its limit.
-  let capFired = false;
 
   // Reset the engine ONCE per independent analysis, before the root search and
-  // never between the 3 related searches. Then re-check cancellation: a cancel
+  // never between the related searches. Then re-check cancellation: a cancel
   // delivered during the reset rejects the waiter, so we never start searching.
   await awaitRequestReady(budget.deadlineAt);
   throwIfCanceled(request.id);
 
-  const bestSearch = await runSearch(
-    request.fen,
-    [],
-    undefined,
-    request.depth,
-    budget,
-  );
-  capFired = capFired || bestSearch.capFired;
-  throwIfCanceled(request.id);
-  const bestMove = bestSearch.bestmove;
+  // ---- the ONE dispatch point (§15.1 C3) ------------------------------------
+  const outcome = candidate
+    ? await candidate.run(candidateContext(request, sideToMove, budget))
+    : await runCurrentProtocol(request, sideToMove, budget);
+
+  // ---- the ONE join, shared by both arms ------------------------------------
+  const protocol: AnalysisProtocol = candidate ? candidate.arm : "legacy";
+  /**
+   * §9.1's discriminator. The legacy arm is `!capFired && canonical` — NOT
+   * `!capFired` alone, because a completed search whose grading fell back to the
+   * delta-band `classifyMove` is equally unfit to carry a depth claim. Candidate
+   * arms are `false` unconditionally (C8), on every path.
+   */
+  const evidenceEligible = (canonical: boolean) =>
+    candidate === null && !outcome.capFired && canonical;
+
+  const capFired = outcome.capFired;
+  const bestMove = outcome.bestMove;
 
   if (!bestMove || bestMove === "(none)") {
     ctx.postMessage({
@@ -977,75 +1371,21 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       canonical: false,
       capFired,
       stopReason: capFired ? "deadline" : "bestmove",
-      reachedDepth: bestSearch.reachedDepth,
+      reachedDepth: outcome.reachedDepth,
+      evidenceEligible: evidenceEligible(false),
+      protocol,
     } satisfies AnalysisWorkerResponse);
     return;
   }
 
-  // Evaluate the position after the played move, streaming intermediate evals
   const opponentToMove = sideToMove === "w" ? "b" : "w";
-  const terminalPlayedScore = terminalScoreAfterMove(request.fen, request.move);
-  const playedEvalSearch: SearchResult = terminalPlayedScore
-    ? {
-        bestmove: "(terminal)",
-        score: terminalPlayedScore,
-        pv: null,
-        // A deterministic terminal score is not a search: it can never be
-        // truncated, so it never poisons provenance.
-        capFired: false,
-        stopReason: "bestmove",
-        reachedDepth: null,
-      }
-    : await runSearch(
-        request.fen,
-        [request.move],
-        (score, depth) => {
-          if (canceledAnalyses.has(request.id)) {
-            return;
-          }
-          const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
-          if (cp !== null) {
-            ctx.postMessage({
-              type: "analysis-streaming",
-              id: request.id,
-              cp,
-              depth,
-            } satisfies AnalysisWorkerResponse);
-          }
-        },
-        request.depth,
-        budget,
-      );
-  capFired = capFired || playedEvalSearch.capFired;
-  throwIfCanceled(request.id);
-
-  // When best != played, search after the best move too for an apples-to-apples
-  // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
-  // independent searches reach different depths, inflating the delta.
-  let postBestScore = playedEvalSearch.score;
-  let postBestSearch: SearchResult | null = null;
-  if (request.move !== bestMove) {
-    const terminalBestScore = terminalScoreAfterMove(request.fen, bestMove);
-    if (terminalBestScore) {
-      postBestScore = terminalBestScore;
-    } else {
-      postBestSearch = await runSearch(
-        request.fen,
-        [bestMove],
-        undefined,
-        request.depth,
-        budget,
-      );
-      capFired = capFired || postBestSearch.capFired;
-      postBestScore = postBestSearch.score;
-    }
-  }
-  throwIfCanceled(request.id);
+  const postPlayedScore = outcome.postPlayedScore;
+  const postBestScore = outcome.postBestScore;
 
   const { bestEval, playedEval, delta } = computeAnalysisResult({
     bestMove,
     playedMove: request.move,
-    postPlayedScore: playedEvalSearch.score,
+    postPlayedScore,
     postBestScore,
     sideToMove,
     playerColor: request.playerColor,
@@ -1055,7 +1395,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   // the mover's color as request.playerColor). Both post scores are from the
   // opponent-to-move position.
   const playedEvalMate = mateForPlayer(
-    playedEvalSearch.score,
+    postPlayedScore,
     opponentToMove,
     request.playerColor,
   );
@@ -1070,10 +1410,10 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   let classification: MoveClassification | null = null;
   let canonical = false;
-  if (postBestScore && playedEvalSearch.score) {
+  if (postBestScore && postPlayedScore) {
     classification = classifyMoveAdvanced({
       prevScore: postBestScore,
-      nextScore: playedEvalSearch.score,
+      nextScore: postPlayedScore,
       scorePov,
       mover,
       isBestMove,
@@ -1081,19 +1421,19 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     canonical = true;
   } else {
     // Legacy delta-band fallback: a non-canonical result (one of the post-move
-    // searches produced no score). Surface it for diagnostics; not persisted.
+    // scores is missing). Surface it for diagnostics; not persisted. An arm that
+    // DECLINES to grade a row lands here too, by returning a null post-best.
     classification = classifyMove(delta);
     postLog(
       `[analysisWorker] non-canonical classification (delta-band fallback) for move ${request.move}`,
     );
   }
 
-  // Prefer the root PV when it begins with the final bestmove. If Stockfish's
-  // last root PV is stale or short, reuse the already-run continuation search
-  // after the best move so new sessions do not persist one-move lines.
-  const continuationPv =
-    request.move === bestMove ? playedEvalSearch.pv : postBestSearch?.pv ?? null;
-  const bestLine = buildBestLine(bestMove, bestSearch.pv, continuationPv);
+  const bestLine = buildBestLine(
+    bestMove,
+    outcome.rootPv,
+    outcome.continuationPv,
+  );
 
   ctx.postMessage({
     type: "analysis",
@@ -1110,7 +1450,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     canonical,
     capFired,
     stopReason: capFired ? "deadline" : "bestmove",
-    reachedDepth: bestSearch.reachedDepth,
+    reachedDepth: outcome.reachedDepth,
+    evidenceEligible: evidenceEligible(canonical),
+    protocol,
   } satisfies AnalysisWorkerResponse);
 };
 
@@ -1118,7 +1460,7 @@ ensureEngine();
 
 ctx.addEventListener(
   "message",
-  (event: MessageEvent<AnalysisWorkerRequest>) => {
+  (event: MessageEvent<AnalysisWorkerIncoming>) => {
     const message = event.data;
 
     switch (message.type) {
@@ -1131,16 +1473,34 @@ ctx.addEventListener(
         enqueueAnalysis(message);
         break;
       }
+      case "bench-init": {
+        // Malformed (`bench` not literally true) is IGNORED, not answered: a
+        // half-formed opt-in must leave the worker exactly as it was, and an
+        // unanswered handshake is already the runner's "no arms" outcome.
+        if (message.bench !== true) {
+          break;
+        }
+        benchMode = true;
+        ctx.postMessage({
+          type: "bench-ready",
+          arms: availableCandidateArms(),
+        } satisfies BenchReadyMessage);
+        break;
+      }
       case "cancel-analysis": {
         cancelAnalysis(message.id);
         break;
       }
       case "terminate": {
-        engine?.removeEventListener("message", handleEngineMessage);
-        engine?.removeEventListener("error", handleEngineError);
+        if (engine && engineListeners) {
+          engine.removeEventListener("message", engineListeners.message);
+          engine.removeEventListener("error", engineListeners.error);
+        }
         engine?.terminate();
         engine = null;
+        engineListeners = null;
         engineReady = false;
+        failedEngine = null;
         stopHeartbeat();
         failAllRequestReady(new Error("Analysis worker terminated"));
         // Clear the abandoned search's deadline timers BEFORE dropping it. A

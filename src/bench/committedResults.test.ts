@@ -4,6 +4,14 @@ import { describe, expect, it } from 'vitest'
 import { parseJsonl } from './benchRecord'
 import type { BenchRunRecord, BenchSummaryRecord } from './benchRecord'
 import { benchFileProblems } from './benchFile'
+import {
+  KILL_GATE_EVIDENCE,
+  KILL_GATE_POSITION_SET_ID,
+  killGateFile,
+  killGateProblems,
+  killGateVerdict,
+} from './killGate'
+import { buildPositionSet } from './device/positions'
 
 /**
  * The committed benchmark files must be readable by the code that reads them,
@@ -88,5 +96,57 @@ describe('committed benchmark results', () => {
         ])
       }
     }
+  })
+
+  /**
+   * The kill-gate evidence (g-grade-kill-gate §5).
+   *
+   * Two pieces, because a directory scan must stay green BEFORE the capture
+   * exists and must not silently pass afterwards:
+   *
+   * - DISCOVERED: any committed file whose header says `best-30`. Zero such files
+   *   today, so there is nothing to check and this is green.
+   * - REGISTERED: `KILL_GATE_EVIDENCE`, empty until the evidence commit, whose
+   *   every entry must resolve to a discovered file. Filling it in the same
+   *   commit as the JSONL is what turns this from vacuous into enforced, and
+   *   deleting the file later fails the build instead of quietly reverting to
+   *   zero discovered files.
+   *
+   * What it asserts is that the PRECONDITIONS hold and the verdict is
+   * COMPUTABLE — deliberately not that it passes. A failing gate is a legitimate
+   * verdict (§11's rejection clause requires the finding survive either way),
+   * not a broken build.
+   */
+  describe('kill-gate evidence', () => {
+    const gateFiles = files.filter((file) => {
+      const records = parseJsonl(readFileSync(resolve(ANALYSIS_DIR, file), 'utf8'))
+      const header = records.find((record) => record.kind === 'run') as BenchRunRecord | undefined
+      return header?.plan.positionSetId === KILL_GATE_POSITION_SET_ID
+    })
+    const registered = Object.entries(KILL_GATE_EVIDENCE)
+
+    it('registers every committed best-30 file, and only files that exist', () => {
+      // Discovery keys on the SET ID, so the desktop control would be discovered
+      // too if it were ever written here — it is a diagnostic, and this
+      // directory holds evidence only.
+      expect(gateFiles.sort(), 'unregistered best-30 files in docs/analysis/').toEqual(
+        registered.map(([, filename]) => filename).sort(),
+      )
+    })
+
+    it('holds every registered gate file to the §5 preconditions and computes its verdict', () => {
+      const positionIds = buildPositionSet(KILL_GATE_POSITION_SET_ID).positions.map(
+        (position) => position.positionId,
+      )
+
+      for (const [deviceLabel, filename] of registered) {
+        const records = parseJsonl(readFileSync(resolve(ANALYSIS_DIR, filename), 'utf8'))
+        const file = killGateFile(records)
+
+        expect(killGateProblems(file, { deviceLabel, positionIds }), filename).toEqual([])
+        // Computable, not passing: the verdict itself is recorded in the bead.
+        expect(killGateVerdict(file), filename).not.toBeNull()
+      }
+    })
   })
 })
