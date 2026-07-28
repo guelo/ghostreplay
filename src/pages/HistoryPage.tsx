@@ -44,6 +44,13 @@ function HistoryPage() {
   // Terminal outcome of polling: the payload never completed ('incomplete'), or a poll
   // failed for good after a payload was already in hand ('stale'). Null while polling.
   const [pollOutcome, setPollOutcome] = useState<null | 'incomplete' | 'stale'>(null);
+  // Read-only projection of the board's displayed main-line move index (g-m1xc),
+  // held here only because the opening-lineage footer is a SIBLING of the board.
+  // The board stays the canonical owner of navigation; this is never written by
+  // anything but the board's callback. `null` = variation / no game loaded.
+  const [displayedMainlineIndex, setDisplayedMainlineIndex] = useState<number | null>(
+    null,
+  );
   const hasPayloadRef = useRef(false);
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,6 +94,9 @@ function HistoryPage() {
     let cancelled = false;
     pollCountRef.current = 0;
     hasPayloadRef.current = false;
+    // Drop the previous game's board cursor so its index can never select a card
+    // in the incoming game's lineage before the new board reports its own.
+    setDisplayedMainlineIndex(null);
     setPollOutcome(null);
     setAnalysisProcessing(false);
     setAnalysisError(null);
@@ -337,6 +347,7 @@ function HistoryPage() {
                     positionAnalysis={analysis.position_analysis}
                     highlightedMoves={highlightedMoves}
                     onGraphMoveClick={handleGraphMoveClick}
+                    onDisplayedMainlineIndexChange={setDisplayedMainlineIndex}
                     mobileToolbar={isNarrow ? gameSelector : undefined}
                     footer={
                       <>
@@ -355,6 +366,7 @@ function HistoryPage() {
                           lineage={openingLineage}
                           startPly={openingStartPly}
                           scoreStatus={openingScoreStatus}
+                          activeMoveIndex={displayedMainlineIndex}
                           onSelectRoot={handleSelectRoot}
                           onStartDrill={handleStartDrill}
                         />

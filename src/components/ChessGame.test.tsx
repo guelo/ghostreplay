@@ -3882,25 +3882,33 @@ describe("ChessGame opening lineage", () => {
   const LINEAGE_FEN_E5 =
     "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
 
+  /** A lineage card whose crossing move index is `moves.length - 1`. */
+  function lineageCard(
+    openingKey: string,
+    openingName: string,
+    moves: string[],
+    depth = 0,
+  ) {
+    return {
+      opening_key: openingKey,
+      opening_name: openingName,
+      opening_family: openingName,
+      eco: "C20",
+      depth,
+      score: 60,
+      confidence: 0.5,
+      coverage: 0.5,
+      sample_size: 5,
+      game_count: 2,
+      path: [],
+      moves,
+    };
+  }
+
   function lineageResponse(openingKey: string) {
     return {
       player_color: "white",
-      lineage: [
-        {
-          opening_key: openingKey,
-          opening_name: "King's Pawn Game",
-          opening_family: "King's Pawn",
-          eco: "C20",
-          depth: 0,
-          score: 60,
-          confidence: 0.5,
-          coverage: 0.5,
-          sample_size: 5,
-          game_count: 2,
-          path: [],
-          moves: ["e4"],
-        },
-      ],
+      lineage: [lineageCard(openingKey, "King's Pawn Game", ["e4"])],
       start_ply: 1,
     };
   }
@@ -3926,11 +3934,22 @@ describe("ChessGame opening lineage", () => {
       LINEAGE_FEN_E5,
     );
 
-    // Board navigation is wired during play (history parity), so the card is
-    // selectable ("Select …") even while the game is live.
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Select King's Pawn Game/ }),
-    );
+    // The board sits on 1...e5, past this lineage's only crossing (1.e4), so no
+    // card is expanded (g-m1xc) — the game has left the opening.
+    const select = await screen.findByRole("button", {
+      name: /Select King's Pawn Game/,
+    });
+    expect(
+      screen.queryByRole("button", { name: /^Collapse .* details$/ }),
+    ).not.toBeInTheDocument();
+    // Start Drill is post-game only — not offered mid-game.
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+
+    // Board navigation is wired during play (history parity), so selecting the
+    // card reviews the opening's past position.
+    fireEvent.click(select);
 
     // Selecting reviews the opening's past position without disturbing the live
     // game (the store's live position is untouched — only viewIndex moves).
@@ -3940,10 +3959,7 @@ describe("ChessGame opening lineage", () => {
         LINEAGE_FEN_E4,
       ),
     );
-    // Start Drill is post-game only — not offered mid-game.
-    expect(
-      screen.queryByRole("button", { name: /start drill/i }),
-    ).not.toBeInTheDocument();
+    expect(useGameStore.getState().liveFen).toBe(LINEAGE_FEN_E5);
   });
 
   it("post-game lineage offers Start Drill that opens the drill setup (route-state intercept)", async () => {
@@ -3960,12 +3976,11 @@ describe("ChessGame opening lineage", () => {
     });
     render(<ChessGame />);
 
-    // Post-game the card is selectable ("Select …"), and expanding reveals Start
-    // Drill (onStartDrill wired once gameResult !== null).
-    const toggle = await screen.findByRole("button", {
-      name: /Select King's Pawn Game/,
+    // The board sits on the crossing move, so the card is already expanded
+    // (g-m1xc) and offers Start Drill (onStartDrill wired once gameResult !== null).
+    await screen.findByRole("button", {
+      name: /Collapse King's Pawn Game details/,
     });
-    fireEvent.click(toggle);
 
     const drill = await screen.findByRole("button", { name: /start drill/i });
     // Opening the drill setup fetches the opening roots (overlay opened in drill
@@ -3999,8 +4014,11 @@ describe("ChessGame opening lineage", () => {
     const board = screen.getByTestId("chessboard");
     expect(board).toHaveAttribute("data-position", LINEAGE_FEN_E5);
 
+    // The final position is past the crossing, so the card is compact (g-m1xc).
     fireEvent.click(
-      await screen.findByRole("button", { name: /Select King's Pawn Game/ }),
+      await screen.findByRole("button", {
+        name: /Select King's Pawn Game/,
+      }),
     );
 
     // Selecting the card jumps the board back to the King's Pawn position (move 0).
@@ -4010,6 +4028,75 @@ describe("ChessGame opening lineage", () => {
         LINEAGE_FEN_E4,
       ),
     );
+  });
+
+  it("keeps the expanded card in sync with the displayed move (g-m1xc)", async () => {
+    // Two crossings: King's Pawn at move 0, Petrov at move 3.
+    const FEN_NF3 =
+      "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2";
+    const FEN_NF6 =
+      "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        lineageCard("k1", "King's Pawn Game", ["e4"]),
+        lineageCard("k2", "Petrov's Defense", ["e4", "e5", "Nf3", "Nf6"], 1),
+      ],
+      start_ply: 1,
+    });
+    useGameStore.setState({
+      sessionId: "session-lineage-sync",
+      isGameActive: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [
+        { san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" },
+        { san: "e5", fen: LINEAGE_FEN_E5, uci: "e7e5" },
+        { san: "Nf3", fen: FEN_NF3, uci: "g1f3" },
+        { san: "Nf6", fen: FEN_NF6, uci: "g8f6" },
+      ],
+      gameResult: { type: "resign", message: "Resigned." },
+      liveFen: FEN_NF6,
+    });
+    render(<ChessGame />);
+
+    // Latest move (index 3) → the deepest crossing reached is expanded.
+    await screen.findByRole("button", {
+      name: /Collapse Petrov's Defense details/,
+    });
+    expect(
+      screen.getByRole("button", { name: /Select King's Pawn Game/ }),
+    ).toBeInTheDocument();
+
+    // Rewinding to a move before the Petrov crossing falls back to the opening
+    // that was most recently crossed at that point.
+    act(() => {
+      useGameStore.getState().setViewIndex(1);
+    });
+    expect(
+      screen.getByRole("button", { name: /Collapse King's Pawn Game details/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Select Petrov's Defense/ }),
+    ).toBeInTheDocument();
+
+    // Before the first crossing (the starting position) nothing is expanded.
+    act(() => {
+      useGameStore.getState().setViewIndex(-1);
+    });
+    expect(
+      screen.queryByRole("button", { name: /^Collapse .* details$/ }),
+    ).not.toBeInTheDocument();
+
+    // Returning to the live/latest position restores the deepest opening.
+    act(() => {
+      useGameStore.getState().setViewIndex(null);
+    });
+    expect(
+      screen.getByRole("button", { name: /Collapse Petrov's Defense details/ }),
+    ).toBeInTheDocument();
   });
 
   it("refetches the lineage at terminal and shows the inline score-diff badge after resign (g-3gmc)", async () => {

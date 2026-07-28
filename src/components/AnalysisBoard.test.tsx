@@ -2646,3 +2646,128 @@ describe('AnalysisBoard — re-annotation overlay (g-xox0)', () => {
     expect(listEval()).toBe(88)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Displayed main-line index callback (g-m1xc)
+// ---------------------------------------------------------------------------
+
+describe('AnalysisBoard — onDisplayedMainlineIndexChange', () => {
+  const varNode: VarNode = {
+    id: 'var-1',
+    san: 'Bc4',
+    fen: 'rnbqkbnr/pp1ppppp/8/2p5/2B1P3/8/PPPP1PPP/RNBQKNR b KQkq - 1 2',
+    fenBefore: moves[0].fen_after,
+    uci: 'f1c4',
+    parentId: null,
+    parentGameIndex: 1,
+    branchPlyOffset: 0,
+    children: [],
+    nestingLevel: 0,
+  }
+
+  it('emits initialMoveIndex on mount', () => {
+    const onChange = vi.fn()
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        initialMoveIndex={0}
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+
+    expect(onChange).toHaveBeenLastCalledWith(0)
+  })
+
+  it('normalizes "latest" (no current index) to the final move index', () => {
+    const onChange = vi.fn()
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+
+    // Mounting with no initialMoveIndex is the "latest" state, which is the last
+    // played move — not null.
+    expect(onChange).toHaveBeenLastCalledWith(moves.length - 1)
+
+    // Navigating back and then returning to latest resolves the same way.
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+    expect(onChange).toHaveBeenLastCalledWith(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
+    expect(onChange).toHaveBeenLastCalledWith(moves.length - 1)
+  })
+
+  it('emits -1 for an empty move list (starting position)', () => {
+    const onChange = vi.fn()
+    render(
+      <AnalysisBoard
+        moves={[]}
+        boardOrientation="white"
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+
+    expect(onChange).toHaveBeenLastCalledWith(-1)
+  })
+
+  it('follows MoveList and graph navigation', () => {
+    const onChange = vi.fn()
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        initialMoveIndex={0}
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move 2' }))
+    expect(onChange).toHaveBeenLastCalledWith(1)
+
+    const onSelectMove = capturedGraphProps.onSelectMove as (index: number) => void
+    act(() => onSelectMove(0))
+    expect(onChange).toHaveBeenLastCalledWith(0)
+  })
+
+  it('emits null in a variation and the main-line index on return', () => {
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        initialMoveIndex={1}
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+    expect(onChange).toHaveBeenLastCalledWith(1)
+
+    // Entering a hypothetical variation: the board is no longer on a played move.
+    // (A fresh `moves` array defeats the memo so the mocked tree state is re-read.)
+    mockTree = { nodes: new Map([['var-1', varNode]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+    rerender(
+      <AnalysisBoard
+        moves={[...moves]}
+        boardOrientation="white"
+        initialMoveIndex={1}
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+    expect(onChange).toHaveBeenLastCalledWith(null)
+
+    // Leaving it restores the displayed main-line move.
+    mockSelectedVarNodeId = null
+    rerender(
+      <AnalysisBoard
+        moves={[...moves]}
+        boardOrientation="white"
+        initialMoveIndex={1}
+        onDisplayedMainlineIndexChange={onChange}
+      />,
+    )
+    expect(onChange).toHaveBeenLastCalledWith(1)
+  })
+})

@@ -52,6 +52,7 @@ function renderLineage(
     scoreChanges?: OpeningScoreDeltaItem[] | null;
     startPly?: number;
     scoreStatus?: OpeningScoreStatus;
+    activeMoveIndex?: number | null;
   } = {},
 ) {
   const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
@@ -64,12 +65,38 @@ function renderLineage(
         startPly={handlers.startPly ?? 1}
         scoreChanges={handlers.scoreChanges}
         scoreStatus={handlers.scoreStatus}
+        activeMoveIndex={handlers.activeMoveIndex}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
       />
     </MemoryRouter>,
   );
-  return { ...utils, onSelectRoot, onStartDrill };
+  const rerenderWith = (activeMoveIndex: number | null) =>
+    utils.rerender(
+      <MemoryRouter>
+        <GameOpeningLineage
+          playerColor="white"
+          lineage={lineage}
+          startPly={handlers.startPly ?? 1}
+          scoreChanges={handlers.scoreChanges}
+          scoreStatus={handlers.scoreStatus}
+          activeMoveIndex={activeMoveIndex}
+          onSelectRoot={onSelectRoot}
+          onStartDrill={onStartDrill}
+        />
+      </MemoryRouter>,
+    );
+  return { ...utils, onSelectRoot, onStartDrill, rerenderWith };
+}
+
+/** Names of every card currently rendered in its expanded variant (the expanded
+ *  card is the only one carrying a "Collapse … details" overlay). */
+function expandedNames(): string[] {
+  return screen
+    .getAllByRole("button")
+    .map((b) => b.getAttribute("aria-label") ?? "")
+    .map((label) => /^Collapse (.*) details$/.exec(label)?.[1])
+    .filter((name): name is string => Boolean(name));
 }
 
 describe("GameOpeningLineage", () => {
@@ -544,6 +571,245 @@ describe("GameOpeningLineage", () => {
       await user.click(screen.getByRole("button", { name: /Ruy Lopez/ }));
 
       expect(screen.getByText(/score loading/i)).toBeInTheDocument();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Board synchronization (g-m1xc)
+  // -------------------------------------------------------------------------
+
+  describe("board synchronization", () => {
+    // Crossing index of each card is `moves.length - 1`: 1, 4 and 5 here.
+    const OPEN_GAME = makeItem({
+      opening_key: "k-open",
+      opening_name: "Open Game",
+      moves: ["e4", "e5"],
+    });
+    const RUY = makeItem({
+      opening_key: "k-ruy",
+      opening_name: "Ruy Lopez",
+      depth: 1,
+      moves: ["e4", "e5", "Nf3", "Nc6", "Bb5"],
+    });
+    const BERLIN = makeItem({
+      opening_key: "k-berlin",
+      opening_name: "Berlin Defense",
+      depth: 2,
+      moves: ["e4", "e5", "Nf3", "Nc6", "Bb5", "Nf6"],
+    });
+    const THREE = [OPEN_GAME, RUY, BERLIN];
+
+    it("expands the last crossing at or before the displayed move", () => {
+      // Move 3 sits BETWEEN the Open Game crossing (1) and the Ruy crossing (4):
+      // the most recently crossed opening stays expanded.
+      renderLineage(THREE, { activeMoveIndex: 3 });
+
+      expect(expandedNames()).toEqual(["Open Game"]);
+    });
+
+    it("follows the board forward and back, keeping exactly one card expanded", () => {
+      const { rerenderWith } = renderLineage(THREE, { activeMoveIndex: -1 });
+
+      // Starting position: nothing has been crossed yet.
+      expect(expandedNames()).toEqual([]);
+
+      rerenderWith(1);
+      expect(expandedNames()).toEqual(["Open Game"]);
+
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+
+      rerenderWith(5);
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+
+      // Rewinding across a root switches back to the preceding opening...
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+      rerenderWith(2);
+      expect(expandedNames()).toEqual(["Open Game"]);
+
+      // ...and rewinding before the first crossing collapses everything.
+      rerenderWith(0);
+      expect(expandedNames()).toEqual([]);
+    });
+
+    it("collapses the deepest card once the board moves past its crossing", () => {
+      // The deepest crossing has no successor to hand the expansion to: past its
+      // crossing move the game has left the opening, so no card describes the
+      // position on the board.
+      const { rerenderWith } = renderLineage(THREE, { activeMoveIndex: 5 });
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+
+      rerenderWith(6);
+      expect(expandedNames()).toEqual([]);
+      rerenderWith(30);
+      expect(expandedNames()).toEqual([]);
+
+      // Rewinding back onto the crossing re-opens it.
+      rerenderWith(5);
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+    });
+
+    it("collapses a lone card once the board moves past it", () => {
+      // Same rule with nothing to fall back to — the live panel's common case
+      // while a game is still in its first crossing.
+      const { rerenderWith } = renderLineage([OPEN_GAME], { activeMoveIndex: 1 });
+      expect(expandedNames()).toEqual(["Open Game"]);
+
+      rerenderWith(2);
+      expect(expandedNames()).toEqual([]);
+    });
+
+    it("collapses every card when the board leaves the played main line (null)", () => {
+      const { rerenderWith } = renderLineage(THREE, { activeMoveIndex: 5 });
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+
+      // A hypothetical variation is not part of the played lineage.
+      rerenderWith(null);
+      expect(expandedNames()).toEqual([]);
+
+      // Returning to the main line restores that move's opening.
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+    });
+
+    it("never auto-expands a card with no played moves", () => {
+      const { rerenderWith } = renderLineage(
+        [
+          OPEN_GAME,
+          makeItem({ opening_key: "k1", opening_name: "No Moves", moves: [] }),
+        ],
+        { activeMoveIndex: 10 },
+      );
+
+      // Neither card: the empty one has no resolvable crossing index, and — not
+      // being a crossing — it is no successor for Open Game to hand off to, so
+      // Open Game still closes once the board is past its crossing (1).
+      expect(expandedNames()).toEqual([]);
+
+      rerenderWith(1);
+      expect(expandedNames()).toEqual(["Open Game"]);
+    });
+
+    it("expands the matching occurrence when the same opening repeats", () => {
+      // Same opening_key crossed twice (indices 0 and 2); only the occurrence
+      // the board is inside may expand.
+      const { rerenderWith } = renderLineage(
+        [
+          makeItem({
+            opening_key: "dup",
+            opening_name: "First Crossing",
+            moves: ["e4"],
+          }),
+          makeItem({
+            opening_key: "dup",
+            opening_name: "Second Crossing",
+            moves: ["e4", "e5", "d4"],
+          }),
+        ],
+        { activeMoveIndex: 1 },
+      );
+
+      expect(expandedNames()).toEqual(["First Crossing"]);
+
+      rerenderWith(2);
+      expect(expandedNames()).toEqual(["Second Crossing"]);
+    });
+
+    it("respects a manual choice until the board moves, then resynchronizes", async () => {
+      const user = userEvent.setup();
+      const { rerenderWith } = renderLineage(THREE, { activeMoveIndex: 4 });
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+
+      // Manual collapse of the synchronized card sticks while the board is
+      // stationary (a re-render at the same index must not re-open it).
+      await user.click(
+        screen.getByRole("button", { name: "Collapse Ruy Lopez details" }),
+      );
+      expect(expandedNames()).toEqual([]);
+      rerenderWith(4);
+      expect(expandedNames()).toEqual([]);
+
+      // Manually expanding a different card also survives a stationary board.
+      await user.click(
+        screen.getByRole("button", { name: /Select Open Game/ }),
+      );
+      expect(expandedNames()).toEqual(["Open Game"]);
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Open Game"]);
+
+      // The next board change re-applies synchronization.
+      rerenderWith(5);
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+    });
+
+    it("does not resurrect an expired manual choice on a return visit", async () => {
+      // A manual choice lasts until the board moves — moving back onto the move
+      // it was made at must NOT bring it back, or every position the player ever
+      // collapsed would stay collapsed forever.
+      const user = userEvent.setup();
+      const { rerenderWith } = renderLineage(THREE, { activeMoveIndex: 4 });
+
+      await user.click(
+        screen.getByRole("button", { name: "Collapse Ruy Lopez details" }),
+      );
+      expect(expandedNames()).toEqual([]);
+
+      rerenderWith(5);
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+
+      // Same for a manual choice of a card other than the synchronized one.
+      await user.click(screen.getByRole("button", { name: /Select Open Game/ }));
+      expect(expandedNames()).toEqual(["Open Game"]);
+
+      rerenderWith(5);
+      expect(expandedNames()).toEqual(["Berlin Defense"]);
+      rerenderWith(4);
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+    });
+
+    it("opens the right card when the lineage arrives after the board index", () => {
+      // The lineage is derived/fetched asynchronously, so the board index can be
+      // settled before any card exists. The matched-key dependency covers this
+      // without waiting for another board move.
+      const { rerender } = render(
+        <MemoryRouter>
+          <GameOpeningLineage
+            playerColor="white"
+            lineage={[]}
+            startPly={1}
+            activeMoveIndex={4}
+          />
+        </MemoryRouter>,
+      );
+      expect(screen.queryByRole("region")).not.toBeInTheDocument();
+
+      rerender(
+        <MemoryRouter>
+          <GameOpeningLineage
+            playerColor="white"
+            lineage={THREE}
+            startPly={1}
+            activeMoveIndex={4}
+          />
+        </MemoryRouter>,
+      );
+
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
+    });
+
+    it("stays fully manual when activeMoveIndex is omitted", async () => {
+      const user = userEvent.setup();
+      renderLineage(THREE);
+
+      // No card opens on its own...
+      expect(expandedNames()).toEqual([]);
+
+      // ...and clicking still expands exactly the clicked card.
+      await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
+      expect(expandedNames()).toEqual(["Ruy Lopez"]);
     });
   });
 });

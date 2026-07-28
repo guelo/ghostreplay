@@ -2084,6 +2084,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     startPly={openingLineageStartPly}
                     scoreChanges={openingScoreChanges}
                     scoreStatus={openingScoreStatus}
+                    // Keep the expanded card in sync with the board (g-m1xc).
+                    // displayedIndex — not viewIndex — is the board's move
+                    // cursor: it normalizes "live/latest" to the last ply and
+                    // keeps -1 for the starting position.
+                    activeMoveIndex={displayedIndex}
                     // Board navigation works during play AND post-game (history
                     // parity): selecting a card only REVIEWS the opening's past
                     // position (viewIndex) — it never disturbs the live game.

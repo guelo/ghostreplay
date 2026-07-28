@@ -36,6 +36,47 @@ interface GameOpeningLineageProps {
    *  score, so a cold cache reads as "loading" rather than "unscored".
    *  Defaults to "ready" — callers that never see a cold cache can omit it. */
   scoreStatus?: OpeningScoreStatus;
+  /** Index of the move the main board is displaying (g-m1xc), used to keep the
+   *  expanded card in sync with the board. `-1` is the starting position;
+   *  `null` means the board is off the played main line (an analysis
+   *  variation), which collapses every card. Omit entirely to opt out of
+   *  synchronization and keep the fully manual expand/collapse behavior. */
+  activeMoveIndex?: number | null;
+}
+
+/**
+ * Occurrence key of the card the board is inside (g-m1xc), or null when no card
+ * describes the displayed position.
+ *
+ * The match is the LAST crossing whose crossing move is at or before the
+ * displayed move. `moves` is the played SAN prefix up to and including the
+ * crossing move, so its last index is that move's index — the same per-crossing
+ * index card-to-board navigation uses. Lineage order (not `OpeningRoot.depth`)
+ * is the authoritative played order.
+ *
+ * A card holds the expansion until the next crossing takes over, so a position
+ * between two roots keeps the most recently crossed opening open. The deepest
+ * crossing has no successor to hand off to, and so takes the only bound that
+ * exists — its own crossing move: once the board moves past it the game has left
+ * the opening and NO card is expanded.
+ */
+function matchCard(
+  lineage: OpeningLineageItem[],
+  activeMoveIndex: number,
+): string | null {
+  let matched: { item: OpeningLineageItem; index: number } | null = null;
+  let deepest: { item: OpeningLineageItem; index: number } | null = null;
+  for (let index = 0; index < lineage.length; index += 1) {
+    const item = lineage[index];
+    // An empty prefix has no resolvable crossing index — never auto-expanded.
+    if (item.moves.length === 0) continue;
+    deepest = { item, index };
+    if (item.moves.length - 1 <= activeMoveIndex) matched = { item, index };
+  }
+  if (!matched) return null;
+  const isDeepest = matched.index === deepest?.index;
+  if (isDeepest && activeMoveIndex > matched.item.moves.length - 1) return null;
+  return `${matched.item.opening_key}:${matched.index}`;
 }
 
 /**
@@ -83,6 +124,11 @@ function toNodeView(
  * the board/MoveList/graph (history); when omitted the card is expand-only (live
  * panel). The "View in Openings" link is re-homed as the expanded card's footer,
  * and the optional Start Drill button lives inside the expanded card.
+ *
+ * With `activeMoveIndex` supplied the stack also follows the board (g-m1xc): the
+ * card the board is inside (see `matchCard`) is expanded automatically, so the
+ * card on screen always describes the position on the board — and once the board
+ * leaves the opening, no card is expanded.
  */
 function GameOpeningLineage({
   playerColor,
@@ -92,17 +138,52 @@ function GameOpeningLineage({
   onSelectRoot,
   onStartDrill,
   scoreStatus = "ready",
+  activeMoveIndex,
 }: GameOpeningLineageProps) {
-  // Track expansion by a per-occurrence key (opening_key + index), not the bare
-  // opening_key: a lineage can (defensively) repeat the same root as separate
-  // crossings, and keying by opening_key alone would collide React keys and
-  // expand every matching card at once.
-  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  // A manual expand/collapse, stamped with the synchronization state it was made
+  // against (see `syncToken`). Cards are addressed by a per-occurrence key
+  // (opening_key + index), not the bare opening_key: a lineage can (defensively)
+  // repeat the same root as separate crossings, and keying by opening_key alone
+  // would collide React keys and expand every matching card at once.
+  const [manual, setManual] = useState<{
+    token: string;
+    key: string | null;
+  } | null>(null);
 
   const changeByKey = useMemo(
     () => new Map((scoreChanges ?? []).map((c) => [c.opening_key, c])),
     [scoreChanges],
   );
+
+  const matchedKey = useMemo(
+    () =>
+      activeMoveIndex === undefined || activeMoveIndex === null
+        ? null
+        : matchCard(lineage, activeMoveIndex),
+    [lineage, activeMoveIndex],
+  );
+
+  // Identity of the current synchronization state, and the lifetime of a manual
+  // choice: the manual key wins only while the board has not moved and the
+  // matched card has not changed. Deliberately NOT the whole lineage — a
+  // score-only hydration must not blow away what the player just opened, while a
+  // lineage arriving after the board settled DOES change `matchedKey` and so
+  // opens the right card without waiting for another board move. With
+  // `activeMoveIndex` omitted the token is constant and `matchedKey` is null, so
+  // the manual choice never expires — the original fully manual behavior.
+  const syncToken = `${String(activeMoveIndex)}|${matchedKey ?? ""}`;
+  // The override is DISCARDED on the first token change, not merely ignored
+  // while the token differs: tokens recur (rewinding to a move already visited
+  // rebuilds that move's token), and a collapse made there must not come back to
+  // life on the return visit. Resetting state during render is React's sanctioned
+  // alternative to a state-syncing effect — this render's output is discarded and
+  // re-run with `manual` already null, so `override` below stands in for it.
+  let override = manual;
+  if (manual && manual.token !== syncToken) {
+    setManual(null);
+    override = null;
+  }
+  const expandedKey = override ? override.key : matchedKey;
 
   if (lineage.length === 0) {
     return null;
@@ -162,7 +243,7 @@ function GameOpeningLineage({
                     onStartDrill={
                       onStartDrill ? () => onStartDrill(item) : undefined
                     }
-                    onCollapse={() => setExpandedKey(null)}
+                    onCollapse={() => setManual({ token: syncToken, key: null })}
                     footerAction={
                       <Link
                         className="opening-lineage-card__openings-link"
@@ -187,7 +268,7 @@ function GameOpeningLineage({
                       : `Show ${item.opening_name} details`
                   }
                   onSelect={() => {
-                    setExpandedKey(cardKey);
+                    setManual({ token: syncToken, key: cardKey });
                     onSelectRoot?.(item);
                   }}
                   isSelected={isExpanded}

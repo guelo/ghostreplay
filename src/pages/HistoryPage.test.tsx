@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { forwardRef, useImperativeHandle } from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { forwardRef, useEffect, useImperativeHandle } from 'react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
@@ -55,6 +55,12 @@ vi.mock('../utils/api', async () => {
 // projection test cannot pass on the stats pane while the board is still handed
 // unprojected moves.
 const mockJumpToMove = vi.fn();
+// The board's displayed main-line cursor (g-m1xc) is captured rather than
+// emitted, so a test drives it explicitly — this mock has no navigation state of
+// its own to derive it from.
+const displayedIndexChange: {
+  current?: (index: number | null) => void;
+} = {};
 vi.mock('../components/AnalysisBoard', () => ({
   default: forwardRef(
     (
@@ -65,6 +71,7 @@ vi.mock('../components/AnalysisBoard', () => ({
         mobileToolbar,
         sessionId,
         moves,
+        onDisplayedMainlineIndexChange,
       }: {
         boardOrientation: string;
         initialMoveIndex?: number;
@@ -72,10 +79,14 @@ vi.mock('../components/AnalysisBoard', () => ({
         mobileToolbar?: React.ReactNode;
         sessionId?: string;
         moves: AnalysisMove[];
+        onDisplayedMainlineIndexChange?: (index: number | null) => void;
       },
       ref: React.Ref<{ jumpToMove: (index: number) => void }>,
     ) => {
       useImperativeHandle(ref, () => ({ jumpToMove: mockJumpToMove }), []);
+      useEffect(() => {
+        displayedIndexChange.current = onDisplayedMainlineIndexChange;
+      }, [onDisplayedMainlineIndexChange]);
       return (
         <div
           data-testid="analysis-board"
@@ -176,6 +187,7 @@ describe('HistoryPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMatchMedia(false);
+    displayedIndexChange.current = undefined;
     mockFetchSessionOpenings.mockResolvedValue({ player_color: 'white', lineage: [], start_ply: 1 });
   });
 
@@ -427,6 +439,155 @@ describe('HistoryPage', () => {
     await user.click(screen.getByRole('button', { name: /Select Mystery Line/ }));
 
     expect(mockJumpToMove).not.toHaveBeenCalled();
+  });
+
+  // --- Board-driven lineage expansion (g-m1xc) ------------------------------
+
+  /** A lineage entry whose crossing move index is `moves.length - 1`. */
+  const lineageItem = (openingKey: string, openingName: string, moves: string[]) => ({
+    opening_key: openingKey,
+    opening_name: openingName,
+    opening_family: openingName,
+    eco: null,
+    depth: 0,
+    score: 60,
+    confidence: 0.5,
+    coverage: 0.5,
+    sample_size: 5,
+    game_count: 2,
+    path: [],
+    moves,
+  });
+
+  const expandedCard = () =>
+    screen.queryByRole('button', { name: /^Collapse .* details$/ });
+
+  it('expands the lineage card the board is showing, following the board cursor', async () => {
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [
+        lineageItem('k-open', 'Open Game', ['e4']),
+        lineageItem('k-sicilian', 'Sicilian Defense', ['e4', 'c5', 'Nf3']),
+      ],
+      start_ply: 1,
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Open Game')).toBeInTheDocument();
+    });
+    // Nothing is expanded until the board reports where it is.
+    expect(expandedCard()).toBeNull();
+
+    // Board on move 0: only the Open Game crossing has been reached.
+    act(() => displayedIndexChange.current?.(0));
+    expect(
+      screen.getByRole('button', { name: 'Collapse Open Game details' }),
+    ).toBeInTheDocument();
+
+    // Board on move 2: the deeper crossing takes over — no card was clicked.
+    act(() => displayedIndexChange.current?.(2));
+    expect(
+      screen.getByRole('button', { name: 'Collapse Sicilian Defense details' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Collapse Open Game details' }),
+    ).not.toBeInTheDocument();
+
+    // Rewinding before the first crossing collapses everything.
+    act(() => displayedIndexChange.current?.(-1));
+    expect(expandedCard()).toBeNull();
+  });
+
+  it('collapses the synchronized card when the board enters a variation', async () => {
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [lineageItem('k-open', 'Open Game', ['e4'])],
+      start_ply: 1,
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Open Game')).toBeInTheDocument();
+    });
+
+    act(() => displayedIndexChange.current?.(0));
+    expect(
+      screen.getByRole('button', { name: 'Collapse Open Game details' }),
+    ).toBeInTheDocument();
+
+    // A hypothetical variation is not part of the played lineage.
+    act(() => displayedIndexChange.current?.(null));
+    expect(expandedCard()).toBeNull();
+
+    // Returning to the main line restores that move's opening.
+    act(() => displayedIndexChange.current?.(0));
+    expect(
+      screen.getByRole('button', { name: 'Collapse Open Game details' }),
+    ).toBeInTheDocument();
+  });
+
+  it('does not reuse the previous game\'s board cursor after switching games', async () => {
+    const user = userEvent.setup();
+    const twoGames = [
+      HISTORY_RESPONSE[0],
+      { ...HISTORY_RESPONSE[0], session_id: 'def-456', result: 'resign', opening_name: 'French Defense' },
+    ];
+    mockFetchHistory.mockResolvedValue(twoGames);
+    mockFetchAnalysis.mockImplementation(async (id: string) => ({
+      ...ANALYSIS_RESPONSE,
+      session_id: id,
+    }));
+    mockFetchSessionOpenings.mockImplementation(async (id: string) => ({
+      player_color: 'white',
+      lineage: [
+        id === 'abc-123'
+          ? lineageItem('k-open', 'Open Game', ['e4', 'c5', 'Nf3'])
+          : // Same crossing index (2) the first game's cursor was left on, so a
+            // leaked cursor would expand this card on arrival.
+            lineageItem('k-french', 'French Defense', ['e4', 'e6', 'd4']),
+      ],
+      start_ply: 1,
+    }));
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Open Game')).toBeInTheDocument();
+    });
+    act(() => displayedIndexChange.current?.(2));
+    expect(
+      screen.getByRole('button', { name: 'Collapse Open Game details' }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Win vs 1500/ }));
+    await user.click(screen.getAllByRole('option')[1]);
+
+    // Scoped to the lineage: the game selector shows this opening name too.
+    await waitFor(() => {
+      const lineage = screen.getByRole('region', { name: 'Openings played' });
+      expect(within(lineage).getByText('French Defense')).toBeInTheDocument();
+    });
+    // The new board has not reported a cursor yet, so nothing is expanded.
+    expect(expandedCard()).toBeNull();
   });
 
   it('Start Drill from an opening chip navigates to /play with drillSetup state', async () => {

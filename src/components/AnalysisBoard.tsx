@@ -60,6 +60,14 @@ type AnalysisBoardProps = {
   highlightedMoves?: HighlightedMoves | null;
   onGraphMoveClick?: () => void;
   /**
+   * Displayed MAIN-LINE move index, emitted whenever it changes (g-m1xc). `-1`
+   * is the starting position; `null` means the board is showing a hypothetical
+   * variation rather than a played move. Lets a sibling of the board (the
+   * opening-lineage footer) follow the board cursor without the board giving up
+   * ownership of its navigation state.
+   */
+  onDisplayedMainlineIndexChange?: (index: number | null) => void;
+  /**
    * Saved-game session id (g-cache-stronger-evals). When present, the analysis-board
    * evidence driver persists stronger depth-21 evidence for dwelled mainline moves.
    * Omitted by the ephemeral drill board so it never writes evidence.
@@ -212,6 +220,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   positionAnalysis,
   highlightedMoves,
   onGraphMoveClick,
+  onDisplayedMainlineIndexChange,
   sessionId,
 }, ref) => {
   const debugEnabled = useMemo(() => isAnalysisBoardDiagnosticsEnabled(), []);
@@ -292,6 +301,17 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   }, [selectedVarNodeId, tree]);
 
   const effectiveIndex = currentIndex ?? moves.length - 1;
+
+  // Publish the displayed main-line cursor (g-m1xc). Derived from the board's
+  // canonical render state rather than hooked into each navigation branch, so
+  // MoveList clicks/keys, graph clicks, imperative jumpToMove, main-line drag
+  // continuation, a growing move list, and variation entry/exit are all covered
+  // by this one effect. `effectiveIndex` (not `currentIndex`) is emitted because
+  // `currentIndex === null` means "latest", which is the last move — or -1 when
+  // there are no moves at all.
+  useEffect(() => {
+    onDisplayedMainlineIndexChange?.(isInVariation ? null : effectiveIndex);
+  }, [onDisplayedMainlineIndexChange, isInVariation, effectiveIndex]);
 
   // Immediate MoveList patch (g-xox0 Part B): local overlay of accepted upgrades
   // this session's dwell produced, keyed by `${fen_before}::${move_uci}`. `moves` is
