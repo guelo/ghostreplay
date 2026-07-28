@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -57,6 +57,7 @@ from app.srs_opportunity import (
     P_REACH_FLOOR,
     P_REACH_MIN_SAMPLE,
     SEVERITY_NORMALIZER_CP,
+    OpportunityCounters,
     detect_opening_family,
     ghost_eligible,
     load_opportunity_counters,
@@ -97,6 +98,11 @@ class GhostMoveCandidate:
     opportunities_30d: int = 0
     reached_30d: int = 0
     has_opportunity_events: bool = False
+    # Targeted-session reach rate (g-targeted-reach-rate): the p_reach source.
+    # The broad opportunities_30d / reached_30d above stay for urgency and the
+    # SRS surfaces; they are no longer the reach denominator.
+    targeted_30d: int = 0
+    targeted_reached_30d: int = 0
     opening_family: str | None = None
 
     def score(self, now: datetime, current_opening_family: str | None = None) -> float:
@@ -117,9 +123,11 @@ class GhostMoveCandidate:
         # flattened — urgency, distance, reach, and opening weight still differentiate.
         severity = math.log1p(float(centipawn_loss(self.eval_loss_cp)) / SEVERITY_NORMALIZER_CP)
         distance_weight = math.exp(-DISTANCE_DECAY_RATE * self.depth)
-        reach_weight = 1.0
-        if self.has_opportunity_events:
-            reach_weight = compute_p_reach(self.reached_30d, self.opportunities_30d) ** OPPORTUNITY_POWER
+        # Ungated: zero targeted samples give the Laplace 0.5 prior, so a
+        # never-steered target no longer outranks every measured one at 1.0.
+        reach_weight = (
+            compute_p_reach(self.targeted_reached_30d, self.targeted_30d) ** OPPORTUNITY_POWER
+        )
         return (
             urgency
             * severity
@@ -264,6 +272,28 @@ def _isoformat_optional(value: datetime | str | None) -> str | None:
     return value
 
 
+class GhostSelection(NamedTuple):
+    """What the ghost search chose, and the evidence it chose it on.
+
+    ``counters`` is carried out rather than re-read by the caller on purpose. Under
+    READ COMMITTED a second load_opportunity_counters call is a second snapshot: it
+    takes a later clock (drifting the 30-day cutoff) and can observe decisions other
+    sessions committed in between. The response payload is frozen at serve time and
+    replayed verbatim, so any drift is stored permanently as a snapshot that
+    contradicts the score it is supposed to explain. Returning the scored object is
+    the only version with no window at all.
+    """
+
+    move_san: str | None
+    blunder_id: int | None
+    last_reviewed_at: datetime | None
+    created_at: datetime | None
+    counters: OpportunityCounters | None
+
+
+NO_GHOST = GhostSelection(None, None, None, None, None)
+
+
 def find_ghost_move(
     db: Session,
     user_id: int,
@@ -272,7 +302,7 @@ def find_ghost_move(
     *,
     session_id: uuid.UUID | None = None,
     _rng_seed: int | None = None,
-) -> tuple[str | None, int | None, datetime | None, datetime | None]:
+) -> GhostSelection:
     """
     Find a move that steers toward a position where the user previously blundered.
 
@@ -286,8 +316,7 @@ def find_ghost_move(
         player_color: Player color from game session ('white' or 'black')
 
     Returns:
-        Tuple of (move_san, target_blunder_id, last_reviewed_at, created_at) if ghost path exists,
-        else (None, None, None, None)
+        A GhostSelection. All fields are None when no ghost path exists.
     """
     search_started = time.perf_counter()
     current_fen_hash = fen_hash(fen)
@@ -344,7 +373,7 @@ def find_ghost_move(
 
     if not current_position:
         _log_slow("no_position")
-        return (None, None, None, None)
+        return NO_GHOST
 
     # Recursive CTE to find candidate blunders up to the steering radius.
     # Returns the first move in each path and candidate metadata for scoring.
@@ -402,7 +431,7 @@ def find_ghost_move(
 
     if not candidate_rows:
         _log_slow("no_candidates", position_id=current_position.id)
-        return (None, None, None, None)
+        return NO_GHOST
 
     now = datetime.now(timezone.utc)
     if any(row[7] for row in candidate_rows):
@@ -420,6 +449,7 @@ def find_ghost_move(
     opportunity_counters = load_opportunity_counters(
         db,
         [row[1] for row in candidate_rows],
+        user_id=user_id,
         now=now,
         exclude_session_id=session_id,
     )
@@ -440,6 +470,8 @@ def find_ghost_move(
             opportunities_30d=counters.opportunities_30d if counters else 0,
             reached_30d=counters.reached_30d if counters else 0,
             has_opportunity_events=bool(counters and counters.event_count > 0),
+            targeted_30d=counters.targeted_30d if counters else 0,
+            targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
             opening_family=row[7],
         )
         if not ghost_eligible(
@@ -458,7 +490,7 @@ def find_ghost_move(
             position_id=current_position.id,
             candidate_count=len(candidate_rows),
         )
-        return (None, None, None, None)
+        return NO_GHOST
 
     # A depth-1 candidate reaches the review position immediately after the
     # ghost move. Prefer those over multi-ply steering routes, which still
@@ -500,7 +532,13 @@ def find_ghost_move(
         scored_count=len(scored),
         group_count=len(groups),
     )
-    return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at, chosen_candidate.created_at)
+    return GhostSelection(
+        chosen_candidate.first_move,
+        chosen_candidate.blunder_id,
+        chosen_candidate.last_reviewed_at,
+        chosen_candidate.created_at,
+        opportunity_counters.get(chosen_candidate.blunder_id),
+    )
 
 
 class GameResult(str, Enum):
@@ -599,7 +637,16 @@ class NextOpponentMoveRequest(BaseModel):
 
 
 class TargetBlunderSrs(BaseModel):
-    """SRS metadata for the blunder being targeted by a ghost move."""
+    """SRS metadata for the blunder being targeted by a ghost move.
+
+    The opportunity counters are not a fresh read: they are the very
+    OpportunityCounters find_ghost_move scored, carried out on GhostSelection. That
+    read excludes the serving session, so the decision this payload ships with — and
+    every earlier steer in the same game — is outside the counts by construction.
+    A payload is frozen at serve time and replayed verbatim, so anything less exact
+    (a re-read, even a correctly scoped one) stores a snapshot that can contradict
+    the score it is supposed to explain.
+    """
     last_reviewed_at: str | None = Field(None, description="ISO timestamp of last review")
     created_at: str | None = Field(None, description="ISO timestamp of when the blunder was first recorded")
     pass_count: int = Field(0, description="Total times passed")
@@ -608,7 +655,22 @@ class TargetBlunderSrs(BaseModel):
     opportunities_since_review: int = Field(0, description="Opportunity events since latest review")
     opportunities_30d: int = Field(0, description="Opportunity events in the last 30 days")
     reached_30d: int = Field(0, description="Exact blunder reaches in the last 30 days")
-    p_reach: float = Field(0.5, description="Smoothed 30-day reach probability")
+    targeted_30d: int = Field(
+        0,
+        description=(
+            "Sessions this blunder was steered at in the last 30 days, excluding this one"
+        ),
+    )
+    targeted_reached_30d: int = Field(
+        0, description="Those targeted sessions that reached the blunder"
+    )
+    p_reach: float = Field(
+        0.5,
+        description=(
+            "Smoothed 30-day reach probability over targeted sessions, as this "
+            "target was scored"
+        ),
+    )
 
 
 class DrillRouteMetadata(BaseModel):
@@ -1294,7 +1356,13 @@ def get_next_opponent_move(
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
     ghost_search_started = time.perf_counter()
-    move_san, target_blunder_id, blunder_last_reviewed, blunder_created_at = find_ghost_move(
+    (
+        move_san,
+        target_blunder_id,
+        blunder_last_reviewed,
+        blunder_created_at,
+        ghost_counters,
+    ) = find_ghost_move(
         db=db,
         user_id=user.user_id,
         fen=request.fen,
@@ -1332,8 +1400,13 @@ def get_next_opponent_move(
                 """),
                 {"id": target_blunder_id},
             ).fetchone()
-            opportunity_counters = load_opportunity_counters(db, [target_blunder_id] if target_blunder_id else [])
-            counters = opportunity_counters.get(target_blunder_id) if target_blunder_id else None
+            # THE object find_ghost_move scored, carried out of the search rather
+            # than re-queried here. A second read would be a second READ COMMITTED
+            # snapshot — later clock, so a drifted 30-day cutoff, and visibility of
+            # decisions other sessions committed in between — and this payload is
+            # frozen and replayed verbatim, so any drift would be stored forever as
+            # a snapshot contradicting the score it explains.
+            counters = ghost_counters if target_blunder_id else None
 
             target_srs = TargetBlunderSrs(
                 last_reviewed_at=_isoformat_optional(blunder_last_reviewed),
@@ -1344,6 +1417,8 @@ def get_next_opponent_move(
                 opportunities_since_review=counters.opportunities_since_review if counters else 0,
                 opportunities_30d=counters.opportunities_30d if counters else 0,
                 reached_30d=counters.reached_30d if counters else 0,
+                targeted_30d=counters.targeted_30d if counters else 0,
+                targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
                 p_reach=round(counters.p_reach, 4) if counters else 0.5,
             )
 

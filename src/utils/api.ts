@@ -840,6 +840,14 @@ export interface TargetBlunderSrs {
   pass_count: number
   fail_count: number
   pass_streak: number
+  // Targeted-session reach rate: sessions the ghost steered at this blunder in
+  // the last 30 days, and how many of them reached it. These are the counters the
+  // server SCORED this target on, so the current session — including the decision
+  // that carried this payload — is excluded. Optional because this is a
+  // hand-maintained PARTIAL mirror of the backend model (which also carries
+  // the broad opportunity counters and p_reach); the backend always sends them.
+  targeted_30d?: number
+  targeted_reached_30d?: number
 }
 
 interface NextOpponentMoveResponse {
@@ -1709,6 +1717,10 @@ export interface BlunderListItem {
   opportunities_30d: number
   reached_30d: number
   reached_since_review: number
+  // Denominator/numerator behind p_reach. The opportunities_* counters above
+  // stay BROAD neighbourhood evidence and drive SRS dueness only.
+  targeted_30d?: number
+  targeted_reached_30d?: number
   p_reach: number
 }
 

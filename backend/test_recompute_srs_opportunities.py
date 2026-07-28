@@ -12,9 +12,11 @@ from app.models import (
     BlunderOpportunityEvent,
     GameSession,
     Move,
+    OpponentDecision,
     Position,
     SessionMove,
 )
+from app.srs_opportunity import load_opportunity_counters
 from scripts.recompute_srs_opportunities import (
     parse_args,
     recompute_one_blunder,
@@ -157,3 +159,87 @@ def test_recompute_one_blunder_rejects_cross_user_ancestor_path(db_session):
     assert opportunities == 0
     assert reached == 0
     assert db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).count() == 0
+
+
+def test_backfill_cannot_move_the_targeted_denominator(db_session):
+    """The blunder-grain backfill writes BROAD evidence only.
+
+    p_reach's denominator comes from ``opponent_decisions``, which this script
+    never touches — that is what makes an interrupted or replayed recompute
+    incapable of erasing a failed steer. Recording the counters before and after
+    a full ``--blunder-id`` pass pins that separation structurally rather than
+    trusting the query list.
+    """
+    user_id = 123
+    ancestor_fen = "8/8/8/8/8/8/8/K6k w - - 0 1"
+    opponent_fen = "8/8/8/8/8/8/8/1K5k b - - 0 1"
+    blunder_fen = "8/8/8/8/8/8/8/2K4k w - - 0 2"
+
+    ancestor = _position(db_session, user_id=user_id, fen=ancestor_fen, active_color="white")
+    opponent = _position(db_session, user_id=user_id, fen=opponent_fen, active_color="black")
+    blunder_position = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    db_session.add_all([
+        Move(from_position_id=ancestor.id, move_san="a", to_position_id=opponent.id),
+        Move(from_position_id=opponent.id, move_san="b", to_position_id=blunder_position.id),
+    ])
+    blunder = Blunder(
+        user_id=user_id,
+        position_id=blunder_position.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+    )
+    db_session.add(blunder)
+    db_session.flush()
+
+    now = datetime.now(timezone.utc)
+    game_session = GameSession(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        started_at=now,
+        status="active",
+        engine_elo=1500,
+        player_color="white",
+    )
+    db_session.add(game_session)
+    db_session.flush()
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="white",
+            move_san="a",
+            fen_before=ancestor_fen,
+            fen_after=opponent_fen,
+        )
+    )
+    db_session.add(
+        OpponentDecision(
+            decision_id=uuid.uuid4(),
+            session_id=game_session.id,
+            request_fingerprint=uuid.uuid4().hex,
+            request_fen_hash=fen_hash(ancestor_fen),
+            uci_history="[]",
+            ply_before=0,
+            served_at=now,
+            response_payload="{}",
+            target_blunder_id=blunder.id,
+        )
+    )
+    db_session.commit()
+
+    def _targeted():
+        counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id)[blunder.id]
+        return (counters.targeted_30d, counters.targeted_reached_30d)
+
+    before = _targeted()
+    assert before == (1, 0)
+
+    recompute_one_blunder(db_session, blunder_id=blunder.id)
+    db_session.commit()
+    assert _targeted() == before
+
+    # Rerunnable: a second pass is a no-op on both streams.
+    recompute_one_blunder(db_session, blunder_id=blunder.id)
+    db_session.commit()
+    assert _targeted() == before

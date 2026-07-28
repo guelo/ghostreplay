@@ -545,10 +545,15 @@ class BlunderListItem(BaseModel):
     pass_count: int = 0
     fail_count: int = 0
     last_result: bool | None = None
+    # Broad neighbourhood evidence — SRS dueness. Still the opportunity counters
+    # they always were; they are no longer where p_reach comes from.
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
     reached_since_review: int = 0
+    # Targeted-session reach rate — the p_reach source (g-targeted-reach-rate).
+    targeted_30d: int = 0
+    targeted_reached_30d: int = 0
     p_reach: float = 0.5
     source_session_id: str | None = None
     last_session_id: str | None = None
@@ -679,6 +684,8 @@ def _build_blunder_item(
         opportunities_30d=counters.opportunities_30d if counters else 0,
         reached_30d=counters.reached_30d if counters else 0,
         reached_since_review=counters.reached_since_review if counters else 0,
+        targeted_30d=counters.targeted_30d if counters else 0,
+        targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
         p_reach=round(counters.p_reach, 4) if counters else 0.5,
         source_session_id=str(row.source_session_id) if row.source_session_id else None,
         last_session_id=str(row.last_session_id) if row.last_session_id else None,
@@ -741,7 +748,7 @@ def list_blunders(
     query, _last_played = _blunder_list_query(db, user.user_id)
     rows = query.all()
     blunder_ids = [row.id for row in rows]
-    opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
+    opportunity_counters = load_opportunity_counters(db, blunder_ids, user_id=user.user_id, now=now)
     review_counters = load_review_counters(db, blunder_ids)
 
     all_items = [

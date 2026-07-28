@@ -283,7 +283,14 @@ def main() -> int:
                 blunder_id=args.blunder_id,
                 progress_every=args.progress_every,
             )
-            counters = load_opportunity_counters(db, [args.blunder_id]).get(args.blunder_id)
+            # recompute_one_blunder loads the row but returns only its counts, so
+            # the owner has to be looked up here for the loader's required scope.
+            owner_id = (
+                db.query(Blunder.user_id).filter(Blunder.id == args.blunder_id).scalar()
+            )
+            counters = load_opportunity_counters(
+                db, [args.blunder_id], user_id=owner_id
+            ).get(args.blunder_id)
             print(
                 f"Recomputed blunder {args.blunder_id}: sessions={total} "
                 f"matched_opportunities={opportunities} matched_reached={reached}"
@@ -294,6 +301,10 @@ def main() -> int:
                     f"opportunities_since_review={counters.opportunities_since_review} "
                     f"opportunities_30d={counters.opportunities_30d} "
                     f"reached_30d={counters.reached_30d} "
+                    # Read from opponent_decisions, which this backfill does not
+                    # write: these must be identical before and after a recompute.
+                    f"targeted_30d={counters.targeted_30d} "
+                    f"targeted_reached_30d={counters.targeted_reached_30d} "
                     f"p_reach={counters.p_reach:.4f}"
                 )
         elif args.all_blunders:

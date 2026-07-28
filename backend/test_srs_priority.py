@@ -38,6 +38,12 @@ from app.centipawn_loss import centipawn_loss
 
 NOW = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
 
+# g-targeted-reach-rate: reach weight is no longer gated on having opportunity
+# events, so a candidate with no targeted samples carries the Laplace prior
+# (2/4 = 0.5) raised to OPPORTUNITY_POWER, not a free 1.0. Every score below
+# that omits targeted counters picks up this factor.
+UNTARGETED_REACH_WEIGHT = 0.5**1.5
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -402,7 +408,7 @@ class TestSelectionScore:
         urgency = 1.0 + math.log2(3.0)
         severity = math.log1p(2.0)
         distance = math.exp(-0.35)
-        expected = urgency * severity * distance
+        expected = urgency * severity * distance * UNTARGETED_REACH_WEIGHT
         assert c.score(NOW) == pytest.approx(expected)
 
     def test_severity_weighting_200cp_vs_50cp(self):
@@ -423,7 +429,7 @@ class TestSelectionScore:
         c = _candidate(eval_loss_cp=100, depth=0, hours_ago=8.0)
         urgency = 1.0 + math.log2(3.0)
         severity = math.log1p(2.0)
-        assert c.score(NOW) == pytest.approx(urgency * severity * 1.0)
+        assert c.score(NOW) == pytest.approx(urgency * severity * 1.0 * UNTARGETED_REACH_WEIGHT)
 
     def test_distance_weight_at_max_steering_radius(self):
         # depth=5 → distance_weight = exp(-1.75) ≈ 0.1738
@@ -431,7 +437,9 @@ class TestSelectionScore:
         urgency = 1.0 + math.log2(3.0)
         severity = math.log1p(2.0)
         distance = math.exp(-0.35 * 5)
-        assert c.score(NOW) == pytest.approx(urgency * severity * distance)
+        assert c.score(NOW) == pytest.approx(
+            urgency * severity * distance * UNTARGETED_REACH_WEIGHT
+        )
 
     def test_zero_eval_loss_gives_zero_score(self):
         c = _candidate(eval_loss_cp=0)
@@ -469,7 +477,7 @@ class TestSelectionScore:
         urgency = 1.0 + math.log2(6.0)
         severity = math.log1p(2.0)
         distance = math.exp(-0.35)
-        expected = urgency * severity * distance
+        expected = urgency * severity * distance * UNTARGETED_REACH_WEIGHT
         assert c.score(NOW) == pytest.approx(expected)
 
     def test_no_timestamps_gives_zero_score(self):
@@ -494,9 +502,15 @@ class TestSelectionScore:
             last_reviewed_at=NOW - timedelta(days=1),
             created_at=NOW - timedelta(days=7),
             opportunities_since_review=40,
-            opportunities_30d=100,
-            reached_30d=10,
+            # Broad counters drive URGENCY only. Deliberately set to a ratio that
+            # would produce a visibly different reach weight (~0.09) than the
+            # targeted pair below, so a regression to the broad denominator fails
+            # rather than coincidentally passing.
+            opportunities_30d=500,
+            reached_30d=1,
             has_opportunity_events=True,
+            targeted_30d=100,
+            targeted_reached_30d=10,
         )
 
         urgency = 40 / 32
@@ -506,6 +520,23 @@ class TestSelectionScore:
         expected = urgency * severity * distance * reach_weight
 
         assert c.score(NOW) == pytest.approx(expected)
+
+    def test_reach_weight_applies_without_opportunity_events(self):
+        # The old gate handed a never-targeted candidate 1.0 — a better reach
+        # weight than any measured target can earn. It now takes the prior.
+        c = _candidate(eval_loss_cp=100, depth=1, hours_ago=8.0)
+        measured = GhostMoveCandidate(
+            first_move="e4",
+            blunder_id=1,
+            depth=1,
+            eval_loss_cp=100,
+            pass_streak=0,
+            last_reviewed_at=NOW - timedelta(hours=8.0),
+            created_at=NOW - timedelta(days=7),
+            targeted_30d=40,
+            targeted_reached_30d=30,
+        )
+        assert measured.score(NOW) > c.score(NOW)
 
 
 # ---------------------------------------------------------------------------
@@ -587,12 +618,16 @@ class TestGhostEligibleOpportunityGate:
         now=NOW,
         opportunities_30d=0,
         reached_30d=0,
+        targeted_30d=0,
+        targeted_reached_30d=0,
     ):
         counters = OpportunityCounters(
             opportunities_since_review=opportunities_since_review,
             opportunities_30d=opportunities_30d,
             reached_30d=reached_30d,
             event_count=1 if has_opportunity_events else 0,
+            targeted_30d=targeted_30d,
+            targeted_reached_30d=targeted_reached_30d,
         )
         return ghost_eligible(
             counters=counters,
@@ -621,41 +656,74 @@ class TestGhostEligibleOpportunityGate:
         ) is True
 
     def test_backstop_fires_when_p_reach_below_floor_with_sufficient_samples(self):
-        # 0 reached over 183 opps → p_reach ≈ 2/187 ≈ 0.0107 < 0.03
+        # 0 reached over 183 TARGETED sessions → p_reach ≈ 2/187 ≈ 0.0107 < 0.03
         assert self._call(
             opportunities_since_review=5,
-            opportunities_30d=183,
-            reached_30d=0,
+            targeted_30d=183,
+            targeted_reached_30d=0,
         ) is False
 
     def test_backstop_does_not_fire_below_sample_floor(self):
         assert P_REACH_MIN_SAMPLE == 30
         assert self._call(
             opportunities_since_review=5,
-            opportunities_30d=20,
-            reached_30d=0,
+            targeted_30d=20,
+            targeted_reached_30d=0,
         ) is True
 
     def test_backstop_does_not_fire_when_p_reach_above_floor(self):
-        # 10 reached over 100 opps → p_reach ≈ 12/104 ≈ 0.115 >= 0.03
+        # 10 reached over 100 targeted sessions → p_reach ≈ 12/104 ≈ 0.115 >= 0.03
         assert self._call(
             opportunities_since_review=5,
-            opportunities_30d=100,
-            reached_30d=10,
+            targeted_30d=100,
+            targeted_reached_30d=10,
         ) is True
 
-    def test_backstop_does_not_fire_without_opportunity_events(self):
-        reviewed_at = NOW - timedelta(hours=8)
+    def test_backstop_ignores_broad_opportunity_counters(self):
+        # g-targeted-reach-rate: the defect being fixed. Broad evidence is
+        # structurally ~1/N in a dense neighbourhood, which put the AVERAGE
+        # blunder at the floor. 183 broad opportunities with zero broad reaches
+        # must not exclude anything on their own.
+        assert self._call(
+            opportunities_since_review=5,
+            opportunities_30d=183,
+            reached_30d=0,
+        ) is True
+
+    def test_backstop_fires_without_opportunity_events(self):
+        # The floor no longer needs a broad event to fire: the targeted count is
+        # its own sufficient guard, and a session that never uploaded produces a
+        # targeted attempt with no event row at all.
         assert self._call(
             has_opportunity_events=False,
             opportunities_since_review=0,
             pass_streak=0,
-            last_reviewed_at=reviewed_at,
+            last_reviewed_at=NOW - timedelta(hours=8),
             created_at=None,
             now=NOW,
-            opportunities_30d=183,  # ignored without events
-            reached_30d=0,
+            targeted_30d=183,
+            targeted_reached_30d=0,
+        ) is False
+
+    def test_one_failed_targeted_attempt_does_not_unschedule_a_due_blunder(self):
+        # Anti-regression for the rejected target-attributing-dueness design:
+        # dueness stays a property of BROAD evidence, so a single failed steer
+        # cannot cancel the review it was trying to set up.
+        assert self._call(
+            opportunities_since_review=2,
+            targeted_30d=1,
+            targeted_reached_30d=0,
         ) is True
+
+    def test_floor_is_self_healing_once_targeted_window_drains(self):
+        # Exclusion freezes the DENOMINATOR as well as the numerator, so the
+        # 30-day window empties it and lockout is bounded. Against the broad
+        # denominator this was absorbing: ordinary play kept feeding it while
+        # exclusion held the numerator at zero forever.
+        # 2/104 ≈ 0.019 < 0.03 with 100 >= P_REACH_MIN_SAMPLE samples.
+        excluded = dict(opportunities_since_review=5, targeted_30d=100, targeted_reached_30d=0)
+        assert self._call(**excluded) is False
+        assert self._call(**{**excluded, "targeted_30d": 0}) is True
 
     def test_floor_constant_is_three_percent(self):
         assert P_REACH_FLOOR == 0.03

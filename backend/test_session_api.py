@@ -176,7 +176,7 @@ def test_session_moves_populate_ghost_graph(client, auth_headers, create_game_se
     )
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_after_e4,
@@ -245,7 +245,7 @@ def test_session_moves_skip_invalid_ghost_graph_edge(client, auth_headers, creat
         == 1
     )
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_after_e4,

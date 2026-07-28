@@ -397,6 +397,108 @@ def test_ghost_decision_records_target_and_resulting_fen(
     assert json.loads(row.response_payload)["target_blunder_srs"] is not None
 
 
+def _seed_decision(db_session, *, session_id: str, blunder_id: int, served_at) -> None:
+    """An already-served steer at ``blunder_id``, as the decision log would hold it."""
+    db_session.add(
+        OpponentDecision(
+            decision_id=uuid.uuid4(),
+            session_id=uuid.UUID(session_id),
+            request_fingerprint=uuid.uuid4().hex,
+            request_fen_hash=fen_hash(AFTER_E4_FEN),
+            uci_history="[]",
+            ply_before=0,
+            served_at=served_at,
+            response_payload="{}",
+            target_blunder_id=blunder_id,
+            resulting_fen=None,
+            reaches_drill_root=False,
+        )
+    )
+
+
+def test_ghost_srs_snapshot_excludes_the_serving_session(
+    client, auth_headers, create_game_session, db_session
+):
+    """The snapshot is the evidence that CHOSE the target, not a read of live state.
+
+    find_ghost_move scores with the serving session excluded, so the payload has to
+    be scoped the same way. An unscoped read would count the decision this very
+    request records — and any earlier steer in the same session — leaving a frozen
+    payload that contradicts its own score from the moment it is stored, and every
+    replay serving that contradiction.
+    """
+    from app.srs_opportunity import compute_p_reach
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    other_session_id = create_game_session(user_id=user_id, player_color="white")
+    blunder_id = _seed_ghost_target(db_session, user_id)
+
+    served_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    _seed_decision(db_session, session_id=session_id, blunder_id=blunder_id, served_at=served_at)
+    _seed_decision(
+        db_session, session_id=other_session_id, blunder_id=blunder_id, served_at=served_at
+    )
+    db_session.commit()
+
+    response = _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
+
+    assert response.status_code == 200
+    srs = response.json()["target_blunder_srs"]
+    # Only the other session. Neither the same-session steer seeded above nor the
+    # one this request just wrote is inside its own denominator.
+    assert srs["targeted_30d"] == 1
+    assert srs["targeted_reached_30d"] == 0
+    assert srs["p_reach"] == pytest.approx(round(compute_p_reach(0, 1), 4))
+    assert len(_decisions(db_session, session_id)) == 2
+
+
+def test_ghost_srs_snapshot_is_the_scored_read_not_a_second_one(
+    client, auth_headers, create_game_session, db_session
+):
+    """One counter read per served ghost decision — the one the score used.
+
+    Re-reading to build the payload would take a second READ COMMITTED snapshot: a
+    later clock (so a drifted 30-day cutoff) and visibility of decisions other
+    sessions committed in between. The payload is frozen and replayed verbatim, so
+    that drift would be stored permanently. The perturbed second return here makes a
+    reintroduced re-read show up in the served numbers, not just in the call count.
+    """
+    from dataclasses import replace
+
+    from app.api import game as game_api
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    other_session_id = create_game_session(user_id=user_id, player_color="white")
+    blunder_id = _seed_ghost_target(db_session, user_id)
+    _seed_decision(
+        db_session,
+        session_id=other_session_id,
+        blunder_id=blunder_id,
+        served_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    db_session.commit()
+
+    real = game_api.load_opportunity_counters
+    calls: list[dict] = []
+
+    def counting(*args, **kwargs):
+        result = real(*args, **kwargs)
+        calls.append(kwargs)
+        if len(calls) > 1:
+            return {k: replace(v, targeted_30d=v.targeted_30d + 100) for k, v in result.items()}
+        return result
+
+    with patch.object(game_api, "load_opportunity_counters", counting):
+        response = _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "ghost"
+    assert len(calls) == 1
+    assert response.json()["target_blunder_srs"]["targeted_30d"] == 1
+
+
 def test_ghost_retry_replays_the_srs_snapshot_verbatim(
     client, auth_headers, create_game_session, db_session
 ):

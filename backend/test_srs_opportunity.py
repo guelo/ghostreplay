@@ -22,6 +22,7 @@ from app.models import (
     BlunderReview,
     GameSession,
     Move,
+    OpponentDecision,
     Position,
     SessionMove,
 )
@@ -32,6 +33,8 @@ from app.srs_math import (
     expected_opportunities,
 )
 from app.srs_opportunity import (
+    P_REACH_FLOOR,
+    P_REACH_MIN_SAMPLE,
     load_opportunity_counters,
     load_review_counters,
     practice_priority_score,
@@ -93,6 +96,38 @@ def _blunder(db_session, *, user_id: int, position: Position, eval_loss_cp: int 
     return blunder
 
 
+def _decision(
+    db_session,
+    *,
+    session: GameSession,
+    blunder: Blunder | None,
+    served_at: datetime,
+    ply_before: int = 0,
+) -> OpponentDecision:
+    """One row of the authoritative served-decision log.
+
+    ``target_blunder_id=None`` is a real, common shape: engine moves and
+    pre-root drill route moves are served without a target and must produce no
+    targeted attribution.
+    """
+    decision = OpponentDecision(
+        decision_id=uuid.uuid4(),
+        session_id=session.id,
+        # Unique per row: the real fingerprint is a hash of the request FEN and
+        # UCI history, and (session_id, request_fingerprint) is the replay key.
+        request_fingerprint=uuid.uuid4().hex,
+        request_fen_hash=fen_hash("8/8/8/8/8/8/8/K6k w - - 0 1"),
+        uci_history="[]",
+        ply_before=ply_before,
+        served_at=served_at,
+        response_payload="{}",
+        target_blunder_id=blunder.id if blunder is not None else None,
+    )
+    db_session.add(decision)
+    db_session.flush()
+    return decision
+
+
 def _opportunity_event(
     db_session,
     *,
@@ -101,7 +136,15 @@ def _opportunity_event(
     opportunity: bool,
     reached: bool,
     occurred_at: datetime,
-) -> None:
+    targeted: bool = False,
+) -> GameSession:
+    """One session's broad evidence, optionally with a served target.
+
+    ``targeted`` adds an ``opponent_decisions`` row in the SAME session, which
+    is what the targeted-session reach rate counts. The two streams are
+    deliberately separate: broad evidence comes from the client upload, the
+    decision log does not.
+    """
     game_session = _session(db_session, user_id=user_id, started_at=occurred_at)
     db_session.add(
         BlunderOpportunityEvent(
@@ -112,6 +155,9 @@ def _opportunity_event(
             reached=reached,
         )
     )
+    if targeted:
+        _decision(db_session, session=game_session, blunder=blunder, served_at=occurred_at)
+    return game_session
 
 
 def test_opportunity_math_smoothed_and_bounded():
@@ -366,7 +412,7 @@ def test_same_session_review_event_is_excluded_from_since_review(db_session):
     )
     db_session.commit()
 
-    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 0
     assert counters.opportunities_30d == 1
     assert counters.reached_30d == 1
@@ -398,7 +444,7 @@ def test_opportunity_counters_ignore_events_before_blunder_creation(db_session):
     ])
     db_session.commit()
 
-    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 1
     assert counters.opportunities_30d == 1
     assert counters.reached_30d == 1
@@ -424,6 +470,9 @@ def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_sess
     rare.created_at = now - timedelta(days=2)
     frequent.created_at = now - timedelta(days=2)
 
+    # Steered at 100 times, reached once, versus steered at 10 times and reached
+    # every time. Reach weight reads the TARGETED sessions, so the rare branch
+    # loses despite its much larger broad opportunity count.
     for idx in range(100):
         _opportunity_event(
             db_session,
@@ -432,6 +481,7 @@ def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_sess
             opportunity=True,
             reached=idx == 0,
             occurred_at=now - timedelta(days=1, minutes=idx),
+            targeted=True,
         )
     for idx in range(10):
         _opportunity_event(
@@ -441,10 +491,11 @@ def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_sess
             opportunity=True,
             reached=True,
             occurred_at=now - timedelta(days=1, minutes=idx),
+            targeted=True,
         )
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=start_fen,
@@ -474,7 +525,7 @@ def test_reached_since_review_counts_only_post_review_reaches(db_session):
         )
     db_session.commit()
 
-    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 183
     assert counters.reached_since_review == 0
     assert counters.reached_30d == 0
@@ -533,24 +584,71 @@ def test_reached_since_review_excludes_pre_review_and_same_session_reaches(db_se
     )
     db_session.commit()
 
-    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.reached_since_review == 1
 
 
-def test_find_ghost_move_suppresses_high_opportunity_zero_reach_blunder(db_session):
-    from app.api.game import find_ghost_move
-
-    user_id = 123
-    now = datetime.now(timezone.utc)
+def _single_step_blunder(db_session, *, user_id: int, now: datetime, blunder_fen: str):
+    """A start position with exactly one move leading to a blundered position."""
     start_fen = "8/8/8/8/8/8/8/K6k b - - 0 1"
-    blunder_fen = "8/8/8/8/8/8/8/1K5k w - - 0 2"
     start = _position(db_session, user_id=user_id, fen=start_fen, active_color="black")
     blunder_pos = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
     db_session.add(Move(from_position_id=start.id, move_san="step", to_position_id=blunder_pos.id))
     blunder = _blunder(db_session, user_id=user_id, position=blunder_pos, eval_loss_cp=200)
     blunder.created_at = now - timedelta(days=5)
+    return start_fen, blunder
 
-    # 183 ancestor-only opportunities, zero reaches — matches blunder 578 scenario
+
+def test_find_ghost_move_suppresses_high_targeted_zero_reach_blunder(db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen, blunder = _single_step_blunder(
+        db_session, user_id=user_id, now=now, blunder_fen="8/8/8/8/8/8/8/1K5k w - - 0 2"
+    )
+
+    # 183 sessions steered at this blunder, none of which reached it.
+    for idx in range(183):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=blunder,
+            opportunity=True,
+            reached=False,
+            occurred_at=now - timedelta(minutes=idx + 1),
+            targeted=True,
+        )
+    db_session.commit()
+
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=start_fen,
+        player_color="white",
+        _rng_seed=1,
+    )
+    assert move_san is None
+    assert target_blunder_id is None
+
+
+def test_find_ghost_move_keeps_blunder_with_broad_only_zero_reach_evidence(db_session):
+    """The g-ghost-preach-absorb defect: broad evidence alone must not exclude.
+
+    Identical to the test above except that no session ever STEERED at this
+    blunder — the 183 rows are ancestor-only neighbourhood evidence from
+    ordinary play. That denominator is structurally ~1/N, so gating on it put
+    the average blunder at the exclusion floor and collapsed steering onto one
+    target.
+    """
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen, blunder = _single_step_blunder(
+        db_session, user_id=user_id, now=now, blunder_fen="8/8/8/8/8/8/8/1K5k w - - 0 2"
+    )
+
     for idx in range(183):
         _opportunity_event(
             db_session,
@@ -562,15 +660,15 @@ def test_find_ghost_move_suppresses_high_opportunity_zero_reach_blunder(db_sessi
         )
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=start_fen,
         player_color="white",
         _rng_seed=1,
     )
-    assert move_san is None
-    assert target_blunder_id is None
+    assert move_san == "step"
+    assert target_blunder_id == blunder.id
 
 
 def test_find_ghost_move_uses_due_opportunities_with_supported_reach_rate(db_session):
@@ -600,7 +698,7 @@ def test_find_ghost_move_uses_due_opportunities_with_supported_reach_rate(db_ses
         )
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=start_fen,
@@ -1102,7 +1200,7 @@ def test_find_ghost_move_prefers_immediate_review_over_deeper_route(db_session):
         )
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=start_fen,
@@ -1149,3 +1247,453 @@ def test_practice_priority_severity_saturates_and_floors_negatives():
     assert score_negative == score_zero
     # ...and strictly below the capped-severity 1000cp case.
     assert score_negative < score_decisive
+
+
+# ---------------------------------------------------------------------------
+# g-targeted-reach-rate: the targeted-session reach rate comes from the
+# authoritative opponent_decisions log, NOT from blunder_opportunity_events.
+#
+# The distinction is the whole point of the design: opportunity events are
+# written by the client upload path, so a session that is served a target and
+# then never uploads would silently drop a FAILED steer and bias p_reach
+# upward. The decision log is written server-side at serve time and is
+# permanent, so every one of these tests is a claim about evidence surviving
+# something the upload path cannot guarantee.
+# ---------------------------------------------------------------------------
+
+
+def _targeted_only_setup(db_session, *, user_id: int = 123, now: datetime | None = None):
+    """A blunder plus one session that was steered at it and uploaded nothing."""
+    now = now or datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+    game_session = _session(db_session, user_id=user_id, started_at=now - timedelta(hours=2))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(hours=1)
+    )
+    return now, blunder, game_session
+
+
+def test_targeted_counts_a_session_that_never_uploaded(db_session):
+    # ZERO SessionMove rows and ZERO opportunity events: the failed steer that
+    # must not vanish. Under the rejected materialize-at-upload design this
+    # session produces no row at all and p_reach reads high.
+    now, blunder, _ = _targeted_only_setup(db_session)
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+    assert counters.targeted_reached_30d == 0
+    # Broad evidence is genuinely absent — the two streams degrade independently.
+    assert counters.event_count == 0
+    assert counters.opportunities_30d == 0
+
+
+def test_later_reached_event_moves_numerator_not_denominator(db_session):
+    now, blunder, game_session = _targeted_only_setup(db_session)
+    db_session.commit()
+    before = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+
+    # The upload finally lands, proving the position was reached.
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=game_session.id,
+            occurred_at=now - timedelta(minutes=30),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.commit()
+    after = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+
+    assert (before.targeted_30d, before.targeted_reached_30d) == (1, 0)
+    assert (after.targeted_30d, after.targeted_reached_30d) == (1, 1)
+    assert after.p_reach > before.p_reach
+
+
+def test_multiple_decisions_in_one_session_count_once(db_session):
+    now, blunder, game_session = _targeted_only_setup(db_session)
+    # Re-hooking the same blunder later in the same game is one targeted session.
+    for minutes in (50, 40, 30):
+        _decision(
+            db_session,
+            session=game_session,
+            blunder=blunder,
+            served_at=now - timedelta(minutes=minutes),
+        )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+
+
+def test_cross_cutoff_session_keeps_its_in_window_attempt(db_session):
+    """Filter-order regression: rows are filtered BEFORE grouping.
+
+    One session targets the blunder at day -31 and again at day -1. Grouping
+    first and then testing ``MIN(served_at)`` against the cutoff would see day
+    -31, drop the whole session, and return 0 — discarding an attempt that is
+    squarely inside the window.
+    """
+    now, blunder, game_session = _targeted_only_setup(db_session)
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(days=31)
+    )
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(days=1)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+
+
+def test_out_of_window_decisions_alone_count_nothing(db_session):
+    # The other half of the cutoff: with no in-window row the session drops out
+    # entirely, which is what makes the exclusion floor self-healing.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(days=60)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(days=40))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(days=31)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 0
+    assert counters.p_reach == pytest.approx(compute_p_reach(0, 0))
+
+
+def test_cross_creation_time_session_keeps_its_later_attempt(db_session):
+    # Same filter-order trap on the after-created predicate: a decision served
+    # before the blunder existed must not forfeit the session's later ones.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(hours=6)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(hours=12))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(hours=10)
+    )
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(hours=2)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+
+
+def test_pre_creation_decisions_alone_count_nothing(db_session):
+    # Independent guard on the after-created predicate. The cross-boundary test
+    # above cannot be one: its two decisions collapse into a single session group
+    # whether or not `served_at >= Blunder.created_at` is applied, so it still
+    # passes with the predicate deleted. Only a session whose decisions are ALL
+    # older than the blunder separates the two.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(hours=6)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(hours=12))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(hours=10)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 0
+    assert counters.p_reach == pytest.approx(compute_p_reach(0, 0))
+
+
+def test_blunder_created_during_the_session_is_still_credited(db_session):
+    # The timeline is per-decision served_at, never session.started_at: dating a
+    # decision to the session's opening would drop this attempt entirely.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(hours=3)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(hours=5))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(hours=1)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+
+
+def test_long_running_session_counts_by_decision_time_not_start_time(db_session):
+    # Session STARTED 40 days ago, decision served yesterday: in window.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(days=60)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(days=40))
+    _decision(
+        db_session, session=game_session, blunder=blunder, served_at=now - timedelta(days=1)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+
+
+def test_replayed_broad_recompute_leaves_targeted_counts_unchanged(db_session):
+    # The broad backfill deletes and rewrites opportunity events. It writes no
+    # decisions, so it must be structurally incapable of moving the denominator.
+    now, blunder, game_session = _targeted_only_setup(db_session)
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=game_session.id,
+            occurred_at=now - timedelta(minutes=30),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.commit()
+
+    def _targeted():
+        counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)
+        return counters[blunder.id].targeted_30d
+
+    assert _targeted() == 1
+    db_session.query(BlunderOpportunityEvent).filter(
+        BlunderOpportunityEvent.session_id == game_session.id
+    ).delete(synchronize_session=False)
+    db_session.commit()
+    # Mid-recompute, with the events gone, the attempt still counts.
+    assert _targeted() == 1
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=game_session.id,
+            occurred_at=now - timedelta(minutes=30),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.commit()
+    assert _targeted() == 1
+
+
+def test_exclude_session_id_applies_to_the_decision_aggregate(db_session):
+    now, blunder, game_session = _targeted_only_setup(db_session)
+    db_session.commit()
+
+    counters = load_opportunity_counters(
+        db_session, [blunder.id], user_id=123, now=now, exclude_session_id=game_session.id
+    )[blunder.id]
+    assert counters.targeted_30d == 0
+
+
+def test_decision_targeting_another_users_blunder_is_not_attributed(db_session):
+    # target_blunder_id is a bare FK with no user scoping, so the aggregate
+    # joins through Blunder.user_id. This holds even when the caller's own
+    # query was unscoped and handed us a foreign blunder id.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=999, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    other_blunder = _blunder(db_session, user_id=999, position=pos)
+    game_session = _session(db_session, user_id=999, started_at=now - timedelta(hours=2))
+    _decision(
+        db_session, session=game_session, blunder=other_blunder, served_at=now - timedelta(hours=1)
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(
+        db_session, [other_blunder.id], user_id=123, now=now
+    )[other_blunder.id]
+    assert counters.targeted_30d == 0
+
+
+def test_untargeted_decisions_create_no_attribution(db_session):
+    # Engine moves and pre-root drill route moves carry target_blunder_id=None.
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    game_session = _session(db_session, user_id=123, started_at=now - timedelta(hours=2))
+    for minutes in (90, 80, 70):
+        _decision(
+            db_session,
+            session=game_session,
+            blunder=None,
+            served_at=now - timedelta(minutes=minutes),
+        )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 0
+
+
+def test_legacy_drill_session_with_no_broad_evidence_still_counts_targeted(db_session):
+    """A drill that produces no broad evidence still contributes an attempt.
+
+    Legacy 'root_reached' drills carry no reconstructable evidence boundary, so
+    boundary-scoped broad accounting excludes them. targeted +1 / reached +0 is
+    the correct answer there, not zero and not an error: the session proves a
+    steer was attempted and provides no proof it landed.
+    """
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    drill = GameSession(
+        id=uuid.uuid4(),
+        user_id=123,
+        started_at=now - timedelta(hours=3),
+        status="ended",
+        engine_elo=1500,
+        player_color="white",
+        session_mode="drill",
+        drill_state="root_reached",
+        is_rated=False,
+    )
+    db_session.add(drill)
+    db_session.flush()
+    assert drill.rated_start_ply is None
+    _decision(db_session, session=drill, blunder=blunder, served_at=now - timedelta(hours=1))
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.targeted_30d == 1
+    assert counters.targeted_reached_30d == 0
+
+
+def test_p_reach_uses_targeted_counters_not_broad_ones(db_session):
+    now = datetime.now(timezone.utc)
+    pos = _position(
+        db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white"
+    )
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    # 40 broad opportunities with no reaches would read p_reach ≈ 0.045; the
+    # four targeted sessions, three of which reached, read ≈ 0.625.
+    for idx in range(40):
+        _opportunity_event(
+            db_session,
+            user_id=123,
+            blunder=blunder,
+            opportunity=True,
+            reached=False,
+            occurred_at=now - timedelta(minutes=idx + 1),
+        )
+    for idx in range(4):
+        _opportunity_event(
+            db_session,
+            user_id=123,
+            blunder=blunder,
+            opportunity=True,
+            reached=idx < 3,
+            occurred_at=now - timedelta(hours=idx + 1),
+            targeted=True,
+        )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
+    assert counters.opportunities_30d == 44
+    assert counters.targeted_30d == 4
+    assert counters.targeted_reached_30d == 3
+    assert counters.p_reach == pytest.approx(compute_p_reach(3, 4))
+
+
+def test_load_opportunity_counters_requires_user_id(db_session):
+    # A required keyword makes every call site a compile-time sweep instead of
+    # a silent cross-user leak.
+    with pytest.raises(TypeError):
+        load_opportunity_counters(db_session, [1], now=datetime.now(timezone.utc))
+
+
+def test_find_ghost_move_does_not_collapse_onto_one_target_under_broad_evidence(db_session):
+    """End-to-end shape of the reported symptom (g-ghost-preach-absorb).
+
+    A dense neighbourhood: one position with five candidate first moves, each
+    reaching a different blunder, and every blunder carrying heavy broad
+    opportunity evidence with zero broad reaches. That is ordinary play in a
+    repeated opening — the user played 1.b4 every game — not evidence that any
+    of these targets is unreachable.
+
+    Against the broad denominator all five sat under the exclusion floor, the
+    selector was left with a single eligible group, and the weighted choice
+    became degenerate: the ghost replied with the same move every game
+    regardless of seed. Nothing steers at these blunders, so the targeted
+    denominator is empty and every one of them stays eligible.
+    """
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen = "8/8/8/8/8/8/8/K6k b - - 0 1"
+    start = _position(db_session, user_id=user_id, fen=start_fen, active_color="black")
+
+    first_moves = ["f5", "e5", "d5", "g6", "Nf6"]
+    blunder_fens = _distinct_king_fens(len(first_moves), turn="w")
+    blunder_ids: list[int] = []
+    for first_move, blunder_fen in zip(first_moves, blunder_fens):
+        blunder_pos = _position(
+            db_session,
+            user_id=user_id,
+            fen=blunder_fen,
+            active_color="white",
+        )
+        db_session.add(
+            Move(from_position_id=start.id, move_san=first_move, to_position_id=blunder_pos.id)
+        )
+        blunder = _blunder(db_session, user_id=user_id, position=blunder_pos, eval_loss_cp=200)
+        blunder.created_at = now - timedelta(days=5)
+        blunder_ids.append(blunder.id)
+        # 2/104 ≈ 0.019 — under the old broad floor of 0.03, with well over
+        # P_REACH_MIN_SAMPLE samples, so every one of the five was excluded.
+        for event_idx in range(100):
+            _opportunity_event(
+                db_session,
+                user_id=user_id,
+                blunder=blunder,
+                opportunity=True,
+                reached=False,
+                occurred_at=now - timedelta(minutes=event_idx + 1),
+            )
+    db_session.commit()
+
+    # Pin the setup as a real regression guard: every one of these blunders
+    # must still be over the broad sample floor and under the reach floor on
+    # BROAD numbers, so this test cannot quietly stop reproducing the defect.
+    counters = load_opportunity_counters(
+        db_session, blunder_ids, user_id=user_id, now=now
+    )
+    for blunder_id in blunder_ids:
+        broad = counters[blunder_id]
+        assert broad.opportunities_30d >= P_REACH_MIN_SAMPLE
+        assert compute_p_reach(broad.reached_30d, broad.opportunities_30d) < P_REACH_FLOOR
+        assert broad.targeted_30d == 0
+
+    served = {
+        find_ghost_move(
+            db=db_session,
+            user_id=user_id,
+            fen=start_fen,
+            player_color="white",
+            _rng_seed=seed,
+        )[0]
+        for seed in range(30)
+    }
+    assert None not in served
+    assert len(served) > 1, f"ghost collapsed onto a single reply: {served}"

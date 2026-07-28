@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.centipawn_loss import centipawn_loss
 from app.fen import normalize_fen
-from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
+from app.models import Blunder, BlunderOpportunityEvent, BlunderReview, OpponentDecision
 from app.opening_roots import get_opening_roots
 from app.srs_math import (
     OPPORTUNITY_POWER,
@@ -37,15 +37,37 @@ P_REACH_MIN_SAMPLE = 30
 
 @dataclass(frozen=True)
 class OpportunityCounters:
+    """Two independent evidence streams for one blunder.
+
+    The ``opportunities_*`` / ``reached_*`` counters are BROAD evidence from
+    ``blunder_opportunity_events``: an 8-ply forward neighbourhood of everything
+    the session touched. They drive SRS dueness, where "the position was in
+    reach and you did not review it" is exactly the intended signal.
+
+    ``targeted_*`` is the TARGETED-SESSION reach rate, read straight from the
+    authoritative ``opponent_decisions`` log: sessions in which the ghost
+    actually steered at this blunder, and how many of those reached it. Broad
+    evidence is structurally ~1/N in a dense neighbourhood, so using it as the
+    p_reach denominator put the AVERAGE blunder at the exclusion floor and
+    collapsed steering onto whichever target was newest
+    (g-ghost-preach-absorb). p_reach therefore derives from the targeted stream
+    only.
+    """
+
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
     reached_since_review: int = 0
     event_count: int = 0
+    targeted_30d: int = 0
+    targeted_reached_30d: int = 0
 
     @property
     def p_reach(self) -> float:
-        return compute_p_reach(self.reached_30d, self.opportunities_30d)
+        # Zero targeted samples fall out of the Laplace prior as 0.5 with no
+        # special-casing, which is what makes the ungated reach weight in
+        # practice_priority_score / GhostMoveCandidate.score safe.
+        return compute_p_reach(self.targeted_reached_30d, self.targeted_30d)
 
 
 @dataclass(frozen=True)
@@ -136,12 +158,19 @@ def load_opportunity_counters(
     db: Session,
     blunder_ids: list[int],
     *,
+    user_id: int,
     now: datetime | None = None,
     exclude_session_id: uuid.UUID | None = None,
 ) -> dict[int, OpportunityCounters]:
-    """Per-blunder opportunity counters.
+    """Per-blunder opportunity counters, broad and targeted.
 
-    ``exclude_session_id`` drops that session's own opportunity events from the
+    ``user_id`` is REQUIRED, not defaulted. ``opponent_decisions.target_blunder_id``
+    is a bare FK to ``blunders.id`` with no user scoping of its own, so the
+    targeted aggregate below joins through ``Blunder.user_id`` to scope it. A
+    default would let a caller silently skip that scoping; making it required
+    turns every call site into a compile-time sweep instead.
+
+    ``exclude_session_id`` drops that session's own evidence from BOTH
     aggregates. Ghost steering passes the in-progress game session here: the
     game we are steering *toward* the blunder in must not count as a missed
     opportunity against that blunder's dueness, or a single ancestor touch
@@ -238,15 +267,113 @@ def load_opportunity_counters(
         rows_query = rows_query.filter(BlunderOpportunityEvent.session_id != exclude_session_id)
     rows = rows_query.group_by(BlunderOpportunityEvent.blunder_id).all()
 
+    targeted = _load_targeted_counters(
+        db,
+        unique_blunder_ids,
+        user_id=user_id,
+        cutoff=cutoff,
+        exclude_session_id=exclude_session_id,
+    )
+
     for row in rows:
+        targeted_30d, targeted_reached_30d = targeted.pop(row.blunder_id, (0, 0))
         counters[row.blunder_id] = OpportunityCounters(
             opportunities_since_review=int(row.opportunities_since_review or 0),
             opportunities_30d=int(row.opportunities_30d or 0),
             reached_30d=int(row.reached_30d or 0),
             reached_since_review=int(row.reached_since_review or 0),
             event_count=int(row.event_count or 0),
+            targeted_30d=targeted_30d,
+            targeted_reached_30d=targeted_reached_30d,
+        )
+    # A blunder can be targeted with no broad event at all — that is the failed
+    # steer whose whole point is to survive the session never uploading — so the
+    # targeted-only remainder still has to land in the result.
+    for blunder_id, (targeted_30d, targeted_reached_30d) in targeted.items():
+        counters[blunder_id] = OpportunityCounters(
+            targeted_30d=targeted_30d,
+            targeted_reached_30d=targeted_reached_30d,
         )
     return counters
+
+
+def _load_targeted_counters(
+    db: Session,
+    unique_blunder_ids: list[int],
+    *,
+    user_id: int,
+    cutoff: datetime,
+    exclude_session_id: uuid.UUID | None,
+) -> dict[int, tuple[int, int]]:
+    """Targeted-session denominator/numerator from ``opponent_decisions``.
+
+    A SECOND aggregate rather than more columns on the broad query: the grains
+    differ (one is over events, the other over decisions), so they cannot fold
+    into one GROUP BY. It reads the decision log directly instead of
+    materializing targeting into ``blunder_opportunity_events``, which is
+    written by the client upload path — a session served a target and then
+    never uploading would drop the FAILED steer and bias p_reach upward, the
+    exact client-controlled-denominator hole the decision log exists to close.
+
+    FILTER BEFORE GROUPING. Eligibility is a property of an individual decision
+    ROW, not of a group's ``MIN(served_at)``. Grouping first and testing the
+    minimum would drop a whole session whose EARLIEST targeting of a blunder
+    falls outside the window, even when a later attempt sits squarely inside
+    it; the same error hits ``served_at >= created_at`` for a blunder created
+    mid-session.
+    """
+    filters = [
+        OpponentDecision.target_blunder_id.in_(unique_blunder_ids),
+        Blunder.user_id == user_id,
+        OpponentDecision.served_at >= cutoff,
+        # Per-decision served_at IS the targeted timeline. Not session.started_at:
+        # that would date a late-session decision to the session's opening and
+        # silently drop targeting of a blunder created during that same session.
+        OpponentDecision.served_at >= Blunder.created_at,
+    ]
+    if exclude_session_id is not None:
+        filters.append(OpponentDecision.session_id != exclude_session_id)
+
+    groups = (
+        db.query(
+            OpponentDecision.session_id.label("session_id"),
+            OpponentDecision.target_blunder_id.label("blunder_id"),
+        )
+        .join(Blunder, Blunder.id == OpponentDecision.target_blunder_id)
+        .filter(*filters)
+        # Grouping by session is what makes the denominator count targeted
+        # SESSIONS: re-hooking the same blunder later in one session counts once.
+        .group_by(OpponentDecision.session_id, OpponentDecision.target_blunder_id)
+        .subquery()
+    )
+
+    # reached stays whole-session position-set membership from the broad stream,
+    # joined in for the NUMERATOR only. The unique (session_id, blunder_id) on
+    # blunder_opportunity_events means this outer join cannot fan out a group.
+    # No event row means not reached.
+    rows = (
+        db.query(
+            groups.c.blunder_id,
+            func.count().label("targeted_30d"),
+            func.coalesce(
+                func.sum(case((BlunderOpportunityEvent.reached.is_(True), 1), else_=0)), 0
+            ).label("targeted_reached_30d"),
+        )
+        .select_from(groups)
+        .outerjoin(
+            BlunderOpportunityEvent,
+            and_(
+                BlunderOpportunityEvent.session_id == groups.c.session_id,
+                BlunderOpportunityEvent.blunder_id == groups.c.blunder_id,
+            ),
+        )
+        .group_by(groups.c.blunder_id)
+        .all()
+    )
+    return {
+        row.blunder_id: (int(row.targeted_30d or 0), int(row.targeted_reached_30d or 0))
+        for row in rows
+    }
 
 
 def opportunity_priority(
@@ -310,12 +437,19 @@ def ghost_eligible(
     """Same persistent eligibility rule used by ``find_ghost_move``.
 
     A target is ghost eligible when it is SRS due (priority > 1.0) and, for
-    opportunity-tracked targets with enough samples, is reached often enough
-    that steering is likely to feel relevant (p_reach >= P_REACH_FLOOR). This
-    is position independent: actual in-game steerability still depends on the
-    current FEN and is owned by find_ghost_move.
+    targets steered at often enough to have a real sample, is reached often
+    enough that steering is likely to feel relevant (p_reach >= P_REACH_FLOOR).
+    This is position independent: actual in-game steerability still depends on
+    the current FEN and is owned by find_ghost_move.
+
+    The floor gates on TARGETED samples, not broad ones. Against the broad
+    denominator it was absorbing: exclusion stopped the blunder being served,
+    which froze the numerator while ordinary play kept growing the denominator,
+    so nothing could ever climb back out. Against the targeted denominator
+    exclusion freezes BOTH sides, so the 30-day window drains it and lockout is
+    bounded at 30 days. ``event_count`` still routes srs_priority; it no longer
+    guards the floor, because the targeted count is its own sufficient guard.
     """
-    has_events = counters is not None and counters.event_count > 0
     priority = srs_priority(
         counters=counters,
         pass_streak=pass_streak,
@@ -326,8 +460,8 @@ def ghost_eligible(
     if priority <= 1.0:
         return False
     if (
-        has_events
-        and counters.opportunities_30d >= P_REACH_MIN_SAMPLE
+        counters is not None
+        and counters.targeted_30d >= P_REACH_MIN_SAMPLE
         and counters.p_reach < P_REACH_FLOOR
     ):
         return False
@@ -367,7 +501,11 @@ def practice_priority_score(
     # Ghost candidate score: >=1000cp losses share one severity so mate pseudo-cp
     # cannot dominate practice priority. Floors legacy negatives to 0.
     severity = math.log1p(float(centipawn_loss(eval_loss_cp)) / SEVERITY_NORMALIZER_CP)
-    reach_weight = 1.0
-    if has_events:
-        reach_weight = counters.p_reach ** OPPORTUNITY_POWER
+    # Ungated, unlike urgency above. Gating reach on has_events handed a
+    # never-targeted blunder 1.0 — a better weight than any measured target can
+    # earn — instead of the intended prior. With zero targeted samples p_reach
+    # is the Laplace 0.5, so this is a uniform 0.354 across the no-data cohort
+    # and leaves intra-cohort ordering untouched.
+    p_reach = counters.p_reach if counters is not None else compute_p_reach(0, 0)
+    reach_weight = p_reach**OPPORTUNITY_POWER
     return urgency * severity * reach_weight

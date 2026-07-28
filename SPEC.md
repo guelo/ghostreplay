@@ -1414,8 +1414,46 @@ severity        = log1p(min(max(eval_loss_cp, 0), 1000) / 50)   -- 50cp → 0.69
 
 distance_weight = exp(-0.35 × depth)                -- depth=1 → 0.70, depth=3 → 0.35, depth=5 → 0.17
 
-score = urgency × severity × distance_weight
+reach_weight    = p_reach ^ 1.5                     -- targeted-session reach rate, see below
+
+score = urgency × severity × distance_weight × reach_weight × opening_weight
 ```
+
+**Targeted-session reach rate (g-targeted-reach-rate).** `p_reach` is a Laplace-smoothed
+`(reached + 2) / (targeted + 4)` over the last 30 days, where the denominator counts **sessions in
+which the ghost actually steered at this blunder** — read directly from the `opponent_decisions`
+log, grouped by `(session_id, target_blunder_id)` so re-hooking the same target within one game
+counts once. The numerator joins broad `blunder_opportunity_events` for whole-session `reached`
+membership; no event row means not reached.
+
+It is deliberately **not** derived from `blunder_opportunity_events`, whose `opportunity` flag is an
+8-ply forward neighbourhood of everything a session touched. That denominator is structurally ~1/N
+in a dense opening: one game credited ~168 blunders with an opportunity while only a handful could
+be steered to, which put the *average* blunder at the exclusion floor regardless of how the user
+played. The two counters stay separate — broad evidence drives SRS **dueness**
+(`opportunities_since_review`), targeted evidence drives **reach**.
+
+- **Exclusion floor.** A blunder with `targeted_30d ≥ 30` and `p_reach < 0.03` is not ghost
+  eligible. Against the broad denominator this was **absorbing**: exclusion stopped the blunder
+  being served, freezing the numerator, while ordinary play kept growing the denominator, so
+  nothing could climb back out — steering collapsed onto whichever target was newest. Against the
+  targeted denominator exclusion freezes both sides, so the 30-day window drains it and lockout is
+  bounded at 30 days.
+- **Upload-independent.** The decision log is written server-side at serve time, so a session that
+  is served a target and never uploads still counts as a **failed** steer. Targeting is
+  deliberately not materialized into `blunder_opportunity_events`, which the client upload path
+  writes: that would relocate the client-controlled-denominator hole rather than close it. A broad
+  recompute or backfill therefore cannot move `p_reach`'s denominator at all.
+- **Reach weight is ungated.** A blunder with no targeted samples takes the prior (0.5 → 0.354),
+  not a free 1.0 — uniform across the no-data cohort, so intra-cohort ordering is unchanged, but a
+  well-reached target now outranks a never-tried one.
+- **The served snapshot IS the scoring read.** `target_blunder_srs` on a `next-opponent-move`
+  response carries the counters `find_ghost_move` scored, returned on `GhostSelection` rather than
+  re-queried by the endpoint. That read uses `exclude_session_id = session_id`, so the decision the
+  payload ships with — and any earlier steer in the same game — is outside the counts by
+  construction. The payload is frozen at serve time and replayed verbatim on retry, so a second
+  read would permanently store drift: under READ COMMITTED it takes a later clock (moving the
+  30-day cutoff) and can see decisions other sessions committed in between.
 
 `eval_loss_cp` is stored RAW/uncapped; severity normalizes it 0..1000 (`centipawn_loss`, `CENTIPAWN_LOSS_CAP_CP = 1000`) so a mate pseudo-cp (~10000) and a real −1200 blunder saturate to the same severity. Only severity saturates — urgency, distance, reach, and opening-family weight still differentiate two equally-severe blunders.
 
@@ -2173,6 +2211,8 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
     "opportunities_since_review": "integer",
     "opportunities_30d": "integer",
     "reached_30d": "integer",
+    "targeted_30d": "integer",
+    "targeted_reached_30d": "integer",
     "p_reach": "float"
   },
   "decision_source": "ghost_path | backend_engine",

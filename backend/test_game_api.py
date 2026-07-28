@@ -895,7 +895,7 @@ def test_find_ghost_move_finds_blunder_at_max_depth(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=positions[1].fen_raw,
@@ -930,7 +930,7 @@ def test_find_ghost_move_respects_depth_limit(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=positions[1].fen_raw,
@@ -1004,7 +1004,7 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
     db_session.commit()
 
     # Use _rng_seed=1 for deterministic top-k sampling (seed 1 picks higher-weight candidate)
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
@@ -1105,7 +1105,7 @@ def test_find_ghost_move_mate_magnitude_does_not_outrank_decisive(db_session):
     # reachable and gets picked across seeds.
     picks = set()
     for seed in range(20):
-        move_san, target_blunder_id, _, _ = find_ghost_move(
+        move_san, target_blunder_id, _, _, _ = find_ghost_move(
             db=db_session, user_id=user_id, fen=fen_start,
             player_color="white", _rng_seed=seed,
         )
@@ -1179,7 +1179,7 @@ def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
     db_session.commit()
 
     # Use _rng_seed=1 for deterministic top-k sampling (seed 1 picks higher-weight candidate)
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
@@ -1256,7 +1256,7 @@ def test_find_ghost_move_handles_cycles(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_a,
@@ -1298,7 +1298,7 @@ def test_find_ghost_move_skips_not_yet_due_blunder(db_session):
     ))
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
 
@@ -1336,7 +1336,7 @@ def test_find_ghost_move_selects_just_due_blunder(db_session):
     ))
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
 
@@ -1379,7 +1379,7 @@ def test_find_ghost_move_slow_log_includes_opening_family_timer(db_session, monk
     monkeypatch.setattr(game_api, "detect_opening_family", fake_detect_opening_family)
 
     with caplog.at_level(logging.INFO, logger="app.api.game"):
-        move_san, target_blunder_id, _, _ = game_api.find_ghost_move(
+        move_san, target_blunder_id, _, _, _ = game_api.find_ghost_move(
             db=db_session,
             user_id=user_id,
             fen=fen_start,
@@ -1461,14 +1461,14 @@ def test_find_ghost_move_ignores_current_session_opportunity(db_session):
 
     # Without the current session excluded, its own event suppresses steering
     # (priority collapses to exactly 1.0) — this is the failure mode.
-    suppressed_san, _, _, _ = find_ghost_move(
+    suppressed_san, _, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
     assert suppressed_san is None
 
     # Passing the in-progress session excludes its own event, so the blunder
     # stays time-based due (1.25) and steering survives.
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
@@ -1510,7 +1510,7 @@ def test_find_ghost_move_skips_mastered_blunder_high_pass_streak(db_session):
     ))
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
 
@@ -1551,7 +1551,7 @@ def test_find_ghost_move_not_due_excluded_despite_urgency(db_session):
     ))
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
 
@@ -1596,7 +1596,7 @@ def test_find_ghost_move_topk_samples_from_candidates(db_session):
         ))
     db_session.commit()
 
-    move_san, target_blunder_id, _, _ = find_ghost_move(
+    move_san, target_blunder_id, _, _, _ = find_ghost_move(
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
         _rng_seed=42,
     )
@@ -1695,7 +1695,7 @@ def test_find_ghost_move_different_seed_can_differ(db_session):
     # eventually pick different candidates.
     results = set()
     for seed in range(50):
-        move_san, _, _, _ = find_ghost_move(
+        move_san, _, _, _, _ = find_ghost_move(
             db=db_session, user_id=user_id, fen=fen_start, player_color="white",
             _rng_seed=seed,
         )

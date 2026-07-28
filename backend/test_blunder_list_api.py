@@ -7,7 +7,14 @@ from sqlalchemy import event
 
 from conftest import engine
 
-from app.models import Blunder, BlunderOpportunityEvent, BlunderReview, GameSession, Position
+from app.models import (
+    Blunder,
+    BlunderOpportunityEvent,
+    BlunderReview,
+    GameSession,
+    OpponentDecision,
+    Position,
+)
 
 
 def _create_blunder(
@@ -323,8 +330,13 @@ def test_list_blunders_due_includes_high_opportunity_zero_reach(client, auth_hea
 
 
 def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers, db_session):
-    """A high-opportunity, zero-reach target is SRS due but not ghost-eligible,
-    so it appears under due=true but not under practice_ready=true."""
+    """A heavily-steered, zero-reach target is SRS due but not ghost-eligible,
+    so it appears under due=true but not under practice_ready=true.
+
+    Dueness is a property of BROAD evidence and eligibility a property of the
+    TARGETED reach rate, which is exactly why one surface can keep a blunder the
+    other drops (g-targeted-reach-rate).
+    """
     now = datetime.now(timezone.utc)
     blunder = _create_blunder(
         db_session,
@@ -354,6 +366,19 @@ def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers,
                 reached=False,
             )
         )
+        db_session.add(
+            OpponentDecision(
+                decision_id=uuid.uuid4(),
+                session_id=session.id,
+                request_fingerprint=uuid.uuid4().hex,
+                request_fen_hash="fen-hash",
+                uci_history="[]",
+                ply_before=0,
+                served_at=now - timedelta(minutes=idx + 1),
+                response_payload="{}",
+                target_blunder_id=blunder.id,
+            )
+        )
     db_session.commit()
 
     due = client.get("/api/blunder?due=true", headers=auth_headers(user_id=123)).json()
@@ -361,6 +386,8 @@ def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers,
     assert due["due_total"] == 1
     assert due["items"][0]["srs_due"] is True
     assert due["items"][0]["ghost_eligible"] is False
+    assert due["items"][0]["targeted_30d"] == 183
+    assert due["items"][0]["targeted_reached_30d"] == 0
 
     ready = client.get(
         "/api/blunder?practice_ready=true", headers=auth_headers(user_id=123)
