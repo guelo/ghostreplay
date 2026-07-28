@@ -47,6 +47,17 @@ class StatementLog:
             pre.append(sql)
         return pre
 
+    def statements_after_first_commit(self) -> list[str]:
+        seen_commit = False
+        post: list[str] = []
+        for kind, sql in self.events:
+            if kind == "commit":
+                seen_commit = True
+                continue
+            if seen_commit:
+                post.append(sql)
+        return post
+
     def commit_attempt_count(self) -> int:
         """How many commits were ATTEMPTED — not how many became durable.
 
@@ -94,6 +105,20 @@ def cursor_write_indices(statements: list[str]) -> list[int]:
     return [i for i, s in enumerate(statements) if is_write(s) and "opening_score_cursors" in s]
 
 
+def _assert_no_post_commit_writes(log: StatementLog) -> None:
+    """No write of ANY kind ran after the commit the cursor accounts for.
+
+    Post-commit SELECTs are fine and expected (``db.refresh`` + the opening-score
+    delta reads). A post-commit WRITE is not: it lands in a transaction the bump
+    does not cover, so either it never commits and is silently lost at the
+    ``db.close()`` teardown, or it commits and the evidence counter under-counts
+    the change. Neither is caught by the cursor-cardinality check when the write
+    touches some other table.
+    """
+    writes = [s for s in log.statements_after_first_commit() if is_write(s)]
+    assert not writes, f"writes ran in a second transaction after the commit: {writes}"
+
+
 def cursor_last_before_commit(log: StatementLog) -> tuple[list[str], int]:
     """The request bumped the evidence cursor exactly once ACROSS THE WHOLE
     REQUEST, and that bump was the FINAL STATEMENT (not merely the final write)
@@ -111,6 +136,7 @@ def cursor_last_before_commit(log: StatementLog) -> tuple[list[str], int]:
     Callers MUST additionally assert the persisted cursor row.
     """
     assert log.commit_attempt_count() == 1, log.events
+    _assert_no_post_commit_writes(log)
 
     all_bumps = cursor_write_indices(log.statements())
     assert len(all_bumps) == 1, (
@@ -132,5 +158,6 @@ def no_cursor_bump(log: StatementLog) -> list[str]:
     vacuously.
     """
     assert log.commit_attempt_count() == 1, log.events
+    _assert_no_post_commit_writes(log)
     assert cursor_write_indices(log.statements()) == [], log.statements()
     return log.statements_before_first_commit()

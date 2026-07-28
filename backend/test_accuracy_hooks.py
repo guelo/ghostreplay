@@ -516,7 +516,15 @@ def test_generic_orm_path_flushes_moves_then_recompute_then_accuracy_then_cursor
     visibility BEFORE the recompute query, and the accuracy UPDATE drains BEFORE the
     cursor, which is the transaction's final statement. Forcing a foreign dialect
     name routes through the generic ``bump_evidence_seq`` branch — the one a new
-    dialect would run — while still executing against SQLite."""
+    dialect would run — while still executing against SQLite.
+
+    Read the cursor-is-last half as documentation, not as a guard: unlike the
+    sqlite/postgres branches, which ``db.execute`` the upsert on the spot, the
+    generic branch only mutates the ORM object, so its UPDATE is emitted by the
+    commit flush itself. With autoflush off (backend sessions disable it) that
+    lands last no matter what runs after the bump. The flush-ORDER assertions
+    above it are what this test actually enforces; the ordering guard for a real
+    dialect lives in the sqlite tests and the @pg_required one."""
     headers = auth_headers(user_id=123)
     sid = create_game_session(user_id=123)
     _upload(client, auth_headers, sid, MOVES_HIGH, headers=headers)
