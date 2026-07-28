@@ -761,8 +761,11 @@ DETECTOR_CASES = [
     (
         # The grid simply CONTINUES past the PGN's last ply. Coordinate-contiguous
         # surplus validates as intact — frozen v1 rejects only n < expected
-        # (accuracy_v1.py:152-153), and tightening that to `==` is an accuracy-v2
-        # decision, not a detector one.
+        # (accuracy_v1.py:152-153), and g-i6st measured that tightening to `==`
+        # would null more correct scores than wrong ones, so it stays. Note it
+        # would never have been an accuracy-v2 change either: a length rule is the
+        # INPUT contract, which docs/session-accuracy-versioning.md supersedes with
+        # an accuracy_rows_v2 rather than by bumping the algorithm version.
         "contiguous_surplus",
         INTACT_PLIES + [(4, "white", 5), (4, "black", 6)],
         True,

@@ -53,6 +53,17 @@ def ply_coordinates_intact(rows) -> bool:
     the same side. It does NOT prove a row carries the PGN's move: a row sitting
     at the right coordinate with a different san/fen_before passes. Only a
     PGN-vs-rows replay could catch that.
+
+    That gap is real and was measured, not merely anticipated. g-i6st replayed a
+    restore of the 2026-07-24 production dump and found 20 ended-visible sessions
+    that pass this function while carrying rows whose ``move_san`` disagrees with
+    their own PGN mainline; 19 of them serve an accuracy computed over those rows
+    (1.2% of all served values). The shape is a discarded two-ply variation left
+    at coordinates the real game later reused — the record resyncs immediately
+    after, so the grid stays perfect. The population is historical (2026-03-28 to
+    2026-04-04, plus one 2026-05-15 outlier) and the accepted decision was to
+    record it rather than supersede this contract; see g-i6st for the evidence
+    and the priced alternatives, and g-discard-branch-rows for the writer.
     """
     for i, row in enumerate(rows):
         if row.move_number != i // 2 + 1:

@@ -111,24 +111,28 @@ def game_accuracy_for_rows(
     is the invariant that makes the algorithm's parity attribution and its
     ``move.color`` eval sign name the same side.
 
-    It does NOT fail closed on ``n > expected_total_moves``: a
-    *coordinate-contiguous* surplus row (the grid simply continues past the PGN's
-    last ply) validates as intact, and frozen v1 accepts it because
-    ``accuracy_v1.py:152-153`` rejects only ``n < expected``. Tightening that to
-    ``==`` is an accuracy-v2 decision requiring a data check against real
-    sessions, not a live-surface tweak, so this only logs (g-i6st).
+    It does NOT fail closed on ``n > expected_total_moves``, and that is now a
+    MEASURED decision rather than a deferred one. g-i6st ran the check against a
+    restore of the 2026-07-24 production dump: of 1,646 ended-visible sessions, 6
+    had surplus rows, and the dominant shape is a TRUNCATED PGN rather than a
+    surplus row set — the extra rows replay as a legal, ``fen_after``-chained
+    continuation of the PGN's own final position, so the rows are the FULLER
+    record and the PGN lags them. One of them (session 298ec83a) scores 50 over
+    its 18 rows and 92 over the PGN's 16, because the two rows the PGN is missing
+    are the queen blunder the player resigned to. Tightening to ``==`` would have
+    nulled three CORRECT scores while missing 16 of the 19 sessions that really
+    are serving a wrong number.
+
+    Length is therefore not the discriminator, in either direction: it cannot
+    tell "the PGN is short" from "the rows describe a different game". The defect
+    worth catching is row-vs-PGN IDENTITY — a row at the right coordinate
+    carrying a move the game never played — which needs a PGN replay and which
+    this surface deliberately does not do. See g-i6st for the measurement and
+    g-discard-branch-rows for the writer that produced the population.
     """
     if not ply_coordinates_intact(rows):
         logger.warning("accuracy: non-mainline ply coordinates, session=%s", session_id)
         return None
-    if expected_total_moves is not None and len(rows) > expected_total_moves:
-        # Observe only — see the scope boundary above.
-        logger.warning(
-            "accuracy: %d rows exceed %d PGN plies, session=%s",
-            len(rows),
-            expected_total_moves,
-            session_id,
-        )
     return compute_game_accuracy(
         # ply_color, not a local re-implementation: the row set the guard
         # validated and the move list the algorithm scores must read colour by

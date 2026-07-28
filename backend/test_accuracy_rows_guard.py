@@ -23,8 +23,10 @@ These tests pin:
   fixtures below call ``_recompute_cache`` — the cache has to hold the guard's own
   decision about these rows, not an empty-rowset artifact;
 * the surplus-row scope boundary in BOTH directions: a coordinate-contiguous
-  surplus still scores (frozen v1 accepts ``n > expected``; tightening that is an
-  accuracy-v2 decision, g-i6st), a coordinate-BREAKING surplus fails closed;
+  surplus still scores, and does so SILENTLY (frozen v1 accepts ``n > expected``,
+  and g-i6st measured that length is not a defect signal — the surplus population
+  is dominated by truncated PGNs whose rows are the fuller record), while a
+  coordinate-BREAKING surplus fails closed;
 * the /stats blast radius — a guard-nulled game leaves ``accuracy_pct``'s
   population but STAYS in ``mistake_free_game_rate``'s (SPEC §18.3);
 * the static wiring pin: no module under ``app/api/`` may reference
@@ -151,16 +153,26 @@ def test_enum_rows_validate_and_score(monkeypatch):
 # ===========================================================================
 # 3. The surplus-row boundary, both directions.
 # ===========================================================================
-def test_contiguous_surplus_scores_and_warns(caplog):
+def test_contiguous_surplus_scores_silently(caplog):
     """n == expected + 1 with the grid continuing: frozen v1 accepts n > expected
-    (accuracy_v1.py:152 rejects only n < expected) and this bead does not change
-    that — it observes. Tightening to == is an accuracy-v2 decision (g-i6st)."""
+    (accuracy_v1.py:152 rejects only n < expected) and the guard does not
+    second-guess it.
+
+    Silently, and that is the MEASURED outcome of g-i6st, not an unexamined
+    default. Against the 2026-07-24 production dump the surplus population's
+    dominant shape is a truncated PGN — the extra rows replay as a legal
+    continuation, so the rows are the fuller record — and rejecting on length
+    would have nulled three correct scores while missing 16 of the 19 sessions
+    that actually serve a wrong number. The warning this used to assert was
+    removed with that finding: it fired on the benign shape and stayed silent on
+    the harmful one.
+    """
     with caplog.at_level("WARNING"):
         accuracy = game_accuracy_for_rows(
             _grid(3), player_color="white", expected_total_moves=2
         )
     assert accuracy is not None, "a contiguous surplus must still score"
-    assert "rows exceed" in caplog.text
+    assert caplog.text == "", "length alone is not a defect signal (g-i6st)"
 
 
 def test_coordinate_breaking_surplus_fails_closed(caplog):
