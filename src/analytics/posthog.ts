@@ -26,23 +26,6 @@ function isDisabled(): boolean {
   return import.meta.env.VITE_PUBLIC_POSTHOG_DISABLED === 'true'
 }
 
-/**
- * Global Privacy Control (https://globalprivacycontrol.org/) exposes a
- * `navigator.globalPrivacyControl` boolean when the user's browser/extension
- * asserts a do-not-sell/share preference. Unlike Do Not Track, the PostHog SDK
- * does NOT read it (see node_modules/posthog-js consent.js `_getDnt`, which only
- * checks doNotTrack/msDoNotTrack), so we gate init ourselves: when GPC is set we
- * skip initialization entirely — no SDK load, no cookies, no network — matching
- * the "don't init" posture of an explicit opt-out. (DNT itself is left to the
- * SDK via `respect_dnt: true` below.)
- */
-function isGpcSignaled(): boolean {
-  return (
-    typeof navigator !== 'undefined' &&
-    (navigator as Navigator & { globalPrivacyControl?: boolean })
-      .globalPrivacyControl === true
-  )
-}
 
 /**
  * Initialize the PostHog singleton. Idempotent and safe to call when disabled
@@ -53,7 +36,7 @@ function isGpcSignaled(): boolean {
 export function initAnalytics(): void {
   if (enabled) return
   const token = import.meta.env.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
-  if (!token || isDisabled() || isGpcSignaled()) return
+  if (!token || isDisabled()) return
   const apiHost = import.meta.env.VITE_PUBLIC_POSTHOG_HOST || DEFAULT_HOST
   posthog.init(token, {
     api_host: apiHost,
