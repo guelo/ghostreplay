@@ -3,6 +3,11 @@
 import dataclasses
 
 from app.analysis_cache_policy import (
+    CROSS_GRAIN_DERIVED_FIELDS,
+    EVIDENCE_FIELDS,
+    MOVE_GRAIN_FIELDS,
+    POSITION_GRAIN_FIELDS,
+    RELOCATABLE_GRAINS,
     CacheRow,
     Decision,
     Reason,
@@ -12,6 +17,7 @@ from app.analysis_profiles import (
     BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_ANALYSIS_PROFILE_ID,
     BROWSER_PROFILE_ID,
+    CANONICAL_LINUX_PROFILE_ID,
     CANONICAL_PROFILE_ID,
     JEFFML_PROFILE_ID,
 )
@@ -21,6 +27,7 @@ from app.evidence_contracts import (
     MOVE_COMPLETE,
     RESOLVER_COMPLETE,
     RESOLVER_COMPLETE_V2,
+    Grain,
 )
 
 
@@ -437,18 +444,148 @@ def test_canonical_v2_replaces_browser_analysis_multipv():
     assert reason is Reason.DOMINATES_REPLACE
 
 
-def test_future_canonical_move_complete_would_not_replace_browser_analysis_v2():
-    """g-6xc3 gap: a canonical move-complete-v1 row does NOT supersede
-    resolver-complete-v2, so the current contract check keeps the browser-analysis
-    v2 row. Captured so the cross-grain gap is a deliberate, tested behavior."""
+# --- Rules 4b/5b: cross-grain authority replacement (g-6xc3) ----------------
+#
+# move-complete-v1 is deliberately NOT a superset/successor of resolver-complete-v2
+# and populates none of the position fields, so BOTH halves of the completeness gate
+# fail for every canonical move-grain write. The rule below is keyed on AUTHORITY
+# instead, and every test here exists to pin one side of that asymmetry.
+
+_MOVE_CORE = frozenset({"played_eval", "classification"})
+
+
+def test_canonical_move_complete_replaces_browser_analysis_v2():
+    """AC direction 1: authoritative move-grain evidence supersedes a
+    NON-authoritative browser resolver-complete-v2 row for the same key.
+
+    The position facts the write drops are not lost — the same canonical run wrote
+    them to ``position_analysis`` — which is what licenses shedding them here.
+    """
     existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
-    incoming = _canonical({"played_eval", "classification"}, contract=MOVE_COMPLETE)
+    incoming = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.REPLACE
+    assert reason is Reason.CROSS_GRAIN_AUTHORITY_REPLACE
+
+
+def test_non_authoritative_move_complete_cannot_replace_canonical_v2():
+    """AC direction 2: the hatch is one-way. Canonical is authoritative, so the
+    comparator gives B_SUPERSEDES and Rule 5 stops before the cross-grain rule."""
+    existing = _canonical(_V2_CORE, contract=RESOLVER_COMPLETE_V2)
+    incoming = _browser_analysis_multipv(_MOVE_CORE, contract=MOVE_COMPLETE)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
-    # Canonical dominates browser-analysis-multipv via AUTHORITY, but
-    # move-complete-v1 is not a superset of resolver-complete-v2 -> contract_ok
-    # False -> kept.
+    assert reason is Reason.INCOMPATIBLE_KEEP
+
+
+def test_non_authoritative_move_complete_refused_even_across_a_winning_edge():
+    """The asymmetry is AUTHORITY, not merely winning the ordering.
+
+    A PROTOCOL_CORRECTION edge makes the incoming visible-MultiPV row supersede the
+    retired browser-analysis-v1 row, so Rule 5 reaches the completeness gate — and
+    the cross-grain hatch still refuses it, because a non-authoritative producer
+    never gets to shed a stored row's position evidence. (No browser producer can
+    stamp move-complete-v1 today — ``select_browser_contract`` does not offer it —
+    so this is the fail-closed pin for one that could.)
+    """
+    existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _browser_analysis_multipv(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
+
+
+def test_cross_grain_rule_does_not_fire_between_two_authoritative_rows():
+    # Both canonical manifests are authoritative, so the asymmetry does not exist
+    # and the two platform builds keep their historical incompatible_keep.
+    existing = _row(
+        profile=CANONICAL_LINUX_PROFILE_ID,
+        contract=RESOLVER_COMPLETE_V2,
+        verified=True,
+        fields=_V2_CORE,
+    )
+    incoming = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INCOMPATIBLE_KEEP
+
+
+def test_canonical_move_complete_may_not_shed_retained_move_evidence():
+    # Authority licenses handing off the POSITION grain, never a thinner row in the
+    # grain analysis_cache owns: the stored row has a played_eval this mate-only
+    # canonical row does not.
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _canonical(
+        {"played_eval_mate", "classification"}, contract=MOVE_COMPLETE
+    )
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
+
+
+def test_canonical_minimal_played_eval_is_not_a_grain_split_write():
+    # minimal-played-eval-v1 is move-grain and equally canonical, but it is narrow
+    # because nobody produced the rest — no position row was written anywhere — so
+    # it must not inherit the relocation licence.
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _canonical({"played_eval"}, contract=MINIMAL_PLAYED_EVAL)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
+
+
+def test_canonical_move_complete_replaces_browser_game_v1_row():
+    # resolver-complete-v1 also spans both grains, so the rule is about GRAIN, not
+    # about the v2 contract specifically.
+    existing = _browser(_V2_CORE, RESOLVER_COMPLETE)
+    incoming = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.REPLACE
+    assert reason is Reason.CROSS_GRAIN_AUTHORITY_REPLACE
+
+
+def test_canonical_move_complete_reclaims_unidentified_v2_row():
+    # Rule 4b: an unverified canonical-id row is effectively legacy, and the same
+    # cross-grain licence applies at that completeness veto.
+    existing = _row(
+        profile=CANONICAL_PROFILE_ID,
+        contract=RESOLVER_COMPLETE_V2,
+        verified=False,
+        fields=_V2_CORE,
+    )
+    incoming = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.REPLACE
+    assert reason is Reason.CROSS_GRAIN_AUTHORITY_REPLACE
+
+
+def test_canonical_move_complete_does_not_reclaim_an_uncontracted_legacy_row():
+    # A profile-less row declares no contract, so its grain is UNKNOWN and the rule
+    # fails closed rather than guessing that its evidence relocated.
+    existing = _legacy(_V2_CORE)
+    incoming = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
+
+
+def test_grain_field_sets_partition_the_evidence_fields():
+    # The rule's completeness comparison is only honest if every evidence field is
+    # claimed exactly once. eval_delta is deliberately in NEITHER grain: it is
+    # derived from both halves and recomposed at read time.
+    assert POSITION_GRAIN_FIELDS | MOVE_GRAIN_FIELDS | CROSS_GRAIN_DERIVED_FIELDS == set(
+        EVIDENCE_FIELDS
+    )
+    assert not POSITION_GRAIN_FIELDS & MOVE_GRAIN_FIELDS
+    assert not (POSITION_GRAIN_FIELDS | MOVE_GRAIN_FIELDS) & CROSS_GRAIN_DERIVED_FIELDS
+    assert CROSS_GRAIN_DERIVED_FIELDS == {"eval_delta"}
+
+
+def test_move_grain_is_never_relocatable():
+    # analysis_cache IS the move-grain table: nothing else stores those facts, so a
+    # narrower row that sheds them is evidence loss however authoritative its writer.
+    assert Grain.MOVE not in RELOCATABLE_GRAINS
+    assert RELOCATABLE_GRAINS == {Grain.POSITION}
 
 
 # --- Rule 2: same browser-analysis-multipv profile merges -------------------

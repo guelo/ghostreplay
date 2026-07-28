@@ -32,8 +32,12 @@ g-mk1d then EXTENDS it with the declared-dynamic half:
   * :data:`OverlayMode.REQUIRES_COMPARISON` for rows that may only overlay when
     provably STRONGER than a live operand.
 
-Deliberately OUT of scope (stable API laid, not wired): read/reuse grants beyond
-DISPLAY_OVERLAY (g-v21l) and the cross-grain authority rule (g-6xc3).
+Two follow-ups then consume this vocabulary WITHOUT extending it: g-v21l wires the
+read/reuse grants beyond DISPLAY_OVERLAY, and g-6xc3 adds the cross-grain authority
+rule. The latter lives in :mod:`app.analysis_cache_policy` rather than here — it is a
+STORAGE decision about one table's grain ownership, composed from this module's
+authority answer and the contract registry's grain answer, so the comparator stays a
+pure ordering.
 
 Dependency tier: imports only :mod:`app.analysis_profiles` and
 :mod:`app.evidence_contracts` (same tier as ``analysis_trust``; NO ORM). The

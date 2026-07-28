@@ -111,6 +111,13 @@ _ACCEPTED_REASONS = frozenset(
         # would rank, and without this entry that successful upgrade would land in
         # `write_failures` and exit the run unsuccessfully (g-mk1d review).
         Reason.STRENGTH_REPLACE,
+        # A cross-grain authority replacement (Rules 4b/5b) is likewise a successful
+        # write. Latent today — this script targets resolver-complete-v2, which is not
+        # a grain-split contract, so the rule cannot fire — but once the canonical
+        # writer emits move-complete-v1 (g-v2-deprecation.2) every stored browser-v2
+        # row it relocates earns this verdict, and without this entry a whole run of
+        # correct replacements would land in `write_failures` (g-6xc3).
+        Reason.CROSS_GRAIN_AUTHORITY_REPLACE,
         # PROTOCOL_CORRECTED_REPLACE stays out: this producer is authoritative, and
         # the authority barrier resolves canonical-vs-browser before explicit edges,
         # so a canonical write can never earn a protocol-correction verdict.

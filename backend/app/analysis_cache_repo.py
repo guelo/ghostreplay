@@ -390,11 +390,32 @@ def _build_merged(existing: dict, incoming: dict, incoming_contract: str | None)
 
 
 def _apply_update(row: AnalysisCache, data: dict, *, full: bool) -> None:
-    """Apply REPLACE (full) or MERGE (evidence + contract only) to an ORM row."""
+    """Apply REPLACE (full) or MERGE (evidence + contract only) to an ORM row.
+
+    A REPLACE clears every EVIDENCE column ``data`` does not carry, so the stored
+    row's evidence is exactly the incoming row's — never a union with whatever the
+    replaced producer happened to write. Absence and explicit ``None`` therefore mean
+    the same thing here, unlike on the INSERT path (:func:`_insert_cols`), where an
+    absent key must fall through to a column server default.
+
+    Necessary since g-6xc3: a canonical ``move-complete-v1`` write replaces a browser
+    ``resolver-complete-v2`` row precisely BECAUSE it carries no position facts, so
+    a leave-absent-alone update would strand that browser row's best-move columns
+    under a canonical profile stamp and a move-grain contract id. The same reasoning
+    already applied, latently, to the Rule 5 mate strip: a CP-only replacement must
+    not inherit the weaker row's raw mate count.
+
+    Only evidence is cleared. ``move_san`` / ``source`` / the identity columns are
+    left alone when absent — those describe the KEY and the producer, and every write
+    path stamps the identity block whole.
+    """
     if full:
         for f in _WRITABLE_FIELDS:
             if f in data:
                 setattr(row, f, data[f])
+        for f in _EVIDENCE_FIELDS:
+            if f not in data:
+                setattr(row, f, None)
     else:
         for f in (*_EVIDENCE_FIELDS, "evidence_contract_id"):
             if f in data:

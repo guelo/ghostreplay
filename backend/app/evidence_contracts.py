@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 
 import chess
 
@@ -152,6 +153,21 @@ def _validate_move_complete(data: dict) -> bool:
     return data.get("classification") in VALID_CLASSIFICATIONS
 
 
+class Grain(Enum):
+    """Which half of a position's evidence a contract describes.
+
+    The g-position-analysis split separates POSITION truth — the position's best
+    move, best line and best eval, owned by the normalized-FEN-keyed
+    ``position_analysis`` table — from MOVE truth — the played move's eval and
+    classification, owned by the ``(fen_before, move_uci)``-keyed
+    ``analysis_cache``. The legacy resolver contracts describe BOTH grains on one
+    row; the grain-specific contracts describe exactly one each.
+    """
+
+    POSITION = "position"
+    MOVE = "move"
+
+
 @dataclass(frozen=True)
 class Contract:
     contract_id: str
@@ -159,6 +175,17 @@ class Contract:
     # contract_ids this one is a registered superset/successor of.
     supersedes: frozenset[str]
     validate: Callable[[dict], bool]
+    # Which grain(s) this contract's evidence describes. Independent of
+    # ``supersedes``: two contracts can share a grain without either superseding
+    # the other (move-complete-v1 vs. minimal-played-eval-v1).
+    grains: frozenset[Grain]
+    # True only for a POST-SPLIT grain contract, whose narrowness is a deliberate
+    # RELOCATION — the producer writes the complement grain to the other grain's
+    # table in the same run — rather than missing evidence. The two legacy
+    # ``minimal-*`` shapes are narrow for the opposite reason (nobody produced the
+    # rest), so they must never license dropping a stored row's other grain. Read
+    # by the cross-grain authority rule in :mod:`app.analysis_cache_policy`.
+    grain_split: bool = False
     extra: dict = field(default_factory=dict)
 
 
@@ -171,7 +198,9 @@ MINIMAL_BEST_EVAL = "minimal-best-eval-v1"
 # canonical rows are projected into each grain by the helpers below, NOT by
 # registry supersession. resolver-complete-v2 stays the LEGACY read/projection
 # contract and is intentionally left registered/unchanged so existing canonical
-# rows stay trusted during the migration.
+# rows stay trusted during the migration. Their ``grain_split`` flag is what lets
+# the storage policy tell "narrow because the other half moved tables" from
+# "narrow because nobody produced the rest" (g-6xc3).
 POSITION_COMPLETE = "position-complete-v1"
 MOVE_COMPLETE = "move-complete-v1"
 
@@ -195,6 +224,10 @@ _CONTRACTS: dict[str, Contract] = {
             {RESOLVER_COMPLETE, MINIMAL_PLAYED_EVAL, MINIMAL_BEST_EVAL}
         ),
         validate=_validate_resolver_complete_v2,
+        # Both grains on one row: the position facts (best move / PV / best_eval)
+        # AND the played move's eval + classification, tied together by the
+        # cross-grain eval_delta invariant this contract validates.
+        grains=frozenset({Grain.POSITION, Grain.MOVE}),
     ),
     RESOLVER_COMPLETE: Contract(
         contract_id=RESOLVER_COMPLETE,
@@ -206,18 +239,25 @@ _CONTRACTS: dict[str, Contract] = {
         # sparse row can never replace a complete one.
         supersedes=frozenset({MINIMAL_PLAYED_EVAL, MINIMAL_BEST_EVAL}),
         validate=_validate_resolver_complete,
+        # Both grains: a best move + multi-move PV (position) AND a classification
+        # or eval_delta signal for the played move.
+        grains=frozenset({Grain.POSITION, Grain.MOVE}),
     ),
     MINIMAL_PLAYED_EVAL: Contract(
         contract_id=MINIMAL_PLAYED_EVAL,
         required_fields=frozenset({"played_eval"}),
         supersedes=frozenset(),
         validate=_validate_minimal_played_eval,
+        # Move-grain only, but NOT a grain split: it is narrow because the producer
+        # had nothing else, not because the position half went somewhere else.
+        grains=frozenset({Grain.MOVE}),
     ),
     MINIMAL_BEST_EVAL: Contract(
         contract_id=MINIMAL_BEST_EVAL,
         required_fields=frozenset({"best_eval"}),
         supersedes=frozenset(),
         validate=_validate_minimal_best_eval,
+        grains=frozenset({Grain.POSITION}),
     ),
     POSITION_COMPLETE: Contract(
         contract_id=POSITION_COMPLETE,
@@ -229,6 +269,8 @@ _CONTRACTS: dict[str, Contract] = {
         required_fields=frozenset({"best_move_uci", "best_line_uci"}),
         supersedes=frozenset(),
         validate=_validate_position_complete,
+        grains=frozenset({Grain.POSITION}),
+        grain_split=True,
     ),
     MOVE_COMPLETE: Contract(
         contract_id=MOVE_COMPLETE,
@@ -239,6 +281,8 @@ _CONTRACTS: dict[str, Contract] = {
         required_fields=frozenset({"classification"}),
         supersedes=frozenset(),
         validate=_validate_move_complete,
+        grains=frozenset({Grain.MOVE}),
+        grain_split=True,
     ),
 }
 
@@ -263,6 +307,35 @@ def contract_satisfied(contract_id: str | None, data: dict) -> bool:
     if contract is None:
         return False
     return contract.validate(data)
+
+
+def list_contract_ids() -> tuple[str, ...]:
+    """Every registered contract id (mirrors ``analysis_profiles.list_profiles``).
+
+    Lets a caller state a rule over the WHOLE registry — "every contract declares a
+    grain" — instead of an enumeration that a newly registered contract would slip
+    past.
+    """
+    return tuple(_CONTRACTS)
+
+
+def contract_grains(contract_id: str | None) -> frozenset[Grain]:
+    """The grain(s) a contract's evidence describes.
+
+    An UNKNOWN or absent contract id returns the empty set, which reads downstream
+    as "the grain of this row is unknown" and fails every grain rule closed — the
+    right answer for a legacy uncontracted row.
+    """
+    contract = get_contract(contract_id)
+    if contract is None:
+        return frozenset()
+    return contract.grains
+
+
+def is_grain_split_contract(contract_id: str | None) -> bool:
+    """True when the contract is a POST-SPLIT grain contract (see ``Contract.grain_split``)."""
+    contract = get_contract(contract_id)
+    return contract is not None and contract.grain_split
 
 
 def is_superset_or_successor(incoming_id: str | None, existing_id: str | None) -> bool:

@@ -364,6 +364,81 @@ def _full_evidence_profile_row(profile_id):
     return row
 
 
+def test_canonical_move_grain_write_relocates_a_browser_v2_row(file_db):
+    """g-6xc3 against the REAL writer, not just the pure policy.
+
+    The point of the cross-grain rule is that the position half is RELOCATED to
+    ``position_analysis``, so this asserts the stored row afterwards is a move-grain
+    row and nothing else: the replace path must NULL the position columns rather than
+    leave a v2 row's stale best-move facts sitting under a ``move-complete-v1``
+    contract id, which would read as canonical position truth it never wrote.
+    """
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import BROWSER_ANALYSIS_MULTIPV_PROFILE_ID, stamp_profile_full
+    from app.evidence_contracts import MOVE_COMPLETE
+
+    _, Factory = file_db
+    _seed(Factory, _full_evidence_profile_row(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID))
+
+    canonical_move = {
+        "fen_before": FEN,
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "source": "precomputed",
+        "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": MOVE_COMPLETE,
+        "played_eval": 12,
+        "classification": "good",
+        **stamp_profile_full(CANONICAL_PROFILE_ID),
+    }
+    s = Factory()
+    results = write_analysis_cache_rows(s, [canonical_move])
+    s.close()
+    assert all(r is Reason.CROSS_GRAIN_AUTHORITY_REPLACE for _, r in results)
+
+    s2 = Factory()
+    row = s2.query(AnalysisCache).one()
+    assert row.analysis_profile_id == CANONICAL_PROFILE_ID
+    assert row.evidence_contract_id == MOVE_COMPLETE
+    assert (row.played_eval, row.classification) == (12, "good")
+    # The relocated grain, gone from this table.
+    assert row.best_move_uci is None
+    assert row.best_line_uci is None
+    assert row.best_eval is None
+    s2.close()
+
+
+def test_replace_does_not_inherit_the_replaced_rows_mate_count(file_db):
+    """A REPLACE stores the incoming row's evidence, never a union with the old row's.
+
+    The Rule 5 mate strip lets a CP-only canonical row replace a weaker row that
+    merely stored a raw mate count. If the writer left absent columns alone, that
+    mate count would survive under the canonical stamp — a mate claim canonical never
+    made, on a row every consumer reads as canonical truth.
+    """
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+
+    _, Factory = file_db
+    browser = _full_evidence_profile_row(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    browser.update(played_eval_mate=3, best_eval_mate=2)
+    _seed(Factory, browser)
+
+    canonical_cp_only = _full_evidence_profile_row(CANONICAL_PROFILE_ID)
+    assert "played_eval_mate" not in canonical_cp_only  # precondition: absent, not None
+    s = Factory()
+    results = write_analysis_cache_rows(s, [canonical_cp_only])
+    s.close()
+    assert all(r is Reason.DOMINATES_REPLACE for _, r in results)
+
+    s2 = Factory()
+    row = s2.query(AnalysisCache).one()
+    assert row.analysis_profile_id == CANONICAL_PROFILE_ID
+    assert row.played_eval_mate is None
+    assert row.best_eval_mate is None
+    s2.close()
+
+
 def test_retired_profile_row_never_inserted_as_new_key(file_db):
     """A correctly-stamped RETIRED-profile row is refused at the insert path.
 

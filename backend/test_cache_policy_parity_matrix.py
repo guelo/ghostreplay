@@ -9,14 +9,21 @@ against the SAME matrix captured from the pre-refactor baseline
 The refactors under test are ``g-reuse-d21-search`` (comparator reroute,
 ``declared_profile_inactive`` gate, ``browser-analysis-v1`` retirement,
 ``browser-analysis-multipv-v2``), ``g-mk1d`` (``CacheRow.metadata``, Rule 2a
-measured strength, comparator steps 4-5), and ``g-bgv1-cutover``
-(``browser-game-v1`` retirement). Exactly TWO behavior changes were announced
-across them, and they are the SAME change applied to two profiles: a valid
-incoming row on a RETIRED profile — ``browser-analysis-v1``, then
-``browser-game-v1`` — is now refused storage (``keep`` /
-``inactive_profile_keep``) whatever it meets. Every other baseline cell must be
-byte-identical, and the differing set must equal the announced predicate exactly
-— an EXTRA delta is a finding, not a golden refresh.
+measured strength, comparator steps 4-5), ``g-bgv1-cutover`` (``browser-game-v1``
+retirement), and ``g-6xc3`` (the cross-grain authority rule). TWO behavior changes
+were announced across them:
+
+  * RETIREMENT — one change applied to two profiles: a valid incoming row on a
+    RETIRED profile (``browser-analysis-v1``, then ``browser-game-v1``) is refused
+    storage (``keep`` / ``inactive_profile_keep``) whatever it meets;
+  * CROSS-GRAIN AUTHORITY — an AUTHORITATIVE ``move-complete-v1`` write now
+    REPLACES a NON-authoritative row whose contract also spanned the position
+    grain (``replace`` / ``cross_grain_authority_replace``), which the completeness
+    gate had been vetoing.
+
+Every other baseline cell must be byte-identical, and the differing set must equal
+the union of the announced predicates exactly — an EXTRA delta is a finding, not a
+golden refresh.
 
 The archetype spec lives once, in ``scripts/gen_cache_policy_matrix.py``, which
 this module loads by path; see that file's docstring for the capture procedure
@@ -121,10 +128,19 @@ PRE_REFACTOR_IDS = (
     "unverified_canonical",
 )
 
-# The announced behavior changes, as a literal count: 5 valid incoming archetypes
-# on a RETIRED profile x 20 operands (19 existing + missing key) = 100. That is 2
-# browser-analysis-v1 archetypes (40) plus 3 browser-game-v1 archetypes (60).
-ANNOUNCED_DELTA_COUNT = 100
+# The announced behavior changes, as a literal count.
+#
+# RETIREMENT (100): 5 valid incoming archetypes on a RETIRED profile x 20 operands
+# (19 existing + missing key). That is 2 browser-analysis-v1 archetypes (40) plus 3
+# browser-game-v1 archetypes (60).
+#
+# CROSS-GRAIN (6): the one authoritative move-grain incoming archetype x the 6
+# baseline-registered existing archetypes that declare a both-grain contract without
+# being authoritative — the 3 browser-analysis-v1 rows, the 2 browser-game-v1 rows,
+# and unverified_canonical. (At HEAD the same predicate also moves 9 cells against
+# the multipv / browser-game-v2 archetypes, which have no baseline counterpart and so
+# are outside this count.)
+ANNOUNCED_DELTA_COUNT = 106
 
 # Profiles retired from WRITES. Their rows stay readable and keep their dominance
 # edges; only an INCOMING row on one of them is refused storage.
@@ -132,6 +148,17 @@ RETIRED_PROFILES = frozenset({
     "browser-analysis-v1",  # g-reuse-d21-search
     "browser-game-v1",      # g-bgv1-cutover
 })
+
+# Profiles whose identity-verified rows are AUTHORITATIVE.
+CANONICAL_PROFILES = frozenset({
+    "canonical-sf18-depth24-v1",
+    "canonical-sf18-depth24-linux-v1",
+})
+
+# Contracts that describe BOTH grains on one row (the legacy resolver family), and
+# the move-grain contract the post-split canonical writer declares.
+BOTH_GRAIN_CONTRACTS = frozenset({"resolver-complete-v1", "resolver-complete-v2"})
+MOVE_GRAIN_CONTRACT = "move-complete-v1"
 
 
 def _load(path: Path) -> dict:
@@ -158,6 +185,52 @@ def _is_announced_retirement_delta(existing_id: str, incoming_id: str) -> bool:
     if incoming.profile_id not in RETIRED_PROFILES:
         return False
     return incoming.contract_satisfied and incoming.identity_verified
+
+
+def _is_authoritative(archetype) -> bool:
+    return archetype.profile_id in CANONICAL_PROFILES and archetype.identity_verified
+
+
+def _is_announced_cross_grain_delta(existing_id: str, incoming_id: str) -> bool:
+    """The announced g-6xc3 delta: an AUTHORITATIVE move-grain write replaces a
+    NON-authoritative row whose contract also spanned the position grain.
+
+    Unlike the retirement predicate this one DOES read ``existing``: the rule is an
+    asymmetry between the two rows, not a property of the incoming one. Both
+    conjuncts on ``existing`` are load-bearing — a both-grain contract is what makes
+    the pair cross-grain at all (a ``minimal-*`` row shares the move grain and is
+    untouched), and non-authority is what licenses shedding its position half. The
+    missing-key insert column has no ``existing`` and is excluded by construction.
+    """
+    by_id = _archetypes_by_id()
+    existing = by_id.get(existing_id)
+    if existing is None:  # the "None|<incoming>" insert column
+        return False
+    incoming = by_id[incoming_id]
+    if incoming.data.get("evidence_contract_id") != MOVE_GRAIN_CONTRACT:
+        return False
+    if not _is_authoritative(incoming):
+        return False
+    if existing.data.get("evidence_contract_id") not in BOTH_GRAIN_CONTRACTS:
+        return False
+    return not _is_authoritative(existing)
+
+
+def _announced_delta(existing_id: str, incoming_id: str) -> list[str] | None:
+    """The cell an announced change moves this pair TO, or ``None`` if unannounced.
+
+    Returning the expected VALUE rather than a bool keeps the two predicates from
+    silently overlapping: a pair claimed by both changes would have to agree on one
+    outcome, and they cannot (one keeps, one replaces).
+    """
+    retirement = _is_announced_retirement_delta(existing_id, incoming_id)
+    cross_grain = _is_announced_cross_grain_delta(existing_id, incoming_id)
+    assert not (retirement and cross_grain), f"{existing_id}|{incoming_id}"
+    if retirement:
+        return ["keep", "inactive_profile_keep"]
+    if cross_grain:
+        return ["replace", "cross_grain_authority_replace"]
+    return None
 
 
 def _cross_product(ids) -> set[str]:
@@ -238,8 +311,9 @@ def test_parity_with_pre_refactor_except_announced_deltas():
     for key, before in sorted(pre.items()):
         assert key in current, f"{key} vanished from the current matrix"
         after = current[key]
-        if _is_announced_retirement_delta(*_split(key)):
-            assert after == ["keep", "inactive_profile_keep"], key
+        expected = _announced_delta(*_split(key))
+        if expected is not None:
+            assert after == expected, key
             # The exception must be EXERCISED, never a silent pass: if the cell
             # already read this way before the refactor it does not belong in the
             # announced set.
@@ -248,13 +322,24 @@ def test_parity_with_pre_refactor_except_announced_deltas():
             assert after == before, f"{key}: {before} -> {after} (unannounced)"
 
 
-def test_announced_delta_set_is_exactly_the_retirement_predicate():
+def test_announced_delta_set_is_exactly_the_announced_predicates():
     pre = _load(_PRE_FIXTURE)
     current = _load(_CURRENT_FIXTURE)
     observed = {k for k, v in pre.items() if current[k] != v}
-    predicted = {k for k in pre if _is_announced_retirement_delta(*_split(k))}
+    predicted = {k for k in pre if _announced_delta(*_split(k)) is not None}
     assert observed == predicted
     assert len(observed) == ANNOUNCED_DELTA_COUNT
+
+
+def test_each_announced_predicate_claims_cells_of_its_own():
+    # A union of predicates could hide one that matches NOTHING (a rule that was
+    # deleted, or mis-stated against the archetype spec) behind the other's cells.
+    pre = _load(_PRE_FIXTURE)
+    retirement = {k for k in pre if _is_announced_retirement_delta(*_split(k))}
+    cross_grain = {k for k in pre if _is_announced_cross_grain_delta(*_split(k))}
+    assert len(retirement) == 100
+    assert len(cross_grain) == 6
+    assert not retirement & cross_grain
 
 
 # --- the announced behaviors, in readable form -----------------------------------
@@ -305,6 +390,39 @@ def test_announced_multipv_cells(existing, incoming, expected):
     ],
 )
 def test_announced_dynamic_strength_cells(existing, incoming, expected):
+    assert _load(_CURRENT_FIXTURE)[f"{existing}|{incoming}"] == expected
+
+
+@pytest.mark.parametrize(
+    "existing,incoming,expected",
+    [
+        # The motivating cell: canonical move-grain evidence now supersedes a
+        # NON-authoritative browser row that spanned both grains...
+        ("multipv_core_v2", "canonical_move_complete",
+         ["replace", "cross_grain_authority_replace"]),
+        ("browser_analysis_core_v2", "canonical_move_complete",
+         ["replace", "cross_grain_authority_replace"]),
+        # ...including the legacy v1 resolver contract (the rule is about GRAIN, not
+        # about v2)...
+        ("browser_game_core_v1", "canonical_move_complete",
+         ["replace", "cross_grain_authority_replace"]),
+        # ...and an effectively-legacy unverified canonical row (the Rule 4 veto).
+        ("unverified_canonical", "canonical_move_complete",
+         ["replace", "cross_grain_authority_replace"]),
+        # Guarded negatives. Two AUTHORITATIVE rows have no asymmetry to key on...
+        ("canonical_linux_core_v2", "canonical_move_complete",
+         ["keep", "incompatible_keep"]),
+        # ...a same-GRAIN pair is still governed by the ordinary completeness gate,
+        # so a canonical move row does not reclaim a browser minimal-played-eval row...
+        ("browser_game_sparse", "canonical_move_complete",
+         ["keep", "incoming_less_complete_keep"]),
+        # ...and an uncontracted legacy row has an UNKNOWN grain, so the rule fails
+        # closed rather than assuming its evidence relocated.
+        ("legacy_uncontracted", "canonical_move_complete",
+         ["keep", "incoming_less_complete_keep"]),
+    ],
+)
+def test_announced_cross_grain_cells(existing, incoming, expected):
     assert _load(_CURRENT_FIXTURE)[f"{existing}|{incoming}"] == expected
 
 

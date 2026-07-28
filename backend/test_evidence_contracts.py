@@ -7,17 +7,21 @@ from app.analysis_profiles import (
     resolve_profile,
 )
 from app.evidence_contracts import (
+    Grain,
     MINIMAL_BEST_EVAL,
     MINIMAL_PLAYED_EVAL,
     MOVE_COMPLETE,
     POSITION_COMPLETE,
     RESOLVER_COMPLETE,
     RESOLVER_COMPLETE_V2,
+    contract_grains,
     contract_satisfied,
+    is_grain_split_contract,
     is_strict_successor,
     is_superset_or_successor,
     legacy_v2_satisfies_move,
     legacy_v2_satisfies_position,
+    list_contract_ids,
     project_v2_to_move,
     project_v2_to_position,
     select_browser_contract,
@@ -288,3 +292,51 @@ def test_legacy_v2_helpers_fail_closed_on_non_v2_row():
     no_id.pop("evidence_contract_id")
     assert not legacy_v2_satisfies_position(no_id)
     assert not legacy_v2_satisfies_move(no_id)
+
+
+# --- Contract grains (g-6xc3) ---------------------------------------------------
+
+
+def test_every_registered_contract_declares_a_grain():
+    # A contract with no grain would silently disable the cross-grain rule for every
+    # pair it participates in, so a new contract must state which half it describes.
+    for contract_id in list_contract_ids():
+        assert contract_grains(contract_id), contract_id
+
+
+def test_legacy_resolver_contracts_span_both_grains():
+    both = frozenset({Grain.POSITION, Grain.MOVE})
+    assert contract_grains(RESOLVER_COMPLETE_V2) == both
+    assert contract_grains(RESOLVER_COMPLETE) == both
+
+
+def test_grain_specific_contracts_declare_one_grain_each():
+    assert contract_grains(POSITION_COMPLETE) == {Grain.POSITION}
+    assert contract_grains(MOVE_COMPLETE) == {Grain.MOVE}
+
+
+def test_minimal_contracts_carry_the_grain_of_the_eval_they_hold():
+    assert contract_grains(MINIMAL_PLAYED_EVAL) == {Grain.MOVE}
+    assert contract_grains(MINIMAL_BEST_EVAL) == {Grain.POSITION}
+
+
+def test_unknown_contract_has_no_grain():
+    # Fails closed: an absent/unknown id must not be guessed into a grain.
+    assert contract_grains(None) == frozenset()
+    assert contract_grains("not-a-contract-v9") == frozenset()
+
+
+def test_only_the_post_split_contracts_are_grain_splits():
+    # The distinction the storage policy depends on: minimal-played-eval-v1 is
+    # move-grain too, but it is narrow because nobody produced the rest, not because
+    # the position half was written to position_analysis.
+    splits = {c for c in list_contract_ids() if is_grain_split_contract(c)}
+    assert splits == {POSITION_COMPLETE, MOVE_COMPLETE}
+    assert not is_grain_split_contract(None)
+
+
+def test_grain_split_contracts_describe_exactly_one_grain():
+    # A "split" that still spanned both grains would relocate nothing.
+    for contract_id in list_contract_ids():
+        if is_grain_split_contract(contract_id):
+            assert len(contract_grains(contract_id)) == 1, contract_id

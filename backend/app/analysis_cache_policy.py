@@ -4,10 +4,13 @@ Every cache writer routes through :func:`decide_analysis_cache_replacement` so
 the quality-aware replacement policy lives in exactly one tested place rather
 than being duplicated across SQL conflict clauses.
 
-The decision separates two axes:
+The decision separates three axes:
   * profile identity / authority — from :mod:`app.analysis_profiles`
   * evidence completeness — ``populated_fields`` vs. the row's selected contract
     (:mod:`app.evidence_contracts`)
+  * evidence GRAIN — which half of a position a contract describes. Completeness is
+    only comparable WITHIN a grain, so a narrower post-split contract is judged by
+    :func:`cross_grain_authority_replaces` instead (g-6xc3)
 
 Ordering signals are authority + explicit ``dominates`` edges + completeness
 masks only — never raw numeric depth.
@@ -27,7 +30,10 @@ from app.analysis_profiles import (
     stamp_dynamic_profile,
 )
 from app.evidence_contracts import (
+    Grain,
+    contract_grains,
     contract_satisfied,
+    is_grain_split_contract,
     is_strict_successor,
     is_superset_or_successor,
 )
@@ -69,6 +75,34 @@ EVIDENCE_FIELDS = (
 # additive and still participate in agreement + superset-contribution checks.
 OPTIONAL_MATE_FIELDS = frozenset({"played_eval_mate", "best_eval_mate"})
 
+# EVIDENCE_FIELDS partitioned by GRAIN (g-6xc3). POSITION facts describe the
+# position itself and are owned, post-split, by the normalized-FEN-keyed
+# ``position_analysis`` table; MOVE facts describe the played move and stay in
+# ``analysis_cache``. ``eval_delta`` belongs to NEITHER: it is
+# ``best_eval - played_eval``, derived from BOTH halves, which is exactly why
+# ``move-complete-v1`` deliberately does not validate it (a move-only row has no
+# best_eval) and why the delta is recomposed at read time from the canonical
+# position winner. Counting it as move-grain evidence would make the cross-grain
+# rule below unreachable: every legacy v2 row carries a delta and a native move row
+# need not. The three sets partition EVIDENCE_FIELDS exactly (pinned by a test).
+POSITION_GRAIN_FIELDS = frozenset(
+    {"best_move_uci", "best_move_san", "best_line_uci", "best_eval", "best_eval_mate"}
+)
+MOVE_GRAIN_FIELDS = frozenset({"played_eval", "played_eval_mate", "classification"})
+CROSS_GRAIN_DERIVED_FIELDS = frozenset({"eval_delta"})
+
+_GRAIN_FIELDS: dict[Grain, frozenset[str]] = {
+    Grain.POSITION: POSITION_GRAIN_FIELDS,
+    Grain.MOVE: MOVE_GRAIN_FIELDS,
+}
+
+# The only grain ``analysis_cache`` may hand off. A grain-split write does not DROP
+# the position half, it RELOCATES it: the same producer run writes those facts to
+# ``position_analysis``. Nothing relocates the MOVE grain — this IS the move-grain
+# table — so a narrower row that would shed move evidence is plain evidence loss and
+# never qualifies, however authoritative its writer.
+RELOCATABLE_GRAINS = frozenset({Grain.POSITION})
+
 
 class Decision(str, Enum):
     INSERT = "insert"
@@ -91,6 +125,12 @@ class Reason(str, Enum):
     INACTIVE_PROFILE_KEEP = "inactive_profile_keep"
     LEGACY_KEEP_NON_AUTH = "legacy_keep_non_auth"
     LEGACY_REPLACED_BY_AUTH = "legacy_replaced_by_auth"
+    # An AUTHORITATIVE grain-split row replaced a NON-authoritative row that spanned a
+    # grain it relocates (g-6xc3) — canonical ``move-complete-v1`` over a stored
+    # browser ``resolver-complete-v2`` row. An accepted write. Distinct from
+    # ``dominates_replace`` because the ordinary completeness gate did NOT pass and
+    # could not: the two contracts describe different grains on purpose.
+    CROSS_GRAIN_AUTHORITY_REPLACE = "cross_grain_authority_replace"
     SAME_PROFILE_IDEMPOTENT = "same_profile_idempotent"
     SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
     SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
@@ -274,6 +314,69 @@ def _same_profile_strength_decision(
     return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
 
 
+def _fields_for_grains(grains: frozenset[Grain]) -> frozenset[str]:
+    """The evidence fields ``grains`` claims.
+
+    Never includes :data:`CROSS_GRAIN_DERIVED_FIELDS`, which belong to no single
+    grain, so no grain-scoped comparison ever charges a row for them.
+    """
+    fields: frozenset[str] = frozenset()
+    for grain in grains:
+        fields |= _GRAIN_FIELDS[grain]
+    return fields
+
+
+def cross_grain_authority_replaces(existing: CacheRow, incoming: CacheRow) -> bool:
+    """May an AUTHORITATIVE grain-split row replace a wider-grain stored row? (g-6xc3)
+
+    The escape hatch from the completeness (superset) gate, which measures the wrong
+    thing for a post-split write. ``move-complete-v1`` is deliberately NOT a
+    superset/successor of ``resolver-complete-v2`` — a move-only row cannot satisfy
+    v2's cross-grain ``eval_delta == f(best_eval, played_eval)`` invariant — and it
+    populates none of the position fields, so BOTH halves of the gate fail and an
+    authoritative canonical move write would lose to a NON-authoritative browser v2
+    row. The position facts are not lost, they moved: the same producer run wrote them
+    to ``position_analysis``.
+
+    So this rule is keyed on AUTHORITY rather than contract supersession, and it is
+    ASYMMETRIC in exactly that:
+
+    1. ``incoming`` is effectively AUTHORITATIVE. A non-authoritative grain-split row
+       never gets the hatch — not even across a PROTOCOL_CORRECTION / TIER_BASELINE
+       edge, which is enough to WIN the ordering but never enough to license shedding
+       a stored row's evidence;
+    2. ``existing`` is NOT effectively authoritative. Two authoritative rows (canonical
+       vs. canonical-linux) keep ``incompatible_keep``;
+    3. ``incoming`` declares a ``grain_split`` contract — its narrowness is a
+       relocation, not missing evidence. A legacy ``minimal-*`` row is equally narrow
+       and equally canonical and still does NOT qualify;
+    4. every grain it drops is RELOCATABLE (position only — see
+       :data:`RELOCATABLE_GRAINS`), and it drops at least one, so a same-or-wider-grain
+       pair falls through to the ordinary gate;
+    5. within the grains it RETAINS it sheds nothing, with ``OPTIONAL_MATE_FIELDS``
+       stripped symmetrically exactly as Rule 5 does. Authority licenses handing off a
+       grain; it never licenses a thinner row in the grain this table owns.
+
+    An unknown/absent contract on EITHER side yields an empty grain set and fails
+    closed at (3)/(4) — a legacy uncontracted row is never replaced by this rule.
+    """
+    if not incoming.is_effectively_authoritative():
+        return False
+    if existing.is_effectively_authoritative():
+        return False
+    if not is_grain_split_contract(incoming.evidence_contract_id):
+        return False
+    incoming_grains = contract_grains(incoming.evidence_contract_id)
+    existing_grains = contract_grains(existing.evidence_contract_id)
+    dropped = existing_grains - incoming_grains
+    if not dropped or not dropped <= RELOCATABLE_GRAINS:
+        return False
+    retained = _fields_for_grains(incoming_grains) - OPTIONAL_MATE_FIELDS
+    return (incoming.populated_fields & retained) >= (
+        existing.populated_fields & retained
+    )
+
+
 def merge_owner_ok(
     existing: CacheRow,
     existing_submitters: frozenset[int],
@@ -438,6 +541,12 @@ def decide_analysis_cache_replacement(
         legacy_fields = existing.populated_fields
         if incoming.populated_fields >= legacy_fields:
             return Decision.REPLACE, Reason.LEGACY_REPLACED_BY_AUTH
+        # Rule 4b (g-6xc3): an authoritative grain-split write reclaims a legacy /
+        # unidentified row that spans a grain it relocates, even though it populates
+        # fewer fields. Same rule as 5b below, at the other completeness veto — the
+        # true-authority gate this branch already applied is condition (1).
+        if cross_grain_authority_replaces(existing, incoming):
+            return Decision.REPLACE, Reason.CROSS_GRAIN_AUTHORITY_REPLACE
         return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
     # Rule 5: different family, incoming replacement-eligible. The raw
@@ -481,6 +590,13 @@ def decide_analysis_cache_replacement(
         else:
             reason = Reason.DOMINATES_REPLACE
         return Decision.REPLACE, reason
+    # Rule 5b (g-6xc3): the completeness gate cannot be satisfied ACROSS GRAINS, by
+    # construction, so an authoritative grain-split write is judged on authority
+    # instead. Reached only after the comparator returned A_SUPERSEDES / A_STRONGER;
+    # for the authoritative-over-non-authoritative pair this rule requires, step 2's
+    # authority barrier always returns A_SUPERSEDES, so the two never disagree.
+    if cross_grain_authority_replaces(existing, incoming):
+        return Decision.REPLACE, Reason.CROSS_GRAIN_AUTHORITY_REPLACE
     return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
 

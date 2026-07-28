@@ -553,8 +553,11 @@ performs for arrows/lines. Key points:
   (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
   and *capability* (which consumers may reuse a row — `has_capability`). g-v21l wires
   the read/reuse grants beyond `DISPLAY_OVERLAY` and adds submitter (owner) scoping on
-  top of them (§14.7); the cross-grain authority rule (g-6xc3) lays its API here but is
-  not yet wired; measured-strength comparison is wired by g-mk1d (below).
+  top of them (§14.7); the cross-grain authority rule (g-6xc3) composes this module's
+  authority answer with the contract registry's grain answer but lives in
+  `analysis_cache_policy` — it is a storage decision about one table's grain ownership,
+  so the comparator stays a pure ordering; measured-strength comparison is wired by
+  g-mk1d (below).
 - **`EDGES` and kinds.** Cross-profile ordering is explicit directed edges, never raw
   depth, each tagged `AUTHORITY` (canonical over any non-authoritative row),
   `PROTOCOL_CORRECTION` (a truthful protocol fixes a defective one), or `TIER_BASELINE`
@@ -689,6 +692,15 @@ performs for arrows/lines. Key points:
   is symmetric and global to Rule 5 (a CP-only canonical write also replaces a browser
   row that stored mate counts). Same-profile MERGE (Rule 2) is unchanged: there mate
   fields are genuinely additive and still participate in agreement/superset checks.
+- **A REPLACE stores the incoming evidence, never a union.** `_apply_update(full=True)`
+  CLEARS every evidence column the incoming row does not carry, so absence and an
+  explicit `None` mean the same thing on the replace path (unlike INSERT, where an
+  absent key must fall through to a column server default). Without it a replacement
+  would inherit whatever the replaced producer wrote in the columns it left out — a
+  mate count no CP-only canonical row ever claimed, or (since the cross-grain rule
+  below) a browser row's best-move facts stranded under a canonical stamp and a
+  move-grain contract id. Identity, `source` and `move_san` are untouched when absent:
+  they describe the producer and the key, and every write path stamps identity whole.
 - **Network identity.** `browser-analysis-v1` pins the lite-single net
   `nn-9067e33176e8.nnue` (full SHA-256 …993f314d), distinct from canonical SF18's big
   net `nn-c288c895ea92.nnue`, so browser-analysis is network-incompatible with
@@ -697,9 +709,29 @@ performs for arrows/lines. Key points:
   (`stockfish@18.0.7`), and npm integrity are surrounding provenance only.
   `engine_version="18"` is the UCI `id name` token (npm `18.0.7` is provenance only).
 - **Canonical replacement is guaranteed** for current canonical `resolver-complete-v2`
-  writes replacing browser-analysis; a future canonical `move-complete-v1` would NOT
-  replace a browser-analysis v2 row under the current superset check (cross-grain gap
-  tracked in `g-6xc3`).
+  writes replacing browser-analysis, and — since g-6xc3 — for post-split canonical
+  `move-complete-v1` writes too, via the cross-grain authority rule below.
+- **Cross-grain authority (Rules 4b/5b, `cross_grain_authority_replaces`).** The
+  completeness (superset) gate measures the wrong thing for a post-split write:
+  `move-complete-v1` is deliberately not a superset/successor of
+  `resolver-complete-v2` (a move-only row cannot satisfy v2's cross-grain
+  `eval_delta == f(best_eval, played_eval)` invariant) and populates no position
+  fields, so BOTH halves fail and an authoritative canonical move write would lose to
+  a NON-authoritative browser v2 row. The position facts are not dropped but
+  RELOCATED — the same producer run wrote them to `position_analysis` — so the rule is
+  keyed on AUTHORITY instead, and consulted at both `incoming_less_complete_keep`
+  vetoes (Rule 4 legacy reclamation, Rule 5 cross-family dominance). It fires only
+  when: the incoming row is effectively authoritative; the existing row is NOT; the
+  incoming contract is `grain_split` (`position-complete-v1` / `move-complete-v1` —
+  a legacy `minimal-*` shape is equally narrow but narrow because nobody produced the
+  rest, and does not qualify); every grain it drops is `POSITION` (nothing relocates
+  the MOVE grain — `analysis_cache` *is* that table); and it sheds nothing within the
+  grain it retains (mate fields stripped symmetrically, as in Rule 5). Verdict:
+  `cross_grain_authority_replace`. An unknown/absent contract on either side has no
+  grain and fails the rule closed. Rule 2 (same effective profile) is untouched: a
+  canonical `move-complete-v1` write over a stored canonical `resolver-complete-v2`
+  row is still `same_profile_idempotent` — both rows are authoritative, so there is no
+  asymmetry to key on, and the stored v2 row still projects into both grains.
 - **Not read-trusted.** Browser-analysis rows are never `/lookup` trusted hits or
   frontend trusted publications; read-time trust for stronger browser rows is the
   follow-up `g-v21l`.
