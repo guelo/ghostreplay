@@ -2943,6 +2943,79 @@ def _user14_scenario() -> tuple[
     )
 
 
+def _fold_mirror_scenario() -> tuple[
+    OpeningGraph, EvidenceOverlay, EvidenceOverlay, OpeningRoots, str
+]:
+    """The TURN-SYMMETRY fixture (g-fold-sym-gate): EQUAL, NONZERO coverage on both turns.
+
+    The one configuration in which "user multiplier == opponent multiplier" is a meaningful
+    assertion. _user14_scenario CANNOT carry this property: its Caro child is a user-turn
+    node with an EMPTY prepared-children set under white (both overlay edges are black
+    moves), so the white root's coverage is 0 while the black root's is 1/12 — comparing the
+    two multipliers there demands (1/12)**p == 0, which no p > 0 satisfies. Turn symmetry
+    needs its own topology, not a tolerance.
+
+    Returns (graph, black_overlay, white_overlay, roots, root_fen). Topology::
+
+        F  = after 1.e4          (black to move)  <- the mirrored root
+        F -> A  (c7c6)           A  = after 1...c6 (white to move)
+        F -> B  (e7e5)           B  = after 1...e5 (white to move), LEAF, NO evidence
+        A -> A1 (d2d4)           A1 = after 2.d4   (black to move), LEAF
+        A -> A2 (b1c3)           A2 = after 2.Nc3  (black to move), LEAF, NO evidence
+
+    Both sides then reach coverage EXACTLY FOLD_MIRROR_COVERAGE, by two different routes:
+
+      * black (F is a USER turn): prepared={A} at weight 1.0, and A is an opponent node
+        whose two replies split 0.5/0.5 with only A1 covered  ->  0.5.
+      * white (F is an OPPONENT turn): children {A, B} split 0.5/0.5, B is uncovered, and A
+        is a USER turn whose single prepared child A1 gives it coverage 1.0  ->  0.5.
+
+    The exactness holds for EVERY cell in required_cells u DEMO_CELLS: the coverage channel
+    is independent of coverage_fold / lcb_z / report_fold_*, and A1's 20 live attempts clear
+    every coverage_live_threshold in the grid. The gate pins the 0.5 to a literal so a
+    topology drift fails loudly instead of making the equality checks vacuous (coverage 0 or
+    1 on BOTH sides would satisfy them trivially).
+    """
+    root_fen = _diag_positions(["e2e4"])[1]  # 1.e4, black to move (the mirrored root)
+    a_fen = _diag_positions(["e2e4", "c7c6"])[2]  # 1...c6, white to move
+    a1_fen = _diag_positions(["e2e4", "c7c6", "d2d4"])[3]  # 2.d4, black to move (LEAF)
+    # Exactly ONE uncovered sibling at EACH level, so both turns divide by 2 (2.Nc3 is the
+    # opponent-turn sibling under black; 1...e5 is the sibling under white).
+    graph = _diag_graph(
+        [
+            ["e2e4", "c7c6", "d2d4"],
+            ["e2e4", "c7c6", "b1c3"],
+            ["e2e4", "e7e5"],
+        ]
+    )
+
+    def _overlay(color: str) -> EvidenceOverlay:
+        # Timestamp-free and color-independent, exactly like the User-14 overlays: the SAME
+        # evidence read from both sides is what makes the two multipliers comparable at all.
+        overlay = EvidenceOverlay(14, color)
+        overlay.nodes[root_fen] = NodeEvidence(
+            fen=root_fen, quality_sum=30.0, quality_count=60, live_attempts=60
+        )
+        overlay.nodes[a_fen] = NodeEvidence(
+            fen=a_fen, quality_sum=20.0, quality_count=40, live_attempts=40
+        )
+        overlay.nodes[a1_fen] = NodeEvidence(
+            fen=a1_fen, quality_sum=10.0, quality_count=20, live_attempts=20
+        )
+        # Prepared-child status comes from EDGES. One black move (c7c6) and one white move
+        # (d2d4), so whichever color is scored finds exactly one prepared child on its own
+        # user-turn node — that is the mirror.
+        overlay.edges[(root_fen, a_fen)] = EdgeEvidence(
+            root_fen, a_fen, "c7c6", live_attempts=60, live_passes=60
+        )
+        overlay.edges[(a_fen, a1_fen)] = EdgeEvidence(
+            a_fen, a1_fen, "d2d4", live_attempts=40, live_passes=40
+        )
+        return overlay
+
+    return graph, _overlay("black"), _overlay("white"), _diag_roots(root_fen), root_fen
+
+
 def _score_target(
     target: str,
     graph: OpeningGraph,
@@ -3100,11 +3173,17 @@ User14Scenario = tuple[
     OpeningGraph, EvidenceOverlay, EvidenceOverlay, OpeningRoots, str, str
 ]
 
+# The frozen turn-symmetry mirror tuple: (graph, black_overlay, white_overlay, roots,
+# root_fen). Built ONCE per run and passed to every cell, like the User-14 one.
+FoldMirrorScenario = tuple[
+    OpeningGraph, EvidenceOverlay, EvidenceOverlay, OpeningRoots, str
+]
+
 
 def _user14_cell_operands(
     scenario: User14Scenario, cell: GridCell, *, as_of: datetime
 ) -> dict[str, object]:
-    """The nine User-14 synthetic operands for ONE grid cell, at now=as_of, debug=True.
+    """The ten User-14 synthetic operands for ONE grid cell, at now=as_of, debug=True.
 
     Extracted so the User-14 diagnostic rows and the release-path DiagnosticCellResult
     (g-p4ih-replay-bind) compute the SAME operands from ONE code path — a divergence
@@ -3132,7 +3211,40 @@ def _user14_cell_operands(
         "synth_opp_turn_score": white_root.opening_score,
         "synth_opp_turn_pre_fold_quality": opp_node.pre_fold_quality,
         "synth_opp_turn_multiplier": opp_node.report_fold_multiplier,
+        # The OPPONENT side's own coverage (g-fold-sym-gate). Without it the gate can only
+        # compare the two multipliers to each other, and this scenario's two sides do not
+        # carry the same coverage — each multiplier is checkable only against ITS OWN.
+        "synth_opp_root_coverage_fraction": white_root.coverage / 100.0,
         "user_tp_score": black_root.opening_score,
+    }
+
+
+def _fold_mirror_cell_operands(
+    mirror: FoldMirrorScenario, cell: GridCell, *, as_of: datetime
+) -> dict[str, object]:
+    """The four turn-symmetry operands for ONE grid cell, at now=as_of, debug=True.
+
+    The mirrored root scored under BOTH colors off identical evidence: each side's coverage
+    fraction and each side's report-stage fold multiplier. Equal-coverage by construction
+    (see _fold_mirror_scenario), which is what makes the multiplier equality assertable.
+    """
+    graph, black_overlay, white_overlay, roots, root_fen = mirror
+    config = cell.config
+    black_root = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+    )
+    white_root = compute_root_score(
+        root_fen, "white", graph, white_overlay, roots, config, now=as_of, debug=True
+    )
+    return {
+        "fold_mirror_user_coverage_fraction": black_root.coverage / 100.0,
+        "fold_mirror_opp_coverage_fraction": white_root.coverage / 100.0,
+        "fold_mirror_user_multiplier": _report_node_for(
+            black_root, root_fen
+        ).report_fold_multiplier,
+        "fold_mirror_opp_multiplier": _report_node_for(
+            white_root, root_fen
+        ).report_fold_multiplier,
     }
 
 
@@ -4159,11 +4271,18 @@ class DiagnosticCellResult:
     synth_black_root_score: float
     synth_caro_child_score: float
     synth_root_coverage_fraction: float
+    synth_opp_root_coverage_fraction: float
     synth_user_turn_multiplier: float
     synth_opp_turn_multiplier: float
     synth_user_turn_pre_fold_quality: float
     synth_opp_turn_score: float
     synth_opp_turn_pre_fold_quality: float
+    # Turn-symmetry mirror (g-fold-sym-gate): the ONLY operands on which "the two
+    # multipliers are equal" is a satisfiable claim, because the two coverages are equal.
+    fold_mirror_user_coverage_fraction: float
+    fold_mirror_opp_coverage_fraction: float
+    fold_mirror_user_multiplier: float
+    fold_mirror_opp_multiplier: float
     broad_guard_opp_score: float
     specialist_pre_fold_quality: float
     user_tp_score: float
@@ -4198,20 +4317,32 @@ class SelectionInputs:
 
 
 def _diagnostic_cell_result(
-    scenario: User14Scenario, cell: GridCell, *, as_of: datetime
+    scenario: User14Scenario,
+    mirror: FoldMirrorScenario,
+    cell: GridCell,
+    *,
+    as_of: datetime,
 ) -> DiagnosticCellResult:
-    """The full raw-gate operand set for ONE cell: the nine User-14 operands plus the
-    broad-guard NOT-crater operand and the specialist leak operand, all under now=as_of."""
+    """The full raw-gate operand set for ONE cell: the ten User-14 operands, the four
+    turn-symmetry mirror operands, plus the broad-guard NOT-crater operand and the
+    specialist leak operand, all under now=as_of. Both scenarios are built ONCE by the
+    caller and passed in — they are frozen fixtures, not per-cell state."""
     ops = _user14_cell_operands(scenario, cell, as_of=as_of)
+    mops = _fold_mirror_cell_operands(mirror, cell, as_of=as_of)
     return DiagnosticCellResult(
         synth_black_root_score=float(ops["synth_black_root_score"]),
         synth_caro_child_score=float(ops["synth_caro_child_score"]),
         synth_root_coverage_fraction=float(ops["synth_root_coverage_fraction"]),
+        synth_opp_root_coverage_fraction=float(ops["synth_opp_root_coverage_fraction"]),
         synth_user_turn_multiplier=float(ops["synth_user_turn_multiplier"]),
         synth_opp_turn_multiplier=float(ops["synth_opp_turn_multiplier"]),
         synth_user_turn_pre_fold_quality=float(ops["synth_user_turn_pre_fold_quality"]),
         synth_opp_turn_score=float(ops["synth_opp_turn_score"]),
         synth_opp_turn_pre_fold_quality=float(ops["synth_opp_turn_pre_fold_quality"]),
+        fold_mirror_user_coverage_fraction=float(mops["fold_mirror_user_coverage_fraction"]),
+        fold_mirror_opp_coverage_fraction=float(mops["fold_mirror_opp_coverage_fraction"]),
+        fold_mirror_user_multiplier=float(mops["fold_mirror_user_multiplier"]),
+        fold_mirror_opp_multiplier=float(mops["fold_mirror_opp_multiplier"]),
         broad_guard_opp_score=float(run_broad_guard_diagnostic(cell, as_of=as_of)),
         specialist_pre_fold_quality=float(run_specialist_diagnostic(cell, as_of=as_of)),
         user_tp_score=float(ops["user_tp_score"]),
@@ -4445,13 +4576,14 @@ def _build_selection_inputs(
     # timestamp-free, so the header clock and SYNTHETIC_AS_OF score it identically.
     diag_cells = tuple(required_cells) + DEMO_CELLS
     scenario = _user14_scenario()
+    mirror = _fold_mirror_scenario()
     diagnostics = DiagnosticSuite(
         as_of=as_of,
         model_version=SCORE_MODEL_VERSION,
         scorer_contract_id=REPORT_SCORER_CONTRACT_ID,
         config_fingerprints={cell: _cfg_fp(cell) for cell in diag_cells},
         cells={
-            cell: _diagnostic_cell_result(scenario, cell, as_of=as_of)
+            cell: _diagnostic_cell_result(scenario, mirror, cell, as_of=as_of)
             for cell in diag_cells
         },
     )
@@ -5766,6 +5898,13 @@ NOT_A_READY_GRADES: tuple[str, ...] = ("C", "D", "F")
 # Float-reassociation slack on the report-stage identity (reported == pre_fold_quality x
 # multiplier), EXACT in real arithmetic. Absolute, boundary INCLUSIVE (op "<=").
 FOLD_IDENTITY_TOL = 1.0e-9
+# The coverage _fold_mirror_scenario reaches on BOTH turns, by construction. This pins the
+# FIXTURE'S TOPOLOGY, not a modelling threshold — nothing about the release policy changes
+# if the mirror is rebuilt at a different value. It exists so the turn-symmetry checks
+# cannot pass vacuously: equal multipliers are trivially true at coverage 0 on both sides
+# (0**p == 0) or 1 on both sides (1**p == 1), so a drift into either degenerate topology
+# must fail the gate loudly rather than silently making it prove nothing.
+FOLD_MIRROR_COVERAGE = 0.5
 # Raw parent-<=-child epsilon (criterion 2 and real_parent_le_child_raw).
 RAW_PARENT_CHILD_EPS = 1.0
 
@@ -5804,9 +5943,10 @@ _GATE_SCALES: frozenset[str] = frozenset({"raw", "derived"})
 REASON_CODE_ORDER: tuple[str, ...] = (
     RAW_GATE_ORDER + DERIVED_GATE_ORDER + ("cutoff_collision",)
 )
-# Per-role fold_symmetry_i check count: ARM-1 (two identities + multiplier-equality) = 3;
-# ARM-2 (two identities + user-mult<1 + opp-mult==1.0) = 4.
-_ARM_FOLD_CHECK_COUNT: dict[str, int] = {"arm1": 3, "arm2": 4}
+# Per-role fold_symmetry_i check count: ARM-1 (two report-stage identities + each User-14
+# multiplier against ITS OWN coverage + the mirror's two pinned coverages + the mirror
+# multiplier equality) = 7; ARM-2 (two identities + user-mult<1 + opp-mult==1.0) = 4.
+_ARM_FOLD_CHECK_COUNT: dict[str, int] = {"arm1": 7, "arm2": 4}
 _VALID_CANDIDATE_ROLES: tuple[str, ...] = ("arm1", "arm2")
 _OP_SYMBOLS: frozenset[str] = frozenset({"<", "<=", ">=", "==", "in"})
 
@@ -5969,7 +6109,7 @@ class Arm:
             )
 
 
-ARM1 = Arm(role="arm1", scope="all", cells=arm1_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=3)
+ARM1 = Arm(role="arm1", scope="all", cells=arm1_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=7)
 ARM2 = Arm(role="arm2", scope="user", cells=arm2_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=4)
 # The pinned release policy. NOT caller-controlled: the arm sequence sets BOTH the
 # enumeration order (ARM-1 preferred; ARM-2 the lazy fallback) AND the required-cell set.
@@ -6632,7 +6772,10 @@ def _check_single_clock(inputs: SelectionInputs) -> None:
 
 
 _DIAGNOSTIC_UNIT_FIELDS = (
-    "synth_root_coverage_fraction", "synth_user_turn_multiplier", "synth_opp_turn_multiplier",
+    "synth_root_coverage_fraction", "synth_opp_root_coverage_fraction",
+    "synth_user_turn_multiplier", "synth_opp_turn_multiplier",
+    "fold_mirror_user_coverage_fraction", "fold_mirror_opp_coverage_fraction",
+    "fold_mirror_user_multiplier", "fold_mirror_opp_multiplier",
 )
 _DIAGNOSTIC_SCORE_FIELDS = (
     "synth_black_root_score", "synth_caro_child_score", "synth_opp_turn_score",
@@ -6710,7 +6853,22 @@ def _coverage_consistent(name: str, scale: str, dcr: DiagnosticCellResult, p: fl
     return GateOutcome(name, scale, c1.passed and c2.passed, (c1, c2), "parent grade consistent with child + coverage")
 
 
-def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm) -> GateOutcome:
+def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm, p: float) -> GateOutcome:
+    """Criterion (i). TWO independent properties on TWO fixtures — conflating them is the
+    g-fold-sym-gate defect: the User-14 mirror carries UNEQUAL coverage (user 1/12,
+    opponent 0), so "um == om" there demanded (1/12)**p == 0 and could never pass.
+
+      * per-side fold identity, on the User-14 operands: each multiplier is ITS OWN
+        coverage**p. Satisfiable at unequal coverage, and it is what catches "the fold
+        never reached the opponent report" — that would read om == 1.0, not 0.0.
+      * turn symmetry, on the _fold_mirror_scenario operands: at equal, nonzero, sub-1
+        coverage the two multipliers are BIT-IDENTICAL.
+
+    Checks 3/4 need a tolerance because the recorded coverage operand is
+    ``RootScore.coverage / 100.0`` — a x100/÷100 round trip off the float the multiplier was
+    computed from (1 ulp at p=1.0). Checks 5-7 stay EXACT: the mirror's two coverages are
+    bit-identical by construction, so a tolerance there would hide precisely the asymmetry
+    the gate exists to catch."""
     id_user = abs(dcr.synth_black_root_score - dcr.synth_user_turn_pre_fold_quality * dcr.synth_user_turn_multiplier)
     id_opp = abs(dcr.synth_opp_turn_score - dcr.synth_opp_turn_pre_fold_quality * dcr.synth_opp_turn_multiplier)
     checks = [
@@ -6718,8 +6876,30 @@ def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm) -> GateOutcome:
         GateCheck("fold_identity_opp", id_opp, FOLD_IDENTITY_TOL, "<=", id_opp <= FOLD_IDENTITY_TOL),
     ]
     if arm.role == "arm1":
-        um, om = dcr.synth_user_turn_multiplier, dcr.synth_opp_turn_multiplier
-        checks.append(GateCheck("fold_multiplier_equal", um, om, "==", um == om))
+        # ARM-1 is scope="all": the fold reaches BOTH reports, so each side's multiplier is
+        # that side's own coverage**p.
+        res_user = abs(dcr.synth_user_turn_multiplier - dcr.synth_root_coverage_fraction ** p)
+        res_opp = abs(dcr.synth_opp_turn_multiplier - dcr.synth_opp_root_coverage_fraction ** p)
+        mirror_user_cov = dcr.fold_mirror_user_coverage_fraction
+        mirror_opp_cov = dcr.fold_mirror_opp_coverage_fraction
+        mum, mom = dcr.fold_mirror_user_multiplier, dcr.fold_mirror_opp_multiplier
+        checks.append(GateCheck(
+            "fold_multiplier_user_cov", res_user, FOLD_IDENTITY_TOL, "<=", res_user <= FOLD_IDENTITY_TOL
+        ))
+        checks.append(GateCheck(
+            "fold_multiplier_opp_cov", res_opp, FOLD_IDENTITY_TOL, "<=", res_opp <= FOLD_IDENTITY_TOL
+        ))
+        # Pinning the fixture's own coverage is what keeps the two equalities below from
+        # passing vacuously on a degenerate (0-on-both / 1-on-both) topology.
+        checks.append(GateCheck(
+            "fold_mirror_coverage_pinned", mirror_user_cov, FOLD_MIRROR_COVERAGE,
+            "==", mirror_user_cov == FOLD_MIRROR_COVERAGE,
+        ))
+        checks.append(GateCheck(
+            "fold_mirror_coverage_equal", mirror_opp_cov, mirror_user_cov,
+            "==", mirror_opp_cov == mirror_user_cov,
+        ))
+        checks.append(GateCheck("fold_multiplier_equal", mum, mom, "==", mum == mom))
     else:
         um = dcr.synth_user_turn_multiplier
         om = dcr.synth_opp_turn_multiplier
@@ -6767,7 +6947,7 @@ def _raw_gates(cell: GridCell, arm: Arm, dcr: DiagnosticCellResult, ref: Diagnos
     return (
         _parent_le_child_raw(dcr),
         _coverage_consistent("coverage_consistent_raw_3a", "raw", dcr, cell.report_fold_p, None),
-        _fold_symmetry(dcr, arm),
+        _fold_symmetry(dcr, arm, cell.report_fold_p),
         _opp_guard(dcr, ref),
         _leak(dcr, ref),
         _user_tp(dcr, ref),

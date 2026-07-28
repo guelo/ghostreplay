@@ -879,6 +879,7 @@ _USER14_OPERANDS = {
     "synth_black_root_score",
     "synth_caro_child_score",
     "synth_root_coverage_fraction",
+    "synth_opp_root_coverage_fraction",
     "synth_user_turn_pre_fold_quality",
     "synth_user_turn_multiplier",
     "synth_opp_turn_score",
@@ -917,6 +918,38 @@ class TestDiagnostics:
         b1_row = by_roles[("b1",)]
         assert b1_row["graded_for"] == "reference"
         assert 30.0 <= b1_row["synth_black_root_score"] <= 38.0  # ~34 de-inflation ref
+
+    def test_user14_mirror_coverage_is_asymmetric_by_construction(self):
+        # WHY _fold_mirror_scenario has to exist (g-fold-sym-gate): the User-14 mirror
+        # exposes the same FEN on both turns, but NOT at the same coverage — under white
+        # the Caro child is a user-turn node with no prepared children, so the opponent
+        # side's coverage is 0 while the user side's is 1/12. Comparing the two
+        # multipliers HERE demands (1/12)**p == 0, which no p > 0 satisfies.
+        scenario = cal._user14_scenario()
+        for cell in cal.ARM1.cells:
+            ops = cal._user14_cell_operands(scenario, cell, as_of=cal.SYNTHETIC_AS_OF)
+            assert ops["synth_opp_root_coverage_fraction"] == 0.0
+            assert ops["synth_root_coverage_fraction"] == pytest.approx(1.0 / 12.0)
+            assert ops["synth_user_turn_multiplier"] != ops["synth_opp_turn_multiplier"]
+
+    def test_fold_mirror_scenario_is_coverage_symmetric(self):
+        # The turn-symmetry fixture: EQUAL, NONZERO coverage on both turns for EVERY cell
+        # the release path scores, so "the two multipliers are equal" is assertable at all.
+        mirror = cal._fold_mirror_scenario()
+        cells = cal._required_cells(cal.RELEASE_ARMS) | set(cal.DEMO_CELLS)
+        assert cells
+        for cell in cells:
+            ops = cal._fold_mirror_cell_operands(mirror, cell, as_of=cal.SYNTHETIC_AS_OF)
+            uc = ops["fold_mirror_user_coverage_fraction"]
+            oc = ops["fold_mirror_opp_coverage_fraction"]
+            um = ops["fold_mirror_user_multiplier"]
+            om = ops["fold_mirror_opp_multiplier"]
+            assert uc == oc == cal.FOLD_MIRROR_COVERAGE, cell.label
+            assert um == cal.FOLD_MIRROR_COVERAGE ** cell.report_fold_p, cell.label
+            if cell.report_fold_scope == "all":
+                assert om == um, cell.label  # bit-identical, not merely close
+            else:
+                assert om == 1.0, cell.label  # a user-scope fold never folds the opponent
 
     def test_user14_b1_failure_never_flips_passed(self):
         # B1 is graded_for="reference": even scored, it never enters passed.

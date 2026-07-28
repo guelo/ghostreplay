@@ -72,47 +72,82 @@ def _cell_score(named_scores=(), named_score_map=None):
     )
 
 
+# The fold operands are CELL-AWARE (g-fold-sym-gate): fold_symmetry_i now checks each
+# multiplier against ITS OWN coverage raised to the cell's p, so a CONSISTENT fabricated
+# input is one whose multipliers are derived from the coverages it also reports. Constants
+# cannot satisfy four different p from one dict. Every score another gate reads is still a
+# free literal, so no grade-dependent expectation elsewhere in this file moves.
+def _fold_ops(cell, *, cov, opp_cov, root_score, opp_score):
+    p = cell.report_fold_p
+    um = cov ** p
+    # A scope="user" fold never reaches the OPPONENT report -> its multiplier stays 1.0.
+    om = opp_cov ** p if cell.report_fold_scope == "all" else 1.0
+    mirror_um = cal.FOLD_MIRROR_COVERAGE ** p
+    return dict(
+        synth_root_coverage_fraction=cov,
+        synth_opp_root_coverage_fraction=opp_cov,
+        synth_user_turn_multiplier=um,
+        # pre_fold_quality * multiplier == the reported score, to the last ulp.
+        synth_user_turn_pre_fold_quality=root_score / um,
+        synth_opp_turn_multiplier=om,
+        synth_opp_turn_score=opp_score,
+        synth_opp_turn_pre_fold_quality=opp_score / om,
+        # The turn-symmetry mirror: equal coverage on both turns by construction, so the
+        # two multipliers coincide exactly whenever the fold reaches both reports.
+        fold_mirror_user_coverage_fraction=cal.FOLD_MIRROR_COVERAGE,
+        fold_mirror_opp_coverage_fraction=cal.FOLD_MIRROR_COVERAGE,
+        fold_mirror_user_multiplier=mirror_um,
+        fold_mirror_opp_multiplier=mirror_um if cell.report_fold_scope == "all" else 1.0,
+    )
+
+
 # The candidate operand set that makes an ARM-1 cell ADMITTED (see module design):
-#   parent=25 (D) <= child=30 (C) + eps; fold multipliers equal (0.5); report-stage
-#   identities exact; opp/leak within tolerance of the A-grade reference; user-tp D <= C.
-_CAND_OPS = dict(
-    synth_black_root_score=25.0,
-    synth_caro_child_score=30.0,
-    synth_root_coverage_fraction=0.25,
-    synth_user_turn_multiplier=0.5,
-    synth_opp_turn_multiplier=0.5,
-    synth_user_turn_pre_fold_quality=50.0,
-    synth_opp_turn_score=50.0,
-    synth_opp_turn_pre_fold_quality=100.0,
-    broad_guard_opp_score=75.0,
-    specialist_pre_fold_quality=80.0,
-    user_tp_score=25.0,
-)
+#   parent=25 (D) <= child=30 (C) + eps; each multiplier consistent with its own coverage
+#   and the mirror's two equal; report-stage identities exact; opp/leak within tolerance of
+#   the A-grade reference; user-tp D <= C.
+def _cand_ops(cell):
+    return dict(
+        synth_black_root_score=25.0,
+        synth_caro_child_score=30.0,
+        broad_guard_opp_score=75.0,
+        specialist_pre_fold_quality=80.0,
+        user_tp_score=25.0,
+        # opp_score 25.0 (not 50.0): pre_fold_quality is opp_score / opp_cov**p, which at
+        # cov=0.25 and p=1.0 is exactly 100.0 — the top of the check-5 operand domain.
+        **_fold_ops(cell, cov=0.25, opp_cov=0.25, root_score=25.0, opp_score=25.0),
+    )
+
+
 # The CURRENT reference: user-tp grades A, opp/leak references are A-grade.
-_REF_OPS = dict(
-    synth_black_root_score=40.0,
-    synth_caro_child_score=45.0,
-    synth_root_coverage_fraction=0.5,
-    synth_user_turn_multiplier=1.0,
-    synth_opp_turn_multiplier=1.0,
-    synth_user_turn_pre_fold_quality=40.0,
-    synth_opp_turn_score=40.0,
-    synth_opp_turn_pre_fold_quality=40.0,
-    broad_guard_opp_score=80.0,
-    specialist_pre_fold_quality=80.0,
-    user_tp_score=80.0,
-)
-# ARM-2 admissible operands: user multiplier < 1 strict, opp multiplier == 1.0 exact.
-_ARM2_OPS = dict(_CAND_OPS)
-_ARM2_OPS.update(
-    synth_user_turn_multiplier=0.5,
-    synth_opp_turn_multiplier=1.0,
-    synth_opp_turn_score=100.0,   # pfq_opp(100) * 1.0
-    synth_opp_turn_pre_fold_quality=100.0,
-)
-# ARM-1 raw-fail operands (multiplier equality broken -> fold_symmetry_i fails).
-_ARM1_FAIL_OPS = dict(_CAND_OPS)
-_ARM1_FAIL_OPS.update(synth_opp_turn_multiplier=0.6, synth_opp_turn_score=60.0)
+def _ref_ops(cell):
+    return dict(
+        synth_black_root_score=40.0,
+        synth_caro_child_score=45.0,
+        broad_guard_opp_score=80.0,
+        specialist_pre_fold_quality=80.0,
+        user_tp_score=80.0,
+        **_fold_ops(cell, cov=0.5, opp_cov=0.5, root_score=40.0, opp_score=40.0),
+    )
+
+
+def _arm2_ops(cell):
+    """ARM-2 admissible operands: user multiplier < 1 strict, opp multiplier == 1.0 exact.
+
+    Identical to the ARM-1 candidate set — on a scope="user" cell _fold_ops ALREADY yields
+    om == 1.0 (the fold never reaches the opponent report) and um == 0.25**p < 1.0 for every
+    p in REPORT_FOLD_P_GRID. The distinction is the cell's scope, not a different dict.
+    """
+    return _cand_ops(cell)
+
+
+def _arm1_fail_ops(cell):
+    """ARM-1 raw-fail operands: the MIRROR's multiplier equality is broken, which is the
+    only operand pair on which that equality is assertable. om == 1.0 is the real defect
+    shape — the opponent report skipping the fold entirely. Meaningful only where the fold
+    is on (at p=0 both multipliers are legitimately 1.0), so callers use it on swept cells.
+    """
+    return dict(_cand_ops(cell), fold_mirror_opp_multiplier=1.0)
+
 
 # The two quantile-pool halves; pooled per cell -> [10,30,50,70,90,100].
 _POOL_A = (10.0, 30.0, 50.0)
@@ -123,12 +158,12 @@ def _dcr(ops):
     return cal.DiagnosticCellResult(**ops)
 
 
-def _ops_for(cell, *, arm1_ops=_CAND_OPS, arm2_ops=_ARM2_OPS):
+def _ops_for(cell, *, arm1_ops=_cand_ops, arm2_ops=_arm2_ops):
     if cell == cal.CURRENT_SM_V2_3_CELL:
-        return _REF_OPS
+        return _ref_ops(cell)
     if cell.report_fold_scope == "user":  # ARM-2 cells
-        return arm2_ops
-    return arm1_ops
+        return arm2_ops(cell)
+    return arm1_ops(cell)
 
 
 def _provenance(**overrides):
@@ -214,7 +249,7 @@ def _default_pairs(black_opening=25.0, black_child=30.0, white_opening=27.0):
 def _diagnostics(ops_for=_ops_for, **overrides):
     cells = {cell: _dcr(ops_for(cell)) for cell in REQUIRED}
     for cell in cal.DEMO_CELLS:
-        cells[cell] = _dcr(_CAND_OPS)
+        cells[cell] = _dcr(_cand_ops(cell))
     fps = {cell: cal._cfg_fp(cell) for cell in cells}
     base = dict(
         as_of=AS_OF,
@@ -239,31 +274,38 @@ def _arm1_winner_inputs():
 
 
 def _arm2_winner_inputs():
-    """ARM-1 wholly inadmissible (fold multiplier equality broken); ARM-2 admissible."""
+    """ARM-1 wholly inadmissible (mirror multiplier equality broken); ARM-2 admissible."""
     def ops_for(cell):
         if cell == cal.CURRENT_SM_V2_3_CELL:
-            return _REF_OPS
+            return _ref_ops(cell)
         if cell.report_fold_scope == "user":
-            return _ARM2_OPS
+            return _arm2_ops(cell)
         if cell.report_fold_p != 0.0:  # ARM-1 swept cells
-            return _ARM1_FAIL_OPS
-        return _CAND_OPS
+            return _arm1_fail_ops(cell)
+        return _cand_ops(cell)
     return _inputs(diagnostics=_diagnostics(ops_for=ops_for))
 
 
 def _no_ship_inputs():
     """Both arms fail fold_symmetry_i."""
-    fail2 = dict(_ARM2_OPS)
-    fail2.update(synth_opp_turn_multiplier=0.7, synth_opp_turn_score=70.0)  # opp != 1.0
+    def fail2(cell):  # opp multiplier != 1.0 -> ARM-2's fold_opp_multiplier_eq_1 fails
+        # pre_fold_quality moves with it so the report-stage identity still holds exactly:
+        # the ONLY failing check is the one this fixture is about.
+        return dict(
+            _arm2_ops(cell),
+            synth_opp_turn_multiplier=0.7,
+            synth_opp_turn_score=70.0,
+            synth_opp_turn_pre_fold_quality=100.0,
+        )
 
     def ops_for(cell):
         if cell == cal.CURRENT_SM_V2_3_CELL:
-            return _REF_OPS
+            return _ref_ops(cell)
         if cell.report_fold_scope == "user":
-            return fail2
+            return fail2(cell)
         if cell.report_fold_p != 0.0:
-            return _ARM1_FAIL_OPS
-        return _CAND_OPS
+            return _arm1_fail_ops(cell)
+        return _cand_ops(cell)
     return _inputs(diagnostics=_diagnostics(ops_for=ops_for))
 
 
@@ -395,16 +437,16 @@ class TestReleasePolicy:
 class TestArmDescriptors:
     def test_release_arms(self):
         assert [a.role for a in cal.RELEASE_ARMS] == ["arm1", "arm2"]
-        assert cal.ARM1.fold_symmetry_check_count == 3
+        assert cal.ARM1.fold_symmetry_check_count == 7
         assert cal.ARM2.fold_symmetry_check_count == 4
 
     def test_scope_cell_mismatch_raises(self):
         with pytest.raises(ValueError):
-            cal.Arm("arm1", "all", cal.arm2_cells(), 3)  # arm2 cells carry scope "user"
+            cal.Arm("arm1", "all", cal.arm2_cells(), 7)  # arm2 cells carry scope "user"
 
     def test_bad_p_grid_raises(self):
         with pytest.raises(ValueError):
-            cal.Arm("arm1", "all", cal.arm1_cells((0.25, 0.5)), 3)
+            cal.Arm("arm1", "all", cal.arm1_cells((0.25, 0.5)), 7)
 
     def test_bad_fold_count_raises(self):
         with pytest.raises(ValueError):
@@ -791,15 +833,15 @@ class TestBindingCheck0WrapperTypes:
 class TestMultiGateFailure:
     def test_rejection_reason_is_earliest_of_two_failures(self):
         # fold_symmetry_i (index 2) and opp_guard (index 3) both fail; the earlier wins.
-        ops = dict(_CAND_OPS, synth_opp_turn_multiplier=0.6, synth_opp_turn_score=60.0,
-                   broad_guard_opp_score=30.0)
+        def ops(cell):
+            return dict(_arm1_fail_ops(cell), broad_guard_opp_score=30.0)
 
         def ops_for(cell):
             if cell == cal.CURRENT_SM_V2_3_CELL:
-                return _REF_OPS
+                return _ref_ops(cell)
             if cell.report_fold_scope == "user":
-                return _ARM2_OPS  # keep ARM-2 out of the way; irrelevant to the assertion
-            return ops
+                return _arm2_ops(cell)  # ARM-2 out of the way; irrelevant to the assertion
+            return ops(cell)
         r = cal.select_candidate(_inputs(diagnostics=_diagnostics(ops_for=ops_for)))
         arm1 = [c for c in r.candidates if c.role == "arm1" and c.evaluated]
         assert arm1
@@ -1000,6 +1042,128 @@ class TestRealDataGates:
 
 
 # ---------------------------------------------------------------------------
+# fold_symmetry_i on the REAL synthetic operands (g-fold-sym-gate)
+# ---------------------------------------------------------------------------
+
+
+def _fold_check(outcome, name):
+    return next(c for c in outcome.checks if c.name == name)
+
+
+class TestFoldSymmetryOnRealOperands:
+    """The gate against the operands a real run actually produces, not fabricated ones.
+
+    g-fold-sym-gate: the pre-fix ARM-1 branch asserted synth_user_turn_multiplier ==
+    synth_opp_turn_multiplier on the User-14 fixture, whose two sides carry coverage 1/12
+    and 0. That demanded (1/12)**p == 0 and FAILED at every p — every uniform-scope
+    candidate was vetoed regardless of merit. These tests exercise the real producers, so
+    the same regression cannot land silently again.
+    """
+
+    @staticmethod
+    def _real_dcr(cell):
+        return cal._diagnostic_cell_result(
+            cal._user14_scenario(), cal._fold_mirror_scenario(), cell,
+            as_of=cal.SYNTHETIC_AS_OF,
+        )
+
+    @pytest.mark.parametrize("cell", cal.ARM1.cells, ids=lambda c: f"p={c.report_fold_p}")
+    def test_arm1_fold_gate_passes_on_the_real_user14_operands(self, cell):
+        dcr = self._real_dcr(cell)
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert len(outcome.checks) == 7
+        assert outcome.passed, [c.name for c in outcome.checks if not c.passed]
+        # The premise the OLD check assumed and this fixture never satisfied.
+        assert dcr.synth_root_coverage_fraction != dcr.synth_opp_root_coverage_fraction
+
+    @pytest.mark.parametrize("cell", cal.ARM2.cells, ids=lambda c: f"p={c.report_fold_p}")
+    def test_arm2_fold_gate_unchanged_and_passing(self, cell):
+        outcome = cal._fold_symmetry(self._real_dcr(cell), cal.ARM2, cell.report_fold_p)
+        assert [c.name for c in outcome.checks] == [
+            "fold_identity_user", "fold_identity_opp",
+            "fold_user_multiplier_lt_1", "fold_opp_multiplier_eq_1",
+        ]
+        assert outcome.passed
+
+    @pytest.mark.parametrize("cell", cal.ARM1.cells, ids=lambda c: f"p={c.report_fold_p}")
+    def test_mirror_is_the_only_equal_coverage_fixture(self, cell):
+        dcr = self._real_dcr(cell)
+        assert dcr.fold_mirror_user_coverage_fraction == cal.FOLD_MIRROR_COVERAGE
+        assert dcr.fold_mirror_opp_coverage_fraction == cal.FOLD_MIRROR_COVERAGE
+        # Equal coverage on both turns -> bit-identical multipliers under scope="all".
+        assert dcr.fold_mirror_user_multiplier == dcr.fold_mirror_opp_multiplier
+
+    def test_fold_gate_catches_opponent_report_skipping_the_fold(self):
+        cell = cal.ARM1.cells[0]
+        # The opponent report never folded: multiplier 1.0 where the mirror's coverage
+        # says it should be 0.5**p. This is the defect the gate exists to catch.
+        dcr = dataclasses.replace(self._real_dcr(cell), fold_mirror_opp_multiplier=1.0)
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_multiplier_equal"
+        ]
+
+    def test_fold_gate_catches_multiplier_inconsistent_with_its_own_coverage(self):
+        cell = cal.ARM1.cells[0]
+        real = self._real_dcr(cell)
+        # Move the multiplier off its own coverage**p AND restate the reported score from
+        # it, so the report-stage identity still holds exactly. Without that the mutation
+        # trips fold_identity_user too and proves nothing about the new check.
+        bad_multiplier = real.synth_user_turn_multiplier * 1.01
+        dcr = dataclasses.replace(
+            real,
+            synth_user_turn_multiplier=bad_multiplier,
+            synth_black_root_score=real.synth_user_turn_pre_fold_quality * bad_multiplier,
+        )
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_multiplier_user_cov"
+        ]
+
+    def test_fold_gate_catches_opponent_multiplier_inconsistent_with_its_own_coverage(self):
+        cell = cal.ARM1.cells[0]
+        # opp coverage is 0 on this fixture, so a folded opponent report must read 0.0.
+        # The score is restated from the mutated multiplier for the same reason as above.
+        real = self._real_dcr(cell)
+        dcr = dataclasses.replace(
+            real,
+            synth_opp_turn_multiplier=1.0,
+            synth_opp_turn_score=real.synth_opp_turn_pre_fold_quality * 1.0,
+        )
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_multiplier_opp_cov"
+        ]
+
+    def test_fold_gate_rejects_a_degenerate_mirror_coverage(self):
+        cell = cal.ARM1.cells[0]
+        # Coverage 0 on BOTH sides satisfies the two equalities vacuously (0**p == 0);
+        # pinning the fixture's own coverage is what makes them mean something.
+        dcr = dataclasses.replace(
+            self._real_dcr(cell),
+            fold_mirror_user_coverage_fraction=0.0,
+            fold_mirror_opp_coverage_fraction=0.0,
+            fold_mirror_user_multiplier=0.0,
+            fold_mirror_opp_multiplier=0.0,
+        )
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_mirror_coverage_pinned"
+        ]
+        assert _fold_check(outcome, "fold_multiplier_equal").passed  # vacuously
+
+    def test_fold_gate_rejects_an_asymmetric_mirror_coverage(self):
+        cell = cal.ARM1.cells[0]
+        dcr = dataclasses.replace(
+            self._real_dcr(cell), fold_mirror_opp_coverage_fraction=0.25
+        )
+        outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_mirror_coverage_equal"
+        ]
+
+
+# ---------------------------------------------------------------------------
 # Pinned tolerances + total order
 # ---------------------------------------------------------------------------
 
@@ -1014,15 +1178,17 @@ class TestTolerances:
 
     def test_arm2_multiplier_exactly_one_fails(self):
         # user multiplier == 1.0 (coverage saturated) -> ARM-2 fold gate fails (strict <).
-        ops = dict(_ARM2_OPS, synth_user_turn_multiplier=1.0, synth_black_root_score=50.0,
-                   synth_user_turn_pre_fold_quality=50.0)
+        def ops(cell):
+            return dict(_arm2_ops(cell), synth_user_turn_multiplier=1.0,
+                        synth_root_coverage_fraction=1.0, synth_black_root_score=50.0,
+                        synth_user_turn_pre_fold_quality=50.0)
 
         def ops_for(cell):
             if cell == cal.CURRENT_SM_V2_3_CELL:
-                return _REF_OPS
+                return _ref_ops(cell)
             if cell.report_fold_scope == "user":
-                return ops
-            return _ARM1_FAIL_OPS  # force ARM-1 out so ARM-2 is evaluated
+                return ops(cell)
+            return _arm1_fail_ops(cell)  # force ARM-1 out so ARM-2 is evaluated
         r = cal.select_candidate(_inputs(diagnostics=_diagnostics(ops_for=ops_for)))
         arm2 = [c for c in r.candidates if c.role == "arm2" and c.evaluated]
         assert arm2 and all(not c.admitted for c in arm2)
