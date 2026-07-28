@@ -249,6 +249,41 @@ carry the result filename (a content hash names the reviewed bytes instead), the
 any distribution, any gate operand, or the free-form no-ship reason — all of which live in
 the private file the approver reads.
 
+**Two decisions, reported separately.** A run answers *is the mechanism admissible?* and
+*may these cutoffs ship?* independently, and the summary prints both
+(`mechanism_admissible`, `cutoffs_shippable`, plus a `cohort_fitness` block naming which
+fitness criterion failed):
+
+* The **mechanism** decision is the raw gates, and it is what `winner` / `winner_binding` /
+  `no_ship` record. It means the same thing on a four-subject cohort as on a four-hundred
+  one, so a cohort too small to calibrate against does not veto it.
+* The **cutoff** decision is `winner_cutoffs`. Those six integers are percentiles of the
+  pooled quantile distribution and are only as good as the population behind it, so they are
+  emitted **only** when the winner's cutoffs are shippable: the boundaries derived in order
+  *and* the cohort is approved to set boundaries at all.
+
+**Cutoff approval is fail-closed, so today no run publishes cutoffs.** `cohort_fitness`
+carries three criteria and the third — `fitness_sufficiency_criteria` — fails on every run
+until `CUTOFF_SUFFICIENCY_CRITERIA_VERSION` is raised. The other two are a *necessary* census
+floor (`MIN_CALIBRATION_SUBJECTS` distinct subjects, `MIN_CALIBRATION_SUBJECTS_PER_COLOR` of
+them per colour, counted over subjects rather than pairs, with the release guards held out of
+the pool and not read as evidence about it). Clearing a headcount is not what authorises
+percentile boundaries: it cannot see session mix — the frozen artifact records none, so an
+all-drill cohort clears it — and it makes no claim about how stable a p05/p95 from that many
+subjects is. Establishing the real sufficiency criteria against post-release population data
+is **g-cutoff-recalib**; landing them means adding those criteria and raising the version.
+
+So a run returns a winner with `winner_cutoffs: null`. That is a complete, valid decision:
+the winner cell/p is selected and bindable, and the boundaries stay provisional on the
+candidate in the private file rather than being published as the approved product. Exit `0`
+still means "a valid result WITH a winner"; read `cutoffs_shippable` to know whether the run
+approved any cutoffs, and the `cohort_fitness` criteria to see which one withheld them.
+
+The fitness record is re-derived from the run's own quantile pairs inside `SelectionResult`
+and compared whole — names, operands, thresholds, verdicts. A self-consistent record measured
+on some other population (or on invented numbers) cannot be attached to a result and cannot
+authorise its cutoffs.
+
 | Exit | Meaning |
 |------|---------|
 | `0` | a valid result WITH a winner; full result published, summary printed |

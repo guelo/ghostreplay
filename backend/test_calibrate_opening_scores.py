@@ -4365,6 +4365,10 @@ class TestSerialization:
 
 class TestRedactedStdout:
     def test_the_summary_is_the_exact_allowlist(self, monkeypatch, capsys, tmp_path):
+        # Cutoff approval is fail-closed (g-mech-vs-cutoff), so the six boundaries are
+        # withheld until g-cutoff-recalib establishes sufficiency criteria. Opened here so
+        # the carve-out's SHAPE stays pinned — it is a version bump from being live.
+        monkeypatch.setattr(cal, "CUTOFF_SUFFICIENCY_CRITERIA_VERSION", 1)
         run = _ship(monkeypatch, capsys, tmp_path)
         assert run.code == 0
         summary = json.loads(run.out)
@@ -4377,6 +4381,21 @@ class TestRedactedStdout:
         assert set(summary["winner_cutoffs"]) == {"a", "b", "c", "d", "alert", "watch"}
         assert summary["provenance_record_sha256"] == run.digest
         assert summary["result_sha256"] == hashlib.sha256(run.result.read_bytes()).hexdigest()
+
+    def test_a_real_run_ships_a_winner_and_no_cutoffs(self, monkeypatch, capsys, tmp_path):
+        # End to end on the production switch: exit 0, a winner and its binding, and NOT the
+        # boundaries — with stdout naming the criterion that withheld them.
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        summary = json.loads(run.out)
+        assert summary["no_ship"] is False and summary["winner"] is not None
+        assert summary["mechanism_admissible"] is True
+        assert summary["cutoffs_shippable"] is False
+        assert summary["winner_cutoffs"] is None
+        assert [c["name"] for c in summary["cohort_fitness"]["criteria"] if not c["passed"]] == [
+            "fitness_sufficiency_criteria"
+        ]
+        cal.validate_summary_schema(summary, run.digest)
 
     def test_no_redacted_key_appears_anywhere_in_stdout(self, monkeypatch, capsys, tmp_path):
         run = _ship(monkeypatch, capsys, tmp_path)

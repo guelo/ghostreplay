@@ -51,6 +51,21 @@ def _pretend_this_process_is_sealed(monkeypatch):
     """
     monkeypatch.setattr(cal, "_RUNTIME_IMAGE_SHA256", HEX)
 
+
+@pytest.fixture
+def cutoff_approval_established(monkeypatch):
+    """Open the fail-closed cutoff-approval switch for the tests that cover the APPROVED
+    path — the one where winner_cutoffs are actually emitted.
+
+    Production is fail-closed: CUTOFF_SUFFICIENCY_CRITERIA_VERSION is 0, so today NO cohort
+    is fit and NO run publishes boundaries (g-cutoff-recalib owns raising it). That path is
+    still a version bump away from live, so it is exercised here rather than left to rot —
+    and the switch is an in-process constant, never anything a cohort or a summary can say
+    about itself, so opening it in a test does not open it to a forged artifact.
+    """
+    monkeypatch.setattr(cal, "CUTOFF_SUFFICIENCY_CRITERIA_VERSION", 1)
+
+
 OPENING = cal.RELEASE_GUARD_OPENING_KEY
 CHILD = cal.RELEASE_GUARD_CHILD_OPENING_KEY
 REQUIRED = cal._required_cells(cal.RELEASE_ARMS)
@@ -149,9 +164,17 @@ def _arm1_fail_ops(cell):
     return dict(_cand_ops(cell), fold_mirror_opp_multiplier=1.0)
 
 
-# The two quantile-pool halves; pooled per cell -> [10,30,50,70,90,100].
+# The two quantile-pool halves, for a fixture that wants them on ONE pair; pooled per cell
+# -> [10,30,50,70,90,100], the same six values the default cohort spreads over six subjects.
 _POOL_A = (10.0, 30.0, 50.0)
 _POOL_B = (70.0, 90.0, 100.0)
+# Those six pooled scores, one per quantile SUBJECT (g-mech-vs-cutoff). The cohort's SHAPE is
+# what fitness judges — distinct subjects, and subjects per colour — so the fixtures need a
+# cohort with a shape, not two pairs sharing one subject_id. Spreading the identical six
+# values over six subjects keeps the POOLED multiset per cell byte-identical, so every
+# cutoff, grade and distribution expectation in this file is untouched.
+_POOL_PER_SUBJECT = (10.0, 30.0, 50.0, 70.0, 90.0, 100.0)
+_FIT_COLORS = ("white", "black", "white", "black", "white", "black")
 
 
 def _dcr(ops):
@@ -185,9 +208,11 @@ def _provenance(**overrides):
     return cal.ArtifactProvenance(**base)
 
 
-def _quantile_pair(pair_id, surrogate, color, pool):
+def _quantile_pair(pair_id, surrogate, color, pool, subject=None):
     grid = {cell: _cell_score(named_scores=pool) for cell in REQUIRED}
-    return cal.ScoredPair(pair_id, "subject-quant", surrogate, "quantile", color, grid)
+    return cal.ScoredPair(
+        pair_id, subject or f"subject-quant-{surrogate}", surrogate, "quantile", color, grid
+    )
 
 
 def _guard_pair(pair_id, surrogate, color, opening, child=None):
@@ -204,7 +229,10 @@ def _cohort(pairs=None, **overrides):
     if pairs is None:
         pairs = _default_pairs()
     base = dict(
-        provenance=_provenance(),
+        # pair_count is DERIVED from the pairs handed in (binding check 3 compares them), so
+        # a fixture that changes the cohort's shape stays internally consistent. A test that
+        # wants them to disagree passes its own provenance.
+        provenance=_provenance(pair_count=len(pairs)),
         as_of=AS_OF,
         model_version=cal.SCORE_MODEL_VERSION,
         scorer_contract_id=cal.REPORT_SCORER_CONTRACT_ID,
@@ -237,12 +265,20 @@ def _cohort(pairs=None, **overrides):
     return cal.ScoredCalibrationCohort(**base)
 
 
-def _default_pairs(black_opening=25.0, black_child=30.0, white_opening=27.0):
+def _quantile_pairs(colors=_FIT_COLORS, scores=_POOL_PER_SUBJECT):
+    """One pair per quantile SUBJECT, surrogates 1..n (binding check 3 pins index+1)."""
     return [
-        _quantile_pair("pair-0", 1, "black", _POOL_A),
-        _quantile_pair("pair-1", 2, "black", _POOL_B),
-        _guard_pair("pair-2", 3, "white", white_opening),
-        _guard_pair("pair-3", 4, "black", black_opening, child=black_child),
+        _quantile_pair(f"pair-{i}", i + 1, color, (score,))
+        for i, (color, score) in enumerate(zip(colors, scores))
+    ]
+
+
+def _default_pairs(black_opening=25.0, black_child=30.0, white_opening=27.0, quantiles=None):
+    quantile_pairs = _quantile_pairs() if quantiles is None else quantiles
+    n = len(quantile_pairs)
+    return quantile_pairs + [
+        _guard_pair(f"pair-{n}", n + 1, "white", white_opening),
+        _guard_pair(f"pair-{n + 1}", n + 2, "black", black_opening, child=black_child),
     ]
 
 
@@ -310,15 +346,37 @@ def _no_ship_inputs():
 
 
 def _collision_inputs():
-    """Raw gates pass but every arm cell's quantile pool is all-equal -> CutoffCollision."""
-    flat = (50.0, 50.0, 50.0)
-    pairs = [
-        _quantile_pair("pair-0", 1, "black", flat),
-        _quantile_pair("pair-1", 2, "black", flat),
-        _guard_pair("pair-2", 3, "white", 27.0),
-        _guard_pair("pair-3", 4, "black", 25.0, child=30.0),
-    ]
+    """Raw gates pass but every arm cell's quantile pool is all-equal -> CutoffCollision.
+
+    The cohort clears the census floor, which is what makes this the g-p4ih.2 shape: the
+    collision is a property of the pooled distribution, not of the cohort's census, so the
+    candidates come out mechanism_admissible with unshippable cutoffs. (Cutoff approval is
+    fail-closed on top of that; tests that need the collision to be the SOLE reason take the
+    cutoff_approval_established fixture.)"""
+    pairs = _default_pairs(quantiles=_quantile_pairs(scores=(50.0,) * 6))
     return _inputs(cohort=_cohort(pairs=pairs))
+
+
+def _unfit_inputs():
+    """ARM-1 admissible, but the quantile cohort is White-only — the census defect
+    g-cutoff-recalib records. Fitness fails on colour coverage ALONE (six subjects clear the
+    count), and the pooled scores are the fixture's usual six, so no score-derived
+    expectation moves: the only thing that changes is whether the cutoffs may ship."""
+    pairs = _default_pairs(quantiles=_quantile_pairs(colors=("white",) * 6))
+    return _inputs(cohort=_cohort(pairs=pairs))
+
+
+def _replace_candidate(candidate, cohort_fit, **overrides):
+    """dataclasses.replace for a CandidateResult with the cohort_fit InitVar stated
+    EXPLICITLY — pass the run's ``cohort_fitness.fit``.
+
+    It is deliberately not inferred from the candidate. cutoffs_shippable determines it only
+    when the candidate's cutoffs DERIVED; when they did not, cutoffs_shippable is False under
+    a fit cohort and an unfit one alike, so inferring would quietly hand back the wrong bit
+    the first time one of these is used with cutoff approval open. A bit the candidate was
+    not judged under makes the forgery tests below raise on the InitVar mismatch instead of
+    on the forgery they are about — green and proving nothing."""
+    return dataclasses.replace(candidate, cohort_fit=cohort_fit, **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +392,17 @@ class TestHappyPaths:
         assert r.winner.role == "arm1"
         assert r.winner.p == 0.25  # tie on identical pools -> smallest p
         assert r.winner.admitted
-        assert r.winner_cutoffs == r.winner.provisional_cutoffs
+        assert r.winner.provisional_cutoffs is not None
+        # ...and the cutoffs are NOT published: approval is fail-closed today, which is a
+        # decision about the boundaries and leaves the mechanism decision above untouched.
+        assert r.winner_cutoffs is None
         assert r.no_ship_reason is None
+
+    def test_arm1_winner_publishes_its_cutoffs_once_approval_is_open(
+        self, cutoff_approval_established
+    ):
+        r = cal.select_candidate(_arm1_winner_inputs())
+        assert r.winner_cutoffs == r.winner.provisional_cutoffs
 
     def test_candidate_enumeration_is_eight_in_pinned_order(self):
         r = cal.select_candidate(_arm1_winner_inputs())
@@ -381,6 +448,314 @@ class TestHappyPaths:
     def test_determinism_equal_result(self):
         i = _arm1_winner_inputs()
         assert cal.select_candidate(i) == cal.select_candidate(i)
+
+
+# ---------------------------------------------------------------------------
+# Mechanism admissibility vs cutoff shippability (g-mech-vs-cutoff)
+# ---------------------------------------------------------------------------
+
+
+class TestCohortFitness:
+    def _checks(self, pairs):
+        f = cal._cohort_fitness(tuple(p for p in pairs if p.cohort_role == "quantile"))
+        return f, {c.name: c.passed for c in f.criteria}
+
+    def test_the_census_floor_alone_does_not_approve_a_cohort(self):
+        # The default fixture cohort clears BOTH census criteria — six subjects, three per
+        # colour — and is still not fit. A headcount is not an approval: it cannot see
+        # session mix, and nothing here establishes that six subjects place a p05/p95
+        # boundary well enough to ship it (g-cutoff-recalib owns that).
+        f, passed = self._checks(_default_pairs())
+        assert passed["fitness_subject_count"] is True
+        assert passed["fitness_color_coverage"] is True
+        assert passed["fitness_sufficiency_criteria"] is False
+        assert f.fit is False
+
+    def test_no_cohort_is_fit_while_approval_is_fail_closed(self):
+        assert cal.CUTOFF_SUFFICIENCY_CRITERIA_VERSION < cal.MIN_CUTOFF_SUFFICIENCY_CRITERIA_VERSION
+        for pairs in (_default_pairs(),
+                      _default_pairs(quantiles=_quantile_pairs(colors=("white",) * 6)),
+                      _default_pairs(quantiles=_quantile_pairs(scores=(50.0,) * 6))):
+            f, _ = self._checks(pairs)
+            assert f.fit is False
+
+    def test_the_census_floor_still_gates_once_approval_is_open(
+        self, cutoff_approval_established
+    ):
+        # The switch is not a bypass: with sufficiency criteria established, a cohort that
+        # fails the census is still unfit, and one that clears it is finally fit.
+        unfit, _ = self._checks(_default_pairs(quantiles=_quantile_pairs(colors=("white",) * 6)))
+        assert unfit.fit is False
+        fit, passed = self._checks(_default_pairs())
+        assert fit.fit is True and all(passed.values())
+
+    def test_white_only_fails_colour_coverage_alone(self, cutoff_approval_established):
+        f, passed = self._checks(_default_pairs(quantiles=_quantile_pairs(colors=("white",) * 6)))
+        assert f.fit is False
+        assert passed["fitness_subject_count"] is True
+        assert passed["fitness_color_coverage"] is False
+
+    def test_too_few_subjects_fails_the_count(self):
+        four = _quantile_pairs(colors=("white", "black", "white", "black"),
+                               scores=(10.0, 30.0, 70.0, 100.0))
+        f, passed = self._checks(_default_pairs(quantiles=four))
+        assert f.fit is False
+        assert passed["fitness_subject_count"] is False
+
+    def test_one_subject_playing_both_colours_counts_once(self):
+        # Six pairs, one subject: the census is 1, not 6. Counting PAIRS would let a single
+        # person look like a population, which is the failure mode the check exists for.
+        pairs = [
+            _quantile_pair(f"pair-{i}", i + 1, color, (score,), subject="subject-solo")
+            for i, (color, score) in enumerate(zip(_FIT_COLORS, _POOL_PER_SUBJECT))
+        ]
+        f, passed = self._checks(_default_pairs(quantiles=pairs))
+        assert passed["fitness_subject_count"] is False
+        assert f.fit is False
+
+    def test_guard_pairs_are_not_evidence_about_the_pool(self):
+        # The release guard is the only Black-playing subject in the real cohort and is held
+        # OUT of the pool; fitness must not read it as colour coverage. Asserted on the
+        # CRITERION, not on fit: fit is False for a fail-closed reason too, so reading it
+        # here would pass even if the guards were being counted.
+        pairs = _default_pairs(quantiles=_quantile_pairs(colors=("white",) * 6))
+        assert any(p.player_color == "black" for p in pairs if p.cohort_role == "release_guard")
+        f, passed = self._checks(pairs)
+        assert passed["fitness_color_coverage"] is False
+        assert f.fit is False
+
+    def test_fit_contradicting_its_checks_is_unconstructible(self, cutoff_approval_established):
+        criteria = cal._cohort_fitness(
+            tuple(p for p in _default_pairs() if p.cohort_role == "quantile")
+        ).criteria
+        with pytest.raises(ValueError):
+            cal.CohortFitness(criteria=criteria, fit=False)
+        with pytest.raises(ValueError):  # names not the pinned inventory
+            cal.CohortFitness(criteria=(cal.GateCheck("leak", 1, 2, "<", True),), fit=True)
+        with pytest.raises(ValueError):  # reordered
+            cal.CohortFitness(criteria=tuple(reversed(criteria)), fit=True)
+
+    def test_fitness_names_are_not_gate_names(self):
+        # A fitness name that leaked into the gate inventory could become a rejection_reason,
+        # which is the coupling this bead removes.
+        assert not set(cal._FITNESS_CHECK_NAMES) & cal._GATE_NAME_INVENTORY
+        assert not set(cal._FITNESS_CHECK_NAMES) & set(cal.REASON_CODE_ORDER)
+
+
+class TestMechanismVsCutoff:
+    def test_a_census_clean_cohort_still_withholds_the_cutoffs(self):
+        # The production default. The mechanism decision is complete — a winner, a binding,
+        # a ship — and NOTHING about the boundaries is approved, because clearing a headcount
+        # is not what authorises them.
+        r = cal.select_candidate(_arm1_winner_inputs())
+        assert r.mechanism_admissible is True
+        assert r.no_ship is False and r.winner_binding is not None
+        assert r.cutoffs_shippable is False and r.winner_cutoffs is None
+        assert r.winner.provisional_cutoffs is not None
+        failed = [c.name for c in r.cohort_fitness.criteria if not c.passed]
+        assert failed == ["fitness_sufficiency_criteria"]
+
+    def test_fit_cohort_ships_the_cutoffs(self, cutoff_approval_established):
+        r = cal.select_candidate(_arm1_winner_inputs())
+        assert r.cohort_fitness.fit is True
+        assert r.mechanism_admissible is True and r.cutoffs_shippable is True
+        assert r.winner_cutoffs is r.winner.provisional_cutoffs
+
+    def test_unfit_cohort_keeps_the_winner_and_withholds_the_cutoffs(self):
+        r = cal.select_candidate(_unfit_inputs())
+        assert r.cohort_fitness.fit is False
+        assert r.no_ship is False
+        assert r.winner is not None and r.winner_binding is not None
+        assert r.mechanism_admissible is True
+        assert r.cutoffs_shippable is False
+        assert r.winner_cutoffs is None
+        # Withheld, not absent: the boundaries were derived and stay readable as provisional.
+        assert r.winner.provisional_cutoffs is not None
+        assert r.winner.admitted is True and r.winner.mechanism_admissible is True
+        assert r.winner.cutoffs_shippable is False
+
+    def test_collision_on_a_fit_cohort_keeps_the_mechanism_evidence(
+        self, cutoff_approval_established
+    ):
+        # The g-p4ih.2 state: every raw gate green, the pooled distribution too degenerate to
+        # separate d from c. The rejection stands; the mechanism verdict is no longer erased.
+        # Approval is opened here so the COLLISION is the only thing withholding the cutoffs.
+        r = cal.select_candidate(_collision_inputs())
+        colliders = [c for c in r.candidates if c.rejection_reason == "cutoff_collision"]
+        assert colliders
+        for c in colliders:
+            assert c.mechanism_admissible is True
+            assert c.cutoffs_shippable is False
+            assert c.admitted is False
+        assert r.no_ship is True
+        assert r.mechanism_admissible is True  # ...and the run says so at the top level
+        assert r.cutoffs_shippable is False
+
+    def test_raw_gate_failure_is_not_mechanism_admissible(self):
+        r = cal.select_candidate(_no_ship_inputs())
+        failed = [c for c in r.candidates
+                  if c.evaluated and c.rejection_reason in cal.RAW_GATE_ORDER]
+        assert failed
+        assert all(c.mechanism_admissible is False for c in failed)
+        assert all(c.cutoffs_shippable is False for c in failed)
+        assert r.mechanism_admissible is False
+
+    def test_lazy_candidates_claim_neither_verdict(self):
+        r = cal.select_candidate(_arm1_winner_inputs())
+        lazy = [c for c in r.candidates if not c.evaluated]
+        assert lazy
+        assert all(not c.mechanism_admissible and not c.cutoffs_shippable for c in lazy)
+
+    def test_fitness_is_reported_on_every_result(self):
+        for inputs in (_arm1_winner_inputs(), _no_ship_inputs(), _collision_inputs(),
+                       _unfit_inputs()):
+            r = cal.select_candidate(inputs)
+            assert isinstance(r.cohort_fitness, cal.CohortFitness)
+            assert tuple(c.name for c in r.cohort_fitness.criteria) == cal._FITNESS_CHECK_NAMES
+
+    def test_the_fitness_verdict_is_taken_once_for_the_whole_run(self):
+        r = cal.select_candidate(_unfit_inputs())
+        # Every evaluated candidate agrees with the ONE record; none carries its own copy.
+        assert all(
+            c.cutoffs_shippable is False for c in r.candidates
+        ) and r.cohort_fitness.fit is False
+        assert "cohort_fit" not in {f.name for f in dataclasses.fields(cal.CandidateResult)}
+
+    def test_a_candidate_cannot_claim_shippability_the_cohort_denies(self):
+        inputs = _unfit_inputs()
+        r = cal.select_candidate(inputs)
+        cands = list(r.candidates)
+        i = next(i for i, c in enumerate(cands)
+                 if c.evaluated and c.provisional_cutoffs is not None and c is not r.winner)
+        # Self-consistent on its own terms (rebuilt as if judged under a fit cohort)...
+        cands[i] = _replace_candidate(cands[i], True, cutoffs_shippable=True)
+        # ...and refused by the result, which re-derives it against the ONE fitness record.
+        with pytest.raises(ValueError, match="cutoffs_shippable"):
+            cal.SelectionResult(
+                candidates=tuple(cands), winner=r.winner, winner_cutoffs=None,
+                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
+                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
+                cohort_fitness=r.cohort_fitness, mechanism_admissible=True,
+                cutoffs_shippable=False, cohort=inputs.cohort,
+            )
+
+    def test_an_unfit_result_cannot_emit_the_cutoffs_anyway(self):
+        inputs = _unfit_inputs()
+        r = cal.select_candidate(inputs)
+        with pytest.raises(ValueError, match="winner_cutoffs"):
+            cal.SelectionResult(
+                candidates=r.candidates, winner=r.winner,
+                winner_cutoffs=r.winner.provisional_cutoffs,  # the withheld set, published
+                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
+                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
+                cohort_fitness=r.cohort_fitness, mechanism_admissible=True,
+                cutoffs_shippable=False, cohort=inputs.cohort,
+            )
+
+    def test_a_fit_result_cannot_withhold_them(self, cutoff_approval_established):
+        inputs = _arm1_winner_inputs()
+        r = cal.select_candidate(inputs)
+        with pytest.raises(ValueError):
+            cal.SelectionResult(
+                candidates=r.candidates, winner=r.winner, winner_cutoffs=None,
+                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
+                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
+                cohort_fitness=r.cohort_fitness, mechanism_admissible=True,
+                cutoffs_shippable=True, cohort=inputs.cohort,
+            )
+
+    def test_a_candidate_cannot_claim_mechanism_evidence_its_gates_deny(self):
+        r = cal.select_candidate(_no_ship_inputs())
+        c = next(c for c in r.candidates
+                 if c.evaluated and c.rejection_reason in cal.RAW_GATE_ORDER)
+        with pytest.raises(ValueError):
+            _replace_candidate(c, r.cohort_fitness.fit, mechanism_admissible=True)
+
+
+class TestFitnessIsBoundToItsCohort:
+    """CohortFitness proves only that it does not contradict ITSELF. These are the checks
+    that stop a self-consistent record measured on something else — or on nothing —
+    authorising this run's cutoffs."""
+
+    def _result_kwargs(self, r, cohort, **overrides):
+        base = dict(
+            candidates=r.candidates, winner=r.winner, winner_cutoffs=r.winner_cutoffs,
+            no_ship=r.no_ship, no_ship_reason=r.no_ship_reason, b1_reference=r.b1_reference,
+            cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
+            cohort_fitness=r.cohort_fitness,
+            mechanism_admissible=r.mechanism_admissible,
+            cutoffs_shippable=r.cutoffs_shippable, cohort=cohort,
+        )
+        base.update(overrides)
+        return base
+
+    def test_the_selectors_own_record_round_trips(self):
+        inputs = _arm1_winner_inputs()
+        r = cal.select_candidate(inputs)
+        cal.SelectionResult(**self._result_kwargs(r, inputs.cohort))  # no raise
+
+    def test_a_record_from_another_cohort_is_refused(self, cutoff_approval_established):
+        # THE forgery: a White-only run wearing the census record of a colour-balanced one.
+        # Every candidate agrees with it, the result agrees with the winner, and the cutoffs
+        # would be published — so the record has to be held to the pairs it claims to measure.
+        unfit = _unfit_inputs()
+        r = cal.select_candidate(unfit)
+        borrowed = cal.select_candidate(_arm1_winner_inputs()).cohort_fitness
+        assert borrowed.fit is True and r.cohort_fitness.fit is False
+        cands = tuple(
+            # Rebuilt as if judged under the borrowed record, so every candidate agrees with
+            # it and the forgery has to be caught by the record itself.
+            _replace_candidate(c, True, cutoffs_shippable=(c.cutoffs_outcome is not None
+                                                           and c.cutoffs_outcome.passed))
+            for c in r.candidates
+        )
+        winner = next(c for c in cands if c.cell == r.winner.cell and c.role == r.winner.role)
+        with pytest.raises(ValueError, match="cohort_fitness"):
+            cal.SelectionResult(**self._result_kwargs(
+                r, unfit.cohort, candidates=cands, winner=winner,
+                winner_cutoffs=winner.provisional_cutoffs, cutoffs_shippable=True,
+                cohort_fitness=borrowed,
+            ))
+
+    def test_invented_operands_are_refused(self):
+        # A hand-built record: right names, right order, internally consistent, and every
+        # number made up. Only re-derivation from the cohort catches this one.
+        inputs = _arm1_winner_inputs()
+        r = cal.select_candidate(inputs)
+        forged = cal.CohortFitness(
+            criteria=tuple(
+                cal.GateCheck(name, 99, 1, ">=", True) for name in cal._FITNESS_CHECK_NAMES
+            ),
+            fit=True,
+        )
+        with pytest.raises(ValueError, match="cohort_fitness"):
+            cal.SelectionResult(**self._result_kwargs(r, inputs.cohort, cohort_fitness=forged))
+
+    def test_a_softened_threshold_is_refused(self):
+        # Same measurements, lowered limits — "1 >= 1" instead of "6 >= 6". The names and the
+        # verdict match; the record is not the one this cohort produces.
+        inputs = _unfit_inputs()
+        r = cal.select_candidate(inputs)
+        softened = cal.CohortFitness(
+            criteria=tuple(
+                cal.GateCheck(c.name, c.measured, 0, ">=", True) for c in r.cohort_fitness.criteria
+            ),
+            fit=True,
+        )
+        with pytest.raises(ValueError, match="cohort_fitness"):
+            cal.SelectionResult(**self._result_kwargs(r, inputs.cohort, cohort_fitness=softened))
+
+    def test_a_record_measured_on_the_guards_too_is_refused(self):
+        # The near-miss: fitness recomputed over ALL pairs, which reads the held-out Black
+        # guard as colour coverage. One criterion's measured value differs; that is enough.
+        inputs = _unfit_inputs()
+        r = cal.select_candidate(inputs)
+        over_everything = cal._cohort_fitness(inputs.cohort.pairs)
+        assert over_everything != r.cohort_fitness
+        with pytest.raises(ValueError, match="cohort_fitness"):
+            cal.SelectionResult(
+                **self._result_kwargs(r, inputs.cohort, cohort_fitness=over_everything)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -502,63 +877,81 @@ class TestGateCheck:
 
 class TestCandidateResult:
     def _admitted(self):
+        """An admitted winner AND the fitness bit it was judged under — both, because
+        _replace_candidate will not guess the second from the first."""
         r = cal.select_candidate(_arm1_winner_inputs())
-        return r.winner
+        return r.winner, r.cohort_fitness.fit
 
     def test_p_must_match_cell(self):
-        w = self._admitted()
+        w, fit = self._admitted()
         with pytest.raises(ValueError):
-            dataclasses.replace(w, p=0.9)
+            _replace_candidate(w, fit, p=0.9)
 
     def test_role_must_be_valid(self):
-        w = self._admitted()
+        w, fit = self._admitted()
         with pytest.raises(ValueError):
-            dataclasses.replace(w, role="b1")
+            _replace_candidate(w, fit, role="b1")
+
+    def _lazy_kwargs(self, **overrides):
+        base = dict(
+            cell=cal.ARM1.cells[0], role="arm1", p=0.25, evaluated=False,
+            raw_gates=(), cutoffs_outcome=None, provisional_cutoffs=None,
+            distribution=None, derived_gates=(), mechanism_admissible=False,
+            cutoffs_shippable=False, admitted=False, rejection_reason=None,
+            order_keys=None, cohort_fit=True,
+        )
+        base.update(overrides)
+        return base
 
     def test_lazy_must_be_empty(self):
         with pytest.raises(ValueError):
-            cal.CandidateResult(
-                cell=cal.ARM1.cells[0], role="arm1", p=0.25, evaluated=False,
-                raw_gates=(), cutoffs_outcome=None, provisional_cutoffs=None,
-                distribution=None, derived_gates=(), admitted=True,  # contradiction
-                rejection_reason=None, order_keys=None,
-            )
+            cal.CandidateResult(**self._lazy_kwargs(admitted=True))  # contradiction
+
+    @pytest.mark.parametrize("claim", ["mechanism_admissible", "cutoffs_shippable"])
+    def test_lazy_cannot_claim_either_verdict(self, claim):
+        # An unreached candidate proves nothing in either direction, so neither verdict may
+        # ride on it — the shape a lazy arm would need to look like evidence.
+        with pytest.raises(ValueError):
+            cal.CandidateResult(**self._lazy_kwargs(**{claim: True}))
 
     def test_cutoffs_outcome_must_be_cutoff_derivation(self):
-        w = self._admitted()
+        w, fit = self._admitted()
         raw = w.raw_gates[0]  # a passing GateOutcome named 'parent_le_child_raw'
         assert raw.passed and raw.name != "cutoff_derivation"
         with pytest.raises(ValueError):
-            dataclasses.replace(w, cutoffs_outcome=raw)
+            _replace_candidate(w, fit, cutoffs_outcome=raw)
 
     def test_cutoff_repeated_checks_rejected(self):
         # A cutoff_derivation with four repeated look-alike checks (wrong names) is refused.
-        w = self._admitted()
+        w, fit = self._admitted()
         dup = cal.GateCheck("cutoff_d_lt_c", 1, 2, "<", True)
         fake = cal.GateOutcome("cutoff_derivation", "derived", True, (dup, dup, dup, dup), "x")
         with pytest.raises(ValueError):
-            dataclasses.replace(w, cutoffs_outcome=fake)
+            _replace_candidate(w, fit, cutoffs_outcome=fake)
 
     def test_cutoff_fabricated_operands_rejected(self):
         # Correct names/ops but operands not matching the emitted provisional_cutoffs.
-        w = self._admitted()
+        w, fit = self._admitted()
         names = ("cutoff_d_lt_c", "cutoff_c_lt_b", "cutoff_b_lt_a", "cutoff_alert_lt_watch")
         checks = tuple(cal.GateCheck(n, 1, 2, "<", True) for n in names)
         fake = cal.GateOutcome("cutoff_derivation", "derived", True, checks, "x")
         with pytest.raises(ValueError):
-            dataclasses.replace(w, cutoffs_outcome=fake)
+            _replace_candidate(w, fit, cutoffs_outcome=fake)
 
     def _raw_failed(self):
         r = cal.select_candidate(_no_ship_inputs())
-        return next(c for c in r.candidates
-                    if c.evaluated and c.rejection_reason in cal.RAW_GATE_ORDER)
+        c = next(c for c in r.candidates
+                 if c.evaluated and c.rejection_reason in cal.RAW_GATE_ORDER)
+        return c, r.cohort_fitness.fit
 
     def test_raw_rejected_cannot_carry_distribution(self):
-        c = self._raw_failed()
+        c, fit = self._raw_failed()
         assert c.distribution is None  # step 2 never ran
         dist = cal.distribution_stats([1.0, 2.0])
         with pytest.raises(ValueError):
-            dataclasses.replace(c, distribution=dist, order_keys=cal._order_keys(dist, c.p))
+            _replace_candidate(
+                c, fit, distribution=dist, order_keys=cal._order_keys(dist, c.p)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -571,47 +964,40 @@ class TestSelectionResultTruthTable:
         inputs = _arm1_winner_inputs()
         return inputs.cohort, cal.select_candidate(inputs)
 
+    def _kwargs(self, r, cohort, **overrides):
+        """Every field of a real result, so a test names ONLY the fact it is forging."""
+        base = dict(
+            candidates=r.candidates, winner=r.winner, winner_cutoffs=r.winner_cutoffs,
+            no_ship=r.no_ship, no_ship_reason=r.no_ship_reason,
+            b1_reference=r.b1_reference, cohort_provenance=r.cohort_provenance,
+            winner_binding=r.winner_binding, cohort_fitness=r.cohort_fitness,
+            mechanism_admissible=r.mechanism_admissible,
+            cutoffs_shippable=r.cutoffs_shippable, cohort=cohort,
+        )
+        base.update(overrides)
+        return base
+
     def test_ship_with_no_ship_true_raises(self):
         cohort, r = self._ship()
         with pytest.raises(ValueError):
-            cal.SelectionResult(
-                candidates=r.candidates, winner=r.winner, winner_cutoffs=r.winner_cutoffs,
-                no_ship=True, no_ship_reason=None, b1_reference=r.b1_reference,
-                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
-                cohort=cohort,
-            )
+            cal.SelectionResult(**self._kwargs(r, cohort, no_ship=True))
 
     def test_ship_forged_binding_raises(self):
         cohort, r = self._ship()
         forged = dataclasses.replace(r.winner_binding, artifact_sha256="0" * 64)
         with pytest.raises(ValueError):
-            cal.SelectionResult(
-                candidates=r.candidates, winner=r.winner, winner_cutoffs=r.winner_cutoffs,
-                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
-                cohort_provenance=r.cohort_provenance, winner_binding=forged,
-                cohort=cohort,
-            )
+            cal.SelectionResult(**self._kwargs(r, cohort, winner_binding=forged))
 
     def test_forged_provenance_disagreeing_with_cohort_raises(self):
         cohort, r = self._ship()
         forged_prov = dataclasses.replace(cohort.provenance, artifact_sha256="0" * 64)
         with pytest.raises(ValueError):
-            cal.SelectionResult(
-                candidates=r.candidates, winner=r.winner, winner_cutoffs=r.winner_cutoffs,
-                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
-                cohort_provenance=forged_prov, winner_binding=r.winner_binding,
-                cohort=cohort,
-            )
+            cal.SelectionResult(**self._kwargs(r, cohort, cohort_provenance=forged_prov))
 
     def test_truncated_candidates_raises(self):
         cohort, r = self._ship()
         with pytest.raises(ValueError):
-            cal.SelectionResult(
-                candidates=r.candidates[:1], winner=r.winner, winner_cutoffs=r.winner_cutoffs,
-                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
-                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
-                cohort=cohort,
-            )
+            cal.SelectionResult(**self._kwargs(r, cohort, candidates=r.candidates[:1]))
 
     def test_swapped_candidate_cell_raises(self):
         # A non-winner candidate whose cell is swapped for an unscored look-alike sharing
@@ -623,14 +1009,9 @@ class TestSelectionResultTruthTable:
                  if c.role == "arm1" and c.p == 0.5 and c is not r.winner)
         fake_cell = cal.GridCell(lcb_z=9.0, coverage_fold="off", report_fold_p=0.5,
                                  report_fold_scope="all")
-        cands[i] = dataclasses.replace(cands[i], cell=fake_cell)
+        cands[i] = _replace_candidate(cands[i], r.cohort_fitness.fit, cell=fake_cell)
         with pytest.raises(ValueError):
-            cal.SelectionResult(
-                candidates=tuple(cands), winner=r.winner, winner_cutoffs=r.winner_cutoffs,
-                no_ship=False, no_ship_reason=None, b1_reference=r.b1_reference,
-                cohort_provenance=r.cohort_provenance, winner_binding=r.winner_binding,
-                cohort=cohort,
-            )
+            cal.SelectionResult(**self._kwargs(r, cohort, candidates=tuple(cands)))
 
     def test_no_ship_reason_pinned_order_and_stable(self):
         r1 = cal.select_candidate(_no_ship_inputs())
@@ -779,7 +1160,7 @@ class TestBindingCheck0WrapperTypes:
         prov = EvilProvenance(
             artifact_sha256=HEX, artifact_as_of=AS_OF, graph_fingerprint=HEX,
             roots_fingerprint=HEX, captured_model_version="sm-v2-3",
-            schema_version=cal.ARTIFACT_SCHEMA_VERSION, pair_count=4,
+            schema_version=cal.ARTIFACT_SCHEMA_VERSION, pair_count=8,
             min_observations=cal.DEFAULT_MIN_OBSERVATIONS, cohort_rules=cal.COHORT_RULES_ID,
             evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
             release_guard_opening_key=OPENING, release_guard_child_opening_key=CHILD,
@@ -867,9 +1248,9 @@ class TestBindingCheck3PairBinding:
 
     def test_third_guard_raises(self):
         pairs = _default_pairs()
-        pairs.append(_guard_pair("pair-4", 5, "white", 27.0))
+        pairs.append(_guard_pair(f"pair-{len(pairs)}", len(pairs) + 1, "white", 27.0))
         with pytest.raises(cal.SelectionBindingError):
-            cal.select_candidate(_inputs(cohort=_cohort(pairs=pairs, provenance=_provenance(pair_count=5))))
+            cal.select_candidate(_inputs(cohort=_cohort(pairs=pairs)))
 
     def test_one_quantile_pair_raises(self):
         pairs = [
@@ -893,7 +1274,10 @@ class TestBindingCheck3PairBinding:
     def test_guard_shape_error_reraised_with_cause(self):
         # black guard missing the CHILD key -> ReleaseGuardShapeError -> SelectionBindingError
         pairs = _default_pairs()
-        pairs[3] = _guard_pair("pair-3", 4, "black", 25.0, child=None)
+        black_guard = pairs[-1]
+        pairs[-1] = _guard_pair(
+            black_guard.pair_id, black_guard.surrogate_user_id, "black", 25.0, child=None
+        )
         with pytest.raises(cal.SelectionBindingError) as ei:
             cal.select_candidate(_inputs(cohort=_cohort(pairs=pairs)))
         assert isinstance(ei.value.__cause__, cal.ReleaseGuardShapeError)
@@ -1319,6 +1703,26 @@ class TestSummaryAllowlist:
         ]
         assert len(cal._SUMMARY_BINDING_KEYS) == 20
 
+    def test_fitness_key_sets_match_their_dataclasses(self):
+        # Same tripwire as the binding keys: a field added to CohortFitness must be
+        # consciously admitted to stdout or consciously withheld, never silently either.
+        assert cal._SUMMARY_FITNESS_KEYS == {f.name for f in dataclasses.fields(cal.CohortFitness)}
+        # ...and a criterion is a NAME and a BOOLEAN. measured/limit/op are the operands the
+        # redaction rule exists to keep off stdout.
+        gate_check_fields = {f.name for f in dataclasses.fields(cal.GateCheck)}
+        assert cal._SUMMARY_FITNESS_CHECK_KEYS < gate_check_fields
+        assert not cal._SUMMARY_FITNESS_CHECK_KEYS & {"measured", "limit", "op"}
+
+    def test_candidate_summary_keys_are_a_subset_of_the_dataclass(self):
+        fields = {f.name for f in dataclasses.fields(cal.CandidateResult)}
+        assert cal._SUMMARY_CANDIDATE_KEYS - {"gates"} < fields
+        # The verdicts are IN; the operand-bearing fields stay out.
+        assert {"mechanism_admissible", "cutoffs_shippable"} < cal._SUMMARY_CANDIDATE_KEYS
+        assert not cal._SUMMARY_CANDIDATE_KEYS & {
+            "raw_gates", "derived_gates", "cutoffs_outcome", "provisional_cutoffs",
+            "distribution", "order_keys",
+        }
+
     def test_cohort_provenance_keys_are_the_eleven_gating_ones(self):
         fields = {f.name for f in dataclasses.fields(cal.ArtifactProvenance)}
         assert set(cal._SUMMARY_PROVENANCE_KEYS) == fields - {"pair_count"}
@@ -1341,6 +1745,7 @@ class TestSummaryAllowlist:
 class TestSummaryFixtures:
     @pytest.mark.parametrize("builder", [
         _arm1_winner_inputs, _arm2_winner_inputs, _no_ship_inputs, _collision_inputs,
+        _unfit_inputs,
     ])
     def test_every_fixture_validates(self, builder):
         _result, summary = _summary_for(builder())
@@ -1375,7 +1780,51 @@ class TestSummaryFixtures:
         _result, shipped = _summary_for(_arm1_winner_inputs())
         assert shipped["b1_reference"] == {"role": "b1", "cutoffs_collided": False}
 
-    def test_the_winners_cutoffs_are_the_named_carve_out(self):
+    def test_the_two_verdicts_reach_stdout_separately(self):
+        _result, summary = _summary_for(_unfit_inputs())
+        assert summary["mechanism_admissible"] is True
+        assert summary["cutoffs_shippable"] is False
+        assert summary["winner"] is not None and summary["winner_binding"] is not None
+        assert summary["winner_cutoffs"] is None
+        assert summary["cohort_fitness"]["fit"] is False
+        # The approver reads WHICH property failed, and only that.
+        assert summary["cohort_fitness"]["criteria"] == [
+            {"name": "fitness_subject_count", "passed": True},
+            {"name": "fitness_color_coverage", "passed": False},
+            {"name": "fitness_sufficiency_criteria", "passed": False},
+        ]
+        cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_stdout_names_the_fail_closed_criterion_on_a_clean_cohort(self):
+        # The run an approver will actually see today: nothing wrong with the cohort's
+        # census, cutoffs withheld anyway, and stdout says which criterion did it.
+        _result, summary = _summary_for(_arm1_winner_inputs())
+        assert summary["mechanism_admissible"] is True
+        assert summary["cutoffs_shippable"] is False and summary["winner_cutoffs"] is None
+        assert [c["name"] for c in summary["cohort_fitness"]["criteria"] if not c["passed"]] == [
+            "fitness_sufficiency_criteria"
+        ]
+        cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_the_fitness_block_carries_no_cohort_aggregates(self):
+        # Names and booleans only: how many subjects, and how many per colour, are cohort
+        # aggregates and stay in the private file (the rule that keeps pair_count out).
+        _result, summary = _summary_for(_unfit_inputs())
+        for criterion in summary["cohort_fitness"]["criteria"]:
+            assert set(criterion) == cal._SUMMARY_FITNESS_CHECK_KEYS
+        assert set(summary["cohort_fitness"]) == cal._SUMMARY_FITNESS_KEYS
+
+    def test_a_collided_candidate_keeps_its_mechanism_verdict_in_the_summary(self):
+        _result, summary = _summary_for(_collision_inputs())
+        collided = [c for c in summary["candidates"]
+                    if c["rejection_reason"] == "cutoff_collision"]
+        assert collided
+        for c in collided:
+            assert c["mechanism_admissible"] is True
+            assert c["cutoffs_shippable"] is False
+        assert summary["mechanism_admissible"] is True
+
+    def test_the_winners_cutoffs_are_the_named_carve_out(self, cutoff_approval_established):
         result, summary = _summary_for(_arm1_winner_inputs())
         assert summary["winner_cutoffs"] == {
             "a": result.winner_cutoffs.a, "b": result.winner_cutoffs.b,
@@ -1414,6 +1863,50 @@ class TestSummaryValidation:
         with pytest.raises(cal.SummarySchemaError):
             cal.validate_summary_schema(summary, MOUNTED)
 
+    def _unfit(self):
+        return _summary_for(_unfit_inputs())[1]
+
+    def test_publishing_withheld_cutoffs_fails(self):
+        # The forgery this rule exists for: an unfit run whose six integers were pasted back
+        # in, which is what a Phase-3 fixture step would read as approved.
+        summary = self._unfit()
+        summary["winner_cutoffs"] = {"a": 90, "b": 70, "c": 50, "d": 30, "alert": 20, "watch": 40}
+        with pytest.raises(cal.SummarySchemaError, match="cutoffs_shippable"):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_claiming_shippability_under_an_unfit_cohort_fails(self):
+        summary = self._unfit()
+        summary["cutoffs_shippable"] = True
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_flipping_the_fitness_verdict_alone_fails(self):
+        # fit=true with a failing check underneath, and the candidates still say False.
+        summary = self._unfit()
+        summary["cohort_fitness"]["fit"] = True
+        with pytest.raises(cal.SummarySchemaError, match="cohort_fitness"):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_dropped_fitness_criterion_fails(self):
+        summary = self._unfit()
+        summary["cohort_fitness"]["criteria"] = summary["cohort_fitness"]["criteria"][:1]
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_hand_flipped_candidate_verdict_fails(self):
+        for key in ("mechanism_admissible", "cutoffs_shippable"):
+            summary = self._ship()
+            candidate = next(c for c in summary["candidates"] if c["evaluated"])
+            candidate[key] = not candidate[key]
+            with pytest.raises(cal.SummarySchemaError, match=key):
+                cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_forged_top_level_mechanism_verdict_fails(self):
+        summary = self._ship()
+        summary["mechanism_admissible"] = False
+        with pytest.raises(cal.SummarySchemaError, match="mechanism_admissible"):
+            cal.validate_summary_schema(summary, MOUNTED)
+
     def test_an_extra_key_at_any_level_fails(self):
         for mutate in (
             lambda s: s.__setitem__("extra", 1),
@@ -1422,6 +1915,8 @@ class TestSummaryValidation:
             lambda s: s["b1_reference"].__setitem__("real_black_1e4_grade", "A"),
             lambda s: s["candidates"][0].__setitem__("distribution", {}),
             lambda s: s["candidates"][0]["gates"] and s["candidates"][0]["gates"][0].__setitem__("detail", "x"),
+            lambda s: s["cohort_fitness"].__setitem__("subject_count", 4),
+            lambda s: s["cohort_fitness"]["criteria"][0].__setitem__("measured", 4),
         ):
             summary = self._ship()
             mutate(summary)
@@ -1440,7 +1935,7 @@ class TestSummaryValidation:
         with pytest.raises(cal.SummarySchemaError):
             cal.validate_summary_schema(summary, MOUNTED)
 
-    def test_cutoff_ordering_is_enforced(self):
+    def test_cutoff_ordering_is_enforced(self, cutoff_approval_established):
         summary = self._ship()
         summary["winner_cutoffs"]["d"] = summary["winner_cutoffs"]["a"] + 1
         with pytest.raises(cal.SummarySchemaError):
@@ -1544,6 +2039,11 @@ class TestSummaryDecisionConsistency:
         # A SHIP result relabelled as no-ship: every candidate stays internally consistent,
         # so only the cross-check between the verdict and the candidate set catches it.
         summary = self._ship()
-        summary.update(no_ship=True, winner=None, winner_cutoffs=None, winner_binding=None)
+        summary.update(
+            no_ship=True, winner=None, winner_cutoffs=None, winner_binding=None,
+            # A no-ship emits no cutoffs, so the forgery has to withdraw the shippability
+            # claim too — otherwise it fails on the cutoff rule before reaching this one.
+            cutoffs_shippable=False,
+        )
         with pytest.raises(cal.SummarySchemaError, match="admitted candidate"):
             cal.validate_summary_schema(summary, MOUNTED)

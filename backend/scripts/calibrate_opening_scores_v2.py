@@ -5876,9 +5876,18 @@ def build_winner_binding(
 # select_candidate decides ship / no-ship from already-bound SelectionInputs as a
 # SIDE-EFFECT-FREE, DETERMINISTIC-within-the-runtime selector whose returned dataclass
 # IS the release artifact (never an ``assert`` that ``python -O`` strips). It runs the
-# fail-closed binding checks 0-5 BEFORE any gate, then the candidate-selection procedure
-# (raw admissibility -> provisional cutoffs -> derived-grade gates -> total-order winner
-# -> no-ship). Every validation on this path is ``if ... raise`` / a recorded GateCheck.
+# fail-closed binding checks 0-5 BEFORE any gate, then judges the cohort's calibration
+# fitness ONCE, then the candidate-selection procedure (raw admissibility -> provisional
+# cutoffs -> derived-grade gates -> total-order winner -> no-ship). Every validation on this
+# path is ``if ... raise`` / a recorded GateCheck.
+#
+# The result reports TWO independent judgements rather than one verdict (g-mech-vs-cutoff):
+# whether the MECHANISM is admissible (the raw gates — cohort-size-independent in kind) and
+# whether the CUTOFFS are shippable (they derived, and the population they are percentiles
+# of is approved to set boundaries). Shipping the boundaries requires both; selecting a
+# winner cell does not require the cohort to be calibration-fit, so an unapproved cohort
+# withholds the cutoffs without erasing the mechanism evidence. Cutoff approval is currently
+# FAIL-CLOSED for every cohort — see CUTOFF_SUFFICIENCY_CRITERIA_VERSION.
 # ---------------------------------------------------------------------------
 
 
@@ -5943,6 +5952,49 @@ _GATE_SCALES: frozenset[str] = frozenset({"raw", "derived"})
 REASON_CODE_ORDER: tuple[str, ...] = (
     RAW_GATE_ORDER + DERIVED_GATE_ORDER + ("cutoff_collision",)
 )
+# --- Cohort calibration fitness (g-mech-vs-cutoff) --------------------------------------
+#
+# The gate inventories above answer "is the MECHANISM sound?" — they read the scorer's
+# behaviour and mean the same thing on four subjects as on four hundred. The cutoffs answer
+# a different question: they are PERCENTILES of the pooled quantile distribution, so they
+# are only ever as good as the population that distribution came from. The two used to
+# collapse into one verdict, which cost both directions — a mechanism that passed every raw
+# gate was recorded as "rejected: cutoff_collision" (a statement about the cohort, not the
+# mechanism), and grades derived from an acknowledged-invalid cohort read as evidence about
+# the product acceptance bar.
+#
+# These names are DELIBERATELY NOT in _GATE_NAME_INVENTORY. That inventory doubles as the
+# rejection-reason vocabulary (REASON_CODE_ORDER, _SUMMARY_REASON_CODES), so a fitness gate
+# could surface as a candidate's rejection_reason — which is precisely the coupling being
+# removed. Fitness gets its own record, its own inventory, and no reason code.
+_FITNESS_CHECK_NAMES: tuple[str, ...] = (
+    "fitness_subject_count", "fitness_color_coverage", "fitness_sufficiency_criteria",
+)
+# A NECESSARY FLOOR, and nothing more. It is set where it is because the cohort these numbers
+# were written against — 4 anonymous White-only quantile subjects, the sole Black-playing
+# subject held out as the release guard (g-cutoff-recalib) — must not clear it: derive_cutoffs
+# reads p05 and p95, so at four subjects a single one moves an extreme boundary by more than a
+# whole subject-share, and a boundary set from zero Black evidence would grade the Black
+# user-turn surface that g-p4ih is about.
+MIN_CALIBRATION_SUBJECTS: int = 6
+MIN_CALIBRATION_SUBJECTS_PER_COLOR: int = 2
+# ...and this is why clearing that floor does not, by itself, approve any boundary.
+#
+# Cutoff approval is FAIL-CLOSED. The two criteria above are a HEADCOUNT. They cannot see
+# session mix — the frozen artifact records none, so a six-subject cohort that is entirely
+# drill traffic clears them — and they make no claim about how stable a p05/p95 estimated
+# from that many subjects actually is. Publishing boundaries because a headcount passed
+# would re-create, one level down, exactly the coupling this separation exists to break:
+# a cohort-shaped fact read as an approval.
+#
+# So the selector approves NO cutoffs yet. g-cutoff-recalib owns establishing the real
+# sufficiency criteria against post-release population data; landing them means adding the
+# criteria it establishes to _FITNESS_CHECK_NAMES / _cohort_fitness and raising this version
+# to match. Until then every run still reports its MECHANISM verdict on its own terms and
+# withholds winner_cutoffs — the boundaries stay on the winner as provisional_cutoffs,
+# readable, labelled provisional, and unapproved.
+CUTOFF_SUFFICIENCY_CRITERIA_VERSION: int = 0
+MIN_CUTOFF_SUFFICIENCY_CRITERIA_VERSION: int = 1
 # Per-role fold_symmetry_i check count: ARM-1 (two report-stage identities + each User-14
 # multiplier against ITS OWN coverage + the mirror's two pinned coverages + the mirror
 # multiplier equality) = 7; ARM-2 (two identities + user-mult<1 + opp-mult==1.0) = 4.
@@ -6068,6 +6120,52 @@ class GateOutcome:
 
 
 @dataclass(frozen=True)
+class CohortFitness:
+    """Is this cohort fit to have GRADE CUTOFFS derived from it? One record per run, shared
+    by every candidate — fitness is a property of the population, not of an (arm, cell).
+
+    ``fit`` is DERIVED and RE-VERIFIED the way GateOutcome.passed is: __post_init__ RAISES
+    unless the criteria are the pinned ``_FITNESS_CHECK_NAMES`` in order and
+    ``fit == all(c.passed for c in criteria)``. It reuses GateCheck (which re-derives its own
+    verdict from measured/op/limit) so the audit trail carries the numbers the judgement was
+    made on, not a bare boolean.
+
+    NOT a GateOutcome, deliberately: a GateOutcome name can become a rejection_reason, and
+    an unfit cohort must never be recordable as a defect of the mechanism. The field is
+    ``criteria`` rather than ``checks`` for a redaction reason: ``checks`` names GATE checks,
+    which carry measured/limit operands and are barred from stdout by name.
+
+    What this class proves is only INTERNAL consistency — that the record does not contradict
+    itself. It cannot know which population it was measured on, so a record built from other
+    pairs entirely is constructible here. SelectionResult.__post_init__ is where it is bound:
+    it re-derives the record from its own cohort's quantile pairs and compares it whole."""
+
+    criteria: tuple[GateCheck, ...]
+    fit: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "criteria", tuple(self.criteria))
+        for c in self.criteria:
+            if not isinstance(c, GateCheck):
+                raise ValueError(
+                    f"CohortFitness: every criterion must be a GateCheck, got {type(c).__name__}"
+                )
+        if tuple(c.name for c in self.criteria) != _FITNESS_CHECK_NAMES:
+            raise ValueError(
+                f"CohortFitness: criterion names {tuple(c.name for c in self.criteria)} != "
+                f"{_FITNESS_CHECK_NAMES}"
+            )
+        if type(self.fit) is not bool:
+            raise ValueError("CohortFitness: fit must be a bool")
+        recomputed = all(c.passed for c in self.criteria)
+        if self.fit != recomputed:
+            raise ValueError(
+                f"CohortFitness: stored fit={self.fit} contradicts all(criterion.passed)=="
+                f"{recomputed}"
+            )
+
+
+@dataclass(frozen=True)
 class Arm:
     """A NAMED release-policy object binding, as ONE inseparable record, the four facts
     every downstream step reads off it. Deep-immutable (all scalar/tuple), VALIDATING."""
@@ -6140,11 +6238,29 @@ class CandidateResult:
     provisional_cutoffs: Cutoffs | None
     distribution: DistributionStats | None
     derived_gates: tuple[GateOutcome, ...]
+    # The two INDEPENDENT judgements (g-mech-vs-cutoff), both DERIVED and re-verified below:
+    #   mechanism_admissible — every raw gate passed. A statement about the SCORER, and the
+    #     one that stays meaningful on a cohort too small to calibrate against.
+    #   cutoffs_shippable — the cutoffs derived AND the cohort is fit to derive them from.
+    #     A statement about the COHORT and the boundaries pooled from it.
+    # They are not ordered and neither implies the other: a candidate can be
+    # mechanism_admissible with unshippable cutoffs (raw-gate-clean, collided pool — the
+    # g-p4ih.2 arm-2 state), and cutoffs can be shippable under a candidate whose mechanism
+    # failed. ``admitted`` is unchanged and still requires raw + cutoff_derivation + the
+    # derived product-bar gates.
+    mechanism_admissible: bool
+    cutoffs_shippable: bool
     admitted: bool
     rejection_reason: str | None
     order_keys: tuple[float, float, float] | None
+    # The run's ONE fitness verdict, as an InitVar: it is consumed to re-derive
+    # cutoffs_shippable and never stored, so the shared CohortFitness record is not copied
+    # into all eight candidates of the serialized artifact. SelectionResult re-checks every
+    # candidate against the single stored record, which is what stops a candidate from
+    # carrying a fitness verdict of its own.
+    cohort_fit: InitVar[bool]
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, cohort_fit: bool) -> None:
         object.__setattr__(self, "raw_gates", tuple(self.raw_gates))
         object.__setattr__(self, "derived_gates", tuple(self.derived_gates))
         if self.role not in _VALID_CANDIDATE_ROLES:
@@ -6153,21 +6269,31 @@ class CandidateResult:
             raise ValueError(
                 f"CandidateResult p={self.p} != cell.report_fold_p={self.cell.report_fold_p}"
             )
+        for name in ("mechanism_admissible", "cutoffs_shippable"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"CandidateResult {self.role}@{self.p}: {name} must be a bool")
+        if type(cohort_fit) is not bool:
+            raise ValueError(f"CandidateResult {self.role}@{self.p}: cohort_fit must be a bool")
         if not self.evaluated:
-            # Lazy ARM-2: represented HONESTLY as not-reached, never a false rejection.
+            # Lazy ARM-2: represented HONESTLY as not-reached, never a false rejection. An
+            # unreached candidate proves NOTHING about the mechanism, so mechanism_admissible
+            # is False here in the sense of "not established" — the summary's `evaluated`
+            # flag is what distinguishes it from a candidate that was reached and failed.
             if (
                 self.raw_gates
                 or self.cutoffs_outcome is not None
                 or self.provisional_cutoffs is not None
                 or self.distribution is not None
                 or self.derived_gates
+                or self.mechanism_admissible
+                or self.cutoffs_shippable
                 or self.admitted
                 or self.rejection_reason is not None
                 or self.order_keys is not None
             ):
                 raise ValueError(
                     f"CandidateResult {self.role}@{self.p}: not evaluated but carries "
-                    "gate/cutoff/distribution/admitted/reason/order state"
+                    "gate/cutoff/distribution/admissibility/reason/order state"
                 )
             return
         # --- evaluated candidate: gate inventories, presence invariants, reason code ---
@@ -6183,6 +6309,13 @@ class CandidateResult:
                 f"{len(fold.checks)} checks, expected {_ARM_FOLD_CHECK_COUNT[self.role]}"
             )
         raw_passed = all(g.passed for g in self.raw_gates)
+        # Judgement 1, re-derived: mechanism admissibility IS the raw-gate verdict and
+        # nothing else. Nothing about the cohort, the pool, or the derived grades reaches it.
+        if self.mechanism_admissible != raw_passed:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: mechanism_admissible="
+                f"{self.mechanism_admissible} but all-raw-gates-passed={raw_passed}"
+            )
         # cutoffs_outcome is None IFF step 2 never ran (a raw gate failed).
         if raw_passed and self.cutoffs_outcome is None:
             raise ValueError(
@@ -6247,6 +6380,15 @@ class CandidateResult:
                 f"CandidateResult {self.role}@{self.p}: derived_gates non-empty must equal "
                 "cutoffs_outcome present AND passed"
             )
+        # Judgement 2, re-derived: the boundaries came out ordered AND the population they
+        # are percentiles of is fit to set them. The derived product-bar gates are NOT part
+        # of it — those are grades the cutoffs produce, not evidence about the cutoffs.
+        if self.cutoffs_shippable != (cutoffs_passed and cohort_fit):
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: cutoffs_shippable="
+                f"{self.cutoffs_shippable} but (cutoffs derived, cohort fit)="
+                f"({cutoffs_passed}, {cohort_fit})"
+            )
         if self.derived_gates and tuple(g.name for g in self.derived_gates) != DERIVED_GATE_ORDER:
             raise ValueError(
                 f"CandidateResult {self.role}@{self.p}: derived_gates names "
@@ -6286,7 +6428,12 @@ class ReferenceResult:
     """The B1 calibration REFERENCE channel — NON-gating, NOT a candidate, present on
     EVERY result. Carries B1's pooled distribution_stats, provisional cutoffs (None on
     collision), and the black-guard RELEASE_GUARD_OPENING_KEY raw score + provisional
-    grade at B1_CELL. Carries NO gates and NO admitted field."""
+    grade at B1_CELL. Carries NO gates and NO admitted field.
+
+    ``real_black_1e4_grade`` is a letter produced by applying THIS COHORT'S percentile
+    boundaries. Read it against the result's ``cohort_fitness``: from a cohort that may not
+    set boundaries, the grade is evidence about the cohort, not about whether the product
+    acceptance bar is in the right place (g-mech-vs-cutoff)."""
 
     cell: GridCell
     role: str
@@ -6312,7 +6459,25 @@ class SelectionResult:
     field is, transitively, a dict/list/set. __post_init__ enforces the COMPLETE ship /
     no-ship cross-field truth table so winner/no_ship/winner_cutoffs/winner_binding/
     no_ship_reason can never diverge. ``cohort`` is an InitVar (unstored) used only to
-    recompute build_winner_binding for the truth-table check."""
+    recompute build_winner_binding for the truth-table check.
+
+    TWO decisions are reported, never collapsed (g-mech-vs-cutoff):
+
+    * the MECHANISM decision — which (arm, cell) the swept grid selects. That is
+      ``winner`` / ``winner_binding`` / ``no_ship``, and it is what Phase 3 binds.
+    * the CUTOFF decision — whether the six grade/tone boundaries pooled from this cohort
+      may be shipped. That is ``winner_cutoffs``, which is emitted ONLY when the winner's
+      cutoffs are shippable; ``cohort_fitness`` records why.
+
+    So a winner whose cutoffs are not approved is a SHIP with ``winner_cutoffs=None``: the
+    mechanism evidence is not vetoed by the population, and the boundaries are not handed out
+    as approved because a mechanism passed. The winner's own ``provisional_cutoffs`` remain on
+    the candidate — readable, labelled provisional, and not the release product.
+
+    Today that is EVERY run: cutoff approval is fail-closed until g-cutoff-recalib establishes
+    sufficiency criteria (CUTOFF_SUFFICIENCY_CRITERIA_VERSION), so no cohort clears
+    ``cohort_fitness`` and no run emits ``winner_cutoffs``. The mechanism decision is
+    unaffected, which is the whole point of reporting the two separately."""
 
     candidates: tuple[CandidateResult, ...]
     winner: CandidateResult | None
@@ -6322,6 +6487,16 @@ class SelectionResult:
     b1_reference: ReferenceResult
     cohort_provenance: ArtifactProvenance
     winner_binding: WinnerBinding | None
+    # Present on EVERY result (like b1_reference) — a run must say what it judged the cohort
+    # to be whether or not that judgement withheld anything.
+    cohort_fitness: CohortFitness
+    # The two run-level verdicts, DERIVED and re-verified below:
+    #   mechanism_admissible — at least one EVALUATED candidate passed every raw gate, i.e.
+    #     the swept grid contains a sound mechanism. True on a no-ship whose only failures
+    #     were cutoff-side, which is the evidence g-p4ih-grid-v2 needs to survive.
+    #   cutoffs_shippable — a winner exists AND its cutoffs are shippable.
+    mechanism_admissible: bool
+    cutoffs_shippable: bool
     cohort: InitVar[ScoredCalibrationCohort]
 
     def __post_init__(self, cohort: ScoredCalibrationCohort) -> None:
@@ -6345,10 +6520,66 @@ class SelectionResult:
         for c in self.candidates:
             if c.evaluated is False and c.admitted is True:
                 raise ValueError("SelectionResult: an unevaluated candidate is admitted")
+        if not isinstance(self.cohort_fitness, CohortFitness):
+            raise ValueError("SelectionResult: cohort_fitness must be a CohortFitness")
+        # The fitness record is RE-DERIVED from this result's own cohort and compared WHOLE —
+        # every criterion's name, operands, op and verdict, not just `fit`. CohortFitness on
+        # its own only proves internal consistency, so without this a self-consistent record
+        # measured on some OTHER population (or on one criterion, or on invented operands)
+        # would be accepted here and would then authorise the cutoffs. Fitness is a claim
+        # about the bound quantile pairs; this is where it is held to them.
+        expected_fitness = _cohort_fitness(
+            tuple(p for p in cohort.pairs if p.cohort_role == "quantile")
+        )
+        if self.cohort_fitness != expected_fitness:
+            raise ValueError(
+                "SelectionResult: cohort_fitness is not the fitness of THIS cohort's "
+                "quantile pairs"
+            )
+        # Every candidate's two verdicts, re-derived against THE ONE stored fitness record.
+        # CandidateResult can only check itself against the bool it was handed; this is where
+        # a candidate carrying a fitness verdict of its own is caught.
+        for c in self.candidates:
+            expected_mechanism = c.evaluated and all(g.passed for g in c.raw_gates)
+            if c.mechanism_admissible != expected_mechanism:
+                raise ValueError(
+                    f"SelectionResult: candidate {c.role}@{c.p} mechanism_admissible "
+                    f"{c.mechanism_admissible} != its own raw gates {expected_mechanism}"
+                )
+            expected_shippable = (
+                c.cutoffs_outcome is not None
+                and c.cutoffs_outcome.passed
+                and self.cohort_fitness.fit
+            )
+            if c.cutoffs_shippable != expected_shippable:
+                raise ValueError(
+                    f"SelectionResult: candidate {c.role}@{c.p} cutoffs_shippable "
+                    f"{c.cutoffs_shippable} != (cutoffs derived AND this result's "
+                    f"cohort_fitness.fit) {expected_shippable}"
+                )
+        for name in ("mechanism_admissible", "cutoffs_shippable"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"SelectionResult: {name} must be a bool")
+        if self.mechanism_admissible != any(c.mechanism_admissible for c in self.candidates):
+            raise ValueError(
+                "SelectionResult: mechanism_admissible must equal (some candidate passed "
+                "every raw gate)"
+            )
         if self.no_ship != (self.winner is None):
             raise ValueError("SelectionResult: no_ship must equal (winner is None)")
-        if (self.winner_cutoffs is not None) == self.no_ship:
-            raise ValueError("SelectionResult: exactly one cutoff set is emitted IFF ship")
+        if self.cutoffs_shippable != (self.winner is not None and self.winner.cutoffs_shippable):
+            raise ValueError(
+                "SelectionResult: cutoffs_shippable must equal the winner's own verdict "
+                "(False when there is no winner)"
+            )
+        # The cutoff set is emitted IFF a winner exists AND this cohort may set boundaries.
+        # NOT "IFF ship": a ship from an unfit cohort is a mechanism decision, and handing
+        # out its percentile boundaries as the approved product is the coupling this
+        # separation exists to break.
+        if (self.winner_cutoffs is not None) != self.cutoffs_shippable:
+            raise ValueError(
+                "SelectionResult: winner_cutoffs is emitted IFF cutoffs_shippable"
+            )
         if self.no_ship:
             if self.winner is not None or self.winner_cutoffs is not None or self.winner_binding is not None:
                 raise ValueError("SelectionResult no-ship: winner/cutoffs/binding must all be None")
@@ -6372,10 +6603,21 @@ class SelectionResult:
         best = max(admitted, key=lambda c: c.order_keys)
         if winner is not best:
             raise ValueError("SelectionResult ship: winner is not the total-order max over admitted")
-        # winner_cutoffs IS the winner's provisional_cutoffs object (identity, not equality):
-        # exactly the ONE emitted set, not a look-alike Cutoffs with the same field values.
-        if self.winner_cutoffs is not winner.provisional_cutoffs:
-            raise ValueError("SelectionResult ship: winner_cutoffs must BE winner.provisional_cutoffs")
+        # When a cutoff set IS emitted it IS the winner's provisional_cutoffs object
+        # (identity, not equality): exactly the ONE derived set, not a look-alike Cutoffs
+        # with the same field values. When it is withheld, the winner must still HAVE
+        # derived cutoffs — an admitted candidate always does — so the withholding is
+        # visibly a decision about the cohort and not a missing computation.
+        if self.cutoffs_shippable:
+            if self.winner_cutoffs is not winner.provisional_cutoffs:
+                raise ValueError(
+                    "SelectionResult ship: winner_cutoffs must BE winner.provisional_cutoffs"
+                )
+        elif winner.provisional_cutoffs is None:
+            raise ValueError(
+                "SelectionResult ship: an admitted winner must carry provisional_cutoffs even "
+                "when they are withheld as unshippable"
+            )
         if winner.cell not in cohort.config_fingerprints:
             raise ValueError("SelectionResult ship: winner.cell absent from cohort.config_fingerprints")
         if self.winner_binding is None:
@@ -7006,26 +7248,69 @@ def _pool_for(cell: GridCell, quantile_pairs: tuple[ScoredPair, ...]) -> list[fl
     return [s for qp in quantile_pairs for s in qp.grid[cell].named_scores]
 
 
-def _lazy_candidate(cell: GridCell, arm: Arm) -> CandidateResult:
+def _cohort_fitness(quantile_pairs: tuple[ScoredPair, ...]) -> CohortFitness:
+    """Judge the QUANTILE cohort — the pairs whose named_scores derive_cutoffs pools — on the
+    two census properties the frozen artifact can prove about its own population, and then on
+    whether census evidence is even the right question yet.
+
+    Both counts are over DISTINCT ``subject_id``, never over pairs. A subject who plays both
+    colours contributes two pairs and correlated rows (shared ancestor/descendant FENs), so
+    counting pairs would let one person look like a population. The release-guard pairs are
+    excluded by construction: they are held out of the pool, so they cannot be evidence about
+    the distribution the boundaries are percentiles of.
+
+    The third criterion is the fail-closed one and it is NOT about this cohort: no cohort is
+    approved to set boundaries until g-cutoff-recalib establishes real sufficiency criteria
+    (see CUTOFF_SUFFICIENCY_CRITERIA_VERSION). It fails on every run today, which is the
+    point — the census criteria are reported truthfully next to it, so an approver reads both
+    "this cohort's headcount is fine" and "a headcount is not what authorises boundaries"."""
+    subjects = {p.subject_id for p in quantile_pairs}
+    per_color = min(
+        len({p.subject_id for p in quantile_pairs if p.player_color == color})
+        for color in ("white", "black")
+    )
+    established = CUTOFF_SUFFICIENCY_CRITERIA_VERSION
+    criteria = (
+        GateCheck(
+            "fitness_subject_count", len(subjects), MIN_CALIBRATION_SUBJECTS, ">=",
+            len(subjects) >= MIN_CALIBRATION_SUBJECTS,
+        ),
+        GateCheck(
+            "fitness_color_coverage", per_color, MIN_CALIBRATION_SUBJECTS_PER_COLOR, ">=",
+            per_color >= MIN_CALIBRATION_SUBJECTS_PER_COLOR,
+        ),
+        GateCheck(
+            "fitness_sufficiency_criteria", established,
+            MIN_CUTOFF_SUFFICIENCY_CRITERIA_VERSION, ">=",
+            established >= MIN_CUTOFF_SUFFICIENCY_CRITERIA_VERSION,
+        ),
+    )
+    return CohortFitness(criteria=criteria, fit=all(c.passed for c in criteria))
+
+
+def _lazy_candidate(cell: GridCell, arm: Arm, cohort_fit: bool) -> CandidateResult:
     return CandidateResult(
         cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=False,
         raw_gates=(), cutoffs_outcome=None, provisional_cutoffs=None, distribution=None,
-        derived_gates=(), admitted=False, rejection_reason=None, order_keys=None,
+        derived_gates=(), mechanism_admissible=False, cutoffs_shippable=False,
+        admitted=False, rejection_reason=None, order_keys=None, cohort_fit=cohort_fit,
     )
 
 
 def _evaluate_candidate(
     cell: GridCell, arm: Arm, quantile_pairs: tuple[ScoredPair, ...],
     white_guard: ScoredPair, black_guard: ScoredPair,
-    dcr: DiagnosticCellResult, ref: DiagnosticCellResult,
+    dcr: DiagnosticCellResult, ref: DiagnosticCellResult, cohort_fit: bool,
 ) -> CandidateResult:
     raw_gates = _raw_gates(cell, arm, dcr, ref, black_guard)
     if not all(g.passed for g in raw_gates):
         return CandidateResult(
             cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
             raw_gates=raw_gates, cutoffs_outcome=None, provisional_cutoffs=None,
-            distribution=None, derived_gates=(), admitted=False,
+            distribution=None, derived_gates=(), mechanism_admissible=False,
+            cutoffs_shippable=False, admitted=False,
             rejection_reason=_expected_reason(raw_gates, None, ()), order_keys=None,
+            cohort_fit=cohort_fit,
         )
     pool = _pool_for(cell, quantile_pairs)
     distribution = distribution_stats(pool)
@@ -7034,11 +7319,17 @@ def _evaluate_candidate(
         cutoffs = derive_cutoffs(pool)
     except CutoffCollision as exc:
         outcome = _cutoff_outcome(exc.cutoffs, passed=False)
+        # The state g-p4ih.2 hit: every raw gate green, the pooled distribution too
+        # degenerate to separate d from c. rejection_reason still says cutoff_collision —
+        # it IS the first failure — but mechanism_admissible=True keeps the scorer evidence
+        # on the record instead of letting the cohort erase it.
         return CandidateResult(
             cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
             raw_gates=raw_gates, cutoffs_outcome=outcome, provisional_cutoffs=None,
-            distribution=distribution, derived_gates=(), admitted=False,
+            distribution=distribution, derived_gates=(), mechanism_admissible=True,
+            cutoffs_shippable=False, admitted=False,
             rejection_reason="cutoff_collision", order_keys=order_keys,
+            cohort_fit=cohort_fit,
         )
     outcome = _cutoff_outcome(cutoffs, passed=True)
     derived = _derived_gates(cell, dcr, white_guard, black_guard, cutoffs)
@@ -7046,8 +7337,10 @@ def _evaluate_candidate(
     return CandidateResult(
         cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
         raw_gates=raw_gates, cutoffs_outcome=outcome, provisional_cutoffs=cutoffs,
-        distribution=distribution, derived_gates=derived, admitted=admitted,
+        distribution=distribution, derived_gates=derived, mechanism_admissible=True,
+        cutoffs_shippable=cohort_fit, admitted=admitted,
         rejection_reason=_expected_reason(raw_gates, outcome, derived), order_keys=order_keys,
+        cohort_fit=cohort_fit,
     )
 
 
@@ -7082,6 +7375,10 @@ def _select_candidate(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> Selecti
     cohort = inputs.cohort
     diagnostics = inputs.diagnostics
     ref = diagnostics.cells[CURRENT_SM_V2_3_CELL]
+    # ONE fitness judgement per run, taken before any candidate is evaluated and shared by
+    # all of them: it is a property of the population, and eight per-candidate re-judgements
+    # of the same pairs could only ever differ by a bug.
+    fitness = _cohort_fitness(quantile_pairs)
 
     results: dict[int, CandidateResult] = {}
     # Enumerate all (arm, cell) candidates in the pinned order; ARM-1 first, then ARM-2.
@@ -7099,7 +7396,7 @@ def _select_candidate(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> Selecti
         for i, cell in arm_indices:
             results[i] = _evaluate_candidate(
                 cell, arm, quantile_pairs, white_guard, black_guard,
-                diagnostics.cells[cell], ref,
+                diagnostics.cells[cell], ref, fitness.fit,
             )
         admitted = [results[i] for i, _ in arm_indices if results[i].admitted]
         if admitted:
@@ -7109,22 +7406,30 @@ def _select_candidate(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> Selecti
     # Fill any arms never reached with lazy placeholders.
     for i, arm, cell in enumeration:
         if i not in results:
-            results[i] = _lazy_candidate(cell, arm)
+            results[i] = _lazy_candidate(cell, arm, fitness.fit)
 
     candidates = tuple(results[i] for i, _, _ in enumeration)
     b1 = _b1_reference(quantile_pairs, black_guard)
+    mechanism_admissible = any(c.mechanism_admissible for c in candidates)
 
     if winner is None:
         return SelectionResult(
             candidates=candidates, winner=None, winner_cutoffs=None, no_ship=True,
             no_ship_reason=_no_ship_reason(candidates), b1_reference=b1,
-            cohort_provenance=cohort.provenance, winner_binding=None, cohort=cohort,
+            cohort_provenance=cohort.provenance, winner_binding=None,
+            cohort_fitness=fitness, mechanism_admissible=mechanism_admissible,
+            cutoffs_shippable=False, cohort=cohort,
         )
     return SelectionResult(
-        candidates=candidates, winner=winner, winner_cutoffs=winner.provisional_cutoffs,
+        candidates=candidates, winner=winner,
+        # Withheld — not absent — when the cohort may not set boundaries. The winner keeps
+        # its provisional_cutoffs; what is refused is publishing them as the release product.
+        winner_cutoffs=winner.provisional_cutoffs if winner.cutoffs_shippable else None,
         no_ship=False, no_ship_reason=None, b1_reference=b1,
         cohort_provenance=cohort.provenance,
-        winner_binding=build_winner_binding(cohort, winner.cell), cohort=cohort,
+        winner_binding=build_winner_binding(cohort, winner.cell),
+        cohort_fitness=fitness, mechanism_admissible=mechanism_admissible,
+        cutoffs_shippable=winner.cutoffs_shippable, cohort=cohort,
     )
 
 
@@ -7520,10 +7825,11 @@ def serialize_full(result: SelectionResult) -> str:
     """The COMPLETE SelectionResult as deterministic JSON — the private file's bytes.
 
     ``dataclasses.asdict`` flattens the whole tree (CandidateResult / GateOutcome /
-    GateCheck / GridCell / Cutoffs / DistributionStats / ReferenceResult / WinnerBinding /
-    ArtifactProvenance) so every gate outcome is individually addressable instead of buried
-    in a repr; ``cohort`` is an InitVar and therefore not a field, so the unstored cohort
-    cannot ride along.
+    GateCheck / GridCell / Cutoffs / DistributionStats / ReferenceResult / CohortFitness /
+    WinnerBinding / ArtifactProvenance) so every gate outcome is individually addressable
+    instead of buried in a repr; ``cohort`` is an InitVar and therefore not a field, so the
+    unstored cohort cannot ride along — and so is CandidateResult's ``cohort_fit``, which is
+    why the fitness verdict appears once, on the result, rather than eight times.
 
     ``sort_keys=True`` gives byte-identical JSON across runs. ``allow_nan=False`` HARD-FAILS
     on a NaN or Infinity anywhere — JSON has no such literals, and a release record that
@@ -7579,13 +7885,22 @@ _SUMMARY_PROVENANCE_KEYS: tuple[str, ...] = (
 _SUMMARY_TOP_KEYS: frozenset[str] = frozenset({
     "no_ship", "no_ship_reason_codes", "winner", "winner_cutoffs", "winner_binding",
     "cohort_provenance", "provenance_record_sha256", "result_sha256", "candidates",
-    "b1_reference",
+    "b1_reference", "cohort_fitness", "mechanism_admissible", "cutoffs_shippable",
 })
 _SUMMARY_WINNER_KEYS: frozenset[str] = frozenset({"role", "p"})
 _SUMMARY_CUTOFF_KEYS: frozenset[str] = frozenset({"a", "b", "c", "d", "alert", "watch"})
 _SUMMARY_CANDIDATE_KEYS: frozenset[str] = frozenset({
-    "role", "p", "evaluated", "admitted", "rejection_reason", "gates",
+    "role", "p", "evaluated", "mechanism_admissible", "cutoffs_shippable", "admitted",
+    "rejection_reason", "gates",
 })
+# The fitness block: the verdict, and each criterion as a NAME and a BOOLEAN. The measured
+# operands (how many subjects, how many per colour) are cohort aggregates and stay in the
+# private file — the same rule that keeps provenance.pair_count out of the summary. The
+# approver needs to know WHICH property failed, not the population's shape. "criteria", not
+# "checks": stdout is asserted never to carry the token "checks", because a GATE check's
+# measured/limit are real operands.
+_SUMMARY_FITNESS_KEYS: frozenset[str] = frozenset({"fit", "criteria"})
+_SUMMARY_FITNESS_CHECK_KEYS: frozenset[str] = frozenset({"name", "passed"})
 _SUMMARY_GATE_KEYS: frozenset[str] = frozenset({"name", "scale", "passed"})
 _SUMMARY_B1_KEYS: frozenset[str] = frozenset({"role", "cutoffs_collided"})
 # rejection_reason / no_ship_reason_codes draw from the closed gate inventory PLUS the one
@@ -7631,7 +7946,13 @@ def build_redacted_summary(
     stdout". These six integers ARE the release product: Phase 3 writes them verbatim into
     src/utils/format.ts, where they become public to every user of the app. Withholding them
     would withhold the thing being approved. The carve-out is scoped to the WINNER: no
-    rejected candidate's provisional_cutoffs and no distribution is admitted.
+    rejected candidate's provisional_cutoffs and no distribution is admitted. It is also
+    scoped to a SHIPPABLE winner — when the cohort is not approved to set boundaries the
+    result emits none, so the summary prints none and ``cohort_fitness`` says which criterion
+    failed. Nothing is being approved in that case except the winner cell. That is every run
+    until g-cutoff-recalib lands (CUTOFF_SUFFICIENCY_CRITERIA_VERSION), so in practice this
+    carve-out is currently dormant — it is kept, and kept tested, because the criteria that
+    open it are a version bump away and the redaction rule must be right when they land.
 
     ``result_sha256`` replaces the earlier ``result_filename``. A basename is not inherently
     non-identifying — operators name result files after cohorts, dates, and users — while a
@@ -7670,11 +7991,24 @@ def build_redacted_summary(
         },
         "provenance_record_sha256": mounted_digest,
         "result_sha256": result_sha256,
+        # The two independent verdicts, at the top and per candidate: a reader of the
+        # scrollback can see "the mechanism was sound, the cohort could not set boundaries"
+        # without opening the private file.
+        "mechanism_admissible": result.mechanism_admissible,
+        "cutoffs_shippable": result.cutoffs_shippable,
+        "cohort_fitness": {
+            "fit": result.cohort_fitness.fit,
+            "criteria": [
+                {"name": c.name, "passed": c.passed} for c in result.cohort_fitness.criteria
+            ],
+        },
         "candidates": [
             {
                 "role": c.role,
                 "p": c.p,
                 "evaluated": c.evaluated,
+                "mechanism_admissible": c.mechanism_admissible,
+                "cutoffs_shippable": c.cutoffs_shippable,
                 "admitted": c.admitted,
                 "rejection_reason": c.rejection_reason,
                 "gates": _summary_gates(c),
@@ -7756,7 +8090,7 @@ def _expected_gate_names(evaluated: bool, gates: list[dict]) -> tuple[str, ...]:
     return tuple(expected)
 
 
-def _validate_summary_candidate(candidate: object, index: int) -> None:
+def _validate_summary_candidate(candidate: object, index: int, cohort_fit: bool) -> None:
     label = f"candidates[{index}]"
     obj = _require_keyset(candidate, _SUMMARY_CANDIDATE_KEYS, label)
     if obj["role"] not in _VALID_CANDIDATE_ROLES:
@@ -7766,6 +8100,10 @@ def _validate_summary_candidate(candidate: object, index: int) -> None:
     _require_p(obj["p"], f"{label}.p")
     evaluated = _require_summary_bool(obj["evaluated"], f"{label}.evaluated")
     admitted = _require_summary_bool(obj["admitted"], f"{label}.admitted")
+    mechanism = _require_summary_bool(
+        obj["mechanism_admissible"], f"{label}.mechanism_admissible"
+    )
+    shippable = _require_summary_bool(obj["cutoffs_shippable"], f"{label}.cutoffs_shippable")
     gates = obj["gates"]
     if not isinstance(gates, list):
         raise SummarySchemaError(f"{label}.gates must be a list")
@@ -7773,10 +8111,11 @@ def _validate_summary_candidate(candidate: object, index: int) -> None:
     if reason is not None and reason not in _SUMMARY_REASON_CODES:
         raise SummarySchemaError(f"{label}.rejection_reason is not a pinned reason code")
     if not evaluated:
-        if admitted or reason is not None or gates:
+        if admitted or mechanism or shippable or reason is not None or gates:
             raise SummarySchemaError(
-                f"{label}: an unevaluated candidate carries admitted=false, "
-                "rejection_reason=null, and an EMPTY gates list"
+                f"{label}: an unevaluated candidate carries admitted / "
+                "mechanism_admissible / cutoffs_shippable false, rejection_reason=null, "
+                "and an EMPTY gates list"
             )
         return
     for position, gate in enumerate(gates):
@@ -7810,6 +8149,21 @@ def _validate_summary_candidate(candidate: object, index: int) -> None:
         raise SummarySchemaError(f"{label}.rejection_reason is not the first gate failure")
     if admitted != (expected_reason is None and len(names) == 13):
         raise SummarySchemaError(f"{label}.admitted disagrees with its own gate outcomes")
+    # The two independent verdicts, RE-DERIVED from this candidate's own gate projection and
+    # the run's fitness bit — never trusted as printed. Otherwise a hand-edited summary could
+    # claim mechanism evidence its gates do not show, or a shippable cutoff set from a cohort
+    # the same summary says is unfit.
+    by_name = {g["name"]: g for g in gates}
+    if mechanism != all(by_name.get(name, {}).get("passed") is True for name in RAW_GATE_ORDER):
+        raise SummarySchemaError(
+            f"{label}.mechanism_admissible disagrees with its own raw gate outcomes"
+        )
+    cutoff_gate = by_name.get(_CUTOFF_GATE_NAME)
+    if shippable != (cutoff_gate is not None and cutoff_gate["passed"] is True and cohort_fit):
+        raise SummarySchemaError(
+            f"{label}.cutoffs_shippable disagrees with its cutoff_derivation outcome and "
+            "cohort_fitness.fit"
+        )
 
 
 def _validate_summary_binding(binding: object) -> dict:
@@ -7864,6 +8218,33 @@ def _validate_summary_binding(binding: object) -> dict:
     return obj
 
 
+def _validate_summary_fitness(fitness: object) -> bool:
+    """The cohort-fitness block: the pinned criteria IN ORDER, names and booleans only, and a
+    ``fit`` that its own criteria agree with. Returns ``fit`` — the bit the candidate-level
+    ``cutoffs_shippable`` is re-derived against, so a summary cannot claim a shippable cutoff
+    set while its own fitness block says the cohort could not set one."""
+    obj = _require_keyset(fitness, _SUMMARY_FITNESS_KEYS, "cohort_fitness")
+    fit = _require_summary_bool(obj["fit"], "cohort_fitness.fit")
+    criteria = obj["criteria"]
+    if not isinstance(criteria, list):
+        raise SummarySchemaError("cohort_fitness.criteria must be a list")
+    passed: list[bool] = []
+    for position, criterion in enumerate(criteria):
+        label = f"cohort_fitness.criteria[{position}]"
+        entry = _require_keyset(criterion, _SUMMARY_FITNESS_CHECK_KEYS, label)
+        if entry["name"] not in _FITNESS_CHECK_NAMES:
+            raise SummarySchemaError(f"{label}.name is not in the pinned fitness inventory")
+        passed.append(_require_summary_bool(entry["passed"], f"{label}.passed"))
+    if tuple(c["name"] for c in criteria) != _FITNESS_CHECK_NAMES:
+        raise SummarySchemaError(
+            "cohort_fitness.criteria is not the pinned inventory in order — one was dropped, "
+            "duplicated, or reordered"
+        )
+    if fit != all(passed):
+        raise SummarySchemaError("cohort_fitness.fit disagrees with its own criteria")
+    return fit
+
+
 def _validate_summary_provenance(provenance: object) -> None:
     obj = _require_keyset(provenance, frozenset(_SUMMARY_PROVENANCE_KEYS), "cohort_provenance")
     _require_equal(obj["schema_version"], ARTIFACT_SCHEMA_VERSION,
@@ -7911,17 +8292,31 @@ def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> 
     winner = obj["winner"]
     cutoffs = obj["winner_cutoffs"]
     binding = obj["winner_binding"]
+    fit = _validate_summary_fitness(obj["cohort_fitness"])
+    mechanism_admissible = _require_summary_bool(
+        obj["mechanism_admissible"], "mechanism_admissible"
+    )
+    cutoffs_shippable = _require_summary_bool(obj["cutoffs_shippable"], "cutoffs_shippable")
     if no_ship != (winner is None):
         raise SummarySchemaError("no_ship must equal (winner is None)")
-    if (cutoffs is None) != (winner is None) or (binding is None) != (winner is None):
+    if (binding is None) != (winner is None):
+        raise SummarySchemaError("winner and winner_binding are present together or not at all")
+    # winner_cutoffs is NOT tied to the winner's presence: a winner selected from a cohort
+    # that may not set boundaries ships WITHOUT them. It is tied to cutoffs_shippable, which
+    # is itself tied to the winner and the fitness verdict below.
+    if (cutoffs is None) == cutoffs_shippable:
+        raise SummarySchemaError("winner_cutoffs is present IFF cutoffs_shippable")
+    if cutoffs_shippable and not (winner is not None and fit):
         raise SummarySchemaError(
-            "winner, winner_cutoffs, and winner_binding are present together or not at all"
+            "cutoffs_shippable requires both a winner and a calibration-fit cohort"
         )
     if winner is not None:
         w = _require_keyset(winner, _SUMMARY_WINNER_KEYS, "winner")
         if w["role"] not in _VALID_CANDIDATE_ROLES:
             raise SummarySchemaError("winner.role must be arm1|arm2")
         _require_p(w["p"], "winner.p")
+        _validate_summary_binding(binding)
+    if cutoffs is not None:
         c = _require_keyset(cutoffs, _SUMMARY_CUTOFF_KEYS, "winner_cutoffs")
         for key in ("a", "b", "c", "d", "alert", "watch"):
             _require_summary_int(c[key], f"winner_cutoffs.{key}")
@@ -7929,7 +8324,6 @@ def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> 
         # SERIALIZER is wrong, not the selector — which is exactly why it is checked here.
         if not (c["d"] < c["c"] < c["b"] < c["a"]) or not c["alert"] < c["watch"]:
             raise SummarySchemaError("winner_cutoffs violate d<c<b<a / alert<watch")
-        _validate_summary_binding(binding)
 
     _validate_summary_provenance(obj["cohort_provenance"])
 
@@ -7956,7 +8350,11 @@ def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> 
             f"candidates must be the pinned sweep of {expected_count} (role, cell) pairs"
         )
     for index, candidate in enumerate(candidates):
-        _validate_summary_candidate(candidate, index)
+        _validate_summary_candidate(candidate, index, fit)
+    if mechanism_admissible != any(c["mechanism_admissible"] for c in candidates):
+        raise SummarySchemaError(
+            "mechanism_admissible must equal (some candidate passed every raw gate)"
+        )
     # The EXACT (role, p) multiset, not merely the right COUNT. (role, p) is a bijection
     # with (role, cell) here — an arm's cells ARE its p-sweep — so this is the summary's
     # form of the identity check SelectionResult.__post_init__ makes on (role, cell). A
@@ -7979,6 +8377,11 @@ def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> 
             raise SummarySchemaError("winner does not name exactly one candidate")
         if matching[0]["admitted"] is not True:
             raise SummarySchemaError("winner names a candidate that was not admitted")
+        # The top-level cutoff verdict IS the winner's own — not a second opinion about it.
+        if cutoffs_shippable != matching[0]["cutoffs_shippable"]:
+            raise SummarySchemaError(
+                "cutoffs_shippable disagrees with the winning candidate's own verdict"
+            )
     elif any(c["admitted"] for c in candidates):
         raise SummarySchemaError("a no-ship summary carries an admitted candidate")
     # And the reason codes must be exactly the distinct rejections the candidates record.
