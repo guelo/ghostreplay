@@ -255,5 +255,35 @@ def apply_uci_normalized(fen: str, uci: str) -> str:
     return _resulting_fen(fen, uci)
 
 
+def replay_history_fen(moves: list[str]) -> str | None:
+    """Normalized FEN reached by replaying ``moves`` from the initial position.
+
+    ``None`` when any entry is not a legal move there — including a malformed string, a
+    non-string, or a null move.
+
+    This is what makes a move history EVIDENCE rather than an assertion. The opponent
+    endpoint records ``ply_before = len(request.moves)`` and drill root confirmation
+    treats that number as authoritative, so without a replay a client could pair a
+    genuine on-route FEN with a truncated history, be served the real route move, and
+    then confirm a boundary several plies too low — readmitting exactly the scripted
+    prefix the boundary exists to exclude.
+
+    Every drill starts from the standard position, which is why replaying from
+    ``chess.Board()`` is a complete proof for the drill branch that uses it.
+    """
+    board = chess.Board()
+    for uci in moves:
+        if not isinstance(uci, str):
+            return None
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError:
+            return None
+        if move not in board.legal_moves:
+            return None
+        board.push(move)
+    return normalize_fen(board.fen())
+
+
 def _reset_drill_route_cache_for_testing() -> None:
     _ROUTE_CACHE.clear()

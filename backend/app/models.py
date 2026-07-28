@@ -211,6 +211,14 @@ class GameSession(Base):
         ),
         CheckConstraint("rated_start_ply is null or rated_start_ply >= 0", name="ck_game_sessions_rated_start_ply"),
         CheckConstraint(
+            "drill_root_reached_ply is null or drill_root_reached_ply >= 0",
+            name="ck_game_sessions_drill_root_reached_ply",
+        ),
+        CheckConstraint(
+            "drill_root_reached_ply is null or session_mode = 'drill'",
+            name="ck_game_sessions_root_ply_requires_drill",
+        ),
+        CheckConstraint(
             "player_accuracy is null or (player_accuracy >= 0 and player_accuracy <= 100)",
             name="ck_game_sessions_player_accuracy",
         ),
@@ -251,6 +259,26 @@ class GameSession(Base):
     normal_started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     converted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     rated_start_ply: Mapped[int | None] = mapped_column(Integer)
+    # The drill's EVIDENCE BOUNDARY: the ply at which the opening root was CONFIRMED
+    # reached (g-root-confirm-api). Write-once and never re-derived at runtime — the
+    # opening graph is an input to FEN reconstruction, so a graph change could move or
+    # erase a historical boundary and make the same session account differently at two
+    # different times.
+    #
+    # Stamped ONLY by the drill route-check confirmation, which proves the arrival
+    # against a server-recorded opponent decision (or, for a player-reached root, against
+    # the decision two plies earlier) before writing. Serving the route move that WOULD
+    # reach the root deliberately does not stamp it: a response lost after commit would
+    # otherwise make a root no client ever applied durable.
+    #
+    # NULL means "no confirmed root", including for legacy 'root_reached' drills that
+    # predate confirmation. That is a real, expected residue, not a defect: a drill with
+    # no boundary contributes no reach evidence, while its targeted attempts survive
+    # independently in opponent_decisions.
+    #
+    # NOT the same as rated_start_ply (the CONVERSION boundary) and NOT SessionMove.
+    # segment — a drill can reach root, play on, and convert much later.
+    drill_root_reached_ply: Mapped[int | None] = mapped_column(Integer)
     # Idempotency bookkeeping for the first-blunder recording decision. Plain
     # (non-FK) columns: recorded_blunder_id mirrors Blunder.id so retries can
     # echo back the recorded id; blunder_idempotency_key is the decision key.

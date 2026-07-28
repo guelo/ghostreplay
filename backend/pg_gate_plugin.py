@@ -146,6 +146,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_branch_locks.py::test_route_check_off_route_yields_to_concurrent_root_reached",
     "test_branch_locks.py::test_route_check_root_reached_snapshot_preserves_concurrent_failure",
     "test_branch_locks.py::test_route_check_target_reached_yields_to_concurrent_failure",
+    # write-once drill evidence boundary under real row-lock contention
+    # (g-root-confirm-api). The single-connection SQLite engine cannot stage the race
+    # that decides which of two confirmations stamps the ply.
+    "test_drill_root_confirmation.py::test_concurrent_confirmations_converge_on_one_ply",
     # per-user graph-write advisory lock (g-graph-lock)
     "test_graph_write_lock.py::test_recording_times_out_and_persists_nothing_when_lock_held",
     "test_graph_write_lock.py::test_recording_vs_recording_serialize",

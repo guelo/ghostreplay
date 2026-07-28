@@ -306,10 +306,20 @@ def test_pg_population_parity_matrix(pg_migration_db, monkeypatch):
         )
 
     # --- application visibility: the ORM predicate agrees row by row ---
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.orm import load_only, sessionmaker
 
     from app.models import GameSession
     from app.session_contracts import is_visible_game_session, visible_session_filter
+
+    # This database is pinned at REVISION, not head, while ``GameSession`` is TODAY's
+    # model — so a full-entity load would SELECT columns later migrations add and fail
+    # with UndefinedColumn (g-root-confirm-api's drill_root_reached_ply was the first).
+    # Load only what the visibility predicate and these assertions read; the parity
+    # being checked is between the frozen SQL and the ORM PREDICATE, which no column
+    # added after this revision participates in.
+    _VISIBILITY_COLUMNS = load_only(
+        GameSession.status, GameSession.session_mode, GameSession.drill_state
+    )
 
     with eng.connect() as conn:
         frozen_ended_visible = {
@@ -323,12 +333,13 @@ def test_pg_population_parity_matrix(pg_migration_db, monkeypatch):
         orm_ended_visible = {
             s.id
             for s in db.query(GameSession)
+            .options(_VISIBILITY_COLUMNS)
             .filter(GameSession.status == "ended")
             .filter(visible_session_filter())
             .all()
         }
         assert orm_ended_visible == frozen_ended_visible
-        for session in db.query(GameSession).all():
+        for session in db.query(GameSession).options(_VISIBILITY_COLUMNS).all():
             expected = session.status == "ended" and is_visible_game_session(session)
             assert (session.id in frozen_ended_visible) is expected, by_id[session.id]
     finally:

@@ -1475,7 +1475,16 @@ def test_next_opponent_move_steers_through_a_densified_edge(
         session_id = start.json()["session_id"]
         resp = client.post(
             "/api/game/next-opponent-move",
-            json={"session_id": session_id, "fen": _NF3_D5_FEN},
+            # The history is required to reproduce the FEN (g-root-confirm-api): the
+            # pre-root drill branch records len(moves) as ply_before and root
+            # confirmation treats it as the session's evidence boundary. Every real
+            # caller sends the full UCI history; omitting it here relied on the schema
+            # default and claimed ply 0 for a two-ply position.
+            json={
+                "session_id": session_id,
+                "fen": _NF3_D5_FEN,
+                "moves": ["g1f3", "d7d5"],
+            },
             headers=auth_headers(),
         )
 

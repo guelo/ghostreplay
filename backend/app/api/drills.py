@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -7,6 +9,7 @@ from enum import Enum
 import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.openings import MAX_TREE_PLY
@@ -14,13 +17,15 @@ from app.db import get_db
 from app.drill_steering import (
     DrillRouteMap,
     DrillRouteMove,
+    apply_uci_normalized,
+    replay_history_fen,
     route_map_for_target,
     route_move_for_uci,
     route_preserving_moves,
     safe_san_for_uci,
 )
-from app.fen import normalize_fen
-from app.models import GameSession, decode_uci_line, encode_uci_line
+from app.fen import active_color, fen_hash, normalize_fen
+from app.models import GameSession, OpponentDecision, decode_uci_line, encode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_cache import bump_evidence_seq
 from app.opening_densify import routing_view
@@ -40,7 +45,13 @@ from app.session_contracts import (
     utcnow,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/drills", tags=["drills"])
+
+# Every drill starts from the standard position, so a root reached on ply 1 is the
+# player's own first move — the one arrival with nothing before it to anchor against.
+START_POSITION_FEN = normalize_fen(chess.Board().fen())
 
 
 class PlayerColor(str, Enum):
@@ -78,6 +89,15 @@ class DrillRouteCheckRequest(BaseModel):
     current_fen: str = Field(..., min_length=1)
     previous_fen: str | None = Field(None, min_length=1)
     played_uci: str | None = Field(None, min_length=4, max_length=5)
+    # Plies played to reach current_fen. OPTIONAL on purpose: this endpoint predates
+    # confirmation and the live client posts every route-check without it, so requiring
+    # it would 422 each drill move until g-root-confirm-cutover ships the sender.
+    # Absent = no boundary claim, which is exactly the legacy behaviour.
+    current_ply: int | None = Field(None, ge=0)
+    # The opponent_decisions row whose served move the client just applied. Required to
+    # confirm a root the OPPONENT moved into, rejected on one the player moved into —
+    # which of the two applies is derived from the target, never from this field.
+    decision_id: uuid.UUID | None = None
 
 
 class DrillRouteSuggestion(BaseModel):
@@ -100,6 +120,10 @@ class DrillRouteCheckResponse(BaseModel):
     target_fen: str
     suggestions: list[DrillRouteSuggestion]
     failure: DrillRouteFailure | None = None
+    # The session's committed evidence boundary, echoed so a client can tell a
+    # confirmed root from one that only transitioned. NULL on every pre-root response,
+    # and on a root whose boundary could not be proven.
+    drill_root_reached_ply: int | None = None
 
 
 class DrillSessionContract(BaseModel):
@@ -157,18 +181,23 @@ def _suggestion(move: DrillRouteMove) -> DrillRouteSuggestion:
 
 
 def _root_reached_response(
-    current_fen: str, route_map: DrillRouteMap
+    current_fen: str, route_map: DrillRouteMap, root_ply: int | None
 ) -> DrillRouteCheckResponse:
     return DrillRouteCheckResponse(
         status="root_reached",
         current_fen=current_fen,
         target_fen=route_map.target_fen,
         suggestions=[],
+        drill_root_reached_ply=root_ply,
     )
 
 
 def _refreshed_route_guard(
-    session: GameSession, current_fen: str, route_map: DrillRouteMap
+    session: GameSession,
+    current_fen: str,
+    route_map: DrillRouteMap,
+    *,
+    boundary_pending: bool = False,
 ) -> DrillRouteCheckResponse | None:
     """Re-derive a route-check mutating branch from refreshed, locked state.
 
@@ -180,6 +209,12 @@ def _refreshed_route_guard(
     * still active pre-root -> ``None``; the caller performs its intended write;
     * already root-reached -> the root-reached response, sent WITHOUT writing;
     * failed/abandoned/converted/non-active -> the existing entry 400.
+
+    ``boundary_pending`` narrows the root-reached case by exactly one situation: a
+    VALIDATED boundary claim for a row that carries no boundary yet must proceed to
+    stamp it. The serve path still transitions to ``root_reached`` before the client
+    applies the move (g-root-confirm-cutover removes that), so the confirmation must be
+    able to stamp a boundary onto a row whose state a serve already advanced.
     """
     if session.status != "active":
         raise HTTPException(status_code=400, detail="Drill session is not active")
@@ -189,8 +224,226 @@ def _refreshed_route_guard(
             detail="Drill route cannot be checked from its current state",
         )
     if session.drill_state == "root_reached":
-        return _root_reached_response(current_fen, route_map)
+        if boundary_pending and session.drill_root_reached_ply is None:
+            return None
+        return _root_reached_response(
+            current_fen, route_map, session.drill_root_reached_ply
+        )
     return None
+
+
+def _confirmed_root_ply(
+    db: Session,
+    session: GameSession,
+    request: DrillRouteCheckRequest,
+    route_map: DrillRouteMap,
+    current_fen: str,
+    previous_fen: str | None,
+) -> int | None:
+    """Prove the ply at which this drill reached its opening root, or refuse to.
+
+    Returns the PROVEN ply, or ``None`` when the claim is well formed but unprovable —
+    the caller then transitions drill state without stamping a boundary. Raises 422 when
+    the claim CONTRADICTS server-side evidence.
+
+    Which proof is owed is derived, never inferred from the request. A FEN's active
+    colour fixes who moved into it, so the route target alone decides whether the root
+    is reached by the player or by the opponent; a client cannot select the weaker path
+    by omitting ``decision_id``.
+    """
+    current_ply = request.current_ply
+    if current_ply is None:  # pragma: no cover — the caller gates on this
+        return None
+    if current_ply < 1:
+        raise HTTPException(
+            status_code=422, detail="current_ply does not match the drill's move order"
+        )
+    # The target's own side-to-move fixes the parity of ANY ply that reaches it: white
+    # to move means an even number of plies has been played. That is a property of the
+    # position, so it holds whichever side moved in, and it is checked without trusting
+    # a single recorded number.
+    if current_ply % 2 != (0 if active_color(route_map.target_fen) == "white" else 1):
+        raise HTTPException(
+            status_code=422, detail="current_ply does not match the drill's move order"
+        )
+    root_mover = "black" if active_color(route_map.target_fen) == "white" else "white"
+    if root_mover == session.player_color:
+        return _confirmed_player_root_ply(
+            db, session, request, current_fen, previous_fen, current_ply
+        )
+    return _confirmed_opponent_root_ply(db, session, request, current_fen, current_ply)
+
+
+def _decision_ply_is_proven(decision: OpponentDecision) -> bool:
+    """Is this decision's ``ply_before`` backed by its own recorded history?
+
+    ``ply_before`` is ``len(request.moves)`` at serve time. The serve path replays that
+    history and requires it to reproduce the request FEN before recording — but only in
+    the pre-root drill branch, and only for rows written since g-root-confirm-api.
+    Re-proving it here closes both gaps, using only columns the row already carries:
+    replay the stored history, require it to hash to the stored request FEN, and require
+    its length to be the recorded ply.
+
+    The gap that is NOT merely legacy: once a drill is root-reached the endpoint serves
+    from the ghost/engine path, which validates no history, and the ghost can steer back
+    through the route target by repetition. Such a decision has ``resulting_fen`` equal
+    to the target, so it reaches this validator — with a ply nothing checked. Re-proving
+    is what stops it from stamping a boundary far below the real root.
+
+    A row that fails is not a client contradiction — it is a record whose ply is not
+    evidence — so callers decline to stamp rather than rejecting the confirmation.
+    """
+    try:
+        history = json.loads(decision.uci_history)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(history, list) or len(history) != decision.ply_before:
+        return False
+    replayed = replay_history_fen(history)
+    return replayed is not None and fen_hash(replayed) == decision.request_fen_hash
+
+
+def _confirmed_opponent_root_ply(
+    db: Session,
+    session: GameSession,
+    request: DrillRouteCheckRequest,
+    current_fen: str,
+    current_ply: int,
+) -> int | None:
+    """The opponent moved into the root, so the server itself served that move.
+
+    Nothing here is client-asserted: ``ply_before`` and ``resulting_fen`` are both read
+    off the recorded decision, so the client's numbers are only ever compared against
+    them — and ``ply_before`` is itself only evidence once its own history replays
+    (``_decision_ply_is_proven``).
+    """
+    if request.decision_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="decision_id is required to confirm an opponent-reached drill root",
+        )
+    decision = db.execute(
+        select(OpponentDecision).where(
+            OpponentDecision.decision_id == request.decision_id,
+            OpponentDecision.session_id == session.id,
+        )
+    ).scalar_one_or_none()
+    if decision is None:
+        # Same answer for unknown and foreign: the id is an unguessable uuid4, and a
+        # distinguishing response would confirm existence across sessions.
+        raise HTTPException(
+            status_code=422, detail="Unknown opponent decision for this drill session"
+        )
+    # Geometry decides, NOT the recorded ``reaches_drill_root`` flag: that column is
+    # extracted from the response's status string, which the cutover renames to
+    # root_pending. The caller already proved current_fen IS the route target, so a
+    # decision whose resulting_fen is current_fen reaches the root by construction.
+    # A stale id from a reverted branch fails here rather than stamping.
+    if decision.resulting_fen != current_fen:
+        raise HTTPException(
+            status_code=422, detail="The confirmed decision does not reach the drill root"
+        )
+    if not _decision_ply_is_proven(decision):
+        # The decision exists and reaches the root, but its recorded ply is not backed
+        # by a history that reproduces the position it was served from — a row from
+        # before the serve-time replay existed. Transition without a boundary rather
+        # than writing a ply nothing proves.
+        logger.warning(
+            "drill root confirmation left unstamped: decision %s has an unproven "
+            "ply_before session_id=%s",
+            decision.decision_id,
+            session.id,
+        )
+        return None
+    if current_ply != decision.ply_before + 1:
+        raise HTTPException(
+            status_code=422, detail="current_ply does not match the served decision"
+        )
+    return current_ply
+
+
+def _confirmed_player_root_ply(
+    db: Session,
+    session: GameSession,
+    request: DrillRouteCheckRequest,
+    current_fen: str,
+    previous_fen: str | None,
+    current_ply: int,
+) -> int | None:
+    """The player moved into the root, so no decision records the arrival itself.
+
+    ``session_moves`` uploads are asynchronous, so at confirmation time the server holds
+    no record of the player's move. Every remaining proof is therefore required: the
+    played move is replayed to check it produces the observed position (the caller has
+    already checked the ply's parity against the target), and the ply itself is ANCHORED
+    to the decision log — the position the player moved FROM is the resulting position
+    of the opponent decision this server served two plies earlier, and that decision's
+    own ply must be proven in turn.
+
+    The anchor is what keeps ``current_ply`` from being a bare client assertion, and the
+    asymmetry matters: a too-low boundary readmits the scripted pre-root plies this whole
+    boundary exists to exclude, while a too-high one only discards the claimant's own
+    evidence.
+    """
+    if request.decision_id is not None:
+        raise HTTPException(
+            status_code=422,
+            detail="decision_id is not valid for a player-reached drill root",
+        )
+    if previous_fen is None or request.played_uci is None:
+        raise HTTPException(
+            status_code=422,
+            detail="previous_fen and played_uci are required to confirm the drill root",
+        )
+    try:
+        played_fen = apply_uci_normalized(previous_fen, request.played_uci)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail="played_uci is not legal in previous_fen"
+        ) from exc
+    if played_fen != current_fen:
+        raise HTTPException(
+            status_code=422, detail="played_uci does not produce the confirmed position"
+        )
+
+    if current_ply == 1:
+        # The player moved first: nothing precedes it, so the start position IS the
+        # anchor and the ply is fully proven.
+        if previous_fen != START_POSITION_FEN:
+            raise HTTPException(
+                status_code=422,
+                detail="A ply-1 drill root must be reached from the start position",
+            )
+        return 1
+
+    # Any decision matching BOTH the position moved from and the ply two before proves
+    # this arrival. Several rows can match — a transposition reaches the same position
+    # at the same ply by a different history — and each carries its own proof, so the
+    # anchor holds if ANY of them is itself proven.
+    candidates = (
+        db.execute(
+            select(OpponentDecision).where(
+                OpponentDecision.session_id == session.id,
+                OpponentDecision.ply_before == current_ply - 2,
+                OpponentDecision.resulting_fen == previous_fen,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not any(_decision_ply_is_proven(decision) for decision in candidates):
+        # Well formed but unprovable — a drill in flight across the deploy, or history
+        # predating the decision log. NOT a contradiction, so it must not fail the
+        # confirmation: a NULL boundary already means "contributes no reach evidence",
+        # while rejecting would strand a live drill for a claim we merely cannot check.
+        logger.warning(
+            "drill root confirmation left unstamped: no decision anchors ply %d "
+            "session_id=%s",
+            current_ply,
+            session.id,
+        )
+        return None
+    return current_ply
 
 
 def _contract(
@@ -456,6 +709,10 @@ def check_drill_route(
         raise HTTPException(status_code=400, detail="Drill route cannot be checked from its current state")
     if (request.previous_fen is None) != (request.played_uci is None):
         raise HTTPException(status_code=400, detail="previous_fen and played_uci must be provided together")
+    if request.decision_id is not None and request.current_ply is None:
+        raise HTTPException(
+            status_code=422, detail="current_ply is required with decision_id"
+        )
 
     routing = routing_view(get_opening_graph())
     route_map = route_map_for_target(
@@ -470,22 +727,69 @@ def check_drill_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {exc}") from exc
 
-    if session.drill_state == "root_reached":
-        # Entry snapshot: this response writes nothing and may reflect state that
-        # changes concurrently. Do NOT lock — snapshot semantics are intentional.
-        return _root_reached_response(current_fen, route_map)
+    at_root = route_map.is_target(current_fen)
+    if request.decision_id is not None and not at_root:
+        # A confirmation for a position that is not the root. The server SERVED that
+        # move, so this is the confirmation failing — never the drill: refuse here
+        # rather than letting it fall through to the off-route failure branch.
+        raise HTTPException(
+            status_code=422, detail="Confirmed position is not the drill root"
+        )
+    # A boundary CLAIM is current_ply AT THE ROOT. Everywhere else current_ply is
+    # ordinary metadata — the per-player-move call site sends it on every check.
+    # Validate BEFORE anything else touches the row: the claim reads only immutable
+    # inputs (the route target, player_color, decision rows), so a false one fails fast
+    # and never acquires the lock, and a claim that proves nothing cannot turn a
+    # snapshot branch into a locking one.
+    confirmed_ply = (
+        _confirmed_root_ply(db, session, request, route_map, current_fen, previous_fen)
+        if at_root and request.current_ply is not None
+        else None
+    )
 
-    if route_map.is_target(current_fen):
+    if session.drill_state == "root_reached" and not (
+        confirmed_ply is not None and session.drill_root_reached_ply is None
+    ):
+        # Entry snapshot: this response writes nothing and may reflect state that
+        # changes concurrently. Do NOT lock — snapshot semantics are intentional. The
+        # one case that must NOT stop here is a PROVEN boundary for a row that has
+        # none: the serve path still transitions state before the client applies the
+        # move, so confirmation has to be able to stamp a boundary onto an
+        # already-root_reached row. Reading the boundary unlocked is safe because it is
+        # write-once.
+        return _root_reached_response(
+            current_fen, route_map, session.drill_root_reached_ply
+        )
+
+    if at_root:
         # Mutating branch. The unlocked snapshot told us only the geometry; lock
         # and refresh the row, then re-derive the branch before writing so a
         # concurrent terminal transition survives instead of being overwritten.
         session = _get_drill_for_update(db, session_id)
-        guard = _refreshed_route_guard(session, current_fen, route_map)
+        guard = _refreshed_route_guard(
+            session,
+            current_fen,
+            route_map,
+            boundary_pending=confirmed_ply is not None,
+        )
         if guard is not None:
             return guard
-        session.drill_state = "root_reached"
+        if session.drill_state != "root_reached":
+            session.drill_state = "root_reached"
+        # Read the boundary BEFORE the commit expires the row: echoing it afterwards
+        # would cost a third game_sessions SELECT on every root-reaching check.
+        root_ply = session.drill_root_reached_ply
+        if confirmed_ply is not None and root_ply is None:
+            # Write-once, and in the SAME transaction as any state transition it
+            # accompanies. The invariant is ONE-WAY: a non-NULL boundary always implies
+            # root_reached, but root_reached does NOT imply a boundary — the serve path,
+            # legacy sessions and soft-declined confirmations all leave it NULL
+            # permanently. A concurrent confirmation that won the lock first has already
+            # stamped, so this one converges on ITS ply instead of restamping.
+            session.drill_root_reached_ply = confirmed_ply
+            root_ply = confirmed_ply
         db.commit()
-        return _root_reached_response(current_fen, route_map)
+        return _root_reached_response(current_fen, route_map, root_ply)
 
     if route_map.is_on_route(current_fen):
         # Snapshot: writes nothing and may reflect concurrently changing state.

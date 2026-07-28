@@ -21,7 +21,11 @@ from sqlalchemy.orm import Session
 from app.accuracy import expected_total_moves_from_pgn, recompute_session_accuracy
 from app.centipawn_loss import centipawn_loss
 from app.db import get_db
-from app.drill_steering import route_map_for_target, route_preserving_moves
+from app.drill_steering import (
+    replay_history_fen,
+    route_map_for_target,
+    route_preserving_moves,
+)
 from app.fen import fen_hash, active_color, normalize_fen
 from app.models import (
     GameSession,
@@ -1303,6 +1307,30 @@ def get_next_opponent_move(
         else:
             if not session.drill_opening_key:
                 raise HTTPException(status_code=400, detail="Drill is missing an opening root")
+            # PROVE the history before recording its length. ply_before is
+            # len(request.moves), and drill root confirmation treats that number as
+            # authoritative evidence for the session's evidence boundary — so an
+            # unverified history is a client-controlled boundary. A legitimate on-route
+            # FEN paired with a truncated history would otherwise be served the real
+            # route move and then confirm a boundary several plies too low, readmitting
+            # the scripted prefix the boundary exists to exclude.
+            #
+            # Scoped to the pre-root drill branch on purpose. NOT because confirmation
+            # only ever reads rows written here — it reads any decision in the session,
+            # including ghost/engine rows written after the root, which can carry
+            # resulting_fen == the target by repetition (see
+            # test_post_root_ghost_decision_cannot_stamp_a_low_boundary). The scoping is
+            # safe because confirmation re-proves every row it reads against that row's
+            # own uci_history/request_fen_hash and declines to stamp what it cannot prove;
+            # this check only makes the pre-root rows provable in the first place, where
+            # the proof is complete (every drill starts from the standard position) and
+            # the ghost/engine path deliberately forwards `moves` to Maia verbatim with
+            # no per-element validation.
+            if replay_history_fen(request.moves) != normalized_request_fen:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Move history does not reproduce the requested position",
+                )
             routing = routing_view(get_opening_graph())
             route_map = route_map_for_target(
                 routing, session.drill_opening_key, decode_uci_line(session.drill_line)
