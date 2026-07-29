@@ -52,28 +52,28 @@ describe('analytics/posthog', () => {
     expect(mod.isAnalyticsEnabled()).toBe(false)
   })
 
-  it('does not initialize when Global Privacy Control is signaled', async () => {
-    // The SDK ignores navigator.globalPrivacyControl, so our pre-init gate must
-    // skip init entirely — leaving analytics off even with a valid token.
+  it('initializes even when Global Privacy Control is signaled', async () => {
+    // f763907 removed the pre-init GPC bail: DNT (via the SDK's own respect_dnt)
+    // is the only privacy gate now, and navigator.globalPrivacyControl must not
+    // block init on its own.
     vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
     vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
     vi.stubGlobal('navigator', { globalPrivacyControl: true })
     const mod = await import('./posthog')
     mod.initAnalytics()
-    expect(initMock).not.toHaveBeenCalled()
-    expect(mod.isAnalyticsEnabled()).toBe(false)
-  })
-
-  it('initializes normally when Global Privacy Control is not asserted', async () => {
-    // A falsy globalPrivacyControl (or its absence) must NOT block init — only
-    // an explicit `true` is a GPC signal.
-    vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
-    vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
-    vi.stubGlobal('navigator', { globalPrivacyControl: false })
-    const mod = await import('./posthog')
-    mod.initAnalytics()
     expect(initMock).toHaveBeenCalledTimes(1)
     expect(mod.isAnalyticsEnabled()).toBe(true)
+  })
+
+  it('delegates Do Not Track to the SDK via respect_dnt', async () => {
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
+    const mod = await import('./posthog')
+    mod.initAnalytics()
+    expect(initMock).toHaveBeenCalledWith(
+      'phc_test',
+      expect.objectContaining({ respect_dnt: true }),
+    )
   })
 
   it('no-ops identify/reset/capture when disabled', async () => {

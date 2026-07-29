@@ -55,8 +55,8 @@ export function initAnalytics(): void {
     disable_session_recording: true,
     // Honor Do Not Track: with this set the SDK opts capture out when
     // navigator.doNotTrack / msDoNotTrack / window.doNotTrack is yes-like.
-    // (GPC is handled separately in isGpcSignaled() above, which the SDK
-    // ignores.)
+    // This is the ONLY privacy gate — the pre-init GPC bail was removed in
+    // f763907, so navigator.globalPrivacyControl no longer blocks capture.
     respect_dnt: true,
   })
   enabled = true
