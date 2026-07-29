@@ -42,6 +42,25 @@ every `api_request` with the HTTP-header equivalents:
 `api_request_client`". If a healthy volume of those requests arrives and no
 client events do, client capture is genuinely broken.
 
+### Content blockers sit inside the denominator, deliberately
+
+DNT and GPC announce themselves in a request header, so the server can subtract
+them. A content blocker does not. uBlock Origin drops the `/ingest` POST while
+the `/api` calls beside it go through untouched — so that browser is tagged
+`dnt_signaled = false`, lands in the denominator, and contributes nothing to the
+numerator.
+
+That is the right treatment: blocker-induced loss is real telemetry loss, and it
+is invisible to every other signal we have. But it has two consequences. A
+healthy ratio is bounded well below 1.0 by the steady-state blocker share, and a
+*rising* blocker share looks identical to a code regression on the ratio alone —
+so check `vercel.json` and the bundle before concluding either.
+
+The same-origin `/ingest` proxy confers no immunity. It exists for COEP/CORS
+(`src/analytics/posthog.ts:14-21`) and merely happens to dodge some blocklists;
+uBlock Origin blocked capture straight through it on this app, discovered
+2026-07-29.
+
 ### What the first read showed (2026-07-28)
 
 The gate rate came back at **~100%**, and it is **DNT, not GPC**, doing the
@@ -56,15 +75,22 @@ was **two browsers**: one with 3,107 requests (DNT, no GPC) and one with 315
 The app is unreleased — all of it is developer testing, and both test browsers
 had DNT enabled.
 
-So there is no "audience privacy mix" here to reason about. The fix is to clear
-DNT in the test browsers, or to add a first-party opt-in override for local
-testing.
+So there is no "audience privacy mix" here to reason about.
 
-**Until that happens the canary is dormant**: its denominator is near zero, the
-volume guard is never satisfied, and the alert cannot fire. That is correct
-behavior — silence is not an outage when nobody is ungated — but it means this
-is not yet a working detection signal. Watch the ungated-volume series itself
-in the meantime: `B` climbing off zero while `A` stays flat is the outage.
+### Resolution (2026-07-29)
+
+Clearing DNT was necessary but not sufficient. Capture stayed dead until uBlock
+Origin was disabled as well — two independent kill switches, either one fatal on
+its own, which is exactly why fixing the first changed nothing observable and
+looked like a failed fix.
+
+With both cleared the day reads 789 server requests, **789 of them ungated**, and
+**783 `api_request_client` events — a capture ratio of 0.992**. Two `final_full`
+events landed (`game_end`, `resign`), the first ever captured in production, and
+both joined to durable `session_upload_receipt` rows by `client_request_id`.
+
+Treat 0.992 as a **ceiling, not a steady state**: that browser had its blocker
+disabled, so its blocker share was zero. No real population will match it.
 
 > These properties ship from commit `5eeee18` (deployed 2026-07-24). They are
 > absent on earlier events, so scope any backfill query to `timestamp >=
@@ -131,9 +157,18 @@ a healthy ratio is at most 1.0 and should sit well above 0.5. For reference, on
 *total* server volume (6400 / 8238), and the ungated denominator is strictly
 smaller than that, so the true healthy ratio was higher still.
 
+Measured directly against the ungated denominator on 2026-07-29: **783 / 789 =
+0.992**, confirming the ~1:1 model. The six unmatched requests are consistent
+with server-side retries, which add server rows but not client rows.
+
 **Re-calibrate once client capture is restored and a week of clean data exists.**
 Set the threshold to roughly half the observed p10 daily ratio. Until then 0.20
 is low enough that only a real outage trips it.
+
+Calibrate from the *observed* ratio, never from the theoretical 1.0: the blocker
+share above is a permanent floor under the numerator, and its size here is
+unknown — this app has never had a client-capture window that was both ungated
+and blocker-free.
 
 Note that 6400 / 8238 came from a pre-release window, so it is the developer's
 own testing too, not a production baseline. Use it as a sanity bound on the
@@ -145,6 +180,7 @@ shape of the ratio, not as a target.
 |---|---|
 | `capture_ratio` ~0, `ungated_requests` healthy | Real outage. Client capture is broken for browsers that never asked to be excluded. Bisect recent frontend commits touching `src/analytics/posthog.ts`, `main.tsx`, or `vercel.json`'s `/ingest` rewrites. |
 | `capture_ratio` ~0, `ungated_requests` ~0 | Not an outage — the audience really is asserting GPC/DNT. Nothing to fix client-side; measure the affected outcomes server-side instead. |
+| `capture_ratio` sags gradually, no deploy correlates | Likely a drifting content-blocker share, not a regression. Blocked browsers are in the denominator by design (above). Confirm against the bundle/`vercel.json` history before chasing code. |
 | `capture_ratio` healthy, a specific route missing | Not this canary's job — a call-site bug, not a capture outage. |
 | Both series ~0 | Ingest or traffic outage, not client-specific. The existing `api_request` volume insight covers it. |
 
