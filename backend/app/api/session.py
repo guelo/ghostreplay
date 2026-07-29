@@ -185,6 +185,12 @@ class SessionMovesRequest(BaseModel):
     terminal_action: (
         Literal["game_end", "resign", "drill_natural_end", "accuracy_fail"] | None
     ) = None
+    # Sent ONLY by the post-finalization sparse evaluation repair. The endpoint
+    # requires a committed final_full receipt before applying it, so a client
+    # timeout cannot let the repair race ahead of a final request that is still
+    # committing a stale null snapshot.
+    eval_repair: bool = False
+    final_client_request_id: uuid.UUID | None = None
 
 
 class SessionMovesResponse(BaseModel):
@@ -1348,6 +1354,11 @@ def _emit_session_moves_uploaded(
 
 
 @router.post(
+    "/{session_id}/moves/eval-repair",
+    response_model=SessionMovesResponse,
+    response_model_exclude_none=True,
+)
+@router.post(
     "/{session_id}/moves",
     response_model=SessionMovesResponse,
     response_model_exclude_none=True,
@@ -1365,6 +1376,16 @@ def upsert_session_moves(
     if game_session is None:
         raise HTTPException(status_code=404, detail="Game session not found")
     _ensure_session_owned_by_user(game_session, user)
+    is_eval_repair_route = http_request.url.path.endswith("/moves/eval-repair")
+    if request.eval_repair != is_eval_repair_route:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "eval repair requires the dedicated moves/eval-repair route"
+                if request.eval_repair
+                else "moves/eval-repair route requires eval_repair"
+            ),
+        )
     _validate_unique_move_keys(request.moves)
 
     # g-upload-observe. A client-sent terminal_action marks the end-of-session
@@ -1385,6 +1406,45 @@ def upsert_session_moves(
             status_code=400,
             detail="final_full upload requires a valid X-Client-Request-ID",
         )
+
+    if request.eval_repair:
+        if is_final_full:
+            raise HTTPException(
+                status_code=400,
+                detail="eval repair cannot also be final_full",
+            )
+        if not request.moves or any(
+            move.eval_cp is None and move.eval_mate is None
+            for move in request.moves
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="eval repair requires a real evaluation on every move",
+            )
+        if request.final_client_request_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="eval repair requires final_client_request_id",
+            )
+        # The session NKU lock above serializes this read with final_full. If a
+        # timed-out final request is still committing, this request waits behind
+        # it and then sees the receipt; if final_full never commits, 409 asks the
+        # coordinator's bounded frozen retry loop to try again without writing.
+        receipt_exists = (
+            db.query(SessionUploadReceipt.client_request_id)
+            .filter(
+                SessionUploadReceipt.session_id == session_id,
+                SessionUploadReceipt.client_request_id
+                == request.final_client_request_id,
+            )
+            .first()
+            is not None
+        )
+        if not receipt_exists:
+            raise HTTPException(
+                status_code=409,
+                detail="final_full receipt not yet available",
+            )
 
     def _add_upload_receipt() -> None:
         """Stage the durable final_full receipt into the CURRENT transaction.

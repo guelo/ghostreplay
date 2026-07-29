@@ -322,6 +322,29 @@ describe('uploadSessionMoves', () => {
     )
   })
 
+  it('sends a cancellable late repair without terminal receipt fields', async () => {
+    mockResponse({ moves_inserted: 1 })
+    const controller = new AbortController()
+
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'late_eval_repair',
+      finalClientRequestId: 'final-request-123',
+      signal: controller.signal,
+      recomputeOpportunity: false,
+    })
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(fetchMock.mock.calls[0][0]).toEqual(
+      expect.stringContaining('/api/session/sess-1/moves/eval-repair'),
+    )
+    const body = JSON.parse(init.body as string)
+    expect(init.signal).toBe(controller.signal)
+    expect(body.recompute_opportunity).toBe(false)
+    expect(body.eval_repair).toBe(true)
+    expect(body.final_client_request_id).toBe('final-request-123')
+    expect('terminal_action' in body).toBe(false)
+  })
+
   it('constructs the timeout from deadlineMs for a final_full upload', async () => {
     mockResponse({ moves_inserted: 1 })
 
@@ -334,6 +357,22 @@ describe('uploadSessionMoves', () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit
     // The union constructs its own AbortSignal.timeout(deadlineMs) internally.
     expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('uses a caller-bound client id for the final receipt', async () => {
+    mockResponse({ moves_inserted: 1 })
+    const clientRequestId = '11111111-1111-4111-8111-111111111111'
+
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'final_full',
+      terminalAction: 'game_end',
+      deadlineMs: 4000,
+      clientRequestId,
+    })
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit)
+      .headers as Record<string, string>
+    expect(headers['X-Client-Request-ID']).toBe(clientRequestId)
   })
 
   it('sends terminal_action in the body ONLY for a final_full upload', async () => {
@@ -433,6 +472,12 @@ describe('uploadSessionMoves', () => {
         uploadKind: 'revert',
         // @ts-expect-error revert cannot carry deadlineMs
         deadlineMs: 4000,
+      })
+      // @ts-expect-error repair uploads cannot trigger opportunity recompute
+      await uploadSessionMoves('s', [], {
+        uploadKind: 'late_eval_repair',
+        finalClientRequestId: 'final-request-123',
+        recomputeOpportunity: true,
       })
       // @ts-expect-error uploadKind is required
       await uploadSessionMoves('s', [], {})

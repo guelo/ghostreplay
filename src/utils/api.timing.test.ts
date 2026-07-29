@@ -101,6 +101,12 @@ describe('normalizeApiPath', () => {
     )
   })
 
+  it('maps the dedicated eval-repair route to the exact backend template', () => {
+    expect(normalizeApiPath(`/api/session/${uuid}/moves/eval-repair`)).toBe(
+      '/api/session/{session_id}/moves/eval-repair',
+    )
+  })
+
   it('maps the analysis-evidence route to the exact template (not {id} fallback)', () => {
     expect(normalizeApiPath(`/api/session/${uuid}/analysis-evidence`)).toBe(
       '/api/session/{session_id}/analysis-evidence',
@@ -390,6 +396,21 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
     expect(props.error_kind).toBe('parse')
     expect(props.upload_kind).toBe('revert')
     expect(props.client_request_id).toEqual(expect.any(String))
+  })
+
+  it('isolates a successful late evaluation repair from final_full receipts', async () => {
+    uploadOk()
+
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'late_eval_repair',
+      finalClientRequestId: 'final-request-123',
+      recomputeOpportunity: false,
+    })
+
+    const props = onlyClientEvent()
+    expect(props.upload_kind).toBe('late_eval_repair')
+    expect(props.terminal_action).toBeNull()
+    expect(props.deadline_ms).toBeNull()
   })
 
   it('records payload_bytes as the transmitted UTF-8 byte length (TextEncoder), not JSON.stringify length', async () => {

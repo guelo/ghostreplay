@@ -23,6 +23,7 @@ vi.mock("../utils/api", () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
+  newClientRequestId: () => "final-request-123",
   startDrill: (...args: unknown[]) => startDrillMock(...args),
   continueDrill: (...args: unknown[]) => continueDrillMock(...args),
   abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
@@ -70,6 +71,9 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
       sessionId: useGameStore.getState().sessionId,
     })),
     settleWithin: vi.fn().mockResolvedValue(undefined),
+    armLateEvaluationRepair: vi.fn().mockReturnValue(false),
+    releaseLateEvaluationRepair: vi.fn(),
+    cancelLateEvaluationRepair: vi.fn(),
     store: { getState: vi.fn().mockReturnValue({ analysisMap: new Map() }) },
     // Coordinator-owned recording/SRS owner (g-2m0p). The lifecycle only calls
     // cancelPendingSrsReviews on it; spy on that to assert the early-clear contract.
@@ -1917,7 +1921,7 @@ describe("useChessGameLifecycle", () => {
       expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).not.toContain(0);
     });
 
-    it("waits AFTER stopping uploads, so the upload stays the last /moves", async () => {
+    it("waits AFTER stopping ordinary uploads, before the final full upload", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
         chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
@@ -1930,7 +1934,7 @@ describe("useChessGameLifecycle", () => {
       });
 
       // stop -> wait -> upload. Stopping does NOT stop analysis resolution, so
-      // this ordering preserves g-y90g while still exposing a late eval.
+      // this ordering preserves final-full ownership while exposing a late eval.
       const stopOrder = vi.mocked(coordinator.stopSessionUploads).mock
         .invocationCallOrder[0];
       const waitOrder = vi.mocked(coordinator.settleWithin).mock
@@ -1939,6 +1943,63 @@ describe("useChessGameLifecycle", () => {
       expect(waitOrder).toBeLessThan(
         uploadSessionMovesMock.mock.invocationCallOrder[0],
       );
+    });
+
+    it("arms a late penultimate repair and releases it only after final_full settles", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      endGameOnce();
+      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValueOnce(true);
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      expect(coordinator.armLateEvaluationRepair).toHaveBeenCalledWith(
+        "session-123",
+        0,
+        2,
+        moveHistory,
+        "final-request-123",
+      );
+      expect(
+        vi.mocked(coordinator.armLateEvaluationRepair).mock.invocationCallOrder[0],
+      ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ clientRequestId: "final-request-123" }),
+      );
+      expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(coordinator.releaseLateEvaluationRepair).mock
+          .invocationCallOrder[0],
+      );
+    });
+
+    it("disarms when the penultimate resolves into the final snapshot", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValueOnce(true);
+      vi.mocked(coordinator.store.getState).mockReturnValueOnce({
+        analysisMap: new Map([[2, { playedEval: 12 }]]),
+      } as ReturnType<GameAnalysisCoordinator["store"]["getState"]>);
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "game_end",
+        );
+      });
+
+      expect(coordinator.cancelLateEvaluationRepair).toHaveBeenCalledWith(
+        "session-123",
+        0,
+      );
+      expect(coordinator.releaseLateEvaluationRepair).not.toHaveBeenCalled();
     });
 
     it("hands the upload only the REMAINDER of the absolute deadline", async () => {

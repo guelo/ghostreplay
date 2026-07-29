@@ -43,7 +43,7 @@ from app.accuracy import (
     expected_total_moves_from_pgn,
     recompute_session_accuracy,
 )
-from app.models import GameSession, SessionMove
+from app.models import GameSession, SessionMove, SessionUploadReceipt
 from app.opening_cache import current_evidence_seq
 from conftest import engine, pg_required
 from sql_capture import capture_statements, cursor_last_before_commit
@@ -66,6 +66,10 @@ MOVES_LOW = [
 # whole-game accuracy is a legitimate None.
 MOVES_CLEAR_WHITE = [
     {"move_number": 1, "color": "white", "move_san": "e4", "fen_after": "f1w", "eval_cp": None, "eval_mate": None},
+]
+MOVES_GAP = [
+    *MOVES_CLEAR_WHITE,
+    {"move_number": 1, "color": "black", "move_san": "e5", "fen_after": "f1b", "eval_cp": -10},
 ]
 
 
@@ -316,6 +320,117 @@ def test_post_end_upload_changes_accuracy_and_retains_version(
     assert after.player_accuracy is not None
     assert after.player_accuracy != first  # the blundered white move lowered it
     assert after.player_accuracy_algo_version == ACCURACY_ALGO_VERSION
+
+
+def test_sparse_post_end_eval_repair_heals_accuracy_without_another_final_receipt(
+    client, auth_headers, create_game_session, db_session
+):
+    """A receipt-gated one-row repair heals the ended cache without masquerading
+    as another final_full receipt."""
+    sid = create_game_session(user_id=123)
+    client_request_id = uuid.uuid4()
+    final_upload = client.post(
+        f"/api/session/{sid}/moves",
+        json={
+            "moves": MOVES_GAP,
+            "terminal_action": "game_end",
+            "recompute_opportunity": False,
+        },
+        headers={
+            **auth_headers(user_id=123),
+            "X-Client-Request-ID": str(client_request_id),
+        },
+    )
+    assert final_upload.status_code == 200, final_upload.text
+    _end(client, auth_headers, sid)
+    assert _get(db_session, sid).player_accuracy is None
+    assert (
+        db_session.query(SessionUploadReceipt)
+        .filter(SessionUploadReceipt.session_id == uuid.UUID(str(sid)))
+        .count()
+        == 1
+    )
+
+    wrong_route = client.post(
+        f"/api/session/{sid}/moves",
+        json={
+            "moves": [MOVES_HIGH[0]],
+            "eval_repair": True,
+            "final_client_request_id": str(client_request_id),
+            "recompute_opportunity": False,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert wrong_route.status_code == 400
+    assert _get(db_session, sid).player_accuracy is None
+
+    missing_discriminator = client.post(
+        f"/api/session/{sid}/moves/eval-repair",
+        json={
+            "moves": [MOVES_HIGH[0]],
+            "final_client_request_id": str(client_request_id),
+            "recompute_opportunity": False,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert missing_discriminator.status_code == 400
+    assert _get(db_session, sid).player_accuracy is None
+
+    wrong_receipt = client.post(
+        f"/api/session/{sid}/moves/eval-repair",
+        json={
+            "moves": [MOVES_HIGH[0]],
+            "eval_repair": True,
+            "final_client_request_id": str(uuid.uuid4()),
+            "recompute_opportunity": False,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert wrong_receipt.status_code == 409
+    assert _get(db_session, sid).player_accuracy is None
+
+    repair = client.post(
+        f"/api/session/{sid}/moves/eval-repair",
+        json={
+            "moves": [MOVES_HIGH[0]],
+            "eval_repair": True,
+            "final_client_request_id": str(client_request_id),
+            "recompute_opportunity": False,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert repair.status_code == 200, repair.text
+    after = _get(db_session, sid)
+    assert after.player_accuracy is not None
+    assert after.player_accuracy_algo_version == ACCURACY_ALGO_VERSION
+    assert (
+        db_session.query(SessionUploadReceipt)
+        .filter(SessionUploadReceipt.session_id == uuid.UUID(str(sid)))
+        .count()
+        == 1
+    )
+
+
+def test_sparse_eval_repair_waits_for_a_committed_final_receipt(
+    client, auth_headers, create_game_session, db_session
+):
+    sid = create_game_session(user_id=123)
+    assert _upload(client, auth_headers, sid, MOVES_GAP).status_code == 200
+    _end(client, auth_headers, sid)
+
+    repair = client.post(
+        f"/api/session/{sid}/moves/eval-repair",
+        json={
+            "moves": [MOVES_HIGH[0]],
+            "eval_repair": True,
+            "final_client_request_id": str(uuid.uuid4()),
+            "recompute_opportunity": False,
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert repair.status_code == 409
+    assert _get(db_session, sid).player_accuracy is None
 
 
 def test_post_end_upload_can_clear_accuracy(

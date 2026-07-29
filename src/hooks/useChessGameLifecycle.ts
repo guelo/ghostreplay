@@ -13,6 +13,7 @@ import {
   endGame,
   fetchCurrentRating,
   naturalEndDrill,
+  newClientRequestId,
   startDrill,
   startGame,
   uploadSessionMoves,
@@ -267,11 +268,13 @@ export const useChessGameLifecycle = ({
   // abort/reject we log and proceed, leaving the delta to degrade.
   const uploadFullMoveHistoryBeforeEnd = useCallback(
     async (sessionId: string, terminalAction: TerminalAction) => {
-      // Stop the incremental uploader FIRST so this is the last /moves this
-      // client emits for the session (g-y90g). Folding the stop in here — rather
-      // than at each terminal call site — makes "the final full upload is the
-      // last /moves" STRUCTURAL: no terminal path (game end, drill natural-end,
-      // resign, accuracy-fail) can forget it. stopSessionUploads only touches
+      // Stop the ordinary incremental uploader FIRST so this is the sole
+      // FULL/finality upload this client emits for the session (g-y90g). Folding
+      // the stop in here — rather than at each terminal call site — makes that
+      // ownership structural: no terminal path (game end, drill natural-end,
+      // resign, accuracy-fail) can forget it. A later g-residual-eval-gaps
+      // request is a one-row real-evaluation repair, never another full snapshot.
+      // stopSessionUploads only touches
       // the coordinator's upload bookkeeping (disables the timer, clears dirty,
       // aborts the in-flight fetch); the full-history upload below reads
       // moveHistory + analysisMap directly, so it is unaffected. All callers are
@@ -323,11 +326,53 @@ export const useChessGameLifecycle = ({
         return;
       }
 
+      const finalClientRequestId = newClientRequestId();
+      let lateRepairArmed = false;
       try {
+        const penultimateIndex =
+          frozenHistory.length >= 2 ? frozenHistory.length - 2 : null;
+
+        // If the real penultimate analysis missed the bounded wait, retain one
+        // guarded sparse repair. Arm BEFORE snapshotting analysisMap so there is
+        // no gap where a resolution can miss both final_full and the repair.
+        if (penultimateIndex !== null) {
+          try {
+            lateRepairArmed = coordinator.armLateEvaluationRepair(
+              sessionId,
+              epochBefore.generation,
+              penultimateIndex,
+              frozenHistory,
+              finalClientRequestId,
+            );
+          } catch (err) {
+            console.error(
+              "[SessionMoves] Could not arm late evaluation repair:",
+              err,
+            );
+          }
+        }
+
+        const analysisMap = new Map(
+          coordinator.store.getState().analysisMap,
+        );
+        // Resolution won the race into the final snapshot, so final_full already
+        // carries it and no later sparse upload is needed.
+        if (
+          lateRepairArmed &&
+          penultimateIndex !== null &&
+          analysisMap.has(penultimateIndex)
+        ) {
+          coordinator.cancelLateEvaluationRepair(
+            sessionId,
+            epochBefore.generation,
+          );
+          lateRepairArmed = false;
+        }
+
         const uploads = fillUnresolvedTerminal(
           buildSessionMoveUploads(
             frozenHistory,
-            new Map(coordinator.store.getState().analysisMap),
+            analysisMap,
             STARTING_FEN,
           ),
           STARTING_FEN,
@@ -361,6 +406,7 @@ export const useChessGameLifecycle = ({
             uploadKind: "final_full",
             terminalAction,
             deadlineMs: remainingBudgetMs,
+            clientRequestId: finalClientRequestId,
             recomputeOpportunity: true,
           });
         }
@@ -369,6 +415,22 @@ export const useChessGameLifecycle = ({
           "[SessionMoves] Final move-history upload failed/timed out:",
           err,
         );
+      } finally {
+        if (lateRepairArmed) {
+          // Synchronous release only: the terminal action never awaits the late
+          // repair or inherits its retries.
+          try {
+            coordinator.releaseLateEvaluationRepair(
+              sessionId,
+              epochBefore.generation,
+            );
+          } catch (err) {
+            console.error(
+              "[SessionMoves] Could not release late evaluation repair:",
+              err,
+            );
+          }
+        }
       }
     },
     [coordinator],

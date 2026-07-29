@@ -79,6 +79,7 @@ const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`^/api/drills/${UUID_SOURCE}/natural-end$`, 'i'), '/api/drills/{session_id}/natural-end'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}/abandon$`, 'i'), '/api/drills/{session_id}/abandon'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}$`, 'i'), '/api/drills/{session_id}'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/moves/eval-repair$`, 'i'), '/api/session/{session_id}/moves/eval-repair'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/moves$`, 'i'), '/api/session/{session_id}/moves'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis-evidence$`, 'i'), '/api/session/{session_id}/analysis-evidence'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis$`, 'i'), '/api/session/{session_id}/analysis'],
@@ -181,8 +182,12 @@ export type TerminalAction =
   | 'drill_natural_end'
   | 'accuracy_fail'
 
-/** Which of the three `/moves` callers emitted an upload (g-upload-observe). */
-export type UploadKind = 'final_full' | 'incremental' | 'revert'
+/** Which `/moves` path emitted an upload (g-upload-observe). */
+export type UploadKind =
+  | 'final_full'
+  | 'incremental'
+  | 'revert'
+  | 'late_eval_repair'
 
 /**
  * Mint a client-generated correlation id for a request. Unlike the server id
@@ -793,6 +798,14 @@ interface SessionMovesRequest {
    * have.
    */
   terminal_action?: TerminalAction
+  /**
+   * Sent only by `late_eval_repair`. The backend requires a committed
+   * final_full receipt before applying it, which serializes the sparse patch
+   * after a timed-out final request that may still be committing.
+   */
+  eval_repair?: boolean
+  /** Exact final_full receipt this sparse repair must follow. */
+  final_client_request_id?: string
 }
 
 interface SessionMovesResponse {
@@ -1064,7 +1077,7 @@ export const fetchRatingHistory = async (
 
 /**
  * Options for `uploadSessionMoves`, a discriminated union on `uploadKind` so the
- * three callers can never mix the wrong fields (g-upload-observe):
+ * callers can never mix the wrong fields (g-upload-observe):
  *
  *  - `final_full` REQUIRES `terminalAction` + `deadlineMs`. The timeout is
  *    constructed HERE from `deadlineMs` (`AbortSignal.timeout`), so the recorded
@@ -1072,6 +1085,9 @@ export const fetchRatingHistory = async (
  *    builds its own signal.
  *  - `incremental` passes an external cancellation `signal` straight through.
  *  - `revert` has neither.
+ *  - `late_eval_repair` uses the dedicated fail-closed `/moves/eval-repair`
+ *    route, passes an external cancellation `signal`, carries no terminal
+ *    action/deadline, and cannot request the expensive opportunity recompute.
  *
  * The union guarantees `deadlineMs`/`terminalAction` and `signal` are never both
  * present, so no signal-combining is ever needed.
@@ -1081,10 +1097,17 @@ export type UploadSessionMovesOptions =
       uploadKind: 'final_full'
       terminalAction: TerminalAction
       deadlineMs: number
+      clientRequestId?: string
       recomputeOpportunity?: boolean
     }
   | { uploadKind: 'incremental'; signal?: AbortSignal; recomputeOpportunity?: boolean }
   | { uploadKind: 'revert'; recomputeOpportunity?: boolean }
+  | {
+      uploadKind: 'late_eval_repair'
+      finalClientRequestId: string
+      signal?: AbortSignal
+      recomputeOpportunity?: false
+    }
 
 /**
  * Upload analyzed session moves in a single batch.
@@ -1107,20 +1130,31 @@ export const uploadSessionMoves = async (
     ...(options.uploadKind === 'final_full'
       ? { terminal_action: options.terminalAction }
       : {}),
+    ...(options.uploadKind === 'late_eval_repair'
+      ? {
+          eval_repair: true,
+          final_client_request_id: options.finalClientRequestId,
+        }
+      : {}),
   }
   // Serialize ONCE: reuse the exact bytes for the fetch body AND the measured
   // payload size. payloadBytes is the transmitted UTF-8 byte length (TextEncoder),
   // NOT JSON.stringify(body).length (UTF-16 code units — wrong for multi-byte).
   const bodyJson = JSON.stringify(body satisfies SessionMovesRequest)
   const payloadBytes = new TextEncoder().encode(bodyJson).byteLength
-  const clientRequestId = newClientRequestId()
+  const clientRequestId =
+    options.uploadKind === 'final_full' && options.clientRequestId
+      ? options.clientRequestId
+      : newClientRequestId()
 
   // Exactly one signal source per case (no combining): final_full constructs its
-  // own deadline here; incremental forwards the external signal; revert has none.
+  // own deadline here; incremental/late repair forward the external signal;
+  // revert has none.
   const signal =
     options.uploadKind === 'final_full'
       ? AbortSignal.timeout(options.deadlineMs)
-      : options.uploadKind === 'incremental'
+      : options.uploadKind === 'incremental' ||
+          options.uploadKind === 'late_eval_repair'
         ? options.signal
         : undefined
 
@@ -1135,9 +1169,16 @@ export const uploadSessionMoves = async (
       options.uploadKind === 'final_full' ? options.deadlineMs : undefined,
     visibilityStateStart: readVisibilityState(),
   }
+  // A dedicated route makes mixed-version rollout fail closed: an old backend
+  // returns 404 instead of ignoring eval_repair and accepting the sparse row as
+  // an ordinary upload.
+  const movesPath =
+    options.uploadKind === 'late_eval_repair'
+      ? 'moves/eval-repair'
+      : 'moves'
 
   return requestJson<SessionMovesResponse>(
-    `${API_BASE_URL}/api/session/${sessionId}/moves`,
+    `${API_BASE_URL}/api/session/${sessionId}/${movesPath}`,
     {
       method: 'POST',
       headers: getAuthHeaders(),

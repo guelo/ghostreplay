@@ -521,6 +521,192 @@ describe('GameAnalysisCoordinator', () => {
     })
   })
 
+  describe('late evaluation repair after final_full', () => {
+    const prepareRepair = () => {
+      coordinator.startSession('session-repair')
+      const history = makeMoveHistory(3)
+      useGameStore.setState({ moveHistory: history })
+      const requestId = coordinator.analyzeMove(
+        'fen-before-1',
+        'e2e4',
+        'white',
+        1,
+        20,
+      )!
+      coordinator.stopSessionUploads()
+      const { generation } = coordinator.getEpoch()
+      expect(
+        coordinator.armLateEvaluationRepair(
+          'session-repair',
+          generation,
+          1,
+          history,
+          'final-request-123',
+        ),
+      ).toBe(true)
+      return { generation, history, requestId }
+    }
+
+    const resolveWorker = async (requestId: string) => {
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 24,
+          playedEval: 18,
+          delta: 6,
+          classification: 'excellent',
+        },
+      })
+      await vi.advanceTimersByTimeAsync(200)
+    }
+
+    it('holds a late real result until the final upload barrier is released', async () => {
+      uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
+      const { generation, requestId } = prepareRepair()
+
+      await resolveWorker(requestId)
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled()
+
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      expect(uploadSessionMovesMock).toHaveBeenCalledWith(
+        'session-repair',
+        [
+          expect.objectContaining({
+            move_number: 1,
+            color: 'black',
+            eval_cp: 18,
+            eval_mate: null,
+          }),
+        ],
+        expect.objectContaining({
+          uploadKind: 'late_eval_repair',
+          finalClientRequestId: 'final-request-123',
+          recomputeOpportunity: false,
+        }),
+      )
+    })
+
+    it('uploads when the real result resolves after the barrier is released', async () => {
+      uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
+      const { generation, requestId } = prepareRepair()
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+
+      await resolveWorker(requestId)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      expect(uploadSessionMovesMock.mock.calls[0][2]).toMatchObject({
+        uploadKind: 'late_eval_repair',
+      })
+    })
+
+    it('retries idempotently with the same frozen session and payload', async () => {
+      uploadSessionMovesMock
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValueOnce({ moves_inserted: 1 })
+      const { generation, requestId } = prepareRepair()
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+
+      await resolveWorker(requestId)
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      const firstPayload = uploadSessionMovesMock.mock.calls[0][1]
+
+      // A mutable-store change after staging cannot alter the retry.
+      useGameStore.setState({ moveHistory: makeMoveHistory(7) })
+      await vi.advanceTimersByTimeAsync(1000)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
+      expect(uploadSessionMovesMock.mock.calls[1][0]).toBe('session-repair')
+      expect(uploadSessionMovesMock.mock.calls[1][1]).toEqual(firstPayload)
+    })
+
+    it('gives up after six failed attempts instead of retrying for the page lifetime', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        uploadSessionMovesMock.mockRejectedValue(
+          Object.assign(new Error('receipt unavailable'), { status: 409 }),
+        )
+        const { generation, requestId } = prepareRepair()
+        coordinator.releaseLateEvaluationRepair('session-repair', generation)
+
+        await resolveWorker(requestId)
+        await vi.advanceTimersByTimeAsync(120_000)
+
+        expect(uploadSessionMovesMock).toHaveBeenCalledTimes(6)
+        expect(consoleError).toHaveBeenCalledTimes(1)
+
+        await vi.advanceTimersByTimeAsync(10 * 60_000)
+        expect(uploadSessionMovesMock).toHaveBeenCalledTimes(6)
+      } finally {
+        consoleError.mockRestore()
+      }
+    })
+
+    it('aborts an in-flight old-session repair on session replacement', async () => {
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise(() => {}))
+      const { generation, requestId } = prepareRepair()
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+      await resolveWorker(requestId)
+
+      const signal = uploadSessionMovesMock.mock.calls[0][2]?.signal as AbortSignal
+      expect(signal.aborted).toBe(false)
+
+      coordinator.startSession('session-next')
+
+      expect(signal.aborted).toBe(true)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('sends nothing when the armed analysis fails', async () => {
+      const { generation, requestId } = prepareRepair()
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'error',
+          id: requestId,
+          message: 'engine exploded',
+        },
+      })
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+      await vi.advanceTimersByTimeAsync(30_000)
+
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled()
+    })
+
+    it('does not dispatch twice when the same worker result is delivered twice', async () => {
+      uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 1 })
+      const { generation, requestId } = prepareRepair()
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+
+      await resolveWorker(requestId)
+      await resolveWorker(requestId)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+    })
+
+    it('aborts an in-flight repair when the coordinator is destroyed', async () => {
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise(() => {}))
+      const { generation, requestId } = prepareRepair()
+      coordinator.releaseLateEvaluationRepair('session-repair', generation)
+      await resolveWorker(requestId)
+
+      const signal = uploadSessionMovesMock.mock.calls[0][2]?.signal as AbortSignal
+      expect(signal.aborted).toBe(false)
+
+      coordinator.destroy()
+
+      expect(signal.aborted).toBe(true)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
   // ---------------------------------------------------------------
   // g-position-analysis Phase 6: drill-truth side channel
   // ---------------------------------------------------------------

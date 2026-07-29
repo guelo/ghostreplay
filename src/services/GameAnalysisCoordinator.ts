@@ -26,6 +26,7 @@ import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { AnalysisResult } from '../types/analysis'
 import { useGameStore } from '../stores/useGameStore'
 import { buildSessionMoveUploadsForIndices } from '../components/chess-game/domain/sessionUpload'
+import type { MoveRecord } from '../components/chess-game/domain/movePresentation'
 import { STARTING_FEN } from '../components/chess-game/config'
 import { DecisionOwner, type DecisionOwnerGameState } from './DecisionOwner'
 
@@ -73,6 +74,13 @@ const INCREMENTAL_UPLOAD_INTERVAL_MS = 3000
 const INCREMENTAL_UPLOAD_BATCH_THRESHOLD = 4
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000 // 5 minutes
 const RETRY_MAX_DELAY_MS = 30_000
+/**
+ * A late repair is useful only if its exact final_full receipt can appear.
+ * Six total attempts place the last try about 31s after the first failure
+ * (1+2+4+8+16), then discard the frozen state instead of polling a receipt
+ * that may be permanently absent for the rest of the page lifetime.
+ */
+const LATE_EVAL_REPAIR_MAX_ATTEMPTS = 6
 
 type PendingCacheLookup = {
   requestId: string
@@ -306,6 +314,22 @@ type UploadState = {
   uploadsEnabled: boolean
 }
 
+type LateEvalRepairState = {
+  sessionId: string
+  generation: number
+  moveIndex: number
+  requestId: string
+  finalClientRequestId: string
+  frozenHistory: MoveRecord[]
+  /** The sparse repair must not race ahead of the final full upload. */
+  released: boolean
+  payload: SessionMoveUpload[] | null
+  uploadInFlight: boolean
+  abortController: AbortController | null
+  retryCount: number
+  retryTimer: ReturnType<typeof setTimeout> | null
+}
+
 const isAbortError = (err: unknown): boolean =>
   typeof err === 'object' &&
   err !== null &&
@@ -347,6 +371,7 @@ export class GameAnalysisCoordinator {
   private activeSessionId: string | null = null
   private sessionGeneration = 0
   private uploadState: UploadState | null = null
+  private lateEvalRepairState: LateEvalRepairState | null = null
 
   // Incremental upload timer
   private incrementalUploadTimer: ReturnType<typeof setTimeout> | null = null
@@ -844,12 +869,20 @@ export class GameAnalysisCoordinator {
   }
 
   private hasPendingUploads(): boolean {
-    return this.uploadState !== null && this.uploadState.dirtyIndices.size > 0
+    return (
+      (this.uploadState !== null && this.uploadState.dirtyIndices.size > 0) ||
+      this.lateEvalRepairState !== null
+    )
   }
 
   // --- Session lifecycle ---
 
   startSession(sessionId: string) {
+    // A new epoch must never inherit an ended session's queued repair or retry.
+    // An already-dispatched request remains frozen to the old session id, but
+    // aborting here prevents any later attempt after replacement.
+    this.cancelLateEvalRepair()
+
     // If switching sessions, finalize old one
     if (this.activeSessionId && this.activeSessionId !== sessionId) {
       this.finalizeOldSession()
@@ -902,6 +935,7 @@ export class GameAnalysisCoordinator {
   }
 
   clearSession() {
+    this.cancelLateEvalRepair()
     this.finalizeOldSession()
     this.activeSessionId = null
     this.sessionGeneration++
@@ -1582,6 +1616,12 @@ export class GameAnalysisCoordinator {
     this.resolutionState.delete(moveIndex)
     this.pendingMoveIndices.delete(requestId)
     this.pendingMeta.delete(requestId)
+    if (
+      this.lateEvalRepairState?.moveIndex === moveIndex &&
+      this.lateEvalRepairState.requestId === requestId
+    ) {
+      this.cancelLateEvalRepair(this.lateEvalRepairState)
+    }
 
     this.rejectWaitersForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
     // A hard terminal failure rejects any drill-truth waiter for this request and
@@ -1638,6 +1678,15 @@ export class GameAnalysisCoordinator {
 
     this.store.getState().resolveAnalysis(moveIndex, published)
     this.fulfillWaiters(moveIndex, published)
+
+    const lateRepair = this.lateEvalRepairState
+    if (
+      lateRepair &&
+      lateRepair.moveIndex === moveIndex &&
+      lateRepair.requestId === published.id
+    ) {
+      this.stageLateEvalRepair(lateRepair, published)
+    }
 
     // Mark dirty for incremental upload
     if (
@@ -1835,6 +1884,139 @@ export class GameAnalysisCoordinator {
     state.uploadInFlight = false
   }
 
+  private cancelLateEvalRepair(expected?: LateEvalRepairState) {
+    const state = this.lateEvalRepairState
+    if (!state || (expected && state !== expected)) return
+    this.lateEvalRepairState = null
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer)
+      state.retryTimer = null
+    }
+    if (state.abortController) {
+      state.abortController.abort()
+      state.abortController = null
+    }
+    state.uploadInFlight = false
+  }
+
+  private stageLateEvalRepair(
+    state: LateEvalRepairState,
+    result: AnalysisResult,
+  ) {
+    if (
+      this.lateEvalRepairState !== state ||
+      state.payload !== null ||
+      result.id !== state.requestId ||
+      result.moveIndex !== state.moveIndex ||
+      state.sessionId !== this.activeSessionId ||
+      state.generation !== this.sessionGeneration
+    ) {
+      return
+    }
+
+    const payload = buildSessionMoveUploadsForIndices(
+      state.frozenHistory,
+      new Map([[state.moveIndex, result]]),
+      [state.moveIndex],
+      STARTING_FEN,
+    )
+    const repair = payload[0]
+    // A repair can only carry an actual settled evaluation. Never turn an
+    // analysis outcome with no score into another null overwriting upload.
+    if (
+      payload.length !== 1 ||
+      (repair.eval_cp === null && repair.eval_mate === null)
+    ) {
+      this.cancelLateEvalRepair(state)
+      return
+    }
+
+    state.payload = payload
+    if (state.released) {
+      this.flushLateEvalRepair(state)
+    }
+  }
+
+  private flushLateEvalRepair(state: LateEvalRepairState) {
+    if (
+      this.lateEvalRepairState !== state ||
+      !state.released ||
+      !state.payload ||
+      state.uploadInFlight
+    ) {
+      return
+    }
+
+    const payload = state.payload
+    const controller =
+      typeof AbortController !== 'undefined' ? new AbortController() : null
+    state.uploadInFlight = true
+    state.abortController = controller
+
+    uploadSessionMoves(
+      state.sessionId,
+      payload,
+      controller
+        ? {
+            uploadKind: 'late_eval_repair',
+            finalClientRequestId: state.finalClientRequestId,
+            signal: controller.signal,
+            recomputeOpportunity: false,
+          }
+        : {
+            uploadKind: 'late_eval_repair',
+            finalClientRequestId: state.finalClientRequestId,
+            recomputeOpportunity: false,
+          },
+    )
+      .then(() => {
+        if (this.lateEvalRepairState !== state) return
+        if (state.abortController === controller) {
+          state.abortController = null
+        }
+        state.uploadInFlight = false
+        state.retryCount = 0
+        this.lateEvalRepairState = null
+      })
+      .catch((err) => {
+        if (this.lateEvalRepairState !== state) return
+        if (state.abortController === controller) {
+          state.abortController = null
+        }
+        state.uploadInFlight = false
+        if (isAbortError(err)) {
+          this.cancelLateEvalRepair(state)
+          return
+        }
+
+        state.retryCount += 1
+        if (state.retryCount >= LATE_EVAL_REPAIR_MAX_ATTEMPTS) {
+          console.error(
+            '[Coordinator] Late evaluation repair failed; giving up after bounded retries:',
+            err,
+          )
+          this.cancelLateEvalRepair(state)
+          return
+        }
+
+        // 409 is the expected "matching final receipt not visible yet" signal.
+        // Keep transient receipt polling quiet; emit one error only if the
+        // bounded window is exhausted. Other failures remain visible per try.
+        if ((err as { status?: unknown } | null)?.status !== 409) {
+          console.error('[Coordinator] Late evaluation repair failed; retrying:', err)
+        }
+        const delay = Math.min(
+          1000 * Math.pow(2, state.retryCount - 1),
+          RETRY_MAX_DELAY_MS,
+        )
+        state.retryTimer = setTimeout(() => {
+          if (this.lateEvalRepairState !== state) return
+          state.retryTimer = null
+          this.flushLateEvalRepair(state)
+        }, delay)
+      })
+  }
+
   /**
    * Build and send an upload for dirty indices. The payload is snapshotted
    * once from global state when this is first called for a batch. Retries
@@ -1935,6 +2117,96 @@ export class GameAnalysisCoordinator {
   }
 
   /**
+   * Arm one real-evaluation-only repair for a tail ply that is still unresolved
+   * after the bounded terminal wait (g-residual-eval-gaps).
+   *
+   * The repair owns a frozen history and exact request/generation identity. It
+   * never re-enables ordinary incremental uploads and never reads a later
+   * session's moveHistory. Returns false when the request is already stale,
+   * settled, failed, or was never scheduled.
+   */
+  armLateEvaluationRepair(
+    sessionId: string,
+    generation: number,
+    moveIndex: number,
+    history: MoveRecord[],
+    finalClientRequestId: string,
+  ): boolean {
+    if (
+      this.lateEvalRepairState !== null ||
+      this.activeSessionId !== sessionId ||
+      this.sessionGeneration !== generation ||
+      this.store.getState().analysisMap.has(moveIndex)
+    ) {
+      return false
+    }
+
+    const requestId = this.latestRequestIds.get(moveIndex)
+    if (
+      !requestId ||
+      (!this.pendingMoveIndices.has(requestId) &&
+        !this.pendingMeta.has(requestId))
+    ) {
+      return false
+    }
+
+    this.lateEvalRepairState = {
+      sessionId,
+      generation,
+      moveIndex,
+      requestId,
+      finalClientRequestId,
+      frozenHistory: history.map((move) => ({ ...move })),
+      released: false,
+      payload: null,
+      uploadInFlight: false,
+      abortController: null,
+      retryCount: 0,
+      retryTimer: null,
+    }
+    return true
+  }
+
+  /**
+   * Release the repair barrier once the final full upload attempt settles.
+   * This is synchronous and starts repair work without extending terminal
+   * latency. A result that settled while final_full was in flight is picked up
+   * from analysisMap; a later result enters through resolveAnalysisResult.
+   */
+  releaseLateEvaluationRepair(sessionId: string, generation: number): void {
+    const state = this.lateEvalRepairState
+    if (
+      !state ||
+      state.sessionId !== sessionId ||
+      state.generation !== generation ||
+      this.activeSessionId !== sessionId ||
+      this.sessionGeneration !== generation
+    ) {
+      return
+    }
+
+    state.released = true
+    if (state.payload) {
+      this.flushLateEvalRepair(state)
+      return
+    }
+    const resolved = this.store.getState().analysisMap.get(state.moveIndex)
+    if (resolved) {
+      this.stageLateEvalRepair(state, resolved)
+    }
+  }
+
+  cancelLateEvaluationRepair(sessionId: string, generation: number): void {
+    const state = this.lateEvalRepairState
+    if (
+      state?.sessionId === sessionId &&
+      state.generation === generation
+    ) {
+      this.cancelLateEvalRepair(state)
+    }
+  }
+
+  /**
    * Best-effort flush of already-resolved dirty indices. Does NOT block on
    * worker completion. Called at game-end for final reconciliation.
    */
@@ -1961,6 +2233,7 @@ export class GameAnalysisCoordinator {
 
   destroy() {
     this.stopIncrementalUploadTimer()
+    this.cancelLateEvalRepair()
     if (this.uploadState?.retryTimer) {
       clearTimeout(this.uploadState.retryTimer)
     }
