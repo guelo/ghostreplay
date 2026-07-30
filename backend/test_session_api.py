@@ -1054,17 +1054,9 @@ def test_session_analysis_average_cpl_uses_player_moves_and_clamps_negative_delt
 ):
     session_id = create_game_session(user_id=123, player_color="black")
 
-    end_response = client.post(
-        "/api/game/end",
-        json={
-            "session_id": session_id,
-            "result": "draw",
-            "pgn": "1. e4 e5 2. Nf3 Nc6",
-        },
-        headers=auth_headers(user_id=123),
-    )
-    assert end_response.status_code == 200
-
+    # Upload BEFORE ending: the terminal reconcile (g-short-move-rows) would
+    # otherwise derive the PGN's four plies into an empty session, and this
+    # fixture deliberately stores only three rows (no 2. white).
     upload_response = client.post(
         f"/api/session/{session_id}/moves",
         json={
@@ -1098,6 +1090,18 @@ def test_session_analysis_average_cpl_uses_player_moves_and_clamps_negative_delt
         headers=auth_headers(user_id=123),
     )
     assert upload_response.status_code == 200
+
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "draw",
+            "pgn": "1. e4 e5 2. Nf3 Nc6",
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert end_response.status_code == 200
+
     stored_negative = (
         db_session.query(SessionMove)
         .filter(

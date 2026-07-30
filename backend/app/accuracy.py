@@ -146,7 +146,17 @@ def game_accuracy_for_rows(
     )
 
 
-def recompute_session_accuracy(db: Session, session: GameSession) -> None:
+# Distinguishes "caller passed no expected-ply hint" from a caller's explicit
+# None (an unparseable or ceiling-refused PGN, which must fail closed).
+_PARSE_FROM_PGN = object()
+
+
+def recompute_session_accuracy(
+    db: Session,
+    session: GameSession,
+    *,
+    expected_total_moves: int | None | object = _PARSE_FROM_PGN,
+) -> None:
     """Recompute and stamp one session's cached whole-game accuracy in place.
 
     This is Release A's bounded write hook. The serving ``/api/game/end`` and
@@ -162,7 +172,13 @@ def recompute_session_accuracy(db: Session, session: GameSession) -> None:
       :func:`compute_game_accuracy` requires;
     * parses the expected ply count from the session PGN and calls
       :func:`game_accuracy_for_rows`, so a non-mainline ply grid fails closed to
-      None here rather than being scored wrong and then cached forever;
+      None here rather than being scored wrong and then cached forever — unless
+      the caller passes ``expected_total_moves``, its already-computed count
+      for the SAME in-memory PGN (the terminal reconcile's
+      ``ReconcileResult.expected_plies``), which skips the reparse and
+      propagates the reconcile's refusals: an explicit None (unparseable or
+      over the ``MAX_TERMINAL_PGN_CHARS`` size ceiling, where parsing is
+      deliberately never attempted) fails closed here too;
     * assigns ``player_accuracy`` (including a legitimate computed ``None``) and
       always stamps ``player_accuracy_algo_version`` once an eligible
       computation runs.
@@ -194,7 +210,11 @@ def recompute_session_accuracy(db: Session, session: GameSession) -> None:
     accuracy = game_accuracy_for_rows(
         move_rows,
         player_color=session.player_color,
-        expected_total_moves=expected_total_moves_from_pgn(session.pgn),
+        expected_total_moves=(
+            expected_total_moves_from_pgn(session.pgn)
+            if expected_total_moves is _PARSE_FROM_PGN
+            else expected_total_moves
+        ),
         session_id=session.id,
     )
     # Assign even a legitimate None, and always stamp the algorithm version so an

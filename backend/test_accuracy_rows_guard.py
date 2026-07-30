@@ -221,6 +221,12 @@ def _insert_session(db, **kwargs) -> GameSession:
 
 
 def _add_moves(db, session_id, moves) -> None:
+    # Replace semantics: g-short-move-rows makes /game/end derive rows from the
+    # terminal PGN when none exist, and these fixtures pin verdicts over EXACTLY
+    # the seeded shapes — so clear any derived rows before inserting.
+    db.query(SessionMove).filter(
+        SessionMove.session_id == uuid.UUID(str(session_id))
+    ).delete()
     for m in moves:
         db.add(
             SessionMove(

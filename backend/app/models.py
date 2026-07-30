@@ -223,6 +223,10 @@ class GameSession(Base):
             name="ck_game_sessions_player_accuracy",
         ),
         CheckConstraint(
+            "derived_tail_rows is null or derived_tail_rows > 0",
+            name="ck_game_sessions_derived_tail_rows",
+        ),
+        CheckConstraint(
             "session_mode = 'normal' "
             "or (drill_state = 'converted' and is_rated = true and normal_started_at is not null "
             "and converted_at is not null and rated_start_ply is not null) "
@@ -311,6 +315,18 @@ class GameSession(Base):
     # through game_accuracy_for_rows. No read path ever WRITES either column.
     player_accuracy: Mapped[int | None] = mapped_column(Integer)
     player_accuracy_algo_version: Mapped[int | None] = mapped_column(SmallInteger)
+    # Durable terminal-reconcile marker (g-short-move-rows): how many tail rows
+    # were derived from the terminal PGN — at /end or by the historical repair —
+    # because the client's final upload never committed them. NULL means the
+    # reconcile never derived here (including every pre-feature session). It
+    # records that derivation FIRED, not the provenance of the current rows: a
+    # late full-history upsert may overwrite derived rows with the client's
+    # richer record without clearing it. The fire-and-forget ``game_ended``
+    # analytics props carry the same count but may drop; this column is what
+    # makes recurrence measurable in the database itself. It is written by the
+    # terminal transaction alongside status/pgn and is NOT part of
+    # ``session_upload_receipt`` semantics — no receipt is ever derived.
+    derived_tail_rows: Mapped[int | None] = mapped_column(Integer)
 
 
 class Move(Base):

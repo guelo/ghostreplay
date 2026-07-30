@@ -18,7 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.accuracy import expected_total_moves_from_pgn, recompute_session_accuracy
+from app.accuracy import recompute_session_accuracy
 from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.drill_steering import (
@@ -68,6 +68,7 @@ from app.srs_opportunity import (
     load_review_counters,
     opening_weight,
 )
+from app.terminal_row_reconcile import reconcile_terminal_move_rows
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 logger = logging.getLogger(__name__)
@@ -822,6 +823,21 @@ def end_game(
     session.pgn = request.pgn
     effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
     session.is_rated = effective_is_rated
+    # Terminal row reconcile (g-short-move-rows): the PGN above is persisted
+    # verbatim while move rows travel in separate /moves transactions, so a
+    # final upload that never committed would otherwise end the session with
+    # fewer stored rows than its own PGN describes. Derive the verified missing
+    # tail from the PGN inside THIS transaction (evals NULL; a late /moves
+    # upsert overwrites derived rows with the client's richer record). The
+    # flush is load-bearing: autoflush is off, and recompute's scoped SELECT
+    # below must see the staged rows.
+    row_reconcile = reconcile_terminal_move_rows(db, session)
+    if row_reconcile.derived_rows:
+        # Durable marker: after derivation the row grid alone can't distinguish
+        # a reconciled session from ordinary unresolved uploads, and the
+        # post-commit capture() below is fire-and-forget. No receipt is written.
+        session.derived_tail_rows = row_reconcile.derived_rows
+        db.flush()
     # Cached-accuracy recompute (g-accuracy-hooks) runs HERE — after the terminal
     # mutation above and before the users lock below — so its dirty accuracy
     # assignment drains in the same pre-cursor flush() as the terminal/rating
@@ -829,7 +845,12 @@ def end_game(
     # window. It reads committed moves plus the dirty in-memory status/PGN and
     # does not depend on ended_at/rating state; the population guard makes it a
     # no-op for ended failed/abandoned drills (which never reach this handler).
-    recompute_session_accuracy(db, session)
+    # The reconcile's expected-ply verdict rides along so the SAME PGN is never
+    # parsed a second time — and a size-refused PGN (expected_plies None) is
+    # parsed zero times: accuracy fails closed on the propagated refusal.
+    recompute_session_accuracy(
+        db, session, expected_total_moves=row_reconcile.expected_plies
+    )
     # Compute rating change for rated results
     rating_change = None
     if effective_is_rated and request.result.value in RESULT_SCORES:
@@ -942,7 +963,15 @@ def end_game(
                 if rating_change
                 else None
             ),
-            "ply_count": expected_total_moves_from_pgn(session.pgn),
+            # The reconcile's parse of the same PGN — no reparse here, and None
+            # when the size ceiling refused to parse at all.
+            "ply_count": row_reconcile.expected_plies,
+            # g-short-move-rows: the reconcile verdict. Best-effort only —
+            # capture() may drop; the durable recurrence record is the
+            # game_sessions.derived_tail_rows column stamped above.
+            "row_reconcile_outcome": row_reconcile.outcome,
+            "stored_move_rows": row_reconcile.stored_rows,
+            "derived_tail_rows": row_reconcile.derived_rows,
         },
     )
 

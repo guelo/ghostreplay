@@ -8,10 +8,10 @@ from app.models import GameSession
 from app.opening_roots import OpeningRoot, _normalize_opening_key
 
 
-def _end_game(client, auth_headers, session_id, user_id=123, result="checkmate_win"):
+def _end_game(client, auth_headers, session_id, user_id=123, result="checkmate_win", pgn="1. e4 e5"):
     return client.post(
         "/api/game/end",
-        json={"session_id": session_id, "result": result, "pgn": "1. e4 e5"},
+        json={"session_id": session_id, "result": result, "pgn": pgn},
         headers=auth_headers(user_id=user_id),
     )
 
@@ -130,14 +130,16 @@ def test_history_average_cpl_caps_legacy_uncapped_eval_delta(
     # mate pseudo-cp ~10000). The /history Avg CPL normalizes at read time via
     # centipawn_loss_expr (cap 1000), so a single such counted move must report 1000.
     session_id = create_game_session(user_id=123, player_color="white")
-    _end_game(client, auth_headers, session_id)
-
+    # Upload BEFORE ending: the terminal reconcile (g-short-move-rows) would
+    # otherwise derive the PGN's rows into an empty session, and this fixture
+    # needs exactly one stored move.
     _upload_moves(client, auth_headers, session_id, [
         {
             "move_number": 1, "color": "white", "move_san": "e4",
             "fen_after": "fen-1w", "eval_delta": 40, "classification": "mistake",
         },
     ])
+    _end_game(client, auth_headers, session_id)
     # Force a genuinely-historical uncapped row (the write path would have normalized it).
     # The ORM stores session_id as a dash-less 32-char hex in the SQLite TEXT column,
     # so bind that form for the raw UPDATE to actually match the row.
@@ -189,7 +191,9 @@ def test_history_scoped_to_user(client, auth_headers, create_game_session):
 
 def test_history_game_without_moves_has_null_avg_cpl(client, auth_headers, create_game_session):
     session_id = create_game_session(user_id=123)
-    _end_game(client, auth_headers, session_id)
+    # An empty terminal PGN (abandon at move zero) keeps the reconcile from
+    # deriving rows, preserving the no-move-rows shape under test.
+    _end_game(client, auth_headers, session_id, result="abandon", pgn="")
 
     response = client.get("/api/history", headers=auth_headers(user_id=123))
     game = response.json()["games"][0]
