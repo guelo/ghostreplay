@@ -1853,17 +1853,34 @@ describe("useChessGameLifecycle", () => {
     expect(uploadSessionMovesMock.mock.calls[0][2].deadlineMs).toEqual(
       expect.any(Number),
     );
-    expect(uploadSessionMovesMock.mock.calls[0][1]).toHaveLength(4);
-    expect(uploadSessionMovesMock.mock.calls[0][1][2]).toEqual(
+    const finalPayload = uploadSessionMovesMock.mock.calls[0][1];
+    expect(finalPayload).toHaveLength(4);
+    // g-broken-ply-grids: final_full serializes the whole history, not only
+    // resolved analysis indices, and keeps the canonical coordinate grid even
+    // when an interior analysis is absent.
+    expect(
+      finalPayload.map(
+        (move: { move_number: number; color: string }) => [
+          move.move_number,
+          move.color,
+        ],
+      ),
+    ).toEqual([
+      [1, "white"],
+      [1, "black"],
+      [2, "white"],
+      [2, "black"],
+    ]);
+    expect(finalPayload[2]).toEqual(
       expect.objectContaining({
         eval_cp: null,
         eval_mate: null,
       }),
     );
-    expect(uploadSessionMovesMock.mock.calls[0][1][2]).not.toHaveProperty(
+    expect(finalPayload[2]).not.toHaveProperty(
       "synthetic_terminal_eval",
     );
-    expect(uploadSessionMovesMock.mock.calls[0][1][3]).toEqual(
+    expect(finalPayload[3]).toEqual(
       expect.objectContaining({
         move_san: "Qh4#",
         eval_cp: 10000,

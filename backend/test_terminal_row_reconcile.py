@@ -1,9 +1,10 @@
 """Terminal row reconcile (g-short-move-rows).
 
 An ended session must not silently persist fewer canonical move rows than its
-terminal PGN describes. ``POST /api/game/end`` derives the verified missing
-tail from the client PGN inside the terminal transaction; the historical
-backfill replays the same decision over the row-short cohort, dry-run first.
+terminal PGN describes. ``POST /api/game/end`` derives verified missing tail
+or interior rows from the client PGN inside the terminal transaction; the
+historical backfill deliberately replays the narrower prefix-only decision over
+the row-short cohort, dry-run first.
 
 Fail-closed branches pinned here: unparseable PGN, a stored prefix that
 disagrees with the PGN mainline (g-discard-branch-rows shape), surplus rows
@@ -161,6 +162,74 @@ def test_end_with_short_prefix_derives_the_pgn_tail(
     assert props["derived_tail_rows"] == 2
 
 
+def test_end_with_verified_interior_holes_derives_the_full_grid(
+    client, auth_headers, create_game_session, db_session, game_ended_props
+):
+    plies, pgn = _replayed(FOOLS_MATE)
+    session_id = create_game_session(user_id=123, player_color="white")
+    # The pre-2026-06-25 writer shape: resolved-only incremental uploads kept
+    # absolute coordinates 1w and 2w while unresolved 1b (and the terminal 2b)
+    # never reached /moves. The terminal PGN still describes all four plies.
+    _upload(client, auth_headers, session_id, [plies[0], plies[2]])
+
+    assert _end(client, auth_headers, session_id, pgn).status_code == 200
+
+    rows = _ordered_rows(db_session, session_id)
+    assert [(r.move_number, r.color) for r in rows] == [
+        (1, "white"),
+        (1, "black"),
+        (2, "white"),
+        (2, "black"),
+    ]
+    # Existing evaluations stay attached to their declared canonical plies;
+    # missing coordinates are represented honestly, with no invented eval.
+    assert [row.eval_cp for row in rows] == [20, None, 20, None]
+    assert [(r.move_san, r.fen_before, r.fen_after) for r in rows] == [
+        (p["move_san"], p["fen_before"], p["fen_after"]) for p in plies
+    ]
+    session = db_session.query(GameSession).filter(
+        GameSession.id == uuid.UUID(session_id)
+    ).one()
+    assert session.player_accuracy is None
+    assert session.player_accuracy_algo_version == 1
+    # Compatibility column name: the durable count covers all rows derived by
+    # terminal reconciliation, including these two non-tail coordinates.
+    assert session.derived_tail_rows == 2
+    props = game_ended_props()
+    assert props["row_reconcile_outcome"] == OUTCOME_DERIVED
+    assert props["stored_move_rows"] == 2
+    assert props["derived_tail_rows"] == 2
+
+
+def test_sparse_policy_is_live_only_not_historical_backfill(
+    client, auth_headers, create_game_session, db_session
+):
+    plies, pgn = _replayed(FOOLS_MATE)
+    session_id = create_game_session(user_id=123, player_color="white")
+    _upload(client, auth_headers, session_id, [plies[0], plies[2]])
+    session = db_session.query(GameSession).filter(
+        GameSession.id == uuid.UUID(session_id)
+    ).one()
+    session.pgn = pgn
+
+    historical = reconcile_terminal_move_rows(db_session, session, stage=False)
+    serving = reconcile_terminal_move_rows(
+        db_session,
+        session,
+        stage=False,
+        allow_sparse=True,
+    )
+
+    # Prefix-only remains the default used by short_move_row_backfill, so this
+    # bead's historical ten cannot be absorbed by that repair. Only an active
+    # /game/end opts into sparse completion.
+    assert historical.outcome == OUTCOME_PREFIX_MISMATCH
+    assert historical.derived_rows == 0
+    assert serving.outcome == OUTCOME_DERIVED
+    assert serving.derived_rows == 2
+    assert len(_ordered_rows(db_session, session_id)) == 2
+
+
 def test_end_with_no_rows_derives_the_full_game(
     client, auth_headers, create_game_session, db_session
 ):
@@ -176,11 +245,27 @@ def test_end_with_no_rows_derives_the_full_game(
 
 
 def test_end_with_complete_rows_derives_nothing(
-    client, auth_headers, create_game_session, db_session, game_ended_props
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+    game_ended_props,
+    monkeypatch,
 ):
     plies, pgn = _replayed(FOOLS_MATE)
     session_id = create_game_session(user_id=123, player_color="white")
     _upload(client, auth_headers, session_id, plies)
+    # An exact canonical key set needs no derivation, so it bypasses both the
+    # expansion ceiling and the costly SAN/FEN identity replay. Identity-only
+    # divergence at intact coordinates belongs to g-discard-branch-rows.
+    monkeypatch.setattr(
+        "app.terminal_row_reconcile.MAX_DERIVABLE_PLIES",
+        len(plies) - 1,
+    )
+    monkeypatch.setattr(
+        "app.terminal_row_reconcile.stored_subset_matches",
+        lambda *_: pytest.fail("complete grids must not replay row identity"),
+    )
 
     assert _end(client, auth_headers, session_id, pgn).status_code == 200
 
@@ -227,6 +312,109 @@ def test_end_with_diverging_prefix_fails_closed(
     assert [(r.move_san) for r in rows] == ["f3", "e6"]
     props = game_ended_props()
     assert props["row_reconcile_outcome"] == OUTCOME_PREFIX_MISMATCH
+    assert props["derived_tail_rows"] == 0
+
+
+def test_end_with_sparse_wrong_identity_fails_closed(
+    client, auth_headers, create_game_session, db_session, game_ended_props
+):
+    plies, pgn = _replayed(FOOLS_MATE)
+    diverged, _ = _replayed(["f3", "e5", "e4"])
+    session_id = create_game_session(user_id=123, player_color="white")
+    # Both stored keys are real PGN coordinates, but the row declared at 2w is
+    # e4 rather than the terminal PGN's g4. Sparse mode must bind identity at
+    # the declared coordinate before deriving either absent row.
+    _upload(client, auth_headers, session_id, [plies[0], diverged[2]])
+
+    assert _end(client, auth_headers, session_id, pgn).status_code == 200
+
+    rows = _ordered_rows(db_session, session_id)
+    assert [(r.move_number, r.color, r.move_san) for r in rows] == [
+        (1, "white", "f3"),
+        (2, "white", "e4"),
+    ]
+    session = db_session.query(GameSession).filter(
+        GameSession.id == uuid.UUID(session_id)
+    ).one()
+    assert session.derived_tail_rows is None
+    props = game_ended_props()
+    assert props["row_reconcile_outcome"] == OUTCOME_PREFIX_MISMATCH
+    assert props["derived_tail_rows"] == 0
+
+
+def test_end_with_missing_plus_extra_exact_count_grid_fails_closed(
+    client, auth_headers, create_game_session, db_session, game_ended_props
+):
+    plies, pgn = _replayed(FOOLS_MATE)
+    session_id = create_game_session(user_id=123, player_color="white")
+    extra = {**plies[3], "move_number": 3, "color": "white"}
+    # Four stored rows and four PGN plies, but 2b is absent and an impossible
+    # 3w coordinate takes its place. Count equality must not bypass sparse-grid
+    # verification or be reported as complete.
+    _upload(
+        client,
+        auth_headers,
+        session_id,
+        [plies[0], plies[1], plies[2], extra],
+    )
+
+    assert _end(client, auth_headers, session_id, pgn).status_code == 200
+
+    rows = _ordered_rows(db_session, session_id)
+    assert [(r.move_number, r.color) for r in rows] == [
+        (1, "white"),
+        (1, "black"),
+        (2, "white"),
+        (3, "white"),
+    ]
+    props = game_ended_props()
+    assert props["row_reconcile_outcome"] == OUTCOME_PREFIX_MISMATCH
+    assert props["derived_tail_rows"] == 0
+
+
+def test_over_ceiling_missing_plus_extra_skips_identity_verification(
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+    game_ended_props,
+    monkeypatch,
+):
+    plies, pgn = _replayed(FOOLS_MATE)
+    session_id = create_game_session(user_id=123, player_color="white")
+    extra = {**plies[3], "move_number": 3, "color": "white"}
+    _upload(
+        client,
+        auth_headers,
+        session_id,
+        [plies[0], plies[1], plies[2], extra],
+    )
+    # Simulate an exact-count divergent grid above the real 600-ply ceiling.
+    # Its missing key prevents the complete fast path, but the ceiling must
+    # refuse it before any SAN/FEN identity replay.
+    monkeypatch.setattr(
+        "app.terminal_row_reconcile.MAX_DERIVABLE_PLIES",
+        len(plies) - 1,
+    )
+    monkeypatch.setattr(
+        "app.terminal_row_reconcile.stored_subset_matches",
+        lambda *_: pytest.fail("over-ceiling grids must not replay row identity"),
+    )
+
+    assert _end(client, auth_headers, session_id, pgn).status_code == 200
+
+    coordinates = [
+        (row.move_number, row.color)
+        for row in _ordered_rows(db_session, session_id)
+    ]
+    assert coordinates == [
+        (1, "white"),
+        (1, "black"),
+        (2, "white"),
+        (3, "white"),
+    ]
+    props = game_ended_props()
+    assert props["row_reconcile_outcome"] == OUTCOME_OVER_CEILING
     assert props["derived_tail_rows"] == 0
 
 

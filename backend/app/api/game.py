@@ -826,16 +826,23 @@ def end_game(
     # Terminal row reconcile (g-short-move-rows): the PGN above is persisted
     # verbatim while move rows travel in separate /moves transactions, so a
     # final upload that never committed would otherwise end the session with
-    # fewer stored rows than its own PGN describes. Derive the verified missing
-    # tail from the PGN inside THIS transaction (evals NULL; a late /moves
-    # upsert overwrites derived rows with the client's richer record). The
-    # flush is load-bearing: autoflush is off, and recompute's scoped SELECT
-    # below must see the staged rows.
-    row_reconcile = reconcile_terminal_move_rows(db, session)
+    # fewer stored rows than its own PGN describes. Derive every verified
+    # missing coordinate — a tail or an interior hole left by resolved-only
+    # incremental uploads — from the PGN inside THIS transaction (evals NULL; a
+    # late /moves upsert overwrites derived rows with the client's richer
+    # record). The historical backfill keeps the stricter prefix-only default;
+    # sparse completion is safe here because this session is still active and
+    # locked for terminal finalization. The flush is load-bearing: autoflush is
+    # off, and recompute's scoped SELECT below must see the staged rows.
+    row_reconcile = reconcile_terminal_move_rows(
+        db, session, allow_sparse=True
+    )
     if row_reconcile.derived_rows:
         # Durable marker: after derivation the row grid alone can't distinguish
         # a reconciled session from ordinary unresolved uploads, and the
         # post-commit capture() below is fire-and-forget. No receipt is written.
+        # Compatibility name from g-short-move-rows: the count now includes
+        # PGN-derived interior coordinates as well as a derived tail.
         session.derived_tail_rows = row_reconcile.derived_rows
         db.flush()
     # Cached-accuracy recompute (g-accuracy-hooks) runs HERE — after the terminal
