@@ -792,10 +792,13 @@ def _lock_gate(holder_reached: threading.Event, release: threading.Event):
     reaches here after acquiring the lock) sails through the already-set gate."""
     real = accuracy_mod.recompute_session_accuracy
 
-    def gate(db, session):
+    # Forward **kwargs rather than naming them: this stub only cares about the
+    # lock timing, so it must not re-break every time the real signature grows a
+    # keyword-only argument (g-lockgate-expected-moves was exactly that).
+    def gate(db, session, **kwargs):
         holder_reached.set()
         release.wait(timeout=30)
-        return real(db, session)
+        return real(db, session, **kwargs)
 
     return gate
 
