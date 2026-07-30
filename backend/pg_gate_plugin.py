@@ -368,6 +368,23 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_capture_end_to_end.py::test_a_crash_between_the_two_renames_fails_closed_and_reruns_clean",
     "test_capture_end_to_end.py::test_a_second_capture_to_the_same_output_is_refused",
     "test_capture_end_to_end.py::test_full_capture_publishes_artifact_and_reviewable_provenance_diff",
+    # Replay-cache digest agreement between its two formatters
+    # (g-overlay-evidence-reuse). _build_move_rows VALIDATES against the digest
+    # _probe_sql computes in the database and STORES the one _session_digest_body
+    # (+ the dialect's _body_fold) computes in python; a dialect-specific
+    # divergence (integer/timestamp rendering, a collation-dependent ORDER BY, a
+    # NULL that string_agg drops instead of rendering as the sentinel, md5
+    # disagreeing with hashlib) breaks nothing visibly — it silently turns every
+    # warm overlay build back into a full history replay. PostgreSQL is also the
+    # only dialect that FOLDS the body server-side, which is what keeps the
+    # probe's payload O(sessions); on SQLite the fold is the identity and proves
+    # nothing. Pinned, or the whole reuse claim rests on SQLite alone.
+    "test_opening_evidence_digest_pg.py::test_md5_fold_pair_agrees_and_keys_match_end_to_end",
+    "test_opening_evidence_digest_pg.py::test_null_evals_use_the_sentinel_not_an_empty_field",
+    "test_opening_evidence_digest_pg.py::test_probe_ordering_is_collation_independent",
+    "test_opening_evidence_digest_pg.py::test_probe_payload_is_fixed_size_per_session",
+    "test_opening_evidence_digest_pg.py::test_sql_and_python_digest_bodies_are_byte_equal",
+    "test_opening_evidence_digest_pg.py::test_warm_rebuild_on_postgres_fetches_no_rows",
 })
 
 # The SRS/moves cross-root lock matrix must run all four session/blunder lock

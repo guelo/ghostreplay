@@ -9,10 +9,11 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import chess
 import pytest
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 import app.game_phase as game_phase
 import app.opening_evidence as opening_evidence
@@ -1641,6 +1642,30 @@ def _insert_line(db, sid, uci_moves, *, eval_delta=10, eval_cp=None, best_move_e
         )
 
 
+def _extend_line(db, sid, prefix_ucis, extra_ucis, *, eval_delta=10):
+    """Append LATER plies to a session already holding ``prefix_ucis``.
+
+    The /moves-lands-late shape: row_count GROWS on a session an earlier build
+    already cached, rather than a new session appearing or existing values being
+    rewritten. The continuation replays the prefix first, so the fen chain stays
+    continuous and the session is not excluded.
+    """
+    board = chess.Board()
+    for uci in prefix_ucis:
+        board.push(chess.Move.from_uci(uci))
+    for offset, uci in enumerate(extra_ucis):
+        ply = len(prefix_ucis) + offset
+        move = chess.Move.from_uci(uci)
+        san = board.san(move)
+        fen_before = board.fen()
+        color = "white" if board.turn == chess.WHITE else "black"
+        board.push(move)
+        _insert_move(
+            db, sid, ply // 2 + 1, color, san, fen_before, board.fen(),
+            eval_delta=eval_delta,
+        )
+
+
 def _insert_discontinuous_session(db, sid):
     """Two white moves whose fens don't chain → ContinuityError on replay."""
     _insert_move(db, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
@@ -1742,6 +1767,109 @@ class TestDifferentialParity:
         reset_session_evidence_cache()
         scratch = overlay_evidence(db_session, 1, "white", branching_graph)
         _assert_overlay_equal(incr, scratch)
+
+    def test_parity_late_rows_appended_to_a_cached_session(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """row_count GROWTH on an already-cached session — distinct from a new
+        session appearing (covered above) and from existing values being rewritten
+        (covered below). Only the extended session may re-derive, and the result
+        must equal a clean rebuild."""
+        _insert_user(db_session)
+        stable = _insert_session(db_session)
+        _insert_line(db_session, stable, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        late = _insert_session(db_session)
+        prefix = ["e2e4", "e7e5"]
+        _insert_line(db_session, late, prefix)
+        before = overlay_evidence(db_session, 1, "white", branching_graph)  # warm both
+
+        # 2.Nf3 is in book from FEN_E4E5, so the appended plies really do add
+        # evidence — otherwise "unchanged output" would pass vacuously.
+        _extend_line(db_session, late, prefix, ["g1f3", "b8c6"])
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1  # the extended session only; `stable` still cached
+
+        node = incr.nodes[FEN_E4E5]
+        assert node.live_attempts == 2  # was 1 (from `stable`) before the append
+        assert late in node.session_ids
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)
+        with pytest.raises(AssertionError):
+            _assert_overlay_equal(incr, before)  # the append was observable
+
+    def test_parity_eligibility_round_trip_failed_converted_ended(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """Eligibility ROUND TRIP: eligible → ineligible → eligible again.
+
+        An accuracy-failed drill is evidence-eligible while its status is still
+        'active'; /continue flips ``drill_state`` to 'converted' → ineligible; the
+        session later ENDS → eligible again. (There is no converted → failed edge
+        to test: ``ck_game_sessions_drill_rating_boundary`` requires is_rated=true
+        for 'converted' and is_rated=false for 'failed', so a converted session
+        regains eligibility only by ending.)
+
+        Eligibility is enforced by the PROBE — the session is simply not returned —
+        and is deliberately NOT part of the content digest, so the cached replay
+        product survives the excursion and the return re-derives nothing. Each
+        state must also equal its own clean rebuild.
+        """
+        _insert_user(db_session)
+        normal = _insert_session(db_session)
+        _insert_line(db_session, normal, ["e2e4", "e7e5"])
+        drill = _insert_session(
+            db_session, status="active", ended_at=None, session_mode="drill",
+            drill_state="failed", drill_terminal_reason="accuracy", is_rated=False,
+        )
+        _insert_line(db_session, drill, ["e2e4", "c7c5"])
+
+        def _update(**cols):
+            sets = ", ".join(f"{c} = :{c}" for c in cols)
+            db_session.execute(
+                text(f"UPDATE game_sessions SET {sets} WHERE id = :sid"),
+                {**cols, "sid": drill},
+            )
+            db_session.commit()
+
+        eligible = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert drill in eligible.nodes[FEN_ROOT].session_ids
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+
+        _update(
+            drill_state="converted", is_rated=True,
+            normal_started_at="2026-01-01 10:30:00",
+            converted_at="2026-01-01 10:30:00", rated_start_ply=2,
+        )
+        converted = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert drill not in converted.nodes[FEN_ROOT].session_ids
+        assert normal in converted.nodes[FEN_ROOT].session_ids
+        assert counter.count == 0  # dropped by the probe, not re-derived
+
+        # The converted game ends with no further plies uploaded: same rows, same
+        # started_at, so the digest is unchanged and the entry is still valid.
+        _update(status="ended", ended_at="2026-01-01 11:00:00")
+        restored = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 0  # the surviving entry is legitimately reused
+        _assert_overlay_equal(restored, eligible)  # round trip is lossless
+
+        reset_session_evidence_cache()
+        _assert_overlay_equal(
+            restored, overlay_evidence(db_session, 1, "white", branching_graph)
+        )
+
+        # ...and the ineligible middle state equals its own clean rebuild too.
+        _update(status="active", ended_at=None)
+        reset_session_evidence_cache()
+        _assert_overlay_equal(
+            converted, overlay_evidence(db_session, 1, "white", branching_graph)
+        )
 
     def test_parity_eval_backfill_invalidates(
         self, db_session, branching_graph, monkeypatch
@@ -1944,6 +2072,355 @@ class TestDegradedUnderBudget:
         _insert_line(db_session, new_sid, ["e2e4", "c7c5"])
         overlay_evidence(db_session, 1, "white", branching_graph)
         assert counter.count > 1  # more than just the appended session replayed
+
+
+# --------------------------------------------------------------------------- #
+# g-overlay-evidence-reuse: the cached UCI, the DB-computed replay digest, and
+# the probe/fetch race.
+# --------------------------------------------------------------------------- #
+
+# (fen_before, move_san) pairs where a raw-FEN parse could plausibly diverge from
+# a normalized-4-field parse — the en-passant field is the only thing
+# ``normalize_fen`` rewrites, so both EP directions are covered, plus the move
+# kinds whose UCI encoding is special (castling, promotion) and the SAN forms that
+# need the legal-move set to disambiguate.
+_UCI_PARITY_CASES = [
+    # EP capture is legal AND played: normalize_fen KEEPS the ep square.
+    ("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 4", "exf6"),
+    # Same position, a non-EP move played while the ep square is live.
+    ("rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 4", "d4"),
+    # EP square present in the FEN but NO legal ep capture exists: normalize_fen
+    # CLEARS it. Dropping an illegal move cannot change any legal move's SAN.
+    ("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "e5"),
+    # Castling, both sides, both colors — UCI encodes king-to-square.
+    ("r3k2r/pppq1ppp/2npbn2/2b1p3/2B1P3/2NPBN2/PPPQ1PPP/R3K2R w KQkq - 0 9", "O-O"),
+    ("r3k2r/pppq1ppp/2npbn2/2b1p3/2B1P3/2NPBN2/PPPQ1PPP/R3K2R w KQkq - 0 9", "O-O-O"),
+    ("r3k2r/pppq1ppp/2npbn2/2b1p3/2B1P3/2NPBN2/PPPQ1PPP/R3K2R b KQkq - 0 9", "O-O"),
+    # Promotion, quiet and capturing.
+    ("8/4P3/8/8/8/8/k6K/8 w - - 0 1", "e8=Q"),
+    ("3r4/4P3/8/8/8/8/k6K/8 w - - 0 1", "exd8=N"),
+    # SAN that needs file disambiguation (two knights / two rooks reach the
+    # target), and SAN that needs RANK disambiguation.
+    ("4k3/8/8/8/8/8/8/1N2KN2 w - - 0 1", "Nbd2"),
+    ("4k3/8/8/8/8/4K3/8/R6R w - - 0 1", "Rhf1"),
+    ("4k3/8/8/8/8/R7/8/R3K3 w - - 0 1", "R1a2"),
+]
+
+
+class TestCachedUciParity:
+    """``_CachedMove.uci`` is parsed on the RAW fen_before during replay; it
+    replaced a per-build parse on the NORMALIZED 4-field FEN. Pin that the two
+    agree, since the whole speedup rests on that equivalence."""
+
+    @pytest.mark.parametrize("raw_fen,san", _UCI_PARITY_CASES)
+    def test_raw_and_normalized_parses_agree(self, raw_fen, san):
+        raw_uci = chess.Board(raw_fen).parse_san(san).uci()
+        assert opening_evidence._uci_from_san(normalize_fen(raw_fen), san) == raw_uci
+
+    def test_derive_session_carries_the_oracle_uci(self, db_session):
+        """Integration: every uci the real replay caches equals the oracle's."""
+        board = chess.Board()
+        rows = []
+        for ply, uci in enumerate(
+            ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5c6", "d7c6"]
+        ):
+            move = chess.Move.from_uci(uci)
+            rows.append(
+                SimpleNamespace(
+                    session_id="s1",
+                    move_number=ply // 2 + 1,
+                    color="white" if board.turn == chess.WHITE else "black",
+                    move_san=board.san(move),
+                    fen_before=board.fen(),
+                    fen_after=(board.push(move), board.fen())[1],
+                    eval_delta=10,
+                    eval_cp=None,
+                    best_move_eval_cp=None,
+                    session_ts="2026-01-01 10:00:00",
+                )
+            )
+
+        derived = opening_evidence._derive_session(rows)
+        assert not derived.excluded
+        assert derived.moves  # the line is inside the opening interval
+        for cm in derived.moves:
+            assert cm.uci == opening_evidence._uci_from_san(
+                cm.norm_before, cm.move_san
+            ), f"cached uci diverged at {cm.move_san} from {cm.norm_before}"
+
+    def test_book_exit_and_extension_edges_keep_their_uci(
+        self, db_session, branching_graph
+    ):
+        """The cached uci feeds the two former ``_uci_from_san`` call sites in
+        passes 2/3 (book exit + observed continuation), so edges must still key on
+        the real move."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        assert ov.edges
+        for (parent_fen, _child), edge in ov.edges.items():
+            assert (
+                chess.Move.from_uci(edge.uci)
+                in chess.Board(parent_fen + " 0 1").legal_moves
+            ), f"edge uci {edge.uci} is not legal from {parent_fen}"
+
+
+# Per-column mutations that must all bust the replay cache. Each acts on a
+# one-move session so no (session_id, move_number, color) uniqueness collision is
+# possible, and each is a REAL change to a column the overlay consumes.
+_COLUMN_MUTATIONS = [
+    ("move_number", "move_number = 5"),
+    ("color", "color = 'black'"),
+    ("fen_before", f"fen_before = '{RAW_E4E5}'"),
+    ("fen_after", f"fen_after = '{RAW_ROOT}'"),
+    ("move_san", "move_san = 'd4'"),
+    ("eval_delta", "eval_delta = 999"),
+    ("eval_cp", "eval_cp = 42"),
+    ("best_move_eval_cp", "best_move_eval_cp = 77"),
+]
+
+
+class TestReplayDigestColumnCoverage:
+    """The replay-cache digest is computed by the DATABASE while the freshness
+    digest keeps ``_sm_line``, so "same rows → same line" no longer holds by
+    construction across the two. These tests are the replacement guard: every
+    consumed column must invalidate BOTH."""
+
+    def test_mutation_list_covers_every_digested_column(self):
+        assert {c for c, _ in _COLUMN_MUTATIONS} == set(
+            opening_evidence._SESSION_DIGEST_COLUMNS
+        ), (
+            "add the new _SESSION_DIGEST_COLUMNS entry to _COLUMN_MUTATIONS (and to "
+            "_sm_line) — an undigested column serves a stale overlay"
+        )
+
+    @pytest.mark.parametrize("column,set_clause", _COLUMN_MUTATIONS)
+    def test_every_consumed_column_busts_the_replay_cache(
+        self, db_session, branching_graph, monkeypatch, column, set_clause
+    ):
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10
+        )
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+        before_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+
+        db_session.execute(
+            text(f"UPDATE session_moves SET {set_clause} WHERE session_id = :sid"),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1, f"{column} change did not bust the replay cache"
+
+        # The freshness digest must see it too, or a batch would stay armed.
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != before_digest, (
+            f"{column} is digested by the replay cache but not by _sm_line"
+        )
+
+        reset_session_evidence_cache()
+        _assert_overlay_equal(incr, overlay_evidence(db_session, 1, "white", branching_graph))
+
+    def test_started_at_change_busts_the_replay_cache(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """``session_ts`` reaches the overlay as ``NodeEvidence.last_live_at``, so
+        it is digested too — from ``gs``, not ``sm``."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_line(db_session, sid, ["e2e4", "e7e5"])
+        ov1 = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        db_session.execute(
+            text("UPDATE game_sessions SET started_at = :ts WHERE id = :sid"),
+            {"ts": "2026-05-05 12:00:00", "sid": sid},
+        )
+        db_session.commit()
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1
+        assert ov2.nodes[FEN_ROOT].last_live_at != ov1.nodes[FEN_ROOT].last_live_at
+
+        reset_session_evidence_cache()
+        _assert_overlay_equal(ov2, overlay_evidence(db_session, 1, "white", branching_graph))
+
+    def test_sql_and_python_digest_bodies_agree(self, db_session, branching_graph):
+        """The probe's SQL body and ``_session_digest_body`` must be byte-equal:
+        if they drift, nothing is WRONG but every build re-replays from scratch.
+        Asserted directly so that regression names itself instead of showing up as
+        a mysterious replay count."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        # Both colors at the same move_number, so the explicit color rank in the
+        # ORDER BY is actually exercised.
+        _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        db_session.execute(
+            text("UPDATE session_moves SET eval_cp = NULL WHERE move_number = 2"),
+            {},
+        )
+        db_session.commit()
+
+        probe = db_session.execute(
+            text(opening_evidence._probe_sql("sqlite")),
+            {"user_id": 1, "player_color": "white"},
+        ).fetchall()
+        assert len(probe) == 1
+
+        rows = db_session.execute(
+            text(opening_evidence._SESSION_ROWS_SQL).bindparams(
+                bindparam("sids", expanding=True)
+            ),
+            {"user_id": 1, "player_color": "white", "sids": [sid]},
+        ).fetchall()
+
+        assert opening_evidence._session_digest_body(rows) == probe[0].body
+        assert len(rows) == probe[0].row_count
+        assert opening_evidence._session_digest(
+            len(rows), opening_evidence._session_digest_body(rows), rows[0].session_ts
+        ) == opening_evidence._session_digest(
+            probe[0].row_count, probe[0].body, probe[0].session_ts
+        )
+
+
+class TestProbePayloadFold:
+    """The probe must return a FIXED-SIZE row per session, not the raw aggregate.
+
+    Returning the aggregate verbatim would cut round-trips and per-row python
+    without cutting bytes — every FEN of every historical ply would still cross
+    the wire on a warm build (~3 KB per session). Only PostgreSQL can prove the
+    md5 pair agrees (see ``test_opening_evidence_digest_pg.py``); what IS provable
+    here is that the fold is wired in at all, which is what a refactor would drop.
+    """
+
+    def test_postgres_probe_wraps_the_aggregate_and_changes_nothing_else(self):
+        agg = opening_evidence._SESSION_DIGEST_AGG_SQL
+        pg = opening_evidence._probe_sql("postgresql")
+        portable = opening_evidence._probe_sql("sqlite")
+
+        assert f"md5({agg})" in pg, "PostgreSQL probe stopped folding server-side"
+        assert agg in portable and "md5(" not in portable
+        # The two statements may differ ONLY by the fold: same filters, same
+        # GROUP BY, same explicit color rank. Anything else is a real divergence.
+        assert pg.replace(f"md5({agg})", agg) == portable
+
+    def test_every_registered_fold_is_a_usable_pair(self):
+        for dialect, (template, fn) in opening_evidence._BODY_FOLDS.items():
+            assert "{body}" in template, dialect
+            assert fn("some body") != "", dialect
+        # md5 folds any body to 32 hex chars — this is the payload claim.
+        pg_fold = opening_evidence._body_fold("postgresql")[1]
+        assert len(pg_fold("x")) == 32
+        assert len(pg_fold("y" * 100_000)) == 32
+
+    def test_unknown_dialect_falls_back_to_the_identity_pair(self):
+        """An unrecognised dialect must stay CORRECT (identity on both sides),
+        merely un-optimised — never silently mismatched."""
+        assert opening_evidence._body_fold("mysql") is opening_evidence._IDENTITY_FOLD
+        assert opening_evidence._body_fold("sqlite") is opening_evidence._IDENTITY_FOLD
+        assert opening_evidence._body_fold("sqlite")[1]("abc") == "abc"
+
+
+class _RowFetchProxy:
+    """Delegating DB proxy that intercepts the scoped row fetch of
+    ``_build_move_rows`` (STEP 3) so the probe/fetch gap can be driven."""
+
+    def __init__(self, db, on_rows=None, drop_rows=False):
+        self._db = db
+        self._on_rows = on_rows
+        self._drop_rows = drop_rows
+        self.fired = 0
+
+    def execute(self, stmt, *args, **kwargs):
+        if "sm.session_id IN" in str(stmt):
+            self.fired += 1
+            if self._on_rows is not None:
+                self._on_rows()
+            if self._drop_rows:
+                return SimpleNamespace(fetchall=lambda: [])
+        return self._db.execute(stmt, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+class TestProbeFetchRace:
+    """The digest probe and the scoped row fetch are separate statements, so a
+    session can change in the gap. The entry must be keyed to the rows actually
+    replayed, never to the probe's (possibly older) digest."""
+
+    def test_store_key_describes_the_rows_replayed(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10
+        )
+
+        def _mutate_between():
+            db_session.execute(
+                text("UPDATE session_moves SET eval_delta = 555 WHERE session_id = :s"),
+                {"s": sid},
+            )
+            db_session.commit()
+
+        proxy = _RowFetchProxy(db_session, on_rows=_mutate_between)
+        torn = overlay_evidence(proxy, 1, "white", branching_graph)
+        assert proxy.fired == 1
+
+        # The overlay reflects the POST-mutation rows (they are what got replayed),
+        # and the cache entry is keyed to them — so an ordinary rebuild now hits
+        # without replaying. Keyed to the probe's stale digest instead, this build
+        # would re-replay, and a later build could be served the wrong content.
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        after = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 0, "stored key did not match the replayed rows"
+        _assert_overlay_equal(torn, after)
+
+        reset_session_evidence_cache()
+        _assert_overlay_equal(after, overlay_evidence(db_session, 1, "white", branching_graph))
+
+    def test_probed_session_absent_from_fetch_is_skipped(
+        self, db_session, branching_graph
+    ):
+        """A session that goes ineligible between probe and fetch contributes
+        nothing rather than raising."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_line(db_session, sid, ["e2e4", "e7e5"])
+
+        proxy = _RowFetchProxy(db_session, drop_rows=True)
+        ov = overlay_evidence(proxy, 1, "white", branching_graph)
+        assert proxy.fired == 1
+        assert ov.nodes == {}
+        assert ov.edges == {}
+        assert ov.excluded_sessions == 0
+
+        # Nothing was cached for it, so the next honest build derives it normally.
+        full = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert full.nodes[FEN_ROOT].live_attempts == 1
+
+    def test_warm_build_fetches_no_raw_rows(self, db_session, branching_graph):
+        """The point of the probe: a fully warm build issues the scoped row fetch
+        zero times."""
+        _insert_user(db_session)
+        for _ in range(3):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)  # cold
+
+        proxy = _RowFetchProxy(db_session)
+        overlay_evidence(proxy, 1, "white", branching_graph)
+        assert proxy.fired == 0
 
 
 # --------------------------------------------------------------------------- #

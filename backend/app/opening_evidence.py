@@ -26,7 +26,8 @@ import threading
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterable
+from functools import lru_cache
+from typing import Callable, Iterable
 
 import chess
 from sqlalchemy import bindparam, text
@@ -245,6 +246,9 @@ class _MoveRow:
     norm_after: str
     fen_before_raw: str
     move_san: str
+    # ``move_san`` resolved to UCI once during the cached board REPLAY, never
+    # re-derived per build — see ``_CachedMove.uci``.
+    uci: str
     eval_delta: int | None
     quality: float | None
     quality_source: str | None
@@ -294,6 +298,27 @@ class _CachedMove:
     norm_after: str
     fen_before_raw: str
     move_san: str
+    # The played move's UCI, parsed ONCE here during the replay that already
+    # proved this SAN legal from ``fen_before`` (g-overlay-evidence-reuse).
+    #
+    # Before this was cached, every build re-derived it via
+    # ``_uci_from_san(norm_before, move_san)`` at three call sites — which
+    # rebuilds a python-chess ``Board`` from a FEN each time. Profiled on a
+    # heavy user (18.9k premoves) that was 16.3k Board constructions and ~51%
+    # of the WHOLE warm overlay build; the SAN parse itself was only ~12% of
+    # that. Board construction, not parsing, was the cost.
+    #
+    # Parsed on the RAW ``fen_before`` board rather than the normalized 4-field
+    # FEN the old helper used. The two cannot disagree: ``normalize_fen`` copies
+    # fields 1-3 verbatim and only CLEARS the en-passant square when
+    # ``has_legal_en_passant()`` is false — i.e. it can drop an already-illegal
+    # move but never a legal one, so both boards have the same legal move set and
+    # therefore resolve any SAN (including disambiguation) identically. Halfmove/
+    # fullmove clocks do not affect move generation. Verified over 51,174 prod
+    # plies: zero divergence. ``test_cached_uci_matches_normalized_fen_parse``
+    # pins the tricky cases (en passant available / present-but-illegal,
+    # castling, promotion, ambiguous SAN).
+    uci: str
     eval_delta: int | None
     eval_cp: int | None
     best_move_eval_cp: int | None
@@ -342,9 +367,24 @@ _session_cache_evictions = 0  # cumulative rows evicted (observability / tests)
 
 
 def _sm_line(r) -> str:
-    """Canonical per-row ``SM|`` projection shared by the freshness digest
-    (section 1) and the per-session content hash, so "same raw rows → same
-    line" holds by construction across both consumers."""
+    """Canonical per-row ``SM|`` projection for the freshness digest (section 1).
+
+    MAINTENANCE (g-overlay-evidence-reuse): this projection and the per-session
+    REPLAY-cache digest below (``_SESSION_DIGEST_COLUMNS``) must cover the same
+    ``session_moves`` column set. They used to share this function outright, so
+    "same raw rows → same line" held by construction; the cache digest is now
+    computed by the DATABASE (see ``_probe_sql`` for why), so the
+    two are separate formatters over one column list. The by-construction link is
+    replaced by a behavioral guard: ``test_every_consumed_column_busts_the_replay_cache``
+    mutates each column in turn and asserts the cache re-derives, and the
+    freshness-digest tests cover this side. Adding a column the overlay consumes
+    means adding it in BOTH places.
+
+    The stored format is deliberately unchanged: it feeds
+    ``raw_evidence_inputs_digest``, which is persisted in ``inputs_fingerprint``,
+    so any edit here invalidates every stamped batch and forces a global
+    recompute.
+    """
     return "SM|" + "|".join(
         (
             str(r.session_id),
@@ -361,7 +401,197 @@ def _sm_line(r) -> str:
     )
 
 
-def _session_content_hash(srows) -> str:
+# ---------------------------------------------------------------------------
+# Per-session REPLAY-cache digest (g-overlay-evidence-reuse).
+#
+# WHY THE DATABASE COMPUTES IT. Validating the replay cache used to mean
+# SELECTing every eligible historical row (two FENs each) and hashing all of
+# them in python, every build — just to conclude that nothing changed. Profiled
+# on a heavy user (52.5k rows / 1118 sessions) that was ~176 ms of row transfer
+# plus ~317 ms of python hashing to reach a 1118/1118 hit rate: 33% of the warm
+# build spent proving the cache was already correct. Grouping the same
+# projection in SQL costs ~62 ms for the whole user and transfers one FIXED-SIZE
+# row per session (see THE DB-SIDE FOLD below), and the full rows are then
+# fetched ONLY for sessions that missed (~0 ms for the single new session of a
+# drill finalize).
+#
+# TWO FORMATTERS, ONE MEANING. ``_SESSION_DIGEST_BODY_SQL`` and
+# ``_session_digest_body`` must produce byte-identical output for the same rows,
+# or the probe key would never match the stored key and EVERY build would
+# re-replay from scratch. That failure is silent and slow rather than wrong, so
+# it gets an explicit test: ``test_warm_rebuild_replays_nothing`` asserts zero
+# ``_derive_session`` calls on a warm rebuild. Formatting is chosen so the two
+# agree by construction:
+#   - every field goes through coalesce/``_digest_value`` to the same NULL
+#     sentinel, so NULL and '' cannot collide AND a NULL can never make the whole
+#     concatenation NULL (which ``string_agg`` would silently DROP, hiding a
+#     changed row);
+#   - ``count(*)`` is folded in as a second backstop against a dropped row;
+#   - integers render identically under ``CAST(x AS TEXT)`` and ``str()``;
+#   - the timestamp is formatted in PYTHON on both paths (``_digest_ts``), never
+#     in SQL, because timestamp text differs sharply between dialects;
+#   - ordering uses an EXPLICIT color rank rather than ``ORDER BY sm.color``, so
+#     the digest cannot depend on database collation;
+#   - the separators are safe because no consumed field can contain them: ints,
+#     'white'/'black', the FEN charset and the SAN charset admit no '|', '~' or
+#     newline. (``_sm_line`` already relies on the same property.)
+#
+# THE DB-SIDE FOLD. The aggregate concatenates every consumed field of every row,
+# so returning it verbatim would put the whole evidence payload — two FENs per
+# ply — back on the wire. That would cut round-trips and per-row python without
+# cutting BYTES, leaving the warm figure dependent on link bandwidth. Measured on
+# the 1118-session user: the raw aggregate is 6473 body bytes per session, 7.24 MB
+# per warm build — near-free over the loopback socket the timings were taken on,
+# and not free over a real network. So the server folds each body before returning
+# it: 32 body bytes per session, 35.8 KB across the build, a 202x reduction on the
+# term that used to dominate. (Those figures count the BODY column only; each row
+# also carries its session id, row count and timestamp, plus protocol overhead —
+# all of which were already O(sessions). The point of the fold is that the one
+# term that was O(evidence bytes) no longer is.)
+#
+# ``string_agg(... ORDER BY)``, ``CAST(x AS TEXT)`` and ``coalesce`` are common
+# to Postgres 18 and SQLite 3.51, but a hash function is NOT: SQLite has no
+# built-in md5. So the fold is the module's one dialect fork — md5 on
+# PostgreSQL, identity on everything else — and python applies the MATCHING
+# fold to the body it built from the rows it fetched. Since only PostgreSQL can
+# prove the md5 pair agrees, that proof lives in
+# ``test_opening_evidence_digest_pg.py``; the raw-body formatters are still
+# proven byte-equal there too, on the unfolded aggregate.
+# ---------------------------------------------------------------------------
+
+_DIGEST_NULL = "~"  # NULL sentinel; cannot occur in any consumed field
+_DIGEST_FIELD_SEP = "|"
+_DIGEST_ROW_SEP = "\n"
+
+# The ``session_moves`` columns the per-session replay product depends on —
+# everything ``_derive_session`` reads plus everything ``_CachedMove`` carries.
+# Must stay in sync with ``_sm_line`` (see its MAINTENANCE note). ``session_id``
+# is absent because the digest is already per-session, and ``gs.started_at`` is
+# folded in separately (it is a game_sessions column, constant per session).
+_SESSION_DIGEST_COLUMNS = (
+    "move_number",
+    "color",
+    "fen_before",
+    "fen_after",
+    "move_san",
+    "eval_delta",
+    "eval_cp",
+    "best_move_eval_cp",
+)
+
+_SESSION_DIGEST_BODY_SQL = f" || '{_DIGEST_FIELD_SEP}' || ".join(
+    f"coalesce(CAST(sm.{col} AS TEXT), '{_DIGEST_NULL}')"
+    for col in _SESSION_DIGEST_COLUMNS
+)
+
+# Explicit color rank, mirroring ``_COLOR_RANK`` — NOT ``ORDER BY sm.color``,
+# which would make the digest depend on the database's collation.
+_SESSION_DIGEST_ORDER_SQL = (
+    "sm.move_number,"
+    " CASE sm.color WHEN 'white' THEN 0 WHEN 'black' THEN 1 ELSE 2 END,"
+    " sm.id"
+)
+
+
+# The aggregated body, before folding. Shared by the probe and by the PG test's
+# byte-equality assertion against ``_session_digest_body``.
+_SESSION_DIGEST_AGG_SQL = (
+    f"string_agg({_SESSION_DIGEST_BODY_SQL},"
+    f" '{_DIGEST_ROW_SEP}' ORDER BY {_SESSION_DIGEST_ORDER_SQL})"
+)
+
+# (SQL template, python equivalent) per SQLAlchemy dialect name — see THE
+# DB-SIDE FOLD above. md5 here is a non-cryptographic content fold, hence
+# ``usedforsecurity=False`` (which also keeps it working under a FIPS build,
+# where an unflagged hashlib.md5 raises).
+_BODY_FOLDS: dict[str, tuple[str, Callable[[str], str]]] = {
+    "postgresql": (
+        "md5({body})",
+        lambda body: hashlib.md5(
+            body.encode("utf-8"), usedforsecurity=False
+        ).hexdigest(),
+    ),
+}
+# Dialects without a built-in hash return the body itself; python matches.
+_IDENTITY_FOLD: tuple[str, Callable[[str], str]] = ("{body}", lambda body: body)
+
+
+def _body_fold(dialect: str) -> tuple[str, Callable[[str], str]]:
+    """The (SQL template, python fn) fold pair for a dialect. The two MUST agree:
+    disagreement is silent and slow, not wrong — every build re-replays."""
+    return _BODY_FOLDS.get(dialect, _IDENTITY_FOLD)
+
+
+@lru_cache(maxsize=8)
+def _probe_sql(dialect: str) -> str:
+    """STEP 1 of ``_build_move_rows``: one fixed-size row per eligible session.
+
+    Cached because it is pure in ``dialect`` and runs on every overlay build.
+    """
+    body = _body_fold(dialect)[0].format(body=_SESSION_DIGEST_AGG_SQL)
+    return f"""
+    SELECT sm.session_id AS sid,
+           count(*) AS row_count,
+           {body} AS body,
+           max(gs.started_at) AS session_ts
+    FROM session_moves sm
+    JOIN game_sessions gs ON gs.id = sm.session_id
+    WHERE gs.user_id = :user_id
+      AND gs.player_color = :player_color
+      AND sm.fen_before IS NOT NULL
+      AND gs.session_mode IN ('normal', 'drill')
+      AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
+    GROUP BY sm.session_id
+"""
+
+# STEP 3: the full rows, scoped to the sessions that missed the replay cache.
+# Filters MUST match the probe's exactly or a session could be probed under one
+# predicate and replayed under another. ``sm.id`` is selected because
+# ``_digest_row_sort_key`` orders on it.
+_SESSION_ROWS_SQL = f"""
+    SELECT sm.id, sm.session_id, sm.move_number, sm.color,
+           sm.fen_before, sm.fen_after, sm.move_san,
+           sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
+           gs.started_at AS session_ts
+    FROM session_moves sm
+    JOIN game_sessions gs ON gs.id = sm.session_id
+    WHERE gs.user_id = :user_id
+      AND gs.player_color = :player_color
+      AND sm.fen_before IS NOT NULL
+      AND gs.session_mode IN ('normal', 'drill')
+      AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
+      AND sm.session_id IN :sids
+"""
+
+
+def _digest_value(val) -> str:
+    """One field's digest text — python side of the SQL ``coalesce(CAST(...))``."""
+    return _DIGEST_NULL if val is None else str(val)
+
+
+def _digest_row_sort_key(r) -> tuple[int, int, int]:
+    """Python mirror of ``_SESSION_DIGEST_ORDER_SQL`` (note the ``2`` default,
+    matching that expression's ``ELSE 2`` — deliberately NOT the replay sort's
+    ``_COLOR_RANK.get(color, 0)``)."""
+    return (r.move_number, _COLOR_RANK.get(r.color, 2), r.id)
+
+
+def _session_digest_body(srows) -> str:
+    """Python mirror of ``_SESSION_DIGEST_AGG_SQL`` — the UNFOLDED body.
+
+    Used only for rows this build actually FETCHED, to key what it replayed. The
+    caller must apply the dialect's ``_body_fold`` to the result, because the
+    probe returns a folded body.
+    """
+    return _DIGEST_ROW_SEP.join(
+        _DIGEST_FIELD_SEP.join(
+            _digest_value(getattr(r, col)) for col in _SESSION_DIGEST_COLUMNS
+        )
+        for r in sorted(srows, key=_digest_row_sort_key)
+    )
+
+
+def _session_digest(row_count: int, body: str | None, session_ts) -> str:
     """Content hash over one session's rows + the two REPLAY version tags.
 
     Folds ``game_phase.DIVIDER_VERSION`` (read as a LIVE module attribute so a
@@ -369,8 +599,7 @@ def _session_content_hash(srows) -> str:
     version bump misses every entry and forces full re-derivation. QUALITY /
     TAU constants are deliberately absent — quality is recomputed on copy-out.
     """
-    lines = sorted(_sm_line(r) for r in srows)
-    payload = "\n".join(lines)
+    payload = f"{row_count}\x00{body or ''}\x00{_digest_ts(session_ts)}"
     payload += f"\n\x00DIVIDER={game_phase.DIVIDER_VERSION}"
     payload += f"\n\x00INPUTS={OPENING_EVIDENCE_INPUTS_VERSION}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -493,6 +722,14 @@ def _resolve_edge_uci(graph: OpeningGraph, parent_fen: str, child_fen: str) -> s
 
 
 def _uci_from_san(fen_4field: str, move_san: str) -> str | None:
+    """Resolve a SAN to UCI on a board built from a NORMALIZED 4-field FEN.
+
+    No longer on any build path — ``_CachedMove.uci`` carries this value from the
+    replay (g-overlay-evidence-reuse). Retained deliberately as the PARITY ORACLE
+    the equivalence test compares the cached uci against, so the argument in
+    ``_CachedMove.uci`` for why the raw-FEN and normalized-FEN parses agree stays
+    executable rather than only written down.
+    """
     try:
         board = chess.Board(fen_4field + " 0 1")
         move = board.parse_san(move_san)
@@ -595,6 +832,11 @@ def _derive_session(srows) -> _CachedSession:
     for index, r in enumerate(srows):
         if not is_opening_premove(division, index):
             continue
+        # ``boards[index]`` is this ply's PRE-move board, already built and
+        # already proven to accept this SAN by the reconstruction above (it
+        # raises ContinuityError otherwise), so parse_san cannot fail here and
+        # costs no new Board construction. reconstruct_board_sequence pushes only
+        # onto a throwaway copy, so the returned boards are unmutated.
         moves.append(
             _CachedMove(
                 session_id=str(r.session_id),
@@ -604,6 +846,7 @@ def _derive_session(srows) -> _CachedSession:
                 norm_after=normalize_fen(r.fen_after),
                 fen_before_raw=r.fen_before,
                 move_san=r.move_san,
+                uci=boards[index].parse_san(r.move_san).uci(),
                 eval_delta=r.eval_delta,
                 eval_cp=r.eval_cp,
                 best_move_eval_cp=r.best_move_eval_cp,
@@ -626,55 +869,79 @@ def _build_move_rows(
 ) -> list[_MoveRow]:
     """Load session moves, phase-tag them, and attach continuous quality.
 
-    Groups rows by session; for each session, the expensive board REPLAY
-    (reconstruct + divide + opening-premove extraction) is served from an
-    in-process per-session cache (``_derive_session`` on a miss). Quality is
-    recomputed on copy-out into a FRESH mutable ``_MoveRow`` per cached premove,
-    so a QUALITY/TAU version bump honours automatically with no cache
-    invalidation and ``_apply_cache_fallbacks`` can never poison the frozen
-    cached value. Sessions with broken continuity are excluded and counted.
+    Four steps, so an unchanged session costs one grouped digest row and nothing
+    else (g-overlay-evidence-reuse):
+
+    1. PROBE — one grouped statement returns a content digest per eligible
+       session (``_probe_sql(dialect)``).
+    2. RESOLVE — hit the in-process replay cache on that digest. A fully warm
+       build stops here having transferred no raw rows at all.
+    3. FETCH + REPLAY — only for sessions that missed, keyed on a digest of the
+       rows actually fetched (see the torn-read note inline).
+    4. COPY OUT — a fresh mutable ``_MoveRow`` per cached premove, in sorted
+       session order, with quality recomputed live so a QUALITY/TAU version bump
+       honours automatically with no cache invalidation and
+       ``_apply_cache_fallbacks`` can never poison the frozen cached value.
+
+    Sessions with broken continuity are excluded and counted.
     """
-    rows = db.execute(
-        text(f"""
-            SELECT sm.session_id, sm.move_number, sm.color,
-                   sm.fen_before, sm.fen_after, sm.move_san,
-                   sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
-                   gs.started_at AS session_ts
-            FROM session_moves sm
-            JOIN game_sessions gs ON gs.id = sm.session_id
-            WHERE gs.user_id = :user_id
-              AND gs.player_color = :player_color
-              AND sm.fen_before IS NOT NULL
-              AND gs.session_mode IN ('normal', 'drill')
-              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
-        """),
+    # STEP 1 — probe. One grouped statement per (user, color) yields one
+    # fixed-size row per eligible session carrying its folded content digest,
+    # instead of transferring every historical row to hash it here.
+    dialect = db.get_bind().dialect.name
+    fold = _body_fold(dialect)[1]
+    probe_rows = db.execute(
+        text(_probe_sql(dialect)),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
+    if not probe_rows:
+        return []
 
-    by_session: dict[str, list] = defaultdict(list)
-    for row in rows:
-        by_session[str(row.session_id)].append(row)
-
-    opening_moves: list[_MoveRow] = []
-    # Candidates needing an analysis_cache lookup: index into opening_moves plus
-    # the (fen_before_raw, uci, side_to_move) lookup key.
-    cache_candidates: list[tuple[int, str, str, str]] = []
+    # STEP 2 — resolve against the replay cache. Warm builds end here: every
+    # session hits and not one raw row is fetched.
+    derived: dict[str, _CachedSession] = {}
+    missed: list[str] = []
+    for pr in probe_rows:
+        sid = str(pr.sid)
+        cached = _session_cache_get(
+            sid, _session_digest(pr.row_count, pr.body, pr.session_ts)
+        )
+        if cached is None:
+            missed.append(sid)
+        else:
+            derived[sid] = cached
 
     # Build-local eviction tally (rows this rebuild evicted). NOT a diff of the
     # shared cumulative counter: other threads mutate it concurrently, which
     # would over/under-count and misattribute this user's warning.
     evicted_rows = 0
 
-    # Iterate sessions in a DETERMINISTIC order: the SELECT has no ORDER BY, so
-    # by_session insertion order follows DB row order and is not stable across
-    # runs. sorted(by_session) makes phase_samples order and cache_candidates
-    # indices identical between an incremental and a from-scratch build.
-    for sid in sorted(by_session):
-        srows = by_session[sid]
-        srows.sort(key=lambda r: (r.move_number, _COLOR_RANK.get(r.color, 0)))
-        content_hash = _session_content_hash(srows)
-        cached = _session_cache_get(sid, content_hash)
-        if cached is None:
+    # STEP 3 — fetch and replay ONLY the missed sessions.
+    if missed:
+        rows = db.execute(
+            text(_SESSION_ROWS_SQL).bindparams(bindparam("sids", expanding=True)),
+            {"user_id": user_id, "player_color": player_color, "sids": missed},
+        ).fetchall()
+
+        by_session: dict[str, list] = defaultdict(list)
+        for row in rows:
+            by_session[str(row.session_id)].append(row)
+
+        for sid, srows in by_session.items():
+            srows.sort(key=lambda r: (r.move_number, _COLOR_RANK.get(r.color, 0)))
+            # Key the entry on a digest of the rows THIS build actually fetched,
+            # never on the probe's digest. The probe and this fetch are separate
+            # statements, so under READ COMMITTED the session can change in the
+            # gap; storing probe-key → fetched-value would leave an entry whose
+            # key describes rows that were never replayed, and a later probe
+            # returning that key would serve it. Re-deriving here makes key and
+            # value come from ONE snapshot by construction. Every row of a
+            # session shares its game_sessions join row, so srows[0].session_ts
+            # is exactly the probe's max(gs.started_at). ``fold`` is the same
+            # dialect's fold the probe applied server-side.
+            content_hash = _session_digest(
+                len(srows), fold(_session_digest_body(srows)), srows[0].session_ts
+            )
             cached = _derive_session(srows)  # REPLAY happens here only (miss)
             if cached.excluded and _mark_exclusion_warned_if_new(sid, content_hash):
                 logger.warning(
@@ -683,7 +950,26 @@ def _build_move_rows(
                     cached.exclusion_msg,
                 )
             evicted_rows += _session_cache_put(sid, content_hash, cached)
+            derived[sid] = cached
 
+        # A session the probe saw but that this fetch did not return went
+        # ineligible (or lost its rows) in the gap above. It is simply absent from
+        # ``derived`` and contributes nothing — the same outcome as if the probe
+        # had run after the change. Safe under the freshness lower-bound
+        # discipline in opening_cache.py: the signal is sampled BEFORE this read,
+        # so an at-or-newer overlay re-verifies on the next pass.
+
+    opening_moves: list[_MoveRow] = []
+    # Candidates needing an analysis_cache lookup: index into opening_moves plus
+    # the (fen_before_raw, uci, side_to_move) lookup key.
+    cache_candidates: list[tuple[int, str, str, str]] = []
+
+    # STEP 4 — copy out in a DETERMINISTIC session order. Neither statement above
+    # orders by session, so dict insertion order follows DB row order and is not
+    # stable across runs. sorted() makes phase_samples order and cache_candidates
+    # indices identical between an incremental and a from-scratch build.
+    for sid in sorted(derived):
+        cached = derived[sid]
         if cached.excluded:
             overlay.excluded_sessions += 1
             continue
@@ -709,6 +995,7 @@ def _build_move_rows(
                 norm_after=cm.norm_after,
                 fen_before_raw=cm.fen_before_raw,
                 move_san=cm.move_san,
+                uci=cm.uci,
                 eval_delta=cm.eval_delta,
                 quality=quality,
                 quality_source=source,
@@ -721,12 +1008,14 @@ def _build_move_rows(
                 and (cm.eval_cp is None or cm.best_move_eval_cp is None)
             )
             if needs_cache:
-                uci = _uci_from_san(cm.norm_before, cm.move_san)
-                if uci is not None:
-                    stm = "w" if " w " in cm.fen_before_raw else "b"
-                    cache_candidates.append(
-                        (len(opening_moves), cm.fen_before_raw, uci, stm)
-                    )
+                # ``cm.uci`` replaces a per-build _uci_from_san re-parse. The old
+                # code skipped the candidate when that returned None; the cached
+                # uci is always present (the replay proved the SAN legal), so this
+                # branch no longer has an unreachable skip.
+                stm = "w" if " w " in cm.fen_before_raw else "b"
+                cache_candidates.append(
+                    (len(opening_moves), cm.fen_before_raw, cm.uci, stm)
+                )
             opening_moves.append(mr)
 
     if evicted_rows > 0:
@@ -888,10 +1177,7 @@ def _collect_session_moves(
             # Book exit: parent in book, but the edge is not a book edge.
             # This includes moves to off-book positions AND non-book edges
             # that happen to land on a position known elsewhere in the graph.
-            uci = _uci_from_san(mr.norm_before, mr.move_san)
-            if uci is None:
-                continue
-            _apply_move(overlay, mr, uci, is_user, recorded)
+            _apply_move(overlay, mr, mr.uci, is_user, recorded)
             book_exits.add(mr.norm_after)
 
     # Pass 3: follow observed continuations from book-boundary exits. There is no
@@ -907,10 +1193,7 @@ def _collect_session_moves(
         current_fen = frontier.pop()
         for mr in move_chains.get(current_fen, []):
             is_user = mr.color == player_color
-            uci = _uci_from_san(mr.norm_before, mr.move_san)
-            if uci is None:
-                continue
-            _apply_move(overlay, mr, uci, is_user, recorded)
+            _apply_move(overlay, mr, mr.uci, is_user, recorded)
             if mr.norm_after not in visited:
                 visited.add(mr.norm_after)
                 frontier.append(mr.norm_after)
@@ -1112,9 +1395,10 @@ def _per_user_evidence_lines(
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
     for r in session_rows:
-        # Shared per-row projection with the per-session content hash
-        # (_session_content_hash), so "same raw rows → same line" holds across
-        # both the freshness digest and the replay cache by construction.
+        # Canonical per-row projection for THIS digest only. The replay cache's
+        # per-session digest is a separate formatter over the same column set —
+        # see the MAINTENANCE note on ``_sm_line`` for what keeps them aligned
+        # now that they no longer share this function.
         lines.append(_sm_line(r))
 
     # 2. Candidate fen_before set for the shared trusted-source lookups: this
