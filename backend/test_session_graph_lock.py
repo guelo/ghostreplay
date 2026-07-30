@@ -287,7 +287,9 @@ def test_moves_graph_lock_timeout_degrades(
     finally:
         verify.close()
     assert cache_rows == len(_OPENING_MOVES)
-    recompute_mock.assert_called_once_with(user_id, "white")
+    recompute_mock.assert_called_once_with(
+        user_id, "white", source=OpeningScoreTrigger.SESSION_EVIDENCE
+    )
 
 
 @pg_required
