@@ -3,6 +3,14 @@
 Use after changes to opportunity semantics. The recompute is rerunnable because
 events are upserted by (session_id, blunder_id) and stale events are deleted per
 session by _compute_blunder_opportunity_events.
+
+NOT YET BOUNDARY-AWARE (g-boundary-backfill). The runtime writer now scopes a drill's
+evidence to its boundary ply (app/evidence_boundary.py), but the --blunder-id /
+--all-blunders paths below still use this module's own _session_position_ids, which hashes
+EVERY session move. Running them today would recreate exactly the pre-root drill rows the
+boundary excludes. Replacing that helper, adding session-grain modes, and retiring the
+historical rows are g-boundary-backfill; until it lands, treat both modes as unsafe to run
+against production.
 """
 
 from __future__ import annotations

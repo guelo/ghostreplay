@@ -52,6 +52,11 @@ class OpportunityCounters:
     collapsed steering onto whichever target was newest
     (g-ghost-preach-absorb). p_reach therefore derives from the targeted stream
     only.
+
+    ``event_count`` is not a row count. It counts the rows the BROAD eligibility
+    predicate accepts — the same rows ``opportunities_*`` sum — because it is the
+    switch that routes ``srs_priority`` / ``practice_priority_score`` between the
+    dueness branch and the time-based schedule (g-boundary-event-scope).
     """
 
     opportunities_since_review: int = 0
@@ -213,43 +218,43 @@ def load_opportunity_counters(
     event_time = func.coalesce(BlunderOpportunityEvent.occurred_at, BlunderOpportunityEvent.created_at)
     blunder_created_at = func.coalesce(Blunder.created_at, BlunderOpportunityEvent.created_at)
     event_after_blunder_created = event_time >= blunder_created_at
-    opportunity_30d = and_(
-        BlunderOpportunityEvent.opportunity.is_(True),
-        event_time >= cutoff,
-        event_after_blunder_created,
-    )
-    reached_30d = and_(
-        BlunderOpportunityEvent.reached.is_(True),
-        event_time >= cutoff,
-        event_after_blunder_created,
-    )
-    opportunity_since_review = and_(
+    # The single eligibility predicate for BROAD evidence. Every aggregate below is one
+    # of these two AND its own window; ``event_count`` is ``eligible_broad`` with no
+    # window at all.
+    eligible_broad = and_(
         BlunderOpportunityEvent.opportunity.is_(True),
         event_after_blunder_created,
-        or_(
-            latest_review.c.reviewed_at.is_(None),
-            and_(
-                BlunderOpportunityEvent.session_id != latest_review.c.session_id,
-                event_time > latest_review.c.reviewed_at,
-            ),
+    )
+    # ``reached`` is only ever meaningful ALONGSIDE ``opportunity``: reaching a position
+    # is the strongest possible opportunity, which is why the writer sets both and
+    # ck_blunder_opportunity_reached_implies_opportunity enforces it. Restating it here
+    # is defence in depth — a hand-edited or legacy row that claims a reach without an
+    # opportunity must not inflate a numerator whose denominator excludes it.
+    eligible_reached = and_(eligible_broad, BlunderOpportunityEvent.reached.is_(True))
+    since_review = or_(
+        latest_review.c.reviewed_at.is_(None),
+        and_(
+            BlunderOpportunityEvent.session_id != latest_review.c.session_id,
+            event_time > latest_review.c.reviewed_at,
         ),
     )
-    reached_since_review = and_(
-        BlunderOpportunityEvent.reached.is_(True),
-        event_after_blunder_created,
-        or_(
-            latest_review.c.reviewed_at.is_(None),
-            and_(
-                BlunderOpportunityEvent.session_id != latest_review.c.session_id,
-                event_time > latest_review.c.reviewed_at,
-            ),
-        ),
-    )
+    opportunity_30d = and_(eligible_broad, event_time >= cutoff)
+    reached_30d = and_(eligible_reached, event_time >= cutoff)
+    opportunity_since_review = and_(eligible_broad, since_review)
+    reached_since_review = and_(eligible_reached, since_review)
 
     rows_query = (
         db.query(
             BlunderOpportunityEvent.blunder_id.label("blunder_id"),
-            func.count(BlunderOpportunityEvent.id).label("event_count"),
+            # ALIGNED with ``eligible_broad``, not a raw row count. ``event_count`` is
+            # the routing switch in ``opportunity_priority`` /
+            # ``practice_priority_score``: >0 means "opportunity evidence exists, score
+            # by dueness", 0 means "fall back to the time-based schedule". Counting
+            # rows the eligibility predicate rejects — an opportunity=false row, or one
+            # dated before the blunder existed — routed a blunder into the dueness
+            # branch with an ``opportunities_since_review`` of 0, i.e. a priority of 0,
+            # permanently not-due. The counter and the gate now read the same rows.
+            func.coalesce(func.sum(case((eligible_broad, 1), else_=0)), 0).label("event_count"),
             func.coalesce(func.sum(case((opportunity_since_review, 1), else_=0)), 0).label(
                 "opportunities_since_review"
             ),
@@ -356,7 +361,21 @@ def _load_targeted_counters(
             groups.c.blunder_id,
             func.count().label("targeted_30d"),
             func.coalesce(
-                func.sum(case((BlunderOpportunityEvent.reached.is_(True), 1), else_=0)), 0
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                BlunderOpportunityEvent.reached.is_(True),
+                                # Same defence in depth as the broad aggregates: a
+                                # reach without an opportunity is not evidence.
+                                BlunderOpportunityEvent.opportunity.is_(True),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
             ).label("targeted_reached_30d"),
         )
         .select_from(groups)

@@ -1463,7 +1463,10 @@ score = urgency × severity × distance_weight × reach_weight × opening_weight
 which the ghost actually steered at this blunder** — read directly from the `opponent_decisions`
 log, grouped by `(session_id, target_blunder_id)` so re-hooking the same target within one game
 counts once. The numerator joins broad `blunder_opportunity_events` for whole-session `reached`
-membership; no event row means not reached.
+membership; no event row means not reached. "Whole-session" is scoped by the drill's evidence
+boundary (§17.4.2): a drill contributes reaches only from its confirmed root / rated conversion
+onward, and a drill with no boundary contributes none while its targeted attempts still count in
+the denominator.
 
 It is deliberately **not** derived from `blunder_opportunity_events`, whose `opportunity` flag is an
 8-ply forward neighbourhood of everything a session touched. That denominator is structurally ~1/N
@@ -4085,6 +4088,56 @@ boundary claim: a route-check without it behaves exactly as it did before confir
 existed. The live client now sends it on every check; it stays optional only for the length
 of the deploy window, since requiring it would `422` every drill move for an already-open
 tab (g-route-check-ply-required).
+
+#### 17.4.2 Boundary-scoped broad opportunity accounting (g-boundary-event-scope)
+
+`app/evidence_boundary.py` is the single definition of which observed positions are SRS
+evidence, shared by the runtime writer
+(`_compute_blunder_opportunity_events`) and the historical backfill so a boundary can
+never be implemented twice and drift.
+
+**The boundary ply.** A normal session starts at `-1`; a drill starts at
+`min(drill_root_reached_ply, rated_start_ply)` over whichever of the two exists; a drill
+with neither is `NULL` and contributes **no broad evidence at all**. `-1` rather than `0`
+because the reach rule is *strictly greater than* the boundary and ply 0 — the starting
+position, carried only by the first row's `fen_before` — has always been a reach.
+Conversion is a boundary in its own right (from `rated_start_ply` on it is ordinary rated
+play), and taking the **earlier** of the two keeps evidence that either signal alone would
+discard.
+
+**Observations are plies, not rows.** Both `fen_before` and `fen_after` are hashed, at
+`ply-1` and `ply` respectively (`ply_after(move_number, color)`). Dropping `fen_before`
+would discard the starting position and every opponent-to-move position the session passed
+through; dating it at the row's own ply would push the whole pre-boundary prefix one ply
+later and leak it back across the boundary. Each FEN hash keeps its **latest** ply.
+
+**Two roles, one boundary.** Observations at or after the boundary are `seed_hashes` and
+feed the opponent-colour forward BFS; observations *strictly* after it are `reach_hashes`
+and alone decide `reached`. The root is therefore a **seed but not a reach** — arriving
+there is the route's doing — while what is genuinely downstream of it still becomes an
+opportunity. Because observations keep their latest ply, a later transposition back into
+the root *does* count as a reach.
+
+**Terminal state never scopes evidence; only the boundary does.** 92% of drill sessions end
+`abandoned` because that is the catch-all bucket for "played to the strictness threshold,
+clicked Again" — it measures engagement, not quitting. An abandoned drill with a confirmed
+root keeps every post-boundary observation.
+
+**`reached ⇒ opportunity`.** Reaching a position *is* the strongest opportunity at it, so
+the writer sets `opportunity = reached OR forward_reachable`,
+`ck_blunder_opportunity_reached_implies_opportunity` makes that structural, and the reach
+aggregates in `app/srs_opportunity.py` restate it in SQL as defence in depth.
+
+**`event_count` is aligned with the broad eligibility predicate** — `opportunity = true`
+AND the event is not dated before the blunder was created — rather than being a raw row
+count. It is the routing switch in `srs_priority` / `practice_priority_score`: above zero
+means "opportunity evidence exists, score by dueness", zero means "fall back to the
+time-based schedule". Counting rows the predicate rejects routed a blunder into the dueness
+branch with an `opportunities_since_review` of 0, i.e. a priority of exactly 0, permanently
+not-due.
+
+Historical boundary reconstruction, the recompute CLI's session-grain modes, and retirement
+of pre-boundary rows already in production are **g-boundary-backfill**.
 
 ### 17.5 Conversion
 

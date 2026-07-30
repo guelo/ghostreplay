@@ -132,6 +132,14 @@ class BlunderOpportunityEvent(Base):
     __tablename__ = "blunder_opportunity_events"
     __table_args__ = (
         UniqueConstraint("session_id", "blunder_id", name="uq_blunder_opportunity_session_blunder"),
+        # Reaching a position IS the strongest opportunity at it, so a reach without an
+        # opportunity is not a stricter row — it is an incoherent one, and it would land
+        # in a p_reach numerator whose denominator excludes it. The writer already sets
+        # opportunity = reached OR forward_reachable; this makes that structural.
+        CheckConstraint(
+            "reached = false or opportunity = true",
+            name="ck_blunder_opportunity_reached_implies_opportunity",
+        ),
         Index("idx_blunder_opportunity_blunder_time", "blunder_id", "occurred_at"),
         Index("idx_blunder_opportunity_session", "session_id"),
     )

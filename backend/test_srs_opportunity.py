@@ -38,6 +38,7 @@ from app.srs_opportunity import (
     load_opportunity_counters,
     load_review_counters,
     practice_priority_score,
+    srs_priority,
 )
 
 
@@ -341,6 +342,11 @@ def test_unconverted_drill_segment_move_creates_opportunity_event(db_session):
     # Amended drill policy (2026-06-01): pre-continue drill uploads (segment='drill',
     # unconverted session) feed regular SRS opportunity creation. This guards against
     # reintroducing the old normal-segment filter.
+    #
+    # What DOES scope them is the evidence boundary (g-boundary-event-scope), which is a
+    # ply and not a segment or a terminal state: with a confirmed root at ply 1 the
+    # observation at ply 2 is post-boundary and counts, exactly as it did before. The
+    # boundary's own filtering is owned by test_evidence_boundary.py.
     user_id = 123
     started_at = datetime.now(timezone.utc) - timedelta(days=1)
     blunder_fen = "8/8/8/8/8/8/K7/7k w - - 0 1"
@@ -355,7 +361,8 @@ def test_unconverted_drill_segment_move_creates_opportunity_event(db_session):
         engine_elo=1500,
         player_color="white",
         session_mode="drill",
-        drill_state="active",
+        drill_state="root_reached",
+        drill_root_reached_ply=1,
         is_rated=False,
     )
     db_session.add(game_session)
@@ -448,6 +455,83 @@ def test_opportunity_counters_ignore_events_before_blunder_creation(db_session):
     assert counters.opportunities_since_review == 1
     assert counters.opportunities_30d == 1
     assert counters.reached_30d == 1
+
+
+def test_event_count_ignores_rows_the_broad_predicate_rejects(db_session):
+    """``event_count`` counts the SAME rows the opportunity aggregates do.
+
+    It is the routing switch in ``srs_priority`` / ``practice_priority_score``: above
+    zero it means "there is opportunity evidence, score by dueness". Counting rows the
+    eligibility predicate rejects made that switch lie — a blunder whose only rows
+    predate its own creation routed into the dueness branch with an
+    ``opportunities_since_review`` of 0, i.e. a priority of exactly 0, and could never
+    become due again (g-boundary-event-scope).
+    """
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    pos = _position(db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/5k2 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+    blunder.created_at = now - timedelta(days=5)
+    pre_creation = _session(db_session, user_id=user_id, started_at=now - timedelta(days=10))
+    non_opportunity = _session(db_session, user_id=user_id, started_at=now - timedelta(days=1))
+    db_session.add_all([
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=pre_creation.id,
+            occurred_at=pre_creation.started_at,
+            opportunity=True,
+            reached=True,
+        ),
+        # opportunity=false is not a shape the writer produces (it only persists
+        # matches), but the column is nullable-free, not constrained: a row that says
+        # "no opportunity" must not be counted as evidence that one exists.
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=non_opportunity.id,
+            occurred_at=non_opportunity.started_at,
+            opportunity=False,
+            reached=False,
+        ),
+    ])
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert counters.opportunities_since_review == 0
+    assert counters.event_count == 0
+    # ...so the blunder falls back to the time-based schedule and is due on its age,
+    # instead of being pinned at the dueness branch's structural zero.
+    priority = srs_priority(
+        counters=counters,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=blunder.created_at,
+        now=now,
+    )
+    assert priority > 1.0
+
+
+def test_event_count_counts_eligible_broad_rows(db_session):
+    """The other direction: a row the predicate ACCEPTS still routes to dueness."""
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    pos = _position(db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/3k4 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+    blunder.created_at = now - timedelta(days=5)
+    recent = _session(db_session, user_id=user_id, started_at=now - timedelta(days=1))
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=recent.id,
+            occurred_at=recent.started_at,
+            opportunity=True,
+            reached=False,
+        )
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert counters.event_count == 1
+    assert counters.opportunities_since_review == 1
 
 
 def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_session):

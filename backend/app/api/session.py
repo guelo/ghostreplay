@@ -28,6 +28,7 @@ from app.analysis_profiles import (
     stamp_dynamic_profile,
     stamp_profile_full,
 )
+from app.evidence_boundary import session_evidence_hashes
 from app.evidence_policy import Capability, validate_browser_provenance
 from app.move_classification import validate_root_alternative_classification
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
@@ -740,52 +741,54 @@ def _compute_blunder_opportunity_events(
     user_id: int,
     player_color: str,
 ) -> None:
+    """Rewrite this session's BROAD opportunity evidence from its stored moves.
+
+    Scoped to the session's EVIDENCE BOUNDARY (``app.evidence_boundary``). A normal
+    game is evidence from ply 0 as it always was; a drill only from its confirmed
+    root / rated conversion onward, with the boundary position itself a BFS seed but
+    not a reach — the drill routed the player there, so crediting it as a ghost reach
+    is exactly the miscount that inflated dueness counters (g-boundary-event-scope).
+    A drill with no boundary at all contributes nothing and has any prior rows retired
+    by the stale-delete below.
+    """
     game_session = db.query(GameSession).filter(GameSession.id == session_id).first()
     if game_session is None:
         return
 
-    session_moves = (
-        db.query(SessionMove)
-        .filter(SessionMove.session_id == session_id)
-        .all()
-    )
-    session_hashes: set[str] = set()
-    for move in session_moves:
-        if move.fen_before:
-            try:
-                session_hashes.add(fen_hash(move.fen_before))
-            except ValueError:
-                pass
-        if move.fen_after:
-            try:
-                session_hashes.add(fen_hash(move.fen_after))
-            except ValueError:
-                pass
+    evidence = session_evidence_hashes(db, game_session)
     opponent_color = "black" if player_color == "white" else "white"
-    session_position_ids: set[int] = set()
+    # Reach candidates only — strictly post-boundary observations.
+    reach_position_ids: set[int] = set()
     # Opponent-color session positions seed the forward BFS: only an opponent-move
     # ancestor can "steer" the player into a blunder, so player-color positions are
     # never opportunity sources (they were filtered out by the old reverse walk too).
+    # Seeded from the AT-OR-AFTER set so the boundary position keeps contributing the
+    # opportunities genuinely downstream of it.
     opp_source: set[int] = set()
-    if session_hashes:
-        for position_id, active in (
-            db.query(Position.id, Position.active_color)
-            .filter(Position.user_id == user_id, Position.fen_hash.in_(session_hashes))
+    if evidence:
+        # ``evidence.reach`` is a subset of ``evidence.seed``, so one query resolves
+        # both roles; the hash comes back to re-split them by role.
+        for position_id, active, hashed in (
+            db.query(Position.id, Position.active_color, Position.fen_hash)
+            .filter(Position.user_id == user_id, Position.fen_hash.in_(evidence.seed))
             .all()
         ):
-            session_position_ids.add(position_id)
+            if hashed in evidence.reach:
+                reach_position_ids.add(position_id)
             if active == opponent_color:
                 opp_source.add(position_id)
 
     matched: dict[int, tuple[bool, bool]] = {}
-    if session_position_ids:
+    if reach_position_ids or opp_source:
         forward_reachable = _forward_reachable_position_ids(
             db, user_id=user_id, start_ids=opp_source
         )
         blunders = db.query(Blunder).filter(Blunder.user_id == user_id).all()
         for blunder in blunders:
-            reached = blunder.position_id in session_position_ids
+            reached = blunder.position_id in reach_position_ids
             opportunity_only = blunder.position_id in forward_reachable
+            # reached ⇒ opportunity, by construction here and by
+            # ck_blunder_opportunity_reached_implies_opportunity in the schema.
             opportunity = opportunity_only or reached
             if opportunity:
                 matched[blunder.id] = (opportunity, reached)

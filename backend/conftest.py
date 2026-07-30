@@ -160,6 +160,8 @@ def _create_test_schema(conn) -> None:
             reached BOOLEAN NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(session_id, blunder_id),
+            CONSTRAINT ck_blunder_opportunity_reached_implies_opportunity
+                CHECK (reached = false OR opportunity = true),
             FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE,
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )
