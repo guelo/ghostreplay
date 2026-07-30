@@ -46,7 +46,11 @@ from app.opening_cache import (
     prune_old_opening_score_batches,
     recompute_opening_scores,
     recompute_opening_scores_if_needed,
+    OpeningScoreRecomputeResult,
+    RecomputeDisposition,
+    TREE_BOOTSTRAP_TIMEOUT,
 )
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.game_phase import DIVIDER_VERSION
 from app.opening_evidence import (
     FRESHNESS_CONTRACT_VERSION,
@@ -218,6 +222,30 @@ def _seed_black_opening_session(
     return session
 
 
+def _rebuilt_batch(db_session, user_id: int, player_color: str, *, reason: str):
+    """Run the recompute gate, assert it REBUILT for ``reason``, return the batch.
+
+    ``recompute_opening_scores_if_needed`` returns an explicit
+    ``OpeningScoreRecomputeResult``. Asserting the disposition is what proves the
+    decision — batch identity/generation only corroborates it — and taking ``.batch``
+    keeps every later assertion on the SQLAlchemy model rather than the wrapper.
+    """
+    result = recompute_opening_scores_if_needed(db_session, user_id, player_color)
+    assert result.disposition is RecomputeDisposition.REBUILT
+    assert result.reason == reason
+    assert result.batch is not None
+    return result.batch
+
+
+def _cached_batch(db_session, user_id: int, player_color: str):
+    """Run the gate, assert it served the existing batch UNCHANGED, return it."""
+    result = recompute_opening_scores_if_needed(db_session, user_id, player_color)
+    assert result.disposition is RecomputeDisposition.CACHED
+    assert result.reason is None
+    assert result.batch is not None
+    return result.batch
+
+
 def test_recompute_writes_one_coherent_batch(db_session):
     _seed_black_opening_session(db_session)
 
@@ -300,7 +328,7 @@ def test_computed_at_is_evidence_read_upper_bound_if_needed(db_session):
     _seed_black_opening_session(db_session)
     _assert_computed_at_after_reads(
         db_session,
-        lambda: recompute_opening_scores_if_needed(db_session, 123, "black"),
+        lambda: _rebuilt_batch(db_session, 123, "black", reason="cache_miss"),
     )
 
 
@@ -681,7 +709,9 @@ def test_session_upload_refreshes_relevant_opening_snapshot(
     # The endpoint enqueues a coalesced recompute rather than running it inline;
     # drive that recompute directly to assert the snapshot it would produce.
     # End the session first: an in-progress session's moves are not evidence.
-    session_stub.assert_called_once_with(123, "black")
+    session_stub.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.SESSION_EVIDENCE
+    )
     game_session = db_session.get(GameSession, uuid.UUID(session_id))
     game_session.status = "ended"
     game_session.ended_at = datetime.now(timezone.utc)
@@ -739,7 +769,9 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
     )
 
     assert response.status_code == 200
-    srs_stub.assert_called_once_with(123, "black")
+    srs_stub.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.SRS_REVIEW
+    )
     # End the originating session: a blunder sourced from an in-progress
     # session is not evidence until that session terminates.
     game_session = db_session.get(GameSession, uuid.UUID(session_id))
@@ -828,8 +860,8 @@ def test_prune_helper_recovers_from_failure_without_poisoning_session(db_session
 def test_if_needed_reuses_batch_when_inputs_unchanged(db_session):
     _seed_black_opening_session(db_session)
 
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
+    second = _cached_batch(db_session, 123, "black")
 
     assert first is not None
     assert second is not None
@@ -841,7 +873,7 @@ def test_if_needed_reuses_batch_when_inputs_unchanged(db_session):
 def test_if_needed_recomputes_when_evidence_mutated_in_place(db_session):
     session = _seed_black_opening_session(db_session)
 
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
 
     # In-place upsert of a move's eval_delta (no updated_at bump) flips a pass to a
     # fail, changing the consumed-evidence content. Production reaches this only
@@ -857,7 +889,7 @@ def test_if_needed_recomputes_when_evidence_mutated_in_place(db_session):
     oc.bump_evidence_seq(db_session, 123, "black")
     db_session.commit()
 
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="evidence_change")
 
     assert second is not None
     assert second.id != first.id
@@ -883,12 +915,12 @@ def test_if_needed_reuses_synthetic_only_batch(db_session):
     )
     db_session.commit()
 
-    first = recompute_opening_scores_if_needed(db_session, 777, "white")
+    first = _rebuilt_batch(db_session, 777, "white", reason="cache_miss")
     _, first_rows = list_cached_opening_scores(db_session, 777, "white")
     assert first is not None
     assert {row.opening_key for row in first_rows} == {SYNTHETIC_INITIAL_FEN}
 
-    second = recompute_opening_scores_if_needed(db_session, 777, "white")
+    second = _cached_batch(db_session, 777, "white")
 
     assert second is not None
     assert second.id == first.id
@@ -898,14 +930,14 @@ def test_if_needed_reuses_synthetic_only_batch(db_session):
 def test_if_needed_recomputes_when_batch_stale_for_decay(db_session):
     _seed_black_opening_session(db_session)
 
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
 
     # Age the batch past the decay interval; fingerprint is unchanged.
     stale_at = datetime.now(timezone.utc) - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL - timedelta(hours=1)
     first.computed_at = stale_at
     db_session.commit()
 
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="decay_staleness")
 
     assert second is not None
     assert second.id != first.id
@@ -1038,13 +1070,13 @@ def test_inputs_fingerprint_changes_with_model_curve_versions(monkeypatch, const
 
 def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
 
     # A model-version bump drifts the registry fingerprint; the next if_needed
     # read recomputes a fresh generation, leaving generation/pruning atomic.
     monkeypatch.setattr("app.opening_cache.SCORE_MODEL_VERSION", "sm-v2-1-bumped")
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
 
     assert second is not None
     assert second.id != first.id
@@ -1056,7 +1088,7 @@ def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
     """A batch stamped under sm-v2-3's config/version drifts once, then
     the rebuilt batch serves the fast path."""
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
 
     old_config_fp = root_calc_config_fingerprint(
@@ -1077,8 +1109,8 @@ def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
     ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-3")
     db_session.commit()
 
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
+    third = _cached_batch(db_session, 123, "black")
 
     assert second is not None and third is not None
     assert second.id != first.id
@@ -1093,7 +1125,7 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
     a pre-existing batch and forces exactly one recompute on the next gated read, so a
     batch built before the edge read model existed self-heals (materializing edges)."""
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
     assert (
         db_session.query(OpeningPositionEdge)
@@ -1105,7 +1137,7 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
     monkeypatch.setattr(
         "app.opening_cache.OPENING_SCORE_CACHE_SCHEMA_VERSION", "edges-v2"
     )
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
 
     assert second is not None
     assert second.id != first.id  # registry drift forced a fresh batch
@@ -1154,7 +1186,7 @@ def test_golden_stamped_expired_batch_stays_on_fast_path(db_session):
     # cheap freshness predicate — which ignores wall-clock decay — proves it fresh,
     # so the fast path serves it without a rebuild.
     _seed_black_opening_session(db_session)
-    batch = recompute_opening_scores_if_needed(db_session, 123, "black")
+    batch = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert batch is not None
     assert GOLDEN in batch.registry_fingerprint
 
@@ -1185,7 +1217,7 @@ def test_nondefault_report_axis_stamped_batch_recomputes_once(db_session, active
     # batch serves the fast path. (The batch is also aged past decay; registry drift
     # is checked first, so it — not decay — drives the single recompute.)
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
     assert GOLDEN in first.registry_fingerprint
 
@@ -1199,8 +1231,8 @@ def test_nondefault_report_axis_stamped_batch_recomputes_once(db_session, active
     )
     db_session.commit()
 
-    second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
+    third = _cached_batch(db_session, 123, "black")
 
     assert second is not None and third is not None
     assert second.id != first.id  # active-axis stamp drifted → rebuilt
@@ -1597,7 +1629,7 @@ def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
     # stamp shows up as registry drift.
     _seed_black_opening_session(db_session)
 
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
     assert "raw-v7" in first.registry_fingerprint
     # Seed the pre-bump stamp. No raw row is touched.
@@ -1605,7 +1637,7 @@ def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
     db_session.commit()
 
     with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
-        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+        second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
     assert second is not None
     assert second.id != first.id  # exactly one recompute
     assert spy.call_count == 1
@@ -1617,14 +1649,14 @@ def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
         "app.opening_cache.overlay_evidence",
         side_effect=AssertionError("overlay must not be built on the fast path"),
     ):
-        third = recompute_opening_scores_if_needed(db_session, 123, "black")
+        third = _cached_batch(db_session, 123, "black")
     assert third is not None
     assert third.id == second.id
 
 
 def test_if_needed_fast_path_does_not_build_overlay(db_session):
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
 
     # Nothing changed since the first recompute: the second call must serve the
@@ -1633,7 +1665,7 @@ def test_if_needed_fast_path_does_not_build_overlay(db_session):
         "app.opening_cache.overlay_evidence",
         side_effect=AssertionError("overlay must not be built on the fast path"),
     ):
-        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+        second = _cached_batch(db_session, 123, "black")
 
     assert second is not None
     assert second.id == first.id
@@ -1643,7 +1675,7 @@ def test_if_needed_builds_overlay_on_cache_miss(db_session):
     _seed_black_opening_session(db_session)
 
     with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
-        batch = recompute_opening_scores_if_needed(db_session, 123, "black")
+        batch = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
 
     assert batch is not None
     assert spy.called
@@ -1651,7 +1683,7 @@ def test_if_needed_builds_overlay_on_cache_miss(db_session):
 
 def test_if_needed_builds_overlay_on_real_change(db_session):
     session = _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
 
     move = _black_move(db_session, session)
     move.eval_delta = 500
@@ -1660,7 +1692,7 @@ def test_if_needed_builds_overlay_on_real_change(db_session):
     db_session.commit()
 
     with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
-        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+        second = _rebuilt_batch(db_session, 123, "black", reason="evidence_change")
 
     assert spy.called
     assert second is not None
@@ -1746,7 +1778,9 @@ def test_load_cached_rows_warm_serves_cache_and_schedules_background():
     assert batch is sentinel_batch
     assert rows is snapshotted
     snapshot.assert_called_once_with(sentinel_rows)
-    request_recompute.assert_called_once_with(123, "black")
+    request_recompute.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+    )
     refresh_now.assert_not_called()
     list_cached.assert_called_once()
 
@@ -1770,7 +1804,9 @@ def test_load_cached_rows_cold_blocks_then_serves_computed_batch():
 
     assert batch is sentinel_batch
     assert rows is snapshotted
-    refresh_now.assert_called_once_with(123, "black")
+    refresh_now.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.CACHED_SCORE_READER_COLD
+    )
     request_recompute.assert_not_called()
     assert list_cached.call_count == 2
 
@@ -1789,7 +1825,9 @@ def test_load_cached_rows_cold_no_evidence_serves_empty():
 
     assert batch is None
     assert rows == []
-    refresh_now.assert_called_once_with(123, "black")
+    refresh_now.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.CACHED_SCORE_READER_COLD
+    )
     request_recompute.assert_not_called()
 
 
@@ -1812,7 +1850,9 @@ def test_ensure_tree_cache_warm_fresh_serves_without_blocking(db_session):
             db_session, 123, "black", graph, roots
         )
 
-    request_recompute.assert_called_once_with(123, "black")
+    request_recompute.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.TREE_READER_WARM
+    )
     refresh_now.assert_not_called()
     assert batch_id == batch.id
     # SQLite round-trips datetimes tz-naive; compare wall-clock components.
@@ -1836,7 +1876,7 @@ def test_ensure_tree_cache_legacy_edgeless_batch_blocks_and_bootstraps(db_sessio
     db_session.add(stale)
     db_session.commit()
 
-    def _bootstrap(user_id, player_color, timeout=30.0):
+    def _bootstrap(user_id, player_color, timeout=30.0, *, source=None):
         # Stand in for the scheduler landing a fresh edges-v1 batch with edge rows.
         fresh = OpeningScoreBatch(
             user_id=user_id, player_color=player_color, generation=2,
@@ -1856,7 +1896,13 @@ def test_ensure_tree_cache_legacy_edgeless_batch_blocks_and_bootstraps(db_sessio
             db_session, 123, "black", graph, roots
         )
 
-    refresh_now.assert_called_once()  # BLOCKED on the bootstrap, did not background
+    # BLOCKED on the bootstrap, did not background.
+    refresh_now.assert_called_once_with(
+        123,
+        "black",
+        timeout=TREE_BOOTSTRAP_TIMEOUT,
+        source=OpeningScoreTrigger.TREE_READER_BOOTSTRAP,
+    )
     request_recompute.assert_not_called()
     assert state == "bootstrapped"
     assert computed_at.replace(tzinfo=None) == datetime(2026, 6, 15)
@@ -2278,7 +2324,9 @@ def test_load_cached_rows_nonblocking_warm_serves_cache_and_schedules_background
     assert pending is False
     snapshot.assert_called_once_with(sentinel_rows)
     # Unconditional on the warm path — the scheduled-guard must NOT suppress it.
-    request_recompute.assert_called_once_with(123, "black")
+    request_recompute.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.SESSION_LINEAGE_WARM
+    )
     is_scheduled.assert_not_called()
     refresh_now.assert_not_called()
 
@@ -2303,7 +2351,9 @@ def test_load_cached_rows_nonblocking_cold_returns_empty_without_blocking():
     assert rows == []
     assert pending is True
     refresh_now.assert_not_called()
-    request_recompute.assert_called_once_with(123, "black")
+    request_recompute.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD
+    )
     # Cold path must NOT re-list: there is nothing to wait for.
     list_cached.assert_called_once()
 
@@ -2349,7 +2399,9 @@ def test_load_cached_rows_nonblocking_cold_reenqueues_after_work_lost():
         load_cached_rows_nonblocking("db", 123, "black")  # scheduled -> skip
         load_cached_rows_nonblocking("db", 123, "black")  # work lost -> retry
 
-    request_recompute.assert_called_once_with(123, "black")
+    request_recompute.assert_called_once_with(
+        123, "black", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD
+    )
 
 
 def test_load_cached_rows_nonblocking_cold_without_evidence_is_not_pending():
@@ -2380,3 +2432,73 @@ def test_load_cached_rows_nonblocking_cold_without_evidence_is_not_pending():
     request_recompute.assert_not_called()
     is_scheduled.assert_not_called()
     refresh_now.assert_not_called()
+
+
+# --- recompute result contract -------------------------------------------------
+# The scheduler labels its run outcome, its rebuild reason, and the analytics
+# `reason` property straight off these fields, so an impossible combination must be
+# unconstructible rather than merely undocumented.
+
+
+def test_unknown_disposition_is_rejected():
+    """An unrecognised disposition must not be accepted as if it were no_evidence.
+
+    Falling through the per-disposition checks is exactly the presence-inference
+    failure the enum replaced: the scheduler would log run_outcome for a value it
+    never agreed to, and PostHog would gain an unbounded outcome vocabulary.
+    """
+    for bad in ("unexpected", "REBUILT", None, 0, object()):
+        with pytest.raises(ValueError, match="unknown recompute disposition"):
+            OpeningScoreRecomputeResult(disposition=bad, batch=None)
+
+
+def test_equivalent_disposition_string_normalizes_to_the_enum():
+    # Every downstream reader compares with `is`, so a bare value must not survive
+    # as a plain str and silently fail every one of those comparisons.
+    result = OpeningScoreRecomputeResult(
+        disposition="cached", batch=object(), reason=None
+    )
+    assert result.disposition is RecomputeDisposition.CACHED
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (
+            {"disposition": RecomputeDisposition.REBUILT, "batch": None,
+             "reason": "cache_miss"},
+            "requires a batch",
+        ),
+        (
+            {"disposition": RecomputeDisposition.REBUILT, "batch": object(),
+             "reason": None},
+            "requires a rebuild reason",
+        ),
+        (
+            {"disposition": RecomputeDisposition.REBUILT, "batch": object(),
+             "reason": "because_i_said_so"},
+            "requires a rebuild reason",
+        ),
+        (
+            {"disposition": RecomputeDisposition.CACHED, "batch": None},
+            "requires the existing batch",
+        ),
+        (
+            {"disposition": RecomputeDisposition.CACHED, "batch": object(),
+             "reason": "cache_miss"},
+            "must carry no rebuild reason",
+        ),
+        (
+            {"disposition": RecomputeDisposition.NO_EVIDENCE, "batch": object()},
+            "must carry no batch",
+        ),
+        (
+            {"disposition": RecomputeDisposition.NO_EVIDENCE, "batch": None,
+             "reason": "cache_miss"},
+            "must carry no rebuild reason",
+        ),
+    ],
+)
+def test_impossible_result_combinations_are_rejected(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        OpeningScoreRecomputeResult(**kwargs)

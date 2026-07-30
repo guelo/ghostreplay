@@ -13,7 +13,7 @@ from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_cache import bump_evidence_seq
-from app.opening_score_scheduler import request_recompute
+from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 from app.posthog_client import capture
 from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
@@ -208,7 +208,9 @@ def review_blunder(
     # player_color resolved above (pre-commit, alongside the evidence bump).
     recompute_queued = player_color is not None
     if recompute_queued:
-        request_recompute(user.user_id, player_color)
+        request_recompute(
+            user.user_id, player_color, source=OpeningScoreTrigger.SRS_REVIEW
+        )
 
     capture(
         str(user.user_id),

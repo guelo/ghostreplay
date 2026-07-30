@@ -4,10 +4,16 @@ Unit tests inject a fake clock + session factory and drive the scheduler
 synchronously (``run_due`` / ``flush_pending``) so coalescing/debounce logic is
 deterministic with no real sleeps. Exactly one test exercises the real worker
 thread, signalled via ``threading.Event`` rather than timing guesses.
+
+Injected recomputes return contract-shaped ``OpeningScoreRecomputeResult`` values:
+the scheduler labels its run outcome from the explicit disposition and treats a
+legacy bare batch / ``None`` as a contract failure, so a fake that returns the
+pre-contract shape is itself a regression signal (see the contract tests below).
 """
 
 from __future__ import annotations
 
+import logging
 import threading
 from unittest.mock import Mock
 
@@ -15,7 +21,25 @@ import anyio
 import pytest
 
 from app import main
-from app.opening_score_scheduler import OpeningScoreScheduler
+from app.logging_config import SimpleFormatter
+from app.opening_cache import OpeningScoreRecomputeResult, RecomputeDisposition
+from app.opening_score_scheduler import (
+    OpeningScoreScheduler,
+    OpeningScoreTrigger,
+    UnknownOpeningScoreTrigger,
+    current_run_timing,
+)
+
+# conftest's autouse ``_no_op_recompute_scheduler`` patches the module ATTRIBUTE
+# ``app.opening_score_scheduler.request_recompute``, so a facade test reaching it as
+# ``module.request_recompute`` would exercise a MagicMock and assert nothing. These
+# import-time bindings are the real functions; they still resolve ``_scheduler`` from
+# module globals at call time, so monkeypatching the singleton works as usual.
+from app.opening_score_scheduler import refresh_now as _real_refresh_now
+from app.opening_score_scheduler import request_recompute as _real_request_recompute
+
+# Default provenance for tests that are not about provenance itself.
+_TRIGGER = OpeningScoreTrigger.CACHED_SCORE_READER_WARM
 
 
 class _FakeClock:
@@ -29,17 +53,81 @@ class _FakeClock:
         self.now += dt
 
 
+class _FakeBatch:
+    """Stand-in for ``OpeningScoreBatch`` — the scheduler only reads ``generation``."""
+
+    def __init__(self, generation: int = 7) -> None:
+        self.generation = generation
+
+
+def _rebuilt(reason: str = "cache_miss", generation: int = 7):
+    return OpeningScoreRecomputeResult(
+        disposition=RecomputeDisposition.REBUILT,
+        batch=_FakeBatch(generation),
+        reason=reason,
+    )
+
+
+def _cached(generation: int = 7):
+    return OpeningScoreRecomputeResult(
+        disposition=RecomputeDisposition.CACHED, batch=_FakeBatch(generation)
+    )
+
+
+def _no_evidence():
+    return OpeningScoreRecomputeResult(
+        disposition=RecomputeDisposition.NO_EVIDENCE, batch=None
+    )
+
+
 class _RecordingRecompute:
     """Records (user_id, player_color) per call and the session it received."""
 
-    def __init__(self) -> None:
+    def __init__(self, result=None) -> None:
         self.calls: list[tuple[int, str]] = []
         self.sessions: list[object] = []
+        self._result = result if result is not None else _rebuilt()
 
     def __call__(self, db, user_id, player_color):
         self.calls.append((user_id, player_color))
         self.sessions.append(db)
-        return None
+        return self._result
+
+
+class _TimingRecompute(_RecordingRecompute):
+    """Also snapshots the scheduler run context visible to each recompute call."""
+
+    def __init__(self, result=None, advance: tuple[_FakeClock, float] | None = None) -> None:
+        super().__init__(result)
+        self.timings: list[dict | None] = []
+        self._advance = advance
+
+    def __call__(self, db, user_id, player_color):
+        if self._advance is not None:
+            clock, dt = self._advance
+            clock.advance(dt)
+        self.timings.append(current_run_timing())
+        return super().__call__(db, user_id, player_color)
+
+
+def _completion_records(caplog) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("opening_score_recompute_run ")
+    ]
+
+
+def _rendered_completion(caplog) -> str:
+    """The completion record as the PRODUCTION formatter renders it.
+
+    ``app.logging_config`` prints ``%(asctime)s %(levelname)s %(message)s`` only, so
+    anything the scheduler puts in ``extra`` is invisible in production. Assert
+    against this rendering, never against ``record.__dict__``.
+    """
+    records = _completion_records(caplog)
+    assert len(records) == 1, f"expected one completion record, got {len(records)}"
+    return SimpleFormatter("%(asctime)s %(levelname)s %(message)s").format(records[0])
 
 
 class _FakeSession:
@@ -75,7 +163,7 @@ def test_coalesces_burst_into_single_recompute():
     sched, _ = _make_scheduler(clock, recompute)
 
     for _ in range(10):
-        sched.request_recompute(123, "white")
+        sched.request_recompute(123, "white", source=_TRIGGER)
         clock.advance(0.1)  # within the quiet window
 
     # Nothing is due yet (deadline keeps extending).
@@ -98,11 +186,11 @@ def test_immediate_deadline_is_sticky_under_normal_enqueues():
 
     key = (7, "white")
     with sched._cond:
-        sched._enqueue_locked(key, immediate=True)  # due now
+        sched._enqueue_locked(key, immediate=True, source=_TRIGGER)  # due now
 
     # Normal enqueues keep arriving shortly after; none may postpone the deadline.
     for _ in range(5):
-        sched.request_recompute(7, "white")
+        sched.request_recompute(7, "white", source=_TRIGGER)
         clock.advance(0.1)  # still well within one quiet window
 
     # The immediate enqueue is still due at the current (advanced) time.
@@ -122,7 +210,7 @@ def test_is_scheduled_tracks_pending_inflight_and_is_key_scoped():
 
     # A queued recompute is "scheduled" — auto_start is off so the key stays in
     # _pending and the worker never runs it here.
-    sched.request_recompute(123, "white")
+    sched.request_recompute(123, "white", source=_TRIGGER)
     assert sched.is_scheduled(123, "white") is True
     # Key-scoped: an unrelated (user, color) is not reported scheduled.
     assert sched.is_scheduled(999, "black") is False
@@ -154,7 +242,7 @@ def test_is_inflight_tracks_only_running_runs_and_is_key_scoped():
 
     # A queued (pending) recompute is NOT in-flight — this is the whole point of
     # the narrower probe vs is_scheduled (which would report True here).
-    sched.request_recompute(123, "white")
+    sched.request_recompute(123, "white", source=_TRIGGER)
     assert sched.is_scheduled(123, "white") is True
     assert sched.is_inflight(123, "white") is False
 
@@ -175,8 +263,8 @@ def test_distinct_keys_each_recompute_once_with_own_session():
     recompute = _RecordingRecompute()
     sched, sessions = _make_scheduler(clock, recompute)
 
-    sched.request_recompute(1, "white")
-    sched.request_recompute(2, "black")
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "black", source=_TRIGGER)
     clock.advance(2.0)
     sched.run_due()
 
@@ -196,14 +284,14 @@ def test_request_during_inflight_triggers_followup_run():
         # Simulate a request arriving while this key is in-flight.
         if not enqueue_during_run["done"]:
             enqueue_during_run["done"] = True
-            sched.request_recompute(user_id, player_color)
+            sched.request_recompute(user_id, player_color, source=_TRIGGER)
         recompute.calls.append((user_id, player_color))
-        return None
+        return _rebuilt()
 
     recompute.calls = []
     sched, _ = _make_scheduler(clock, recompute)
 
-    sched.request_recompute(5, "white")
+    sched.request_recompute(5, "white", source=_TRIGGER)
     clock.advance(2.0)
     sched.run_due()  # first run re-enqueues
     clock.advance(2.0)
@@ -219,19 +307,19 @@ def test_recompute_failure_is_swallowed_and_next_key_runs():
         recompute.calls.append((user_id, player_color))
         if user_id == 1:
             raise RuntimeError("boom")
-        return None
+        return _rebuilt()
 
     recompute.calls = []
     sched, _ = _make_scheduler(clock, recompute)
 
-    sched.request_recompute(1, "white")
-    sched.request_recompute(2, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "white", source=_TRIGGER)
     clock.advance(2.0)
     sched.run_due()
 
     assert sorted(recompute.calls) == [(1, "white"), (2, "white")]
     # The scheduler is not wedged: a later key still runs.
-    sched.request_recompute(3, "white")
+    sched.request_recompute(3, "white", source=_TRIGGER)
     clock.advance(2.0)
     sched.run_due()
     assert (3, "white") in recompute.calls
@@ -245,7 +333,7 @@ def test_max_wait_cap_fires_under_sustained_enqueues():
     # Keep enqueueing just under the quiet window so the deadline keeps moving,
     # but the max_wait cap (10s from first_seen) must eventually force a run.
     for _ in range(20):
-        sched.request_recompute(7, "white")
+        sched.request_recompute(7, "white", source=_TRIGGER)
         clock.advance(1.0)
         sched.run_due()
 
@@ -259,7 +347,7 @@ def test_initial_enqueue_deadline_is_capped_by_max_wait():
         clock, recompute, quiet_window=20.0, max_wait=3.0
     )
 
-    sched.request_recompute(7, "white")
+    sched.request_recompute(7, "white", source=_TRIGGER)
     clock.advance(3.0)
     sched.run_due()
 
@@ -274,11 +362,11 @@ def test_lifecycle_two_start_shutdown_cycles():
 
     for cycle in range(2):
         sched.start()
-        sched.request_recompute(cycle, "white")
+        sched.request_recompute(cycle, "white", source=_TRIGGER)
         sched.flush_pending(timeout=5.0)
         sched.shutdown(drain=True, timeout=5.0)
         # Post-shutdown enqueue is a no-op and does not raise.
-        sched.request_recompute(999, "white")
+        sched.request_recompute(999, "white", source=_TRIGGER)
 
     assert (0, "white") in recompute.calls
     assert (1, "white") in recompute.calls
@@ -294,7 +382,7 @@ def test_start_failure_is_swallowed_by_facade(monkeypatch):
 
     monkeypatch.setattr(OpeningScoreScheduler, "start", boom)
     # request_recompute swallows the start failure internally.
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
 
 
 def test_retry_safe_start_after_thread_start_raises(monkeypatch):
@@ -315,12 +403,12 @@ def test_retry_safe_start_after_thread_start_raises(monkeypatch):
     monkeypatch.setattr(threading.Thread, "start", flaky_start, raising=True)
 
     # First enqueue: start() raises, facade swallows; state is reset.
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
     assert sched._thread is None
     assert sched._shutdown is False
 
     # Second enqueue cleanly starts a worker and processes the key.
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
     sched.flush_pending(timeout=5.0)
     assert (1, "white") in recompute.calls
     sched.shutdown(drain=True, timeout=5.0)
@@ -335,14 +423,14 @@ def test_flush_pending_times_out_on_wedged_run():
     def recompute(db, user_id, player_color):
         started.set()
         release.wait(timeout=5.0)
-        return None
+        return _rebuilt()
 
     # Real clock so flush_pending's timeout bound actually elapses.
     sched, _ = _make_scheduler(
         time.monotonic, recompute, quiet_window=0.0, auto_start=True
     )
     sched.start()
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
     assert started.wait(timeout=5.0)
 
     # While the worker is wedged in-flight, flush cannot reach quiescence.
@@ -364,7 +452,7 @@ def test_flush_pending_timeout_bounds_caller_owned_pending_run():
         release.wait(timeout=5.0)
 
     sched, _ = _make_scheduler(time.monotonic, recompute, quiet_window=60.0)
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
 
     outcome: list[BaseException] = []
 
@@ -409,7 +497,7 @@ def test_timed_out_flush_does_not_sweep_later_request_into_forced_drain():
     sched, _ = _make_scheduler(
         time.monotonic, recompute, quiet_window=0.25, auto_start=True
     )
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
     assert first_started.wait(timeout=5.0)
 
     with pytest.raises(TimeoutError):
@@ -417,7 +505,7 @@ def test_timed_out_flush_does_not_sweep_later_request_into_forced_drain():
 
     # Enqueue while the stale forced-drain snapshot would still be blocked in
     # the first recompute. This later request must retain its quiet window.
-    sched.request_recompute(2, "white")
+    sched.request_recompute(2, "white", source=_TRIGGER)
     release_first.set()
 
     assert not second_started.wait(timeout=0.05)
@@ -433,14 +521,14 @@ def test_thread_integration_real_worker_runs_recompute():
     def recompute(db, user_id, player_color):
         recompute_calls.append((user_id, player_color))
         done.set()
-        return None
+        return _rebuilt()
 
     sched, sessions = _make_scheduler(
         _FakeClock(), recompute, quiet_window=0.0, auto_start=True
     )
     sched.start()
     try:
-        sched.request_recompute(42, "black")
+        sched.request_recompute(42, "black", source=_TRIGGER)
         assert done.wait(timeout=5.0)
         assert recompute_calls == [(42, "black")]
     finally:
@@ -489,7 +577,7 @@ def test_shutdown_timeout_does_not_run_recompute_on_caller():
     sched, _ = _make_scheduler(
         time.monotonic, recompute, quiet_window=0.0, auto_start=True
     )
-    sched.request_recompute(1, "white")
+    sched.request_recompute(1, "white", source=_TRIGGER)
     assert started.wait(timeout=5.0)
 
     before = time.monotonic()
@@ -538,7 +626,7 @@ def test_refresh_now_returns_true_on_successful_run():
     recompute = _RecordingRecompute()
     sched, _ = _make_scheduler(time.monotonic, recompute)
     try:
-        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is True
         assert recompute.calls == [(1, "white")]
     finally:
         sched.shutdown()
@@ -551,7 +639,7 @@ def test_refresh_now_returns_false_on_recompute_exception():
     sched, _ = _make_scheduler(time.monotonic, boom)
     try:
         # A covering run that fails must not be reported as fresh.
-        assert sched.refresh_now(1, "white", timeout=5.0) is False
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is False
     finally:
         sched.shutdown()
 
@@ -561,7 +649,7 @@ def test_refresh_now_returns_false_on_worker_start_failure_without_blocking():
     sched, _ = _make_scheduler(time.monotonic, recompute)
     sched.start = Mock(side_effect=RuntimeError("cannot start worker"))
     started = time.monotonic()
-    assert sched.refresh_now(1, "white", timeout=5.0) is False
+    assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is False
     # Must not block for the full timeout waiting on a worker that never runs.
     assert time.monotonic() - started < 1.0
 
@@ -575,8 +663,8 @@ def test_refresh_now_does_not_trigger_unrelated_keys():
     try:
         # Queue an unrelated key as a normal (debounced) recompute. It must remain
         # pending — never run, never in-flight — while we refresh a different key.
-        sched.request_recompute(2, "black")
-        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        sched.request_recompute(2, "black", source=_TRIGGER)
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is True
         assert recompute.calls == [(1, "white")]
         # The unrelated key is still pending and was never started: refresh_now
         # isolates its flush/await to its own key.
@@ -595,12 +683,12 @@ def test_refresh_now_times_out_returns_false_and_makes_no_duplicate_run():
     def slow(db, user_id, player_color):
         calls.append((user_id, player_color))
         release.wait(timeout=5.0)
-        return None
+        return _rebuilt()
 
     sched, _ = _make_scheduler(time.monotonic, slow)
     try:
         # The in-flight run blocks; refresh_now times out and serves the current batch.
-        assert sched.refresh_now(1, "white", timeout=0.3) is False
+        assert sched.refresh_now(1, "white", timeout=0.3, source=_TRIGGER) is False
         # No second/concurrent generation was triggered for the key.
         assert calls == [(1, "white")]
     finally:
@@ -617,12 +705,555 @@ def test_refresh_now_waits_for_followup_enqueued_during_run():
             # A normal enqueue arriving during the run creates a follow-up entry
             # with a newer sequence; refresh_now must not return after the first
             # run alone — it must wait for the follow-up and quiescence (TOCTOU).
-            sched.request_recompute(user_id, player_color)
-        return None
+            sched.request_recompute(user_id, player_color, source=_TRIGGER)
+        return _rebuilt()
 
     sched, _ = _make_scheduler(time.monotonic, recompute, quiet_window=0.0)
     try:
-        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is True
         assert calls == [(1, "white"), (1, "white")]
     finally:
         sched.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Explicit recompute-outcome contract (g-score-queue-timing Phase 1)
+#
+# The scheduler must label its run from the returned disposition and never infer
+# it from batch presence/generation/timing. All three normal dispositions are
+# successful COVERING runs for sequence/quiescence; only an exception — or a
+# pre-contract return shape — is a failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "result_factory", [lambda: _rebuilt("evidence_change"), _cached, _no_evidence]
+)
+def test_every_normal_disposition_is_a_covering_run_for_refresh_now(result_factory):
+    # rebuilt / cached / no_evidence are all successful COVERING runs: refresh_now's
+    # contract is "a covering run completed and the key is quiescent", not "a batch
+    # was written".
+    sched, _ = _make_scheduler(time.monotonic, lambda *a: result_factory())
+    try:
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is True
+    finally:
+        sched.shutdown()
+
+
+def test_exception_reports_failure_to_refresh_now():
+    def boom(db, user_id, player_color):
+        raise RuntimeError("recompute failed")
+
+    sched, _ = _make_scheduler(time.monotonic, boom)
+    try:
+        assert sched.refresh_now(1, "white", timeout=5.0, source=_TRIGGER) is False
+    finally:
+        sched.shutdown()
+
+
+@pytest.mark.parametrize(
+    "recompute,expected_outcome,expected_reason,expected_generation",
+    [
+        (lambda *a: _rebuilt("evidence_change", 42), "rebuilt", "evidence_change", "42"),
+        (lambda *a: _cached(9), "cached", "None", "9"),
+        (lambda *a: _no_evidence(), "no_evidence", "None", "None"),
+        (Mock(side_effect=RuntimeError("boom")), "failed", "None", "None"),
+    ],
+    ids=["rebuilt", "cached", "no_evidence", "failed"],
+)
+def test_completion_log_reports_the_exact_run_outcome(
+    caplog, recompute, expected_outcome, expected_reason, expected_generation
+):
+    # Driven synchronously (run_due on this thread) so the record is guaranteed to
+    # exist when asserted: on the worker thread, refresh_now returns at quiescence,
+    # which is BEFORE the completion record is emitted.
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    rendered = _rendered_completion(caplog)
+    assert f"run_outcome={expected_outcome}" in rendered
+    assert f"rebuild_reason={expected_reason}" in rendered
+    assert f"generation={expected_generation}" in rendered
+
+
+def test_failed_run_does_not_prevent_the_next_due_key():
+    clock = _FakeClock()
+    calls: list[tuple[int, str]] = []
+
+    def recompute(db, user_id, player_color):
+        calls.append((user_id, player_color))
+        if user_id == 1:
+            raise RuntimeError("boom")
+        return _rebuilt()
+
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert sorted(calls) == [(1, "white"), (2, "white")]
+
+
+@pytest.mark.parametrize("legacy_result", [None, _FakeBatch(3)])
+def test_legacy_bare_result_is_a_contract_failure(caplog, legacy_result):
+    # A bare OpeningScoreBatch or None is the pre-contract shape. Treating it as
+    # success would resurrect presence-based inference — the exact regression the
+    # explicit disposition exists to prevent.
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, lambda *a: legacy_result)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    seq = sched._seq_counter[(1, "white")]
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    rendered = _rendered_completion(caplog)
+    assert "run_outcome=failed" in rendered
+    # Even a legacy batch carrying a generation must not be reported as one.
+    assert "generation=None" in rendered
+    # A covering waiter is told the run failed, not that it succeeded.
+    assert sched._last_result[(1, "white")] == (seq, False)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler timing + provenance contracts (g-score-queue-timing Phases 2-3)
+# ---------------------------------------------------------------------------
+
+
+def test_single_enqueue_timing_and_configured_windows():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute, quiet_window=1.5, max_wait=10.0)
+
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.SCORE_DELTA)
+    clock.advance(2.0)
+    sched.run_due()
+
+    timing = recompute.timings[0]
+    assert timing is not None
+    assert timing["scheduler_timing_version"] == 1
+    assert isinstance(timing["scheduler_run_id"], str) and timing["scheduler_run_id"]
+    # One enqueue: both ends of the (empty) burst agree and no time was spent
+    # accumulating it.
+    assert timing["queue_first_ms"] == pytest.approx(2000.0)
+    assert timing["queue_last_ms"] == pytest.approx(2000.0)
+    assert timing["coalesce_span_ms"] == pytest.approx(0.0)
+    # Policy delay is the quiet window; the remaining wait is post-deadline lag.
+    assert timing["deadline_delay_ms"] == pytest.approx(1500.0)
+    assert timing["dispatch_lag_ms"] == pytest.approx(500.0)
+    assert timing["trigger_first"] == "score_delta"
+    assert timing["trigger_last"] == "score_delta"
+    assert timing["trigger_sources"] == ["score_delta"]
+    assert timing["enqueue_count"] == 1
+    assert timing["immediate"] is False
+    assert timing["forced_dispatch"] is False
+    assert timing["quiet_window_ms"] == pytest.approx(1500.0)
+    assert timing["max_wait_ms"] == pytest.approx(10000.0)
+
+
+def test_burst_keeps_first_seen_fixed_and_advances_last_seen():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.SESSION_EVIDENCE)
+    clock.advance(0.5)
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.SCORE_DELTA)
+    clock.advance(0.5)
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.SESSION_EVIDENCE)
+    clock.advance(2.0)
+    sched.run_due()
+
+    timing = recompute.timings[0]
+    assert timing["queue_first_ms"] == pytest.approx(3000.0)
+    assert timing["queue_last_ms"] == pytest.approx(2000.0)
+    assert timing["coalesce_span_ms"] == pytest.approx(1000.0)
+    # The decomposition identity that makes both ends reportable from one run.
+    assert timing["queue_first_ms"] == pytest.approx(
+        timing["coalesce_span_ms"] + timing["queue_last_ms"]
+    )
+    assert timing["enqueue_count"] == 3
+    # Sources fold deterministically (sorted by value) and dedupe.
+    assert timing["trigger_sources"] == ["score_delta", "session_evidence"]
+    assert timing["trigger_first"] == "session_evidence"
+    assert timing["trigger_last"] == "session_evidence"
+
+
+def test_max_wait_cap_is_the_reported_policy_delay():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute, quiet_window=20.0, max_wait=3.0)
+
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(1.0)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(3.0)
+    sched.run_due()
+
+    timing = recompute.timings[0]
+    # The second enqueue's quiet window (now+20) loses to the max-wait cap
+    # (first_seen+3), so the reported policy delay is the cap, not the window.
+    assert timing["deadline_delay_ms"] == pytest.approx(3000.0)
+    assert timing["queue_first_ms"] == pytest.approx(4000.0)
+    assert timing["dispatch_lag_ms"] == pytest.approx(1000.0)
+
+
+def test_immediate_stays_sticky_and_provenance_retains_both_callers():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    key = (7, "white")
+    with sched._cond:
+        sched._enqueue_locked(
+            key, immediate=True, source=OpeningScoreTrigger.CACHED_SCORE_READER_COLD
+        )
+    clock.advance(0.2)
+    sched.request_recompute(7, "white", source=OpeningScoreTrigger.SESSION_EVIDENCE)
+    sched.run_due()
+
+    timing = recompute.timings[0]
+    assert timing["immediate"] is True
+    # A later normal enqueue did not postpone the immediate entry: it is still due
+    # at the current time, so the policy delay stays zero.
+    assert timing["deadline_delay_ms"] == pytest.approx(0.0)
+    assert timing["dispatch_lag_ms"] == pytest.approx(200.0)
+    assert timing["trigger_first"] == "cached_score_reader_cold"
+    assert timing["trigger_last"] == "session_evidence"
+    assert timing["trigger_sources"] == [
+        "cached_score_reader_cold",
+        "session_evidence",
+    ]
+
+
+def test_dispatch_lag_includes_head_of_line_wait_behind_an_earlier_due_key():
+    # The pickup timestamp must be sampled per _run_one, not when run_due pops the
+    # due list: the second key genuinely waited for the first key's whole run.
+    clock = _FakeClock()
+    timings: list[dict] = []
+
+    def recompute(db, user_id, player_color):
+        timings.append(current_run_timing())
+        if user_id == 1:
+            clock.advance(4.0)  # first run is slow
+        return _rebuilt()
+
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    sched.run_due()
+
+    by_lag = sorted(t["dispatch_lag_ms"] for t in timings)
+    assert len(by_lag) == 2
+    # First key: only the post-deadline wait (2.0s elapsed - 1.5s quiet window).
+    assert by_lag[0] == pytest.approx(500.0)
+    # Second key: that plus the 4s it spent blocked behind the first run.
+    assert by_lag[1] == pytest.approx(4500.0)
+
+
+def test_reenqueue_during_inflight_run_gets_a_fresh_window_and_run_id():
+    clock = _FakeClock()
+    timings: list[dict] = []
+    followed_up = {"done": False}
+
+    def recompute(db, user_id, player_color):
+        timings.append(current_run_timing())
+        if not followed_up["done"]:
+            followed_up["done"] = True
+            clock.advance(1.0)
+            sched.request_recompute(user_id, player_color, source=_TRIGGER)
+        return _rebuilt()
+
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    sched.run_due()
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(timings) == 2
+    assert timings[0]["scheduler_run_id"] != timings[1]["scheduler_run_id"]
+    # The follow-up entry's window starts at its own enqueue, so its queue time is
+    # measured from then — not from the original burst.
+    assert timings[1]["queue_first_ms"] == pytest.approx(2000.0)
+    assert timings[1]["enqueue_count"] == 1
+
+
+def test_flush_pending_marks_forced_dispatch():
+    recompute = _TimingRecompute()
+    # Long quiet window: the entry is nowhere near due, so the flush pulls it in
+    # ahead of its configured deadline.
+    sched, _ = _make_scheduler(time.monotonic, recompute, quiet_window=30.0)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    try:
+        sched.flush_pending(timeout=5.0)
+    finally:
+        sched.shutdown()
+
+    assert recompute.timings[0]["forced_dispatch"] is True
+
+
+def test_forced_dispatch_marking_spares_already_due_entries():
+    # The predicate the shutdown drain and flush_pending share. An entry already past
+    # its deadline was going to run anyway, so it stays a valid steady-state
+    # observation; only a genuine pull-in ahead of the deadline is "forced".
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, _RecordingRecompute(), quiet_window=1.5)
+
+    sched.request_recompute(1, "white", source=_TRIGGER)  # deadline now+1.5
+    clock.advance(2.0)
+    sched.request_recompute(2, "white", source=_TRIGGER)  # deadline now+1.5, not due
+    with sched._cond:
+        sched._mark_forced_dispatch_locked(clock())
+
+    assert sched._pending[(1, "white")].forced_dispatch is False
+    assert sched._pending[(2, "white")].forced_dispatch is True
+
+
+def test_shutdown_drain_marks_pending_entries_forced():
+    # The worker's shutdown branch and flush_pending call the SAME predicate, so this
+    # asserts the branch wiring; flush_pending above covers the end-to-end run. (An
+    # end-to-end shutdown assertion would need a long quiet window, and the worker's
+    # cond-wait for that window is not synchronised with shutdown's notify — a
+    # pre-existing race unrelated to this instrumentation.)
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute, quiet_window=30.0)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+
+    with sched._cond:
+        sched._shutdown = True
+
+    # The drain runs it regardless of the unreached deadline, and marks it forced.
+    sched.run_due(now=float("inf"))
+    assert sched._pending == {}
+    assert recompute.timings[0]["forced_dispatch"] is True
+
+
+def test_followup_enqueued_during_a_drain_is_also_marked_forced():
+    # Marking at drain start would miss this one: the follow-up entry does not exist
+    # yet when the drain begins, and it too runs before its configured deadline.
+    clock = _FakeClock()
+    timings: list[dict] = []
+    followed_up = {"done": False}
+
+    def recompute(db, user_id, player_color):
+        timings.append(current_run_timing())
+        if not followed_up["done"]:
+            followed_up["done"] = True
+            sched.request_recompute(user_id, player_color, source=_TRIGGER)
+        return _rebuilt()
+
+    sched, _ = _make_scheduler(clock, recompute, quiet_window=30.0)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.run_due(now=float("inf"))
+
+    assert len(timings) == 2
+    assert all(t["forced_dispatch"] is True for t in timings)
+
+
+def test_normal_debounced_run_is_not_forced():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert recompute.timings[0]["forced_dispatch"] is False
+
+
+@pytest.mark.parametrize(
+    "result_factory", [_rebuilt, _cached, _no_evidence, None], ids=lambda f: str(f)
+)
+def test_run_context_is_reset_after_every_disposition_and_exception(result_factory):
+    clock = _FakeClock()
+
+    def recompute(db, user_id, player_color):
+        assert current_run_timing() is not None  # visible DURING the run
+        if result_factory is None:
+            raise RuntimeError("boom")
+        return result_factory()
+
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    sched.run_due()
+
+    # Nothing leaks into the next run — or into a direct recompute on this thread.
+    assert current_run_timing() is None
+
+
+def test_unknown_source_raises_before_touching_queue_state():
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    with pytest.raises(UnknownOpeningScoreTrigger) as first:
+        sched.request_recompute(1, "white", source="totally_made_up")
+    with pytest.raises(UnknownOpeningScoreTrigger) as second:
+        sched.refresh_now(1, "white", timeout=5.0, source="totally_made_up")
+
+    # The rejection must not echo the rejected value anywhere reachable by a log:
+    # not in the message, and not via a chained exception whose message embeds it.
+    for raised in (first, second):
+        assert "totally_made_up" not in str(raised.value)
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+
+    # Queue state is untouched: no sequence burned, nothing pending, no run.
+    assert sched._seq_counter == {}
+    assert sched._pending == {}
+    assert sched._inflight == set()
+    clock.advance(30.0)
+    sched.run_due()
+    assert recompute.calls == []
+
+
+def test_module_facade_drops_invalid_source_without_raising(monkeypatch, caplog):
+    # Best-effort callers (the /moves and SRS handlers) must not turn a bad source
+    # into a 500 — and the invalid value must not reach the queue either.
+    from app import opening_score_scheduler as module
+
+    sched, _ = _make_scheduler(_FakeClock(), _RecordingRecompute())
+    monkeypatch.setattr(module, "_scheduler", sched)
+
+    with caplog.at_level(logging.DEBUG, logger=module.logger.name):
+        _real_request_recompute(1, "white", source="not_a_trigger")
+        assert sched._pending == {}
+        assert _real_refresh_now(1, "white", source="not_a_trigger") is False
+        assert sched._pending == {}
+
+    # Two dropped enqueues, each reported without echoing the rejected value. A
+    # bare ``logger.exception`` here would render the traceback — and the enum's
+    # own "'not_a_trigger' is not a valid ..." message — into production logs,
+    # putting an uncontrolled caller-supplied string in the very sink the closed
+    # vocabulary protects.
+    formatter = SimpleFormatter("%(asctime)s %(levelname)s %(message)s")
+    dropped = [
+        formatter.format(record)
+        for record in caplog.records
+        if "unknown trigger source" in record.getMessage()
+    ]
+    assert len(dropped) == 2
+    for rendered in dropped:
+        assert "not_a_trigger" not in rendered
+        assert "Traceback" not in rendered
+
+
+def test_valid_source_string_is_accepted_and_normalized():
+    clock = _FakeClock()
+    recompute = _TimingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    sched.request_recompute(1, "white", source="session_lineage_cold")
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert recompute.timings[0]["trigger_sources"] == ["session_lineage_cold"]
+
+
+def test_completion_log_failure_is_swallowed_and_next_key_still_runs(monkeypatch):
+    from app import opening_score_scheduler as module
+
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("log handler exploded")
+
+    monkeypatch.setattr(module.logger, "info", boom)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    # Best-effort: a completion-logging fault must neither raise nor wedge the loop.
+    sched.run_due()
+
+    assert sorted(recompute.calls) == [(1, "white"), (2, "white")]
+
+
+# ---------------------------------------------------------------------------
+# Operational completion log — positive contract through the PRODUCTION formatter
+#
+# The root formatter is "%(asctime)s %(levelname)s %(message)s", so fields placed
+# only in `extra` vanish in production. Assert labeled tokens in the RENDERED text,
+# independently of order/punctuation/timestamp.
+# ---------------------------------------------------------------------------
+
+
+def test_completion_log_carries_every_semantic_field_after_rendering(caplog):
+    clock = _FakeClock()
+    recompute = _RecordingRecompute(_rebuilt("evidence_change", generation=42))
+    sched, _ = _make_scheduler(clock, recompute)
+
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.TREE_READER_WARM)
+    clock.advance(0.5)
+    sched.request_recompute(1, "white", source=OpeningScoreTrigger.SCORE_DELTA)
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    rendered = _rendered_completion(caplog)
+    assert "run_id=" in rendered
+    assert "run_outcome=rebuilt" in rendered
+    assert "rebuild_reason=evidence_change" in rendered
+    assert "queue_first_ms=2500.0" in rendered
+    assert "queue_last_ms=2000.0" in rendered
+    assert "coalesce_span_ms=500.0" in rendered
+    # The second enqueue re-armed the quiet window from t+0.5, so the final policy
+    # deadline sits 2.0s after first_seen and 0.5s of post-deadline lag remains.
+    assert "deadline_delay_ms=2000.0" in rendered
+    assert "dispatch_lag_ms=500.0" in rendered
+    assert "worker_run_ms=" in rendered
+    assert "trigger_first=tree_reader_warm" in rendered
+    assert "trigger_last=score_delta" in rendered
+    assert "trigger_sources=score_delta,tree_reader_warm" in rendered
+    assert "enqueue_count=2" in rendered
+    assert "immediate=False" in rendered
+    assert "forced_dispatch=False" in rendered
+    assert "generation=42" in rendered
+
+
+def test_completion_log_omits_user_derived_identifiers(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, _RecordingRecompute())
+
+    sched.request_recompute(987654, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    rendered = _rendered_completion(caplog)
+    # Operational/aggregate surface only — no user ID, no key, no scores.
+    assert "987654" not in rendered
+    assert "user_id" not in rendered
+    assert "player_color" not in rendered
+
+
+def test_exactly_one_completion_record_per_executed_run(caplog):
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "black", source=_TRIGGER)
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    records = _completion_records(caplog)
+    assert len(records) == 2
+    run_ids = {
+        token.split("=", 1)[1]
+        for record in records
+        for token in record.getMessage().split()
+        if token.startswith("run_id=")
+    }
+    assert len(run_ids) == 2  # each run is independently identifiable

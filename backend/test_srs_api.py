@@ -11,6 +11,7 @@ from sqlalchemy import text
 from app.models import Blunder, Position
 from app.opening_cache import current_evidence_seq
 from app.opening_score_scheduler import (
+    OpeningScoreTrigger,
     request_recompute as real_request_recompute_facade,
 )
 from conftest import pg_required
@@ -61,7 +62,10 @@ def _create_blunder(
     return blunder
 
 
-def test_srs_review_pass_increments_streak_and_logs_review(client, auth_headers, create_game_session, db_session):
+def test_srs_review_pass_increments_streak_and_logs_review(
+    client, auth_headers, create_game_session, db_session, _no_op_recompute_scheduler
+):
+    _, srs_stub = _no_op_recompute_scheduler
     session_id = create_game_session(user_id=123, player_color="white")
     blunder = _create_blunder(
         db_session,
@@ -103,6 +107,12 @@ def test_srs_review_pass_increments_streak_and_logs_review(client, auth_headers,
     assert review_row[0] == 1
     assert review_row[1] == "Nf3"
     assert review_row[2] == 20
+
+    # A review is new evidence: the recompute is enqueued naming its own producer,
+    # which is how the timing report segments SRS-driven rebuilds.
+    srs_stub.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SRS_REVIEW
+    )
 
 
 def test_srs_review_fail_resets_streak(client, auth_headers, create_game_session, db_session):

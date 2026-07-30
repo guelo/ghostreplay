@@ -18,6 +18,7 @@ from conftest import TestingSessionLocal
 
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.opening_cache import (
     SCORE_MODEL_VERSION,
     capture_freshness_snapshot,
@@ -579,7 +580,9 @@ def test_delta_enqueues_background_recompute(db_session):
     ):
         compute_opening_score_delta(db_session, session)
 
-    mock_enqueue.assert_called_once_with(123, "white")
+    mock_enqueue.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SCORE_DELTA
+    )
 
 
 def test_delta_terminal_post_never_proves_freshness(db_session):

@@ -556,9 +556,13 @@ def compute_opening_score_delta(
         # first batch; stale refreshes) for the poll to read. Lazy import mirrors
         # the historical load_cached_rows pattern: opening_score_scheduler imports
         # opening_cache at module load, so a top-level import risks a cycle.
-        from app.opening_score_scheduler import request_recompute
+        from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 
-        request_recompute(session.user_id, session.player_color)
+        request_recompute(
+            session.user_id,
+            session.player_color,
+            source=OpeningScoreTrigger.SCORE_DELTA,
+        )
         return items
     except Exception:  # noqa: BLE001 — delta is supplementary; never 500 the end
         source = "failed"

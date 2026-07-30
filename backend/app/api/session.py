@@ -52,7 +52,7 @@ from app.fen import active_color, fen_hash, normalize_fen
 from app.graph_write_lock import acquire_graph_write_lock
 from app.opening_cache import bump_evidence_seq, load_cached_rows_nonblocking
 from app.opening_evidence import session_is_evidence_eligible
-from app.opening_score_scheduler import request_recompute
+from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
 from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
@@ -1299,7 +1299,9 @@ def _run_session_move_evidence_side_effects(
         user_id=user_id,
         move_count=move_count,
     ):
-        request_recompute(user_id, player_color)
+        request_recompute(
+            user_id, player_color, source=OpeningScoreTrigger.SESSION_EVIDENCE
+        )
 
 
 def _validated_content_length(http_request: Request) -> int | None:

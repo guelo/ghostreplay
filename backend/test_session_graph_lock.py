@@ -25,6 +25,7 @@ from sqlalchemy.exc import OperationalError
 import app.api.session as session_api
 import app.graph_write_lock as graph_write_lock
 from app.fen import fen_hash
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.models import (
     AnalysisCache,
     Blunder,
@@ -475,4 +476,6 @@ def test_timeout_twice_degrades_without_raising():
         )
     assert db.rollback.call_count == 2  # one per failed attempt
     cache_mock.assert_called_once()
-    recompute_mock.assert_called_once_with(7, "black")
+    recompute_mock.assert_called_once_with(
+        7, "black", source=OpeningScoreTrigger.SESSION_EVIDENCE
+    )

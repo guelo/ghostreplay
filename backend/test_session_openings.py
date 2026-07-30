@@ -9,6 +9,7 @@ import chess
 import pytest
 
 from app.opening_cache import opening_score_inputs_fingerprint
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.opening_graph import OpeningGraph, OpeningGraphNode, _fen_from_board
 from app.opening_roots import OpeningRoot, OpeningRoots
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
@@ -443,7 +444,9 @@ def test_openings_lineage_warm_serves_cached_and_schedules_background(client, au
         resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
 
     assert resp.status_code == 200
-    mock_recompute.assert_called_once_with(123, "white")
+    mock_recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SESSION_LINEAGE_WARM
+    )
     mock_refresh.assert_not_called()
     lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
     # Score reflects the cached batch.
@@ -502,7 +505,40 @@ def test_openings_cold_cache_serves_lineage_pending_without_blocking(
         assert item["sample_size"] is None
         assert item["game_count"] is None
     mock_refresh.assert_not_called()
-    mock_recompute.assert_called_once_with(123, "white")
+    mock_recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD
+    )
+
+
+def test_cold_reconciliation_poll_does_not_re_enqueue_scheduled_work(
+    client, auth_headers, create_game_session, db_session
+):
+    """The client's ~3s reconciliation poll must not postpone the compute it awaits.
+
+    A normal enqueue re-arms the debounced deadline to ``now + quiet_window``, so an
+    unguarded poll would push the very rebuild it is waiting on out repeatedly
+    (bounded only by ``first_seen + max_wait``). The cold lineage branch is therefore
+    guarded on ``is_recompute_scheduled``: still pending, still no enqueue.
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    with (
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+        patch("app.opening_cache.has_opening_evidence", return_value=True),
+        patch("app.opening_score_scheduler.refresh_now") as mock_refresh,
+        patch("app.opening_score_scheduler.is_recompute_scheduled", return_value=True),
+        patch("app.opening_score_scheduler.request_recompute") as mock_recompute,
+        patch("app.opening_cache.list_cached_opening_scores", return_value=(None, [])),
+    ):
+        resp = client.get(
+            f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123)
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["score_status"] == "pending"
+    mock_recompute.assert_not_called()
+    mock_refresh.assert_not_called()
 
 
 def test_openings_warm_cache_reports_ready(
@@ -541,7 +577,9 @@ def test_openings_warm_cache_reports_ready(
     lineage = {item["opening_key"]: item for item in body["lineage"]}
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(90.0)
     mock_refresh.assert_not_called()
-    mock_recompute.assert_called_once_with(123, "white")
+    mock_recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SESSION_LINEAGE_WARM
+    )
 
 
 @pytest.mark.parametrize("cache_result,expected", [((None, []), "pending"), ("warm", "ready")])
@@ -629,5 +667,7 @@ def test_openings_empty_chain_still_reports_score_status(
     assert body["lineage"] == []
     assert body["score_status"] == "pending"
     # The recompute is enqueued even though this game contributed no chain.
-    mock_recompute.assert_called_once_with(123, "white")
+    mock_recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD
+    )
     mock_refresh.assert_not_called()

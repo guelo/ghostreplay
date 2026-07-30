@@ -21,6 +21,7 @@ import pytest
 
 from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import normalize_fen
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.models import (
     AnalysisCache,
     OpeningPositionEdge,
@@ -1347,7 +1348,9 @@ def test_tree_status_cold_fires_background_recompute(client, auth_headers):
                           headers=auth_headers())
     assert resp.status_code == 200
     assert resp.json()["state"] == "cold"
-    recompute.assert_called_once_with(123, "white")
+    recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.TREE_STATUS_BOOTSTRAP
+    )
     refresh.assert_not_called()
     overlay.assert_not_called()
 
@@ -1381,7 +1384,9 @@ def test_tree_status_registry_stale_batch_is_building_not_warm(client, auth_head
                           headers=auth_headers())
     assert resp.status_code == 200
     assert resp.json()["state"] == "cold"
-    recompute.assert_called_once_with(123, "white")
+    recompute.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.TREE_STATUS_BOOTSTRAP
+    )
     refresh.assert_not_called()
     overlay.assert_not_called()
 

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from sqlalchemy import event
 
 from app.api.openings import NodeDebugResponse
+from app.opening_score_scheduler import OpeningScoreTrigger
 from app.models import (
     GameSession,
     OpeningScoreBatch,
@@ -928,7 +929,9 @@ def test_family_scores_reader_serves_cache_and_schedules_background(client, auth
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
-    recompute_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+    )
     refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
@@ -955,7 +958,9 @@ def test_family_scores_warm_serves_current_batch_without_recompute(client, auth_
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
-    recompute_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+    )
     data = resp.json()
     assert data["families"] == []
     assert "2026-03-01" in data["computed_at"]
@@ -1013,7 +1018,9 @@ def test_family_drill_reader_serves_cache_and_schedules_background(client, auth_
         )
 
     assert resp.status_code == 200
-    recompute_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+    )
     refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
@@ -1495,7 +1502,9 @@ def test_family_drill_serves_refreshed_branch_keys(client, auth_headers):
             headers=auth_headers(),
         )
 
-    recompute_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(
+        123, "white", source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+    )
     refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]

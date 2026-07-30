@@ -18,9 +18,11 @@ import pytest
 from app.models import SessionMove
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
+    RecomputeDisposition,
     bump_evidence_seq,
     recompute_opening_scores_if_needed,
 )
+from app.opening_score_scheduler import OpeningScoreScheduler, OpeningScoreTrigger
 from test_opening_cache import _make_graph, _make_roots, _seed_black_opening_session
 
 
@@ -52,8 +54,8 @@ def _only_props(calls: list[tuple]) -> dict:
 
 def test_cache_miss_emits_with_full_props(db_session, captured):
     _seed_black_opening_session(db_session)
-    batch = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert batch is not None
+    result = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert result.disposition is RecomputeDisposition.REBUILT
 
     events = _events(captured)
     assert len(events) == 1
@@ -72,7 +74,9 @@ def test_cache_miss_emits_with_full_props(db_session, captured):
 
 def test_no_evidence_does_not_emit(db_session, captured):
     result = recompute_opening_scores_if_needed(db_session, 999, "white")
-    assert result is None
+    assert result.disposition is RecomputeDisposition.NO_EVIDENCE
+    assert result.batch is None
+    assert result.reason is None
     assert _events(captured) == []
 
 
@@ -82,7 +86,8 @@ def test_cached_return_does_not_emit(db_session, captured):
     captured.clear()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert second is not None
+    assert second.disposition is RecomputeDisposition.CACHED
+    assert second.reason is None
     assert _events(captured) == []
 
 
@@ -102,7 +107,7 @@ def test_evidence_change_reason(db_session, captured):
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert second is not None
+    assert second.disposition is RecomputeDisposition.REBUILT
     props = _only_props(captured)
     assert props["reason"] == "evidence_change"
     assert props["evidence_change"] is True
@@ -113,7 +118,7 @@ def test_evidence_change_reason(db_session, captured):
 
 def test_decay_staleness_reason(db_session, captured):
     _seed_black_opening_session(db_session)
-    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    first = recompute_opening_scores_if_needed(db_session, 123, "black").batch
     captured.clear()
 
     stale_at = datetime.now(timezone.utc) - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL - timedelta(hours=1)
@@ -121,7 +126,7 @@ def test_decay_staleness_reason(db_session, captured):
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert second is not None
+    assert second.disposition is RecomputeDisposition.REBUILT
     props = _only_props(captured)
     assert props["reason"] == "decay_staleness"
     assert props["decay_staleness"] is True
@@ -139,7 +144,7 @@ def test_registry_drift_reason(db_session, captured, monkeypatch):
     # the priority order regardless of whether the raw fingerprint also moved.
     monkeypatch.setattr("app.opening_cache.SCORE_MODEL_VERSION", "sm-bumped")
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert second is not None
+    assert second.disposition is RecomputeDisposition.REBUILT
     props = _only_props(captured)
     assert props["reason"] == "registry_drift"
     assert props["registry_drift"] is True
@@ -155,9 +160,175 @@ def test_stale_branch_keys_reason(db_session, captured):
     # outranks evidence_change/decay in the reason priority order.
     with patch("app.opening_cache._batch_has_stale_branch_keys", return_value=True):
         second = recompute_opening_scores_if_needed(db_session, 123, "black")
-    assert second is not None
+    assert second.disposition is RecomputeDisposition.REBUILT
     props = _only_props(captured)
     assert props["reason"] == "stale_branch_keys"
     assert props["stale_branch_keys"] is True
     assert props["registry_drift"] is False
     assert props["evidence_change"] is False
+
+
+# ---------------------------------------------------------------------------
+# Scheduler-timed enrichment (g-score-queue-timing Phase 4)
+#
+# The queue/worker decomposition rides on the EXISTING event, so these cases drive
+# a REAL rebuild through a real scheduler (fake clock, synchronous run_due) and
+# assert what a production HogQL query would see.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 5000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, dt: float) -> None:
+        self.now += dt
+
+
+def _scheduler_for(db_session, clock):
+    """A real scheduler whose worker recomputes on the TEST session, run inline."""
+    return OpeningScoreScheduler(
+        session_factory=lambda: _NonClosingSession(db_session),
+        clock=clock,
+        auto_start=False,
+    )
+
+
+class _NonClosingSession:
+    """Proxy so the scheduler's ``db.close()`` cannot close the test's session."""
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def close(self) -> None:
+        pass
+
+
+_TIMING_FIELDS = (
+    "queue_first_ms",
+    "queue_last_ms",
+    "coalesce_span_ms",
+    "deadline_delay_ms",
+    "dispatch_lag_ms",
+    "worker_compute_ms",
+)
+
+
+def test_scheduled_rebuild_is_timed_with_finite_fields(db_session, captured):
+    _seed_black_opening_session(db_session)
+    clock = _FakeClock()
+    sched = _scheduler_for(db_session, clock)
+
+    sched.request_recompute(123, "black", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD)
+    clock.advance(2.0)
+    sched.run_due()
+
+    props = _only_props(captured)
+    assert props["scheduler_timed"] is True
+    assert props["scheduler_timing_version"] == 1
+    assert isinstance(props["scheduler_run_id"], str) and props["scheduler_run_id"]
+    for field in _TIMING_FIELDS:
+        value = props[field]
+        assert isinstance(value, (int, float)), field
+        assert value == value and abs(value) != float("inf"), field  # finite
+        assert value >= 0, field
+    # The existing narrow rebuild span is preserved alongside the new worker span.
+    assert isinstance(props["duration_ms"], (int, float))
+    assert props["reason"] == "cache_miss"
+    assert props["trigger_sources"] == ["session_lineage_cold"]
+    assert props["forced_dispatch"] is False
+    assert props["immediate"] is False
+    assert props["enqueue_count"] == 1
+    assert props["quiet_window_ms"] == 1500.0
+    assert props["max_wait_ms"] == 10000.0
+    # No user-derived payload beyond the existing distinct id / player_color.
+    assert "user_id" not in props
+    assert "opening_key" not in props
+
+
+def test_direct_recompute_is_explicitly_untimed(db_session, captured):
+    # A direct/offline/test call has no scheduler context: the event still fires but
+    # must not invent queue values, and production reports filter it out.
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    props = _only_props(captured)
+    assert props["scheduler_timed"] is False
+    for field in (*_TIMING_FIELDS, "scheduler_run_id", "trigger_sources"):
+        assert field not in props
+
+
+def test_timing_lookup_failure_does_not_change_the_durable_result(
+    db_session, captured, monkeypatch
+):
+    # Telemetry is best-effort: a broken timing snapshot must not alter the batch or
+    # the explicit rebuilt disposition.
+    import app.opening_score_scheduler as scheduler_module
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "current_run_timing",
+        lambda: (_ for _ in ()).throw(RuntimeError("timing exploded")),
+    )
+    _seed_black_opening_session(db_session)
+    clock = _FakeClock()
+    sched = _scheduler_for(db_session, clock)
+
+    sched.request_recompute(123, "black", source=OpeningScoreTrigger.SCORE_DELTA)
+    clock.advance(2.0)
+    sched.run_due()
+
+    props = _only_props(captured)
+    assert props["scheduler_timed"] is False  # degraded, not fabricated
+    assert props["reason"] == "cache_miss"
+    batch, rows = _latest(db_session)
+    assert batch is not None and rows
+
+
+def _latest(db_session):
+    from app.opening_cache import list_cached_opening_scores
+
+    return list_cached_opening_scores(db_session, 123, "black")
+
+
+def test_mixed_source_run_is_selected_by_set_membership_not_by_endpoints(
+    db_session, captured
+):
+    """The behavioral fixture for the runbook's mixed-source HogQL.
+
+    One coalesced run can carry ``session_lineage_cold`` at NEITHER endpoint. Filtering
+    the g-a5v3 target cohort by ``trigger_first``/``trigger_last`` equality would drop
+    exactly this run, which is why the runbook filters on membership in
+    ``trigger_sources``.
+    """
+    _seed_black_opening_session(db_session)
+    clock = _FakeClock()
+    sched = _scheduler_for(db_session, clock)
+
+    sched.request_recompute(123, "black", source=OpeningScoreTrigger.TREE_READER_WARM)
+    clock.advance(0.2)
+    sched.request_recompute(123, "black", source=OpeningScoreTrigger.SESSION_LINEAGE_COLD)
+    clock.advance(0.2)
+    sched.request_recompute(123, "black", source=OpeningScoreTrigger.SCORE_DELTA)
+    clock.advance(2.0)
+    sched.run_due()
+
+    props = _only_props(captured)
+    assert props["trigger_first"] == "tree_reader_warm"
+    assert props["trigger_last"] == "score_delta"
+    assert props["trigger_sources"] == [
+        "score_delta",
+        "session_lineage_cold",
+        "tree_reader_warm",
+    ]
+    # Membership selects the run...
+    assert "session_lineage_cold" in props["trigger_sources"]
+    # ...while equality against either endpoint would have missed it.
+    assert props["trigger_first"] != "session_lineage_cold"
+    assert props["trigger_last"] != "session_lineage_cold"

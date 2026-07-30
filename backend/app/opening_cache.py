@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Iterable, Literal
 
 from sqlalchemy import func, text, update
@@ -692,14 +693,26 @@ def load_cached_rows(
     """
     # Lazy import: opening_score_scheduler imports opening_cache at module load,
     # so a module-level import here would create a cycle.
-    from app.opening_score_scheduler import refresh_now, request_recompute
+    from app.opening_score_scheduler import (
+        OpeningScoreTrigger,
+        refresh_now,
+        request_recompute,
+    )
 
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     if batch is None:
-        refresh_now(user_id, player_color)
+        refresh_now(
+            user_id,
+            player_color,
+            source=OpeningScoreTrigger.CACHED_SCORE_READER_COLD,
+        )
         batch, rows = list_cached_opening_scores(db, user_id, player_color)
     else:
-        request_recompute(user_id, player_color)
+        request_recompute(
+            user_id,
+            player_color,
+            source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM,
+        )
     return batch, _snapshot_cached_rows(rows)
 
 
@@ -740,16 +753,26 @@ def load_cached_rows_nonblocking(
     """
     # Lazy import: opening_score_scheduler imports opening_cache at module load,
     # so a module-level import here would create a cycle.
-    from app.opening_score_scheduler import is_recompute_scheduled, request_recompute
+    from app.opening_score_scheduler import (
+        OpeningScoreTrigger,
+        is_recompute_scheduled,
+        request_recompute,
+    )
 
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     if batch is None:
         if not has_opening_evidence(db, user_id, player_color):
             return None, [], False
         if not is_recompute_scheduled(user_id, player_color):
-            request_recompute(user_id, player_color)
+            request_recompute(
+                user_id,
+                player_color,
+                source=OpeningScoreTrigger.SESSION_LINEAGE_COLD,
+            )
         return None, [], True
-    request_recompute(user_id, player_color)
+    request_recompute(
+        user_id, player_color, source=OpeningScoreTrigger.SESSION_LINEAGE_WARM
+    )
     return batch, _snapshot_cached_rows(rows), False
 
 
@@ -929,13 +952,19 @@ def ensure_tree_cache(
     _validate_player_color(player_color)
     # Lazy import mirrors load_cached_rows: opening_score_scheduler imports this
     # module at load, so a module-level import would create a cycle.
-    from app.opening_score_scheduler import refresh_now, request_recompute
+    from app.opening_score_scheduler import (
+        OpeningScoreTrigger,
+        refresh_now,
+        request_recompute,
+    )
 
     current_registry = opening_score_inputs_fingerprint(graph, roots)
     batch = get_latest_opening_score_batch(db, user_id, player_color)
     warm_fresh = batch is not None and batch.registry_fingerprint == current_registry
     if warm_fresh:
-        request_recompute(user_id, player_color)
+        request_recompute(
+            user_id, player_color, source=OpeningScoreTrigger.TREE_READER_WARM
+        )
         cache_state = "warm_fresh"
     elif batch is None and not has_opening_evidence(db, user_id, player_color):
         # A user with no opening evidence has no observed moves to hide, so a
@@ -948,7 +977,12 @@ def ensure_tree_cache(
         # resolve_tree_cache_state's no-evidence "warm" and keeps that path fast.
         cache_state = "book_only"
     else:
-        refreshed = refresh_now(user_id, player_color, timeout=TREE_BOOTSTRAP_TIMEOUT)
+        refreshed = refresh_now(
+            user_id,
+            player_color,
+            timeout=TREE_BOOTSTRAP_TIMEOUT,
+            source=OpeningScoreTrigger.TREE_READER_BOOTSTRAP,
+        )
         if not refreshed:
             logger.warning(
                 "tree_cache_bootstrap_timeout user_id=%s player_color=%s",
@@ -1010,7 +1044,11 @@ def resolve_tree_cache_state(
     _validate_player_color(player_color)
     # Lazy import mirrors ensure_tree_cache: opening_score_scheduler imports this
     # module at load, so a module-level import would create a cycle.
-    from app.opening_score_scheduler import is_recompute_scheduled, request_recompute
+    from app.opening_score_scheduler import (
+        OpeningScoreTrigger,
+        is_recompute_scheduled,
+        request_recompute,
+    )
 
     current_registry = opening_score_inputs_fingerprint(graph, roots)
     batch = get_latest_opening_score_batch(db, user_id, player_color)
@@ -1020,7 +1058,9 @@ def resolve_tree_cache_state(
         return "warm"
     already_scheduled = is_recompute_scheduled(user_id, player_color)
     if not already_scheduled:
-        request_recompute(user_id, player_color)
+        request_recompute(
+            user_id, player_color, source=OpeningScoreTrigger.TREE_STATUS_BOOTSTRAP
+        )
     return "building" if already_scheduled else "cold"
 
 
@@ -1451,6 +1491,96 @@ def ensure_opening_scores(
     return list_cached_opening_scores(db, user_id, player_color)
 
 
+class RecomputeDisposition(str, Enum):
+    """What ``recompute_opening_scores_if_needed`` actually DID — closed vocabulary.
+
+    ``OpeningScoreBatch | None`` cannot distinguish a cached fast return from a real
+    rebuild: both successful paths return a batch. The scheduler needs that
+    distinction to label its run outcome and to decide whether the run is part of the
+    worker-cost distribution (g-score-queue-timing), and inferring it from batch
+    presence / generation / timing / "did the analytics event fire" is exactly the
+    guesswork this enum removes.
+    """
+
+    REBUILT = "rebuilt"
+    CACHED = "cached"
+    NO_EVIDENCE = "no_evidence"
+
+
+# Dominant trigger reasons for an actual rebuild, in the priority order
+# ``recompute_opening_scores_if_needed`` resolves them. Also the closed set the
+# ``reason`` property of ``opening_scores_recomputed`` can carry.
+RecomputeReason = Literal[
+    "cache_miss",
+    "registry_drift",
+    "stale_branch_keys",
+    "evidence_change",
+    "decay_staleness",
+]
+_REBUILD_REASONS: frozenset[str] = frozenset(
+    {
+        "cache_miss",
+        "registry_drift",
+        "stale_branch_keys",
+        "evidence_change",
+        "decay_staleness",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OpeningScoreRecomputeResult:
+    """Explicit outcome of one ``recompute_opening_scores_if_needed`` call.
+
+    Invariants (enforced in ``__post_init__``, so an impossible combination cannot
+    be constructed and downstream readers never have to re-derive the outcome):
+
+      - ``rebuilt``     → a batch AND one of ``_REBUILD_REASONS``;
+      - ``cached``      → a batch and NO reason (nothing triggered a rebuild);
+      - ``no_evidence`` → no batch and no reason.
+
+    A ``failed`` run is NOT representable here: an exception stays exceptional and
+    the scheduler maps it to its fourth operational outcome (see
+    ``opening_score_scheduler._run_one``).
+    """
+
+    disposition: RecomputeDisposition
+    batch: OpeningScoreBatch | None
+    reason: RecomputeReason | None = None
+
+    def __post_init__(self) -> None:
+        # Close the vocabulary before the per-disposition checks: without this an
+        # unknown value would fall through every branch below and be accepted as if
+        # it were ``no_evidence``, which is how a presence-inference bug re-enters.
+        # Equivalent string values normalise so downstream ``is`` comparisons hold.
+        try:
+            disposition = RecomputeDisposition(self.disposition)
+        except ValueError:
+            raise ValueError(
+                f"unknown recompute disposition {self.disposition!r}"
+            ) from None
+        if disposition is not self.disposition:
+            object.__setattr__(self, "disposition", disposition)
+        if self.disposition is RecomputeDisposition.REBUILT:
+            if self.batch is None:
+                raise ValueError("rebuilt recompute result requires a batch")
+            if self.reason not in _REBUILD_REASONS:
+                raise ValueError(
+                    f"rebuilt recompute result requires a rebuild reason, got {self.reason!r}"
+                )
+            return
+        if self.reason is not None:
+            raise ValueError(
+                f"{self.disposition.value} recompute result must carry no rebuild reason"
+            )
+        if self.disposition is RecomputeDisposition.CACHED:
+            if self.batch is None:
+                raise ValueError("cached recompute result requires the existing batch")
+            return
+        if self.batch is not None:
+            raise ValueError("no_evidence recompute result must carry no batch")
+
+
 def _emit_opening_scores_recomputed(
     db: Session,
     user_id: int,
@@ -1467,10 +1597,35 @@ def _emit_opening_scores_recomputed(
 ) -> None:
     """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
 
-    Best-effort: a count/analytics failure must never break the scheduler worker
-    (``capture`` already swallows its own errors; the count query is guarded too).
-    Runs only on the serialized recompute worker, off the request hot path.
+    Fires ONLY for an actual rebuild — never for a ``cached`` or ``no_evidence``
+    disposition.
+
+    ``duration_ms`` stays the narrow actual-rebuild span measured by the caller
+    inside ``recompute_opening_scores_if_needed``. The scheduler-side queue/worker
+    decomposition (g-score-queue-timing) is snapshotted here, at function ENTRY —
+    before the analytics-only ``batch_size`` count query — so ``worker_compute_ms``
+    covers worker start through a durable batch (commit + post-commit pruning) and
+    excludes this function's own telemetry overhead.
+
+    A direct/offline/test call has no scheduler run context: the event still fires,
+    stamped ``scheduler_timed=False`` with no fabricated queue values, and
+    production queries filter on ``scheduler_timed = true``.
+
+    Best-effort: a count/timing/analytics failure must never break the scheduler
+    worker or alter the durable batch (``capture`` already swallows its own errors;
+    the count query and the timing snapshot are guarded too). Runs only on the
+    serialized recompute worker, off the request hot path.
     """
+    # Function-local import: opening_score_scheduler imports THIS module at load,
+    # so a module-level import would create a cycle (same lazy pattern as the
+    # reader functions' scheduler imports above).
+    try:
+        from app.opening_score_scheduler import current_run_timing
+
+        timing = current_run_timing()
+    except Exception:
+        logger.debug("opening_scores_recomputed timing snapshot failed", exc_info=True)
+        timing = None
     try:
         batch_size = (
             db.query(func.count(UserOpeningScore.id))
@@ -1480,30 +1635,36 @@ def _emit_opening_scores_recomputed(
     except Exception:
         logger.debug("opening_scores_recomputed batch_size query failed", exc_info=True)
         batch_size = None
-    capture(
-        str(user_id),
-        "opening_scores_recomputed",
-        {
-            "duration_ms": duration_ms,
-            "reason": reason,
-            "cache_miss": cache_miss,
-            "registry_drift": registry_drift,
-            "stale_branch_keys": stale_branch_keys,
-            "evidence_change": evidence_change,
-            "decay_staleness": decay_staleness,
-            "batch_size": batch_size,
-            "player_color": player_color,
-        },
-    )
+    properties = {
+        "duration_ms": duration_ms,
+        "reason": reason,
+        "cache_miss": cache_miss,
+        "registry_drift": registry_drift,
+        "stale_branch_keys": stale_branch_keys,
+        "evidence_change": evidence_change,
+        "decay_staleness": decay_staleness,
+        "batch_size": batch_size,
+        "player_color": player_color,
+        "scheduler_timed": timing is not None,
+    }
+    if timing is not None:
+        properties.update(timing)
+    capture(str(user_id), "opening_scores_recomputed", properties)
 
 
 def recompute_opening_scores_if_needed(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> OpeningScoreBatch | None:
+) -> OpeningScoreRecomputeResult:
     """Single recompute-decision function — the only reader-driven path that may
     write a batch, run exclusively on the scheduler's serialized worker.
+
+    Returns an explicit ``OpeningScoreRecomputeResult``, never a bare batch: the
+    scheduler and the analytics surface must be able to tell a real rebuild from a
+    cached fast return without inferring it from batch presence (see
+    ``RecomputeDisposition``). Every normal exit constructs one; an exception stays
+    exceptional and the scheduler labels it ``failed``.
 
     Recomputes when any of the following holds, else reuses the current batch:
       - cache miss (no batch) and the user has opening evidence,
@@ -1529,7 +1690,9 @@ def recompute_opening_scores_if_needed(
 
     if batch is None:
         if not has_opening_evidence(db, user_id, player_color):
-            return None
+            return OpeningScoreRecomputeResult(
+                disposition=RecomputeDisposition.NO_EVIDENCE, batch=None
+            )
         started = time.monotonic()
         # Freshness bundle BEFORE the overlay evidence read (lower-bound
         # discipline — see FreshnessSnapshot); this is where the full digest runs.
@@ -1558,7 +1721,11 @@ def recompute_opening_scores_if_needed(
             evidence_change=False,
             decay_staleness=False,
         )
-        return result
+        return OpeningScoreRecomputeResult(
+            disposition=RecomputeDisposition.REBUILT,
+            batch=result,
+            reason="cache_miss",
+        )
 
     registry_drift = batch.registry_fingerprint != registry_fingerprint
     stale_branch_keys = _batch_has_stale_branch_keys(rows)
@@ -1585,7 +1752,9 @@ def recompute_opening_scores_if_needed(
             computed_at = computed_at.replace(tzinfo=timezone.utc)
         decay_staleness = computed_at < now - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
         if not decay_staleness:
-            return batch
+            return OpeningScoreRecomputeResult(
+                disposition=RecomputeDisposition.CACHED, batch=batch
+            )
 
     # Trigger reason in priority order (the dominant cause of THIS recompute).
     if registry_drift:
@@ -1626,4 +1795,8 @@ def recompute_opening_scores_if_needed(
         evidence_change=evidence_change,
         decay_staleness=decay_staleness,
     )
-    return result
+    return OpeningScoreRecomputeResult(
+        disposition=RecomputeDisposition.REBUILT,
+        batch=result,
+        reason=reason,
+    )
