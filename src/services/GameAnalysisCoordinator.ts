@@ -18,7 +18,7 @@ import {
   reconcileTrustedBest,
 } from '../workers/analysisUtils'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
-import { buildBrowserProvenance } from '../workers/browserProvenance'
+import { workerTupleProvenance } from '../workers/browserProvenance'
 import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
 import type { ReusableAnalysis, SessionMoveUpload } from '../utils/api'
@@ -1554,11 +1554,14 @@ export class GameAnalysisCoordinator {
       classification: message.classification,
       blunder,
       recordable,
-      // A FRESH local search that reached its configured limit carries this
-      // device's provenance; a time-truncated one (capFired) carries none, so a
-      // depth claim is never stamped on numbers the claimed search did not
-      // produce. Cache-sourced results are built elsewhere and carry null.
-      provenance: message.capFired ? null : buildBrowserProvenance(sessionAnalysisDepth()),
+      // A FRESH local search carries this device's provenance only when the
+      // WORKER declared the tuple evidence-eligible — it reached its configured
+      // limit AND graded canonically — so a depth claim is never stamped on
+      // numbers the claimed search did not produce, nor on a delta-band fallback
+      // classification the claimed protocol never made. This is the game-upload
+      // path, so the stamp becomes a persisted row's profile.
+      // Cache-sourced results are built elsewhere and carry null.
+      provenance: workerTupleProvenance(message, sessionAnalysisDepth()),
     }
   }
 

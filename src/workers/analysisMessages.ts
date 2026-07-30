@@ -76,20 +76,29 @@ export type AnalysisWorkerResponse =
        * False when the classification came from the legacy delta-band fallback
        * (classifyMove) rather than the canonical win-chance model
        * (classifyMoveAdvanced), or when the position yielded no best move.
-       * Diagnostics only — not persisted (profile propagation is a follow-up).
+       *
+       * Not persisted itself, but no longer diagnostics-only: it is one of the two
+       * conditions the legacy arm folds into `evidenceEligible` below, so a false
+       * here costs the tuple its provenance and the row uploads as
+       * `browser-game-v1` (g-coord-noncanon-prov).
        */
       canonical: boolean
       /**
        * True when ANY constituent search of this analyze-move was stopped by the
        * shared wall-clock deadline (g-mk1d §1.6). The tuple is then a TRUNCATED
-       * search, so the caller must NOT attach a depth claim to it — the row falls
-       * back to provenance-less `browser-game-v1`.
+       * search, so it must NOT carry a depth claim — the row falls back to
+       * provenance-less `browser-game-v1`.
        *
-       * This is the provenance-honesty signal, NOT `reachedDepth < depth`, which is
-       * wrong in both directions: the stop can land just after `info depth N` is
+       * This is the TRUNCATION signal, NOT `reachedDepth < depth`, which is wrong
+       * in both directions: the stop can land just after `info depth N` is
        * reported (reached == requested, still truncated), and a forced mate can
        * finish below N with no cap — the configured limit was honestly satisfied
-       * there, so that tuple KEEPS its provenance.
+       * there, so truncation is not what disqualifies that tuple.
+       *
+       * It is NOT the whole provenance-honesty rule, and consumers must not gate
+       * on it directly: a search can complete and still grade non-canonically.
+       * Read `evidenceEligible` below, which folds both conditions
+       * (g-coord-noncanon-prov).
        */
       capFired: boolean
       /**
@@ -116,10 +125,12 @@ export type AnalysisWorkerResponse =
        * forgetting one.
        *
        * The legacy arm sets `!capFired && canonical`; candidate arms hardcode
-       * `false` on every path. INERT until a consumer gates on it — that gate and
-       * the envelope map are g-coord-noncanon-prov / g-grade-v3-wire's, which own
-       * the deliberate v2→v1 change for non-canonical legacy rows and its drift
-       * measurement.
+       * `false` on every path. LIVE since g-coord-noncanon-prov: all three
+       * consumers now stamp through `workerTupleProvenance`, which reads this
+       * field and nothing else, so a non-canonical legacy tuple uploads as
+       * `browser-game-v1` (the deliberate v2→v1 change) and no candidate tuple can
+       * ever carry a claim. The producer-envelope map for v3 remains
+       * g-grade-v3-wire's.
        */
       evidenceEligible: boolean
       /** Which protocol produced this tuple. Legacy rows say `'legacy'`. */

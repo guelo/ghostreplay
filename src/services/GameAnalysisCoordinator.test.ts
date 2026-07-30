@@ -3,6 +3,7 @@ import { useGameStore } from '../stores/useGameStore'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { MoveRecord } from '../components/chess-game/domain/movePresentation'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+import { buildBrowserProvenance } from '../workers/browserProvenance'
 import { withLookupSurfaces } from '../test/cacheLookupFixture'
 
 const lookupAnalysisCacheMock = vi.fn()
@@ -1058,6 +1059,158 @@ describe('GameAnalysisCoordinator', () => {
     // The pure `reconcileTrustedBest` unit tests live with the helper in
     // src/workers/analysisUtils.test.ts (the helper moved there in g-49e2 so the
     // coordinator and useMoveAnalysis share a single source).
+  })
+
+  // ---------------------------------------------------------------
+  // g-coord-noncanon-prov: this coordinator owns the GAME UPLOAD path, so its
+  // provenance stamp becomes a persisted row's profile. It gates on the worker's
+  // `evidenceEligible` discriminator — a completed-but-non-canonical tuple is as
+  // unfit to carry a depth claim as a truncated one.
+  // ---------------------------------------------------------------
+  describe('worker provenance eligibility (g-coord-noncanon-prov)', () => {
+    // A complete legacy tuple, shaped as the worker emits it. Each test states
+    // the honesty fields it cares about.
+    const sendWorker = (
+      requestId: string | undefined,
+      over: Record<string, unknown> = {},
+    ) => {
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'uci-0',
+          bestMove: 'd2d4',
+          bestLine: ['d2d4'],
+          bestEval: 40,
+          playedEval: 10,
+          bestEvalMate: null,
+          playedEvalMate: null,
+          delta: 30,
+          classification: 'inaccuracy',
+          canonical: true,
+          capFired: false,
+          stopReason: 'bestmove',
+          reachedDepth: sessionAnalysisDepth(),
+          evidenceEligible: true,
+          protocol: 'legacy',
+          ...over,
+        },
+      })
+    }
+
+    // Resolve move index 0 from the worker; the default cache miss releases the
+    // buffered result.
+    const resolveFromWorker = async (over: Record<string, unknown> = {}) => {
+      coordinator.startSession('session-prov')
+      useGameStore.setState({ moveHistory: makeMoveHistory(1) })
+      const requestId = coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      sendWorker(requestId, over)
+      await vi.advanceTimersByTimeAsync(200)
+      return coordinator.store.getState().analysisMap.get(0)!
+    }
+
+    it('stamps this device\'s provenance on an evidence-eligible tuple', async () => {
+      const resolved = await resolveFromWorker({ evidenceEligible: true })
+      expect(resolved.provenance).toEqual(buildBrowserProvenance(sessionAnalysisDepth()))
+    })
+
+    it('withholds provenance from a completed NON-CANONICAL tuple', async () => {
+      // No cap fired — the searches finished — but a missing post-move score sent
+      // the grading through the legacy delta-band `classifyMove` fallback, so the
+      // classification never came from `classifyMoveAdvanced`. Gating on
+      // `capFired` alone stamped this tuple browser-game-v2 with a full depth
+      // claim; that was the live data-integrity bug.
+      const resolved = await resolveFromWorker({
+        canonical: false,
+        capFired: false,
+        evidenceEligible: false,
+      })
+      expect(resolved.provenance ?? null).toBeNull()
+    })
+
+    it('withholds provenance from a truncated tuple', async () => {
+      const resolved = await resolveFromWorker({
+        capFired: true,
+        stopReason: 'deadline',
+        evidenceEligible: false,
+      })
+      expect(resolved.provenance ?? null).toBeNull()
+    })
+
+    it('withholds provenance from a cache-sourced result', async () => {
+      // Someone else's search: this device must never re-stamp a row it read.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'c2c4', best_move_san: 'c4',
+          best_line_uci: ['c2c4', 'e7e5'], best_eval: 40,
+          played_eval: 10, played_eval_mate: null, eval_delta: 30,
+          classification: 'inaccuracy',
+          position_trusted: true, move_trusted: true, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('session-prov')
+      coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      await vi.advanceTimersByTimeAsync(200)
+
+      const resolved = coordinator.store.getState().analysisMap.get(0)!
+      expect(resolved.bestMove).toBe('c2c4')
+      expect(resolved.provenance ?? null).toBeNull()
+    })
+
+    it('withholds provenance from a canonically reconciled tuple', async () => {
+      // An ELIGIBLE worker tuple, promoted to 'best' by the trusted position
+      // grain: the tuple is now part position truth, so `reconcileTrustedBest`
+      // clears the claim it arrived with.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0'], best_eval: 35,
+          played_eval: 42, played_eval_mate: null, eval_delta: 0,
+          classification: 'excellent',
+          position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('session-prov')
+      const requestId = coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      await vi.advanceTimersByTimeAsync(200)
+      sendWorker(requestId, { evidenceEligible: true })
+      await vi.advanceTimersByTimeAsync(0)
+
+      const resolved = coordinator.store.getState().analysisMap.get(0)!
+      expect(resolved.classification).toBe('best')
+      expect(resolved.provenance ?? null).toBeNull()
+    })
+
+    // The regression the bead exists to prevent, measured where it actually
+    // matters: the uploaded row, not the in-memory result.
+    const uploadedRow = async (over: Record<string, unknown>) => {
+      uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
+      await resolveFromWorker(over)
+      await vi.advanceTimersByTimeAsync(3000) // incremental upload interval
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      return (uploadSessionMovesMock.mock.calls[0][1] as any[])[0]
+    }
+
+    it('uploads a completed NON-CANONICAL result as provenance-less browser-game-v1', async () => {
+      // Provenance labels by OMISSION: the backend reads a null claim as
+      // browser-game-v1 and a present one as browser-game-v2 with a depth claim.
+      // A delta-band fallback tuple must arrive claimless — since v1 retired
+      // (g-bgv1-cutover) the cache writer then refuses the row instead of storing
+      // evidence at a strength it cannot support, while the move's own
+      // session_moves row is written either way.
+      const row = await uploadedRow({
+        canonical: false,
+        capFired: false,
+        evidenceEligible: false,
+      })
+      expect(row.eval_cp).toBe(10) // the tuple's own numbers still upload
+      expect(row.provenance).toBeNull()
+    })
+
+    it('uploads an evidence-eligible result as browser-game-v2 with this device\'s claim', async () => {
+      const row = await uploadedRow({ evidenceEligible: true })
+      expect(row.provenance).toEqual(buildBrowserProvenance(sessionAnalysisDepth()))
+    })
   })
 
   // ---------------------------------------------------------------

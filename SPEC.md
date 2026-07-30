@@ -844,11 +844,28 @@ comparable *within* the browser tier — without changing the authority barrier.
   `stopReason`, never an inferred `reachedDepth < depth` (wrong in both directions: a
   stop can land just after `info depth N`, and a forced mate finishes below N with no
   cap — there the configured limit WAS honestly satisfied). Provenance survives only
-  for a tuple that is BOTH untruncated AND unrewritten: `reconcileTrustedBest` clears
-  it on both of its rewrite branches, since a canonically corrected tuple's best-ness
-  came from the position grain, not from a stronger search. Cache-sourced results
-  (someone else's search) carry none. A cleared claim simply falls back to
-  `browser-game-v1` with no strength claim.
+  for a tuple that is untruncated, CANONICALLY GRADED, and unrewritten:
+  `reconcileTrustedBest` clears it on both of its rewrite branches, since a
+  canonically corrected tuple's best-ness came from the position grain, not from a
+  stronger search. Cache-sourced results (someone else's search) carry none. A
+  cleared claim simply falls back to `browser-game-v1` with no strength claim. The
+  `analysis` response carries a REQUIRED `evidenceEligible` / `protocol` pair
+  (g-two-search-grade §9.1): the worker builds no provenance, so eligibility has to
+  be stated rather than inferred from omission. The shipping arm reports
+  `!capFired && canonical` / `'legacy'`, and candidate arms hardcode ineligible.
+  All three worker-result consumers (the coordinator's `buildWorkerResult` and both
+  `useMoveAnalysis` builders) stamp through the one shared gate
+  `workerTupleProvenance`, which reads `evidenceEligible` and nothing else
+  (g-coord-noncanon-prov). Gating on `capFired` alone is a mislabel, not a
+  simplification: a completed search whose grading fell back to the delta-band
+  `classifyMove` never used the protocol the profile describes, so it uploads
+  claimless and is stamped `browser-game-v1` — which, since that profile retired
+  (g-bgv1-cutover), means the cache writer refuses the row (`INACTIVE_PROFILE_KEEP`)
+  rather than storing evidence under a strength it cannot support. The move's own
+  `session_moves` row is written either way, so nothing the player sees changes.
+  Because provenance labels BY OMISSION — absent means v1, present means v2 with a
+  depth claim — the rule lives in exactly one place, or a consumer that forgets a
+  condition mislabels silently.
 - **`browser-game-v2` — the first DECLARED-DYNAMIC profile.** Its FIXED half
   (`engine_name`, no small net, `multipv=1`, `browser-analyzer-v1`, manifest digest) is
   exact-equality verified and always server-stamped; its DYNAMIC half

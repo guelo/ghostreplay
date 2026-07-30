@@ -27,10 +27,13 @@ export const MATE_BASE_CP = 10000
  * name, MultiPV, analyzer protocol, manifest digest) and never accepts a
  * client-sent profile id.
  *
- * Attached ONLY to a raw, untruncated worker tuple. It is cleared whenever the
- * tuple stops describing that search — a canonical reconciliation rewrite, or a
- * time-truncated (`capFired`) search — so a depth claim is never stamped on
- * numbers the claimed search did not produce. See `reconcileTrustedBest`.
+ * Attached ONLY to a raw worker tuple the worker itself declared eligible
+ * (`evidenceEligible` — untruncated AND canonically graded; see
+ * `workerTupleProvenance`). It is cleared whenever the tuple stops describing
+ * that search — a canonical reconciliation rewrite, a time-truncated
+ * (`capFired`) search, or a delta-band fallback classification — so a depth
+ * claim is never stamped on numbers, or a grade, the claimed search did not
+ * produce. See `reconcileTrustedBest`.
  *
  * Self-reported diagnostics by design: forging these can only reorder
  * NON-authoritative browser rows within the browser tier. It can never cross the
@@ -77,9 +80,9 @@ export type AnalysisResult = {
   /**
    * This device's own search provenance for THIS tuple, or null/absent when the
    * tuple is not honest raw worker output — a cache-sourced result (someone
-   * else's search), a canonically reconciled tuple, or a time-truncated search.
-   * Uploaded per move; null ⇒ the row is stamped `browser-game-v1` with no
-   * strength claim.
+   * else's search), a canonically reconciled tuple, a time-truncated search, or
+   * a search whose grading fell back to the delta band. Uploaded per move;
+   * null ⇒ the row is stamped `browser-game-v1` with no strength claim.
    */
   provenance?: BrowserAnalysisProvenance | null
 }

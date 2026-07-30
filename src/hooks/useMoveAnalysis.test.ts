@@ -154,6 +154,9 @@ describe('useMoveAnalysis', () => {
         bestEvalMate: null,
         delta: 200,
         classification: 'blunder',
+        canonical: true,
+        capFired: false,
+        evidenceEligible: true,
       })
     })
 
@@ -174,8 +177,9 @@ describe('useMoveAnalysis', () => {
       classification: 'blunder',
       blunder: true,
       recordable: false,
-      // A worker message with no `capFired` is not a truncated search, so the
-      // result carries this device's provenance at the session depth (g-mk1d).
+      // The worker declared this tuple evidence-eligible (untruncated AND
+      // canonically graded), so it carries this device's provenance at the
+      // session depth (g-mk1d).
       provenance: expectedProvenance(),
     })
   })
@@ -1128,6 +1132,11 @@ describe('useMoveAnalysis', () => {
         playedEval: null,
         delta: null,
         classification: null,
+        // The worker's no-best-move path: nothing was graded, so it reports
+        // canonical false and evidenceEligible false even though no cap fired.
+        canonical: false,
+        capFired: false,
+        evidenceEligible: false,
       })
     })
 
@@ -1143,7 +1152,9 @@ describe('useMoveAnalysis', () => {
       classification: null,
       blunder: false,
       recordable: false,
-      provenance: expectedProvenance(),
+      // No classification came out of this tuple at all, so it carries no
+      // strength claim (g-coord-noncanon-prov).
+      provenance: null,
     })
   })
 
@@ -1992,6 +2003,192 @@ describe('useMoveAnalysis', () => {
         ([m]: any[]) => m?.type === 'analyze-move',
       )
       expect(analyzeCalls).toHaveLength(1) // the original request only
+    })
+  })
+
+  // -----------------------------------------------------------------------
+  // g-coord-noncanon-prov: BOTH hook result builders gate provenance on the
+  // worker's `evidenceEligible` discriminator, not on `capFired` alone. These
+  // results feed in-memory display and the analysis-board path rather than the
+  // game upload, so a dishonest stamp here is latent — but the rule is one rule,
+  // and it is tested at each site that applies it.
+  // -----------------------------------------------------------------------
+  describe('worker provenance eligibility (g-coord-noncanon-prov)', () => {
+    // A complete legacy tuple: shaped as the worker emits it, with the three
+    // honesty fields left to each test.
+    const analysisMessage = (
+      id: string | undefined,
+      over: Record<string, unknown> = {},
+    ) => ({
+      type: 'analysis',
+      id,
+      move: 'e2e4',
+      bestMove: 'd2d4',
+      bestLine: ['d2d4'],
+      bestEval: 40,
+      playedEval: 10,
+      bestEvalMate: null,
+      playedEvalMate: null,
+      delta: 30,
+      classification: 'inaccuracy',
+      canonical: true,
+      capFired: false,
+      stopReason: 'bestmove',
+      reachedDepth: sessionAnalysisDepth(),
+      evidenceEligible: true,
+      protocol: 'legacy',
+      ...over,
+    })
+
+    // Resolve move index 0 from the worker, letting the default cache miss
+    // release the buffered result.
+    const resolveIndexed = async (over: Record<string, unknown>) => {
+      vi.useFakeTimers()
+      const { result } = renderHook(() => useMoveAnalysis(store))
+      act(() => { simulateMessage({ type: 'ready' }) })
+      let requestId: string | undefined
+      act(() => { requestId = result.current.analyzeMove('fen-0', 'e2e4', 'white', 0, 20) })
+      act(() => { simulateMessage(analysisMessage(requestId, over)) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+      return store.getState().analysisMap.get(0)!
+    }
+
+    describe('indexed builder', () => {
+      it('stamps provenance on an evidence-eligible tuple', async () => {
+        const resolved = await resolveIndexed({ evidenceEligible: true })
+        expect(resolved.provenance).toEqual(expectedProvenance())
+      })
+
+      it('withholds provenance from a completed NON-CANONICAL tuple', async () => {
+        // The searches finished — no cap fired — but a missing post-move score
+        // sent the grading through the delta-band `classifyMove` fallback. The
+        // tuple's classification never came from `classifyMoveAdvanced`, so it
+        // must not read as browser-game-v2 with a depth claim. `capFired` alone
+        // would have stamped it.
+        const resolved = await resolveIndexed({
+          canonical: false,
+          capFired: false,
+          evidenceEligible: false,
+        })
+        expect(resolved.provenance ?? null).toBeNull()
+      })
+
+      it('withholds provenance from a truncated tuple', async () => {
+        const resolved = await resolveIndexed({
+          capFired: true,
+          stopReason: 'deadline',
+          evidenceEligible: false,
+        })
+        expect(resolved.provenance ?? null).toBeNull()
+      })
+
+      it('withholds provenance from a cache-sourced result', async () => {
+        // Someone else's search: this device must never re-stamp a row it read.
+        vi.useFakeTimers()
+        let resolveLookup!: (value: Map<string, unknown>) => void
+        lookupAnalysisCacheMock.mockReturnValueOnce(
+          new Promise((resolve) => { resolveLookup = resolve }),
+        )
+        const { result } = renderHook(() => useMoveAnalysis(store))
+        act(() => { simulateMessage({ type: 'ready' }) })
+        act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0, 20) })
+        await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+        act(() => {
+          resolveLookup(new Map([['fen-0::e2e4', {
+            best_move_uci: 'c2c4',
+            best_line_uci: ['c2c4', 'e7e5'],
+            best_eval: 40,
+            played_eval: 10,
+            eval_delta: 30,
+            classification: 'inaccuracy',
+            position_trusted: true,
+            move_trusted: true,
+          }]]))
+        })
+        await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+        const resolved = store.getState().analysisMap.get(0)!
+        expect(resolved.bestMove).toBe('c2c4')
+        expect(resolved.provenance ?? null).toBeNull()
+      })
+
+      it('withholds provenance from a canonically reconciled tuple', async () => {
+        // An eligible worker tuple promoted by the trusted position grain: part
+        // of it is now position truth, not this device's search.
+        vi.useFakeTimers()
+        let resolveLookup!: (value: Map<string, unknown>) => void
+        lookupAnalysisCacheMock.mockReturnValueOnce(
+          new Promise((resolve) => { resolveLookup = resolve }),
+        )
+        const { result } = renderHook(() => useMoveAnalysis(store))
+        act(() => { simulateMessage({ type: 'ready' }) })
+        let requestId: string | undefined
+        act(() => { requestId = result.current.analyzeMove('fen-0', 'c2c4', 'white', 0, 20) })
+        await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+        act(() => {
+          resolveLookup(new Map([['fen-0::c2c4', {
+            position_trusted: true, move_trusted: false,
+            drill_best_move_uci: null, position_eval_loss_cp: null,
+            reusable_analysis: null,
+            publication_best: {
+              best_move_uci: 'c2c4',
+              interactive_analysis_reuse: true,
+              game_analysis_reuse: false,
+            },
+          }]]))
+        })
+        await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+        act(() => {
+          simulateMessage(analysisMessage(requestId, {
+            move: 'c2c4',
+            bestMove: 'g1f3',
+            classification: 'excellent',
+            evidenceEligible: true,
+          }))
+        })
+
+        const resolved = store.getState().analysisMap.get(0)!
+        expect(resolved.classification).toBe('best')
+        expect(resolved.provenance ?? null).toBeNull()
+      })
+    })
+
+    describe('non-indexed (variation / ad-hoc) builder', () => {
+      // This builder publishes to `lastAnalysis` directly. Neither the cache
+      // channel nor best-reconciliation reaches it — both are keyed by move index
+      // — so eligibility is the only gate it has, and the two remaining cases
+      // (cache-sourced, canonically reconciled) are covered at the indexed site
+      // above, which is where those inputs can arrive.
+      const publishNonIndexed = (over: Record<string, unknown>) => {
+        renderHook(() => useMoveAnalysis(store))
+        act(() => { simulateMessage({ type: 'ready' }) })
+        act(() => { simulateMessage(analysisMessage('adhoc-1', over)) })
+        return store.getState().lastAnalysis!
+      }
+
+      it('stamps provenance on an evidence-eligible tuple', () => {
+        expect(publishNonIndexed({ evidenceEligible: true }).provenance).toEqual(
+          expectedProvenance(),
+        )
+      })
+
+      it('withholds provenance from a completed NON-CANONICAL tuple', () => {
+        const published = publishNonIndexed({
+          canonical: false,
+          capFired: false,
+          evidenceEligible: false,
+        })
+        expect(published.provenance ?? null).toBeNull()
+      })
+
+      it('withholds provenance from a truncated tuple', () => {
+        const published = publishNonIndexed({
+          capFired: true,
+          stopReason: 'deadline',
+          evidenceEligible: false,
+        })
+        expect(published.provenance ?? null).toBeNull()
+      })
     })
   })
 })

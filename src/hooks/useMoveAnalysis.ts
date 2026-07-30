@@ -5,7 +5,7 @@ import type {
 } from '../workers/analysisMessages'
 import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, canResolveReusableAnalysis, reconcileTrustedBest } from '../workers/analysisUtils'
 import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
-import { buildBrowserProvenance } from '../workers/browserProvenance'
+import { workerTupleProvenance } from '../workers/browserProvenance'
 import { lookupAnalysisCache } from '../utils/api'
 import type { ReusableAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -807,11 +807,11 @@ export const useMoveAnalysis = (
               classification: message.classification,
               blunder,
               recordable,
-              // Fresh local search: this device's provenance, unless the shared
-              // wall-clock deadline truncated a constituent search (g-mk1d §1.6).
-              provenance: message.capFired
-                ? null
-                : buildBrowserProvenance(sessionAnalysisDepth()),
+              // Fresh local search: this device's provenance, but only for a tuple
+              // the worker declared evidence-eligible — not one the shared
+              // wall-clock deadline truncated (g-mk1d §1.6), and not one graded by
+              // the delta-band fallback (g-coord-noncanon-prov).
+              provenance: workerTupleProvenance(message, sessionAnalysisDepth()),
             }
 
             if (entry.cacheStatus === 'pending') {
@@ -846,9 +846,10 @@ export const useMoveAnalysis = (
             classification: message.classification,
             blunder: message.classification === 'blunder',
             recordable: false,
-            provenance: message.capFired
-              ? null
-              : buildBrowserProvenance(sessionAnalysisDepth()),
+            // Same gate as the indexed builder above: the variation / ad-hoc path
+            // feeds display today, so a dishonest stamp here is latent rather than
+            // persisted — but one rule, expressed once, for both.
+            provenance: workerTupleProvenance(message, sessionAnalysisDepth()),
           }
           store.getState().setLastAnalysis(result)
           if (result.blunder && message.delta !== null) {
