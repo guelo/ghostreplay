@@ -22,6 +22,7 @@ Never quote Node timing as mobile evidence (§10.1).
 | `device-baseline-desktop-chromium-*.jsonl` | Desktop control, current protocol, 40-ply thermal sequence, 3 repeats, 60s between blocks |
 | `device-baseline-cold-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode cold` (fresh worker per measurement) |
 | `device-baseline-warm-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode sequence --warmup` — the warm pair for the file above |
+| `kill-gate-best30-android-pixel-7-pro-2026-07-30.jsonl` | **The mobile kill gate** — both arms, `best-30`, 4 repeats, on the declared Pixel 7 Pro. Verdict below |
 
 Gate evidence (`plan.positionSetId === 'best-30'`) is registered in
 `KILL_GATE_EVIDENCE` (`src/bench/killGate.ts`) and held to the preconditions
@@ -394,6 +395,110 @@ A **failing** gate is a legitimate verdict, not a broken build — §11's reject
 clause requires the finding survive either way, so the committed-results test
 asserts the verdict is *computable*, not that it passes. The verdict itself is
 recorded in `g-grade-kill-gate`'s notes and in the parent's.
+
+### The verdict — Pixel 7 Pro, 2026-07-30: **FAILED at +23.3%**
+
+`kill-gate-best30-android-pixel-7-pro-2026-07-30.jsonl`, revision `2861639`,
+clean tree, 248 rows, 0 errors, no method warnings, **zero precondition
+problems** — so this is a failed gate, not a void run.
+
+| | current | Variant A |
+|---|---|---|
+| warm median (n=120) | 1970.1 ms | 2428.3 ms |
+| p95 | 2865.0 ms | 4211.3 ms |
+| worst | 3067.3 ms | 4449.3 ms |
+| median nodes | 844,750 | 1,007,047 |
+
+```
+regression = 2428.3 / 1970.1 - 1 = +23.3%   PASS requires <= +10%
+```
+
+**+23.3% is 2.3× the threshold.** That is not the end of Variant A: the bead's
+gate outcome is a ladder, and a failed first gate goes to §3.3's root-snapshot
+shortcut and a rerun before Variant A stops. §15.2 removal is **not** triggered
+by this result. See "What a failed gate does next" below.
+
+The extra root ply is the entire cost, and the per-phase medians say so directly:
+
+| phase | current | Variant A |
+|---|---|---|
+| 0 · root | 975.5 ms / 460,795 nodes @ depth 17 | 1727.0 ms / 765,512 nodes @ depth **18** |
+| 1 · post-played | 560.5 ms / 273,052 nodes @ 17 | 585.5 ms / 284,728 nodes @ 17 |
+
+Root at 18 costs **1.77×** root at 17 while searching 1.66× the nodes — the
+branching factor, plus a small NPS loss (470k → 443k) from the deeper search.
+Host overhead is 26.0 ms against 28.4 ms, so this is engine time, not
+orchestration. Both arms recorded exactly 2 phases and `searchCount: 2`: on this
+cohort the current protocol already skips its post-best search, which is why
+there is no saving to offset the ply. That is §3.4 showing up in measured data,
+and it is the premise the whole gate was built on.
+
+Two facts the run confirms independently of the verdict:
+
+- All 120 `current` rows have `pEqualsB: true` (`p-differs` is empty). `best-30`
+  really is the `P === B` cohort under the shipping protocol at depth 17, so the
+  derivation from the committed thermal-40 baselines holds on a fresh capture.
+- The node counts are **identical** to the desktop control run at the same
+  revision — 460,795 and 765,512 at the root, 844,750 median — and the
+  disagreement set below is the same 9 positions with the same moves. Fixed-depth
+  single-threaded WASM with a `ucinewgame` per analyze-move is deterministic, so
+  the two machines measured the same searches and differ only in wall clock.
+
+**Finding for g-grade-variant-b, reported and never used as a filter**: Variant
+A's depth-18 root named a different best move on 9 of the 30 positions, all 4
+repeats each (36/120 rows) — `ply-002 e7e5→e7e6`, `007 h2h3→c1e3`,
+`015 a2a3→g2g4`, `021 g2g4→h2h4`, `023 g2g4→d4d5`, `025 g2g4→d4e5`,
+`030 d7b6→c6c5`, `033 g2g3→h6h3`, `034 c8b8→d6d5`. Those rows stay in the
+median. Their own median is 2581.1 ms against 2264.4 ms for the agreeing rows,
+but `current` on those same 9 positions medians 1934.4 ms — near its own 1970.1
+ms overall — so they are harder for the deeper search, not intrinsically slow
+positions.
+
+The regression is not carried by a few outliers. Per position, pairing each
+arm's median against the other's, the ratio runs 0.66 to 2.38 with a **median of
+1.32**, and Variant A is faster on only 2 of 30 (`ply-009`, `ply-035`).
+
+### What a failed gate does next
+
+`g-grade-kill-gate`'s gate outcome is three steps, not two:
+
+1. regression ≤ 10% → the parent proceeds.
+2. otherwise **evaluate §3.3's root-snapshot shortcut** — derive the played eval
+   from the root snapshot when `P === B`, so the cohort costs one depth-18
+   search instead of two — **and rerun**.
+3. only if the shortcut is rejected or still fails does Variant A stop, with
+   Variant B carried forward as a correctness-only recommendation.
+
+This capture lands on step 2. Projecting the shortcut from *these* phase
+timings — dropping phase 1 from every Variant A row, which is exactly what §3.3
+does on this cohort:
+
+| | median | vs current |
+|---|---|---|
+| current | 1970.1 ms | — |
+| Variant A as measured | 2428.3 ms | **+23.3%** |
+| Variant A, §3.3 projected | 1753.6 ms | **−11.0%** |
+
+So the shortcut is worth the rerun rather than skipping to a stop. Three caveats,
+because the projection is favourable only at the median:
+
+- **The tail does not improve.** Projected p95 is 2904.2 ms against current's
+  2865.0 — marginally worse. One depth-18 search has a fatter distribution than
+  two smaller ones, and §11 states its gate on p95 as well as median.
+- **It is slower on 14 of 30 positions** (paired per-position ratio: min 0.48,
+  median 0.91, max 1.92). The −11% comes from large wins on a subset, not a
+  uniform shift.
+- **It assumes dropping phase 1 is free.** §3.3 puts mate-frame conversion on
+  the majority path and changes eval-bar streaming; the bead requires explicit
+  acceptance of that UX change, which is a prerequisite to the rerun rather than
+  a formality.
+
+One provenance gap, recorded rather than papered over: `device.notes` is empty on
+this capture, so battery, brightness and pre-run cooling are not stated the way
+the 2026-07-28 thermal baselines state them. No precondition requires it, and at
+2.3× the threshold no plausible thermal story closes a 23% gap. A §3.3 rerun
+would sit near the line, though, where conditions genuinely matter — so that
+field must be filled on the rerun.
 
 ## What a run contains
 

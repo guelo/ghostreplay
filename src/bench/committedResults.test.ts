@@ -104,13 +104,15 @@ describe('committed benchmark results', () => {
    * Two pieces, because a directory scan must stay green BEFORE the capture
    * exists and must not silently pass afterwards:
    *
-   * - DISCOVERED: any committed file whose header says `best-30`. Zero such files
-   *   today, so there is nothing to check and this is green.
-   * - REGISTERED: `KILL_GATE_EVIDENCE`, empty until the evidence commit, whose
-   *   every entry must resolve to a discovered file. Filling it in the same
-   *   commit as the JSONL is what turns this from vacuous into enforced, and
-   *   deleting the file later fails the build instead of quietly reverting to
-   *   zero discovered files.
+   * - DISCOVERED: any committed file whose header says `best-30`.
+   * - REGISTERED: `KILL_GATE_EVIDENCE`, whose every entry must resolve to a
+   *   discovered file.
+   *
+   * The two sets must match exactly, which closes the hole in each direction: an
+   * unregistered capture cannot be dropped into `docs/analysis/` unchecked, and
+   * deleting a registered file fails the build instead of quietly reverting to
+   * "zero discovered files, nothing to check". Both were verified by deleting the
+   * committed capture and watching these two tests go red.
    *
    * What it asserts is that the PRECONDITIONS hold and the verdict is
    * COMPUTABLE — deliberately not that it passes. A failing gate is a legitimate

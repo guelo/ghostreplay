@@ -69,17 +69,23 @@ export const KILL_GATE_MAX_REGRESSION = 0.1
  * Committed gate evidence: declared device label → filename under
  * `docs/analysis/`.
  *
- * EMPTY until the evidence commit, and filling it in the same commit as the
- * JSONL is what turns the committed-results check from vacuous into enforced.
- * It also means deleting the file later fails the build rather than silently
- * reverting to "zero discovered files, nothing to check".
+ * Filled in the SAME commit as the JSONL, which is what turns the
+ * committed-results check from vacuous into enforced. It also means deleting the
+ * file later fails the build rather than silently reverting to "zero discovered
+ * files, nothing to check".
  *
  * The desktop control is NOT here and must not be written into
  * `docs/analysis/` at all — it is a diagnostic, and this directory holds
  * evidence only (see `scripts/bench/run-device-baseline.mjs`, which refuses a
  * `best-30` run without an explicit `--out`).
+ *
+ * The label is the key because the label is what P3 matches, so a capture can
+ * only be registered under the phone it was declared for.
  */
-export const KILL_GATE_EVIDENCE: Readonly<Record<string, string>> = {}
+export const KILL_GATE_EVIDENCE: Readonly<Record<string, string>> = {
+  'Pixel 7 Pro, Android 15, Chrome 150.0':
+    'kill-gate-best30-android-pixel-7-pro-2026-07-30.jsonl',
+}
 
 export type KillGateFile = {
   run: BenchRunRecord | null
