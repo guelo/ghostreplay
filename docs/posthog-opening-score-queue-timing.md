@@ -78,9 +78,10 @@ other value can appear here.
   A forced run that *does* rebuild **is** in this event, carrying
   `forced_dispatch = true`; this filter is what removes it, so omitting the filter
   silently mixes pre-deadline dispatches into the debounce distribution.
-- `properties.scheduler_timing_version = 1` — guards against a later field-semantics
+- `properties.scheduler_timing_version = '1'` — guards against a later field-semantics
   bump. Apply it to **every** query, not just the primary one: a future version-2 event
   would otherwise join a version-1 aggregate with incompatible semantics and no error.
+  Compare against the **quoted** `'1'`; see "HogQL dialect notes".
 
 `failed`, `cached`, and `no_evidence` runs are **not** in this event at all (it fires
 only on a real rebuild), so neither run frequency nor failure rate can be measured from
@@ -93,6 +94,55 @@ opening_score_recompute_run run_id=… run_outcome=rebuilt|cached|no_evidence|fa
 That record is emitted once per executed run with the same `run_id`, carries
 `worker_run_ms` (the all-outcome operational duration), and deliberately contains **no**
 user ID, opening key, session ID, position, or score.
+
+### HogQL dialect notes
+
+Verified against the deployed project on **2026-07-30**. Every custom property is stored
+in a `Map(String, String)` (`properties_group_custom`), so **no property arrives typed**
+— HogQL hands `properties.x` to functions as `Nullable(String)` regardless of what the
+backend sent. Three consequences, each of which produced a wrong or misleading result
+during rollout:
+
+1. **Array membership needs an explicit cast.** `trigger_sources` is emitted as a JSON
+   list but reaches HogQL as the *text* `["score_delta","session_evidence"]`. The
+   natural form fails outright:
+
+   ```
+   has(properties.trigger_sources, 'session_lineage_cold')
+   -- DB::Exception: First argument for function has must be an array, map or JSON.
+   --               Actual Nullable(String)
+   ```
+
+   Verified working form (used by Queries 2, 3, and 5):
+
+   ```sql
+   has(JSONExtract(coalesce(properties.trigger_sources, '[]'), 'Array(String)'), 'session_lineage_cold')
+   ```
+
+   The `coalesce` is for the **type**, not the data: `JSONExtract` is type-checked
+   statically, so the `Nullable` must be stripped even though `scheduler_timed = true`
+   rows always carry the property. If a future PostHog version rejects the type-string
+   form, the equivalent is
+   `has(JSONExtractArrayRaw(coalesce(properties.trigger_sources, '[]')), '"session_lineage_cold"')`
+   — note the **embedded quotes**, because `JSONExtractArrayRaw` returns raw JSON
+   elements. Confirm any replacement parses before trusting it:
+   `length(JSONExtract(...))` must equal the element count, not `0`.
+
+2. **Compare the version fence as `'1'`, not `1`.** The map value is the string `'1'`;
+   the quoted form is verified to match (28/28 events). The bare integer form compiles
+   without error but was **not** verified in this project, and a silently non-matching
+   fence returns zero rows — indistinguishable from "no data yet".
+
+3. **Use `IS NOT NULL`, not `isFinite`.** HogQL compiles `toFloat(properties.x)` to
+   `accurateCastOrNull(..., 'Float64')`, which yields **NULL** — not NaN — for an
+   unparseable value. Guard with `toFloat(properties.x) IS NOT NULL`.
+
+**A filter that returns zero rows is not evidence.** Only the first failure above is
+loud — it raises `DB::Exception` and no result comes back. The version fence and the
+`isFinite` guard fail **silently**, returning a plausible-looking empty or unfiltered
+result. Before reporting an empty cohort, prove the filter is non-vacuous: drop the
+suspect predicate and confirm the count changes, or group by the raw property and read
+its literal stored value.
 
 ## Query 1 — primary all-rebuild distribution
 
@@ -119,10 +169,10 @@ SELECT
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
-  AND isFinite(toFloat(properties.queue_first_ms))
-  AND isFinite(toFloat(properties.worker_compute_ms))
+  AND toFloat(properties.queue_first_ms) IS NOT NULL
+  AND toFloat(properties.worker_compute_ms) IS NOT NULL
   AND timestamp > now() - INTERVAL 7 DAY
 ```
 
@@ -144,9 +194,10 @@ SELECT
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
-  AND has(properties.trigger_sources, 'session_lineage_cold')
+  AND has(JSONExtract(coalesce(properties.trigger_sources, '[]'), 'Array(String)'),
+          'session_lineage_cold')
   AND timestamp > now() - INTERVAL 7 DAY
 ```
 
@@ -161,8 +212,10 @@ rather than quoting an unstable percentile.
 
 ## Query 3 — mixed-source diagnostic (proves Query 2's filter is the right one)
 
-This should return a non-zero count in normal traffic. Each row is a run the
-endpoint-equality filter would have silently dropped:
+Each row is a run the endpoint-equality filter would have silently dropped. The source is
+a **parameter** — substitute the same value into all three predicates. Use
+`session_lineage_cold` for the target cohort, but note that any source demonstrates the
+property, and a source with no traffic yields a vacuously empty result:
 
 ```sql
 SELECT
@@ -173,11 +226,12 @@ SELECT
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
-  AND has(properties.trigger_sources, 'session_lineage_cold')
-  AND properties.trigger_first != 'session_lineage_cold'
-  AND properties.trigger_last != 'session_lineage_cold'
+  AND has(JSONExtract(coalesce(properties.trigger_sources, '[]'), 'Array(String)'),
+          {source})                        -- one OpeningScoreTrigger value
+  AND properties.trigger_first != {source} -- same value in all three
+  AND properties.trigger_last  != {source}
 GROUP BY trigger_first, trigger_last, trigger_sources
 ORDER BY rebuilds DESC
 ```
@@ -185,10 +239,14 @@ ORDER BY rebuilds DESC
 The behavioral fixture for this query is
 `test_opening_recompute_analytics.py::test_mixed_source_run_is_selected_by_set_membership_not_by_endpoints`.
 
-**Validate `has(...)` in the deployed project during rollout.** If that PostHog version
-needs an explicit array cast, update this checked-in runbook with the verified
-equivalent before collecting results. The semantics must remain *membership in
-`trigger_sources`*.
+**Validated against the deployed project 2026-07-30** (commit `d739bcc`, 28 timed
+events) — with `{source} = 'session_lineage_warm'`, **not** `session_lineage_cold`.
+`session_lineage_cold` was unobserved in that sample (0/28), so parameterizing to cold
+would have returned zero rows and proved nothing. The warm run that came back had
+`trigger_sources` containing `session_lineage_warm` while **both** `trigger_first` and
+`trigger_last` were `session_evidence`: exactly the run endpoint equality drops. The
+property demonstrated is membership-vs-endpoints, which is source-independent; the array
+cast is required either way (see "HogQL dialect notes").
 
 ## Query 4 — event-level shares (never compare unrelated aggregate percentiles)
 
@@ -212,18 +270,43 @@ SELECT
   round(quantile(0.50)(
     toFloat(properties.deadline_delay_ms)
     / nullIf(toFloat(properties.queue_first_ms), 0)
-  ), 3) AS policy_share_of_queue_p50
+  ), 3) AS policy_share_of_queue_p50,
+  round(quantile(0.95)(
+    toFloat(properties.deadline_delay_ms)
+    / nullIf(toFloat(properties.queue_first_ms), 0)
+  ), 3) AS policy_share_of_queue_p95,
+  round(quantile(0.50)(
+    toFloat(properties.worker_compute_ms) - toFloat(properties.duration_ms)
+  ), 1) AS worker_overhead_p50,
+  round(quantile(0.95)(
+    toFloat(properties.worker_compute_ms) - toFloat(properties.duration_ms)
+  ), 1) AS worker_overhead_p95,
+  round(max(
+    toFloat(properties.worker_compute_ms) - toFloat(properties.duration_ms)
+  ), 1) AS worker_overhead_max
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
   AND toFloat(properties.queue_first_ms) + toFloat(properties.worker_compute_ms) > 0
   AND timestamp > now() - INTERVAL 7 DAY
 ```
 
-`policy_share_of_queue_p50` splits queue time into intentional policy delay versus
+`policy_share_of_queue_*` splits queue time into intentional policy delay versus
 post-deadline dispatch lag — the split that selects the follow-up bead.
+`worker_overhead_*` is the per-event `worker_compute_ms - duration_ms` gap: worker/session
+acquisition plus decision preflight, i.e. everything the wider measure adds on top of the
+actual rebuild. A small gap means the cost is the scorer; a large one means acquisition.
+
+**Both are computed per event, on purpose.** Subtracting a separately aggregated
+`duration_ms` p50 from a `worker_compute_ms` p50 does **not** yield the overhead
+distribution, and two marginal percentiles being equal does **not** establish per-event
+equality — `queue_first_ms` p50 matching `deadline_delay_ms` p50 is consistent with runs
+that have large dispatch lag offsetting small policy delay. This is the same error the
+section heading warns about; it is easy to make with fields that are nested by
+construction, because the *direction* of the inequality is guaranteed while its
+*magnitude* is not.
 
 ## Query 5 — segmentation
 
@@ -239,7 +322,7 @@ SELECT
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
   AND timestamp > now() - INTERVAL 7 DAY
 GROUP BY reason, player_color, immediate
@@ -256,9 +339,10 @@ SELECT
 FROM events
 WHERE event = 'opening_scores_recomputed'
   AND properties.scheduler_timed = true
-  AND properties.scheduler_timing_version = 1
+  AND properties.scheduler_timing_version = '1'
   AND properties.forced_dispatch = false
-  AND has(properties.trigger_sources, {source})   -- one OpeningScoreTrigger value
+  AND has(JSONExtract(coalesce(properties.trigger_sources, '[]'), 'Array(String)'),
+          {source})   -- one OpeningScoreTrigger value
   AND timestamp > now() - INTERVAL 7 DAY
 ```
 
@@ -269,10 +353,46 @@ several. They do not partition the total and their counts must not be summed.
 
 1. Deploy the instrumentation with **no** scheduler/scorer tuning in the same release.
 2. In PostHog Activity, confirm a real scheduled rebuild has
-   `scheduler_timing_version = 1`, finite non-negative timing fields, only approved
-   `trigger_sources` values, and no raw score/opening/session payload.
-3. Exercise or observe one mixed-source run and verify Query 3 includes it.
-4. Collect **seven complete days**. If that yields fewer than **30** successful,
+   `scheduler_timing_version = '1'`, finite non-negative timing fields, only approved
+   `trigger_sources` values, and no raw score/opening/session payload. Also confirm the
+   published identity `queue_first_ms = coalesce_span_ms + queue_last_ms` holds in
+   production:
+
+   ```sql
+   SELECT
+     count() AS rows_checked,
+     countIf(toFloat(properties.queue_first_ms) IS NULL
+          OR toFloat(properties.coalesce_span_ms) IS NULL
+          OR toFloat(properties.queue_last_ms) IS NULL) AS unparseable_rows,
+     countIf(toFloat(properties.queue_first_ms) IS NOT NULL
+         AND toFloat(properties.coalesce_span_ms) IS NOT NULL
+         AND toFloat(properties.queue_last_ms) IS NOT NULL
+         AND abs(toFloat(properties.queue_first_ms)
+               - (toFloat(properties.coalesce_span_ms)
+                  + toFloat(properties.queue_last_ms))) > 1) AS violations
+   FROM events
+   WHERE event = 'opening_scores_recomputed'
+     AND properties.scheduler_timed = true
+     AND properties.scheduler_timing_version = '1'
+     AND timestamp > now() - INTERVAL 7 DAY
+   ```
+
+   The check **passes only** when `rows_checked > 0` AND `unparseable_rows = 0` AND
+   `violations = 0`. Reading `violations` alone is **fail-open**: a NULL cast makes the
+   `> 1` comparison NULL rather than true, so absent or malformed fields report zero
+   violations. `forced_dispatch` is deliberately not fenced here — the identity is
+   arithmetic and must hold for forced runs too.
+
+3. Exercise or observe one mixed-source run and verify Query 3 includes it, parameterized
+   to a source that is **actually present in the sample**. Organic `session_lineage_cold`
+   is **rare** — it is the cold-start path, and an established account's lineage reads are
+   warm — so parameterizing to cold will usually return zero rows and demonstrate nothing.
+   Do not treat an empty cold cohort as an instrumentation failure without first proving
+   the filter is non-vacuous against a source that is present.
+4. Collect **seven complete days**. Base rate at time of writing is roughly **5
+   rebuilds/day across all ten sources**, with whole days at zero, so seven days yields
+   ~35 events total and any single-source cohort is far smaller. If that yields fewer
+   than **30** successful,
    non-forced, scheduler-timed rebuilds, extend to 14 days and explicitly report the
    small sample rather than optimizing from an unstable percentile.
 5. Run Queries 1, 2, 4, 5. Report failures and forced drains separately, from the
