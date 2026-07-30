@@ -1,5 +1,7 @@
 import { expect, type Page } from "@playwright/test";
+import { apiURL } from "../env";
 import { test } from "../fixtures/auth";
+import { waitForMoveCountAtLeast as waitForCount } from "../fixtures/moves";
 import {
   buildIndex,
   captureState,
@@ -337,7 +339,6 @@ test.describe("game", () => {
     const token = await page.evaluate(() =>
       localStorage.getItem("ghost_replay_token"),
     );
-    const apiURL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
     const historyRes = await page.request.get(
       `${apiURL}/api/history?limit=1`,
       { headers: { Authorization: `Bearer ${token}` } },
@@ -471,11 +472,10 @@ const waitForMoveCountAtLeast = async (
   // Counts half-moves across both layouts: the vertical list renders
   // `.move-list-grid .move-button`, while the narrow/mobile layout swaps in
   // HorizontalMoveList, whose half-moves are `.h-move` tokens.
-  await expect
-    .poll(async () =>
-      page.locator(".move-list-grid .move-button, .h-move").count(),
-    )
-    .toBeGreaterThanOrEqual(minimum);
+  await waitForCount(
+    page.locator(".move-list-grid .move-button, .h-move"),
+    minimum,
+  );
 };
 
 const startGameAsWhite = async (page: Page): Promise<void> => {

@@ -5,13 +5,12 @@ import {
   type APIResponse,
   type Page,
 } from '@playwright/test'
+import { apiURL as apiBaseURL } from '../env'
 import { seedUsers, type SeedUserRole } from './accounts'
 
 type AuthFixtures = {
   loginAs: (page: Page, role: SeedUserRole) => Promise<void>
 }
-
-const apiBaseURL = process.env.E2E_API_URL ?? 'http://127.0.0.1:8010'
 
 /** Connection-level failures — the request never reached the app. */
 const TRANSPORT_ERROR = /ECONNRESET|EPIPE|ECONNREFUSED|socket hang up/i

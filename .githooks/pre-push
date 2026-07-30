@@ -94,6 +94,18 @@ run_gate \
   true \
   env NODE_OPTIONS="$NODE_OPTIONS --disable-warning=ExperimentalWarning" npm run test:run -- --no-color
 
+# Node-side tooling under scripts/. Separate from the gate above because it runs
+# in a node environment against real files and sockets, which the jsdom app
+# config cannot provide (see vitest.scripts.config.ts). It covers the e2e run-slot
+# allocator, whose failure mode is this gate's own e2e stage colliding with a
+# concurrent run (g-e2e-port-collide).
+run_gate \
+  "Script tests" \
+  "Node tooling tests (scripts/)" \
+  "$output_dir/script-tests.out" \
+  true \
+  env NODE_OPTIONS="$NODE_OPTIONS --disable-warning=ExperimentalWarning" npm run test:scripts:run -- --no-color
+
 # Playwright's own config loader calls the deprecated module.register()
 # (DEP0205, node_modules/playwright/lib/common/esmLoaderHost.js) on Node >=26,
 # so --throw-deprecation crashes the run before any test starts. Drop it for

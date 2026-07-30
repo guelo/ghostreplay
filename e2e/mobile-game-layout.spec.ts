@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test } from "./fixtures/auth";
+import { waitForMoveCountAtLeast as waitForCount } from "./fixtures/moves";
 
 const boardSquare = (page: Page, square: string) =>
   page
@@ -11,9 +12,7 @@ const waitForMoveCountAtLeast = async (
   page: Page,
   minimum: number,
 ): Promise<void> => {
-  await expect
-    .poll(async () => page.locator(".h-move-list__strip .h-move").count())
-    .toBeGreaterThanOrEqual(minimum);
+  await waitForCount(page.locator(".h-move-list__strip .h-move"), minimum);
 };
 
 const playMove = async (

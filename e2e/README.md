@@ -11,6 +11,80 @@ npm run test:e2e:ui
 npm run test:e2e:screens   # screenshot gallery only
 ```
 
+Every one of these goes through `scripts/e2e/run.mjs`, which reserves a run slot
+before handing off to `playwright test`. Extra arguments pass straight through:
+`npm run test:e2e -- e2e/play-2col-graph.spec.ts`.
+
+## Concurrent Runs
+
+This repo is worked on by several agents at once, so runs must be able to
+overlap. A slot is a reserved (frontend port, backend port) pair; the database
+belongs to the run rather than to the slot, for the reason below. The runner
+prints what it took:
+
+```
+[e2e] slot 1: frontend 4301, backend 8301, db backend/.tmp/e2e-slot-1-9f3c2a1b7d40.sqlite3
+[e2e] report: npx playwright show-report playwright-report/slot-1
+```
+
+Artifacts are per-slot too (`test-results/slot-N`, `playwright-report/slot-N`),
+because Playwright empties its output directory at startup and would otherwise
+delete a concurrent run's traces.
+
+The slot is held by a listening socket on `8400+N`, which the kernel releases
+when its holders die, however they die. The runner passes that socket to
+Playwright as well, so killing the runner does not free ports that the suite it
+started is about to bind. `lsof -iTCP:8400-8423 -sTCP:LISTEN` names the current
+holders.
+
+The reservation reaches no further than that. A descriptor does not survive the
+next `exec`, and Playwright starts each web server in its own process group, so
+a Playwright that dies badly leaves servers running with nothing holding their
+slot. **Nothing about database safety depends on the reservation.** The database
+is named for the run — `e2e-slot-<slot>-<run>.sqlite3`, where `<run>` is random
+rather than the pid, which is unique only among live processes — so two runs
+cannot name the same file no matter which processes outlive which. What is left
+is a port race in the window before the servers bind, and losing a port is loud:
+Vite or uvicorn fails immediately and Playwright reports it.
+
+Leftovers are swept by the next run, per slot, and only when two things agree:
+nothing holds that slot — reservation and both service ports free — and the file
+has not been written for ten minutes. "Is the pid in the name still alive?" would
+be wrong exactly where the reservation works, on a killed runner whose Playwright
+is still running against that database. The idle slot is not enough on its own
+either: a run that is still seeding has not bound anything yet, so it reads idle
+for a few seconds, and it is the ten minutes of silence that tells the two
+apart.
+
+**Measured envelope:** two pre-push suites at once pass cleanly on a quiet
+machine (29/29 each, ~47s versus ~27s solo). What decides this is CPU, not
+isolation, so read it as a property of the machine rather than of the runner: the
+same pair failed 5-and-1 while another agent's suite had the box at load 47, and
+went green again at load 19. Three at once saturate a laptop outright — three
+Chromium+Stockfish-WASM browsers against three Maia backends — including inside
+timeouts no config setting reaches (`stockfish-worker.smoke.spec.ts` waits 20s
+for its worker from inside `page.evaluate`).
+
+Check `uptime` before blaming a change for that kind of failure. It is loud and
+obvious — the suite takes 2m instead of 27s — and it is not the silent kind this
+isolation exists to prevent, where a run shares a database with a concurrent
+`--reset` and watches rows vanish mid-test (g-e2e-port-collide).
+
+To choose the endpoints yourself instead — debugging, or working around a port
+some other project holds — set any of `E2E_FRONTEND_PORT`, `E2E_BACKEND_PORT`,
+`E2E_BASE_URL`, `E2E_API_URL`, `E2E_DATABASE_URL`. Any one of them switches slot
+allocation off and leaves all five to you, because they are interdependent:
+filling in only the ones you left unset is how the backend ends up on one port
+and the login fixture on another.
+
+`E2E_OUTPUT_DIR` and `E2E_REPORT_DIR` are separate. They only say where
+artifacts land, so setting them keeps per-run port and database isolation — but
+the directories you name are then yours to keep unique, since Playwright empties
+its output directory at startup.
+
+All of these resolve in exactly one place, `e2e/env.ts`; never re-derive a
+default at a call site.
+
 ## Screenshot Gallery (`e2e/screenshots/`)
 
 `npm run test:e2e:screens` captures a fixed first-pass inventory of UI states
@@ -48,6 +122,11 @@ Credentials can be overridden via environment variables:
 
 1. `scripts/e2e/start_backend.sh`:
    - activates `backend/.venv`
-   - resets and seeds the E2E database
-   - runs FastAPI on `127.0.0.1:${E2E_BACKEND_PORT:-8010}`
-2. Vite dev server with `VITE_API_URL` pointed at that backend.
+   - resets and seeds the E2E database named by `DATABASE_URL`
+   - runs FastAPI on `127.0.0.1:$BACKEND_PORT`
+2. Vite dev server with `VITE_API_URL` pointed at that backend, started with
+   `--strictPort` so a taken port fails immediately instead of quietly moving to
+   the next one and leaving Playwright waiting on an empty `baseURL`.
+
+Both get their port and database from the slot the runner reserved; see
+`e2e/env.ts` and Concurrent Runs above.

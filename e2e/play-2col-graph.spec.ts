@@ -1,5 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { test } from "./fixtures/auth";
+import { waitForMoveCountAtLeast as waitForCount } from "./fixtures/moves";
 
 // Geometry checks for the /play 2-column layout (max-width:1099px, ≥660px).
 // The analysis graph shrinks with viewport height — clamp(110px, 20dvh, 220px)
@@ -16,9 +17,7 @@ const waitForMoveCountAtLeast = async (
   page: Page,
   minimum: number,
 ): Promise<void> => {
-  await expect
-    .poll(async () => page.locator(".move-list-grid .move-san").count())
-    .toBeGreaterThanOrEqual(minimum);
+  await waitForCount(page.locator(".move-list-grid .move-san"), minimum);
 };
 
 const playMove = async (

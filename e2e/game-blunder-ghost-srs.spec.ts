@@ -1,5 +1,7 @@
 import { expect, type APIRequestContext, type Page } from "@playwright/test";
+import { apiURL as apiBaseURL } from "./env";
 import { test } from "./fixtures/auth";
+import { waitForMoveCountAtLeast as waitForCount } from "./fixtures/moves";
 
 type BlunderListItem = {
   id: number;
@@ -8,8 +10,6 @@ type BlunderListItem = {
   last_reviewed_at: string | null;
   srs_priority: number;
 };
-
-const apiBaseURL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
 
 const boardSquare = (page: Page, square: string) =>
   page
@@ -21,11 +21,7 @@ const waitForMoveCountAtLeast = async (
   page: Page,
   minimum: number,
 ): Promise<void> => {
-  await expect
-    .poll(async () => {
-      return page.locator(".move-list-grid .move-button").count();
-    })
-    .toBeGreaterThanOrEqual(minimum);
+  await waitForCount(page.locator(".move-list-grid .move-button"), minimum);
 };
 
 const playMove = async (

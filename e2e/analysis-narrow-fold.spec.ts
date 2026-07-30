@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { apiURL } from "./env";
 import { test } from "./fixtures/auth";
 
 /**
@@ -127,7 +128,6 @@ const openHistory = async (page: Page): Promise<void> => {
 };
 
 const openGame = async (page: Page): Promise<void> => {
-  const apiURL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
   await page.goto("/history");
   const token = await page.evaluate(() =>
     localStorage.getItem("ghost_replay_token"),
