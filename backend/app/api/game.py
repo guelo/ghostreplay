@@ -682,6 +682,7 @@ class DrillRouteMetadata(BaseModel):
     target_fen: str
     resulting_fen: str
     plies_to_target: int
+    reaches_root: bool = False
 
 
 class NextOpponentMoveResponse(BaseModel):
@@ -1098,9 +1099,13 @@ def _record_decision(
         "target_blunder_id": stamped.target_blunder_id,
         "resulting_fen": resulting_fen,
         # Read off the response, per the envelope rule — never recomputed here.
+        # Reads the explicit boolean, NOT the status string: the served status is
+        # `root_pending` (the client must confirm before anything is root-reached),
+        # so a status comparison here would silently record FALSE for exactly the
+        # decisions confirmation is about. Pinned by
+        # test_reaches_drill_root_agrees_with_geometry.
         "reaches_drill_root": (
-            stamped.drill_route is not None
-            and stamped.drill_route.status == "root_reached"
+            stamped.drill_route is not None and stamped.drill_route.reaches_root
         ),
     }
 
@@ -1121,8 +1126,8 @@ def _record_decision(
         won = db.execute(stmt).first() is not None
     else:
         # Generic-dialect fallback: a plain insert, with the constraint violation as
-        # the loss signal. The savepoint keeps the surrounding transaction (which in
-        # the route branch carries the drill_state write) usable after the rollback.
+        # the loss signal. The savepoint keeps the surrounding transaction usable
+        # after the rollback.
         try:
             with db.begin_nested():
                 db.execute(OpponentDecision.__table__.insert().values(**values))
@@ -1131,10 +1136,9 @@ def _record_decision(
             won = False
 
     if not won:
-        # Lost. Commit whatever else this transaction holds — in the route branch that
-        # is the drill_state write, which the winner already committed with the same
-        # value (both requests serialize on the drill row lock and the route move is
-        # deterministic), so it is a no-op rather than a clobber.
+        # Lost. Commit to release whatever this transaction still holds — the route
+        # branch's drill row lock — before reading the winner's row. The route branch
+        # no longer writes drill state here, so there is nothing of ours to clobber.
         db.commit()
         winner = _replay_decision(db, session_id, request_fingerprint)
         if winner is None:
@@ -1275,10 +1279,10 @@ def get_next_opponent_move(
     #
     # Placement is load-bearing on both sides. AFTER the drill-state guard, so the
     # terminal states keep answering 400 exactly as before. BEFORE the pre-root drill
-    # branch, because that branch commits drill_state='root_reached' before returning
-    # the route move that would reach it: without replay, a lost first response makes
-    # the retry read drill_state != 'active', release the lock, fall through, and
-    # answer from a still-pre-root FEN with a DIFFERENT move.
+    # branch, so a retry is answered byte-identically — same move, same decision_id,
+    # same target_blunder_srs snapshot — instead of recomputing. The retry must serve
+    # the move the stored decision records, because that row is what a later root
+    # confirmation validates the applied position against.
     replayed = _replay_decision(db, request.session_id, request_fingerprint)
     if replayed is not None:
         return _serve(replayed, True)
@@ -1338,7 +1342,17 @@ def get_next_opponent_move(
             if not route_map.plies_by_fen:
                 raise HTTPException(status_code=400, detail="Drill route is unavailable")
             if route_map.is_target(request.fen):
+                # The request position IS the root: client-OBSERVED, not merely
+                # served, so this branch does transition — and stamps the boundary
+                # write-once. len(request.moves) is proven here: replay_history_fen
+                # above already required the history to reproduce this FEN, and this
+                # FEN is the target. We hold the row lock. Under the client-side
+                # confirmation barrier this should be unreachable for current
+                # clients; it remains the fallback for legacy and lost-confirmation
+                # arrivals.
                 session.drill_state = "root_reached"
+                if session.drill_root_reached_ply is None:
+                    session.drill_root_reached_ply = len(request.moves)
                 db.commit()
                 raise HTTPException(status_code=400, detail="Drill root already reached")
             suggestions = route_preserving_moves(routing, route_map, request.fen)
@@ -1346,9 +1360,12 @@ def get_next_opponent_move(
                 raise HTTPException(status_code=400, detail="Current drill position is off route")
 
             move = suggestions[0]
+            # Serving is NOT a transition. A root-reaching route move is served as
+            # `root_pending` and mutates no drill state; the client applies it and
+            # then confirms the resulting position via /api/drills/{id}/route-check,
+            # which writes drill_state and the evidence boundary together. A boundary
+            # derived from a serve is a boundary a lost response can fabricate.
             reaches_root = move.resulting_fen == route_map.target_fen
-            if reaches_root:
-                session.drill_state = "root_reached"
 
             route_response = NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
@@ -1358,17 +1375,19 @@ def get_next_opponent_move(
                 target_fen=route_map.target_fen,
                 decision_source=DecisionSource.GHOST_PATH,
                 drill_route=DrillRouteMetadata(
-                    status="root_reached" if reaches_root else "on_route",
+                    status="root_pending" if reaches_root else "on_route",
                     target_fen=route_map.target_fen,
                     resulting_fen=move.resulting_fen,
                     plies_to_target=move.plies_to_target,
+                    reaches_root=reaches_root,
                 ),
             )
             # _record_decision's commit is this branch's transaction sink and lock
-            # release, exactly as the bare db.commit() it replaces: the optional
-            # root_reached write rides the same commit, so drill state and the
-            # decision that produced it are never written apart, and the lock does not
-            # outlive it (the route response does no ghost/engine work).
+            # release, exactly as the bare db.commit() it replaces. The branch writes
+            # no drill state of its own any more, but the decision row it commits is
+            # the evidence a later confirmation validates against, so it must still
+            # land before the response is served — and the lock must not outlive it
+            # (the route response does no ghost/engine work).
             served, was_replayed = _record_decision(
                 db,
                 session_id=request.session_id,

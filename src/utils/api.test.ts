@@ -17,6 +17,7 @@ import {
   getStatsAchievements,
   submitAnalysisEvidence,
   fetchSessionOpenings,
+  checkDrillRoute,
 } from './api'
 
 const fetchMock = vi.fn()
@@ -1266,5 +1267,75 @@ describe('fetchSessionOpenings', () => {
       expect.stringContaining('/api/session/s1/openings'),
       expect.objectContaining({ method: 'GET' }),
     )
+  })
+})
+
+describe('checkDrillRoute', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+  })
+
+  const routePayload = {
+    status: 'root_reached',
+    current_fen: 'fen',
+    target_fen: 'fen',
+    suggestions: [],
+    failure: null,
+    drill_root_reached_ply: 3,
+  }
+
+  it('omits current_ply and decision_id when not supplied', async () => {
+    // Absent current_ply is the legacy shape and means "no boundary claim". It
+    // must not be serialized as null, which the backend would reject.
+    mockResponse(routePayload)
+
+    await checkDrillRoute('s1', {
+      current_fen: 'after',
+      previous_fen: 'before',
+      played_uci: 'e2e4',
+    })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({
+      current_fen: 'after',
+      previous_fen: 'before',
+      played_uci: 'e2e4',
+    })
+  })
+
+  it('serializes a boundary claim with current_ply and decision_id', async () => {
+    mockResponse(routePayload)
+
+    const result = await checkDrillRoute('s1', {
+      current_fen: 'after',
+      current_ply: 3,
+      decision_id: 'decision-1',
+    })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toContain('/api/drills/s1/route-check')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({
+      current_fen: 'after',
+      current_ply: 3,
+      decision_id: 'decision-1',
+    })
+    // The mirror was stale before the cutover — the backend has always sent it.
+    expect(result.drill_root_reached_ply).toBe(3)
+  })
+
+  it('threads an AbortSignal into the request', async () => {
+    // The confirmation is a gameplay barrier, so it must be bounded: without a
+    // signal a hung server blocks the board forever.
+    mockResponse(routePayload)
+    const controller = new AbortController()
+
+    await checkDrillRoute(
+      's1',
+      { current_fen: 'after', current_ply: 1 },
+      { signal: controller.signal },
+    )
+
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
   })
 })

@@ -467,17 +467,22 @@ def _insert_decision(db_session, session_id, **kwargs) -> uuid.UUID:
 def test_opponent_root_confirmation_stamps_the_boundary(
     client, auth_headers, db_session
 ):
-    """The served route move reaches the root. Confirmation validates the applied
-    position against the RECORDED decision and stamps the boundary — including onto a
-    row the serve path already advanced to root_reached."""
+    """The two-phase transition, end to end.
+
+    The served route move reaches the root but transitions nothing. Confirmation
+    validates the applied position against the RECORDED decision, and state and
+    boundary land together.
+    """
     session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
 
     served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
     assert served.status_code == 200, served.text
+    assert served.json()["drill_route"]["status"] == "root_pending"
     decision_id = served.json()["decision_id"]
     assert decision_id is not None
     session = _session(db_session, session_id)
-    assert session.drill_state == "root_reached"  # serve-time transition, no boundary
+    # Phase A: nothing written but the decision row.
+    assert session.drill_state == "active"
     assert session.drill_root_reached_ply is None
 
     response = _route_check(
@@ -489,9 +494,13 @@ def test_opponent_root_confirmation_stamps_the_boundary(
         decision_id=decision_id,
     )
 
+    # Phase B: state and boundary in one transaction.
     assert response.status_code == 200, response.text
+    assert response.json()["status"] == "root_reached"
     assert response.json()["drill_root_reached_ply"] == 1
-    assert _session(db_session, session_id).drill_root_reached_ply == 1
+    session = _session(db_session, session_id)
+    assert session.drill_state == "root_reached"
+    assert session.drill_root_reached_ply == 1
 
 
 def test_opponent_root_requires_a_decision_id(client, auth_headers, db_session):
@@ -799,17 +808,20 @@ def test_player_anchor_declines_a_decision_with_an_unproven_ply(
 
 
 def test_reaches_drill_root_agrees_with_geometry(client, auth_headers, db_session):
-    """Guards the trap g-root-confirm-cutover inherits.
+    """Guards the trap this column is built on.
 
-    Confirmation deliberately validates against ``resulting_fen`` rather than this flag,
-    because the flag is extracted from the response's STATUS string and the cutover
-    renames that status to root_pending. That means a broken extraction would NOT fail
-    any confirmation test — it would silently write false into the column. This asserts
-    the flag against geometry, so the rename has to keep them agreeing."""
+    Confirmation deliberately validates against ``resulting_fen`` rather than this flag.
+    The flag used to be extracted from the response's STATUS string, and the served
+    status is now ``root_pending`` — so a status-based extraction would silently write
+    FALSE for exactly the decisions confirmation is about, and NO confirmation test
+    would fail. This asserts the flag against geometry in both directions, so any future
+    re-coupling to a status string has to break here.
+    """
     session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
 
     served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
     assert served.status_code == 200, served.text
+    assert served.json()["drill_route"]["status"] == "root_pending"
 
     row = (
         db_session.query(OpponentDecision)
@@ -818,6 +830,26 @@ def test_reaches_drill_root_agrees_with_geometry(client, auth_headers, db_sessio
     )
     assert row.resulting_fen == E4_FEN  # this decision DOES reach the drill root...
     assert row.reaches_drill_root is True  # ...so the recorded flag must say so
+
+
+def test_reaches_drill_root_is_false_for_an_on_route_serve(
+    client, auth_headers, db_session
+):
+    """The other direction: an on-route move short of the root records FALSE."""
+    session_id = _drill(client, auth_headers, target=NF3_FEN, player_color="black")
+
+    served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
+    assert served.status_code == 200, served.text
+    assert served.json()["drill_route"]["status"] == "on_route"
+    assert served.json()["drill_route"]["reaches_root"] is False
+
+    row = (
+        db_session.query(OpponentDecision)
+        .filter(OpponentDecision.session_id == uuid.UUID(session_id))
+        .one()
+    )
+    assert row.resulting_fen == E4_FEN  # 1.e4 is two plies short of 2.Nf3
+    assert row.reaches_drill_root is False
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +922,110 @@ def test_current_ply_on_an_on_route_check_is_not_a_boundary_claim(
     assert response.json()["drill_root_reached_ply"] is None
     session = _session(db_session, session_id)
     assert session.drill_state == "active"
+    assert session.drill_root_reached_ply is None
+
+
+def test_duplicate_opponent_confirmation_does_not_restamp(
+    client, auth_headers, db_session
+):
+    """The client retries confirmations, so the same body can arrive twice. The second
+    must be a pure read: same answer, and no second write."""
+    session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
+    served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
+    assert served.status_code == 200, served.text
+    body = dict(
+        current_fen=E4_FEN, current_ply=1, decision_id=served.json()["decision_id"]
+    )
+
+    first = _route_check(client, auth_headers, session_id, **body)
+    assert first.status_code == 200, first.text
+    assert first.json()["drill_root_reached_ply"] == 1
+
+    with _capture(engine) as stmts:
+        second = _route_check(client, auth_headers, session_id, **body)
+
+    assert second.status_code == 200, second.text
+    assert second.json() == first.json()
+    assert _gs_updates(stmts) == []
+    assert _session(db_session, session_id).drill_root_reached_ply == 1
+
+
+def test_observed_root_fallback_stamps_the_boundary_write_once(
+    client, auth_headers, db_session
+):
+    """The request FEN already IS the root.
+
+    This position is client-OBSERVED, not merely served, so unlike the route branch it
+    does transition — and stamps the boundary, which len(moves) proves because the
+    history was already required to reproduce this very FEN. Under the client-side
+    barrier current clients never take this path; it is the fallback for legacy tabs
+    and arrivals whose confirmation was lost.
+    """
+    session_id = _drill(client, auth_headers, target=E4_FEN, player_color="white")
+
+    first = _opponent_move(client, auth_headers, session_id, E4_FEN, ["e2e4"])
+
+    assert first.status_code == 400, first.text
+    assert "already reached" in first.json()["detail"].lower()
+    session = _session(db_session, session_id)
+    assert session.drill_state == "root_reached"
+    assert session.drill_root_reached_ply == 1
+
+    # Write-once. The fallback stamped both fields together, so a confirmation
+    # arriving afterwards — here claiming a DIFFERENT ply — must read the committed
+    # boundary back rather than move it, and must write nothing at all.
+    with _capture(engine) as stmts:
+        late = _route_check(
+            client,
+            auth_headers,
+            session_id,
+            current_fen=E4_FEN,
+            previous_fen=START_FEN,
+            played_uci="e2e4",
+            current_ply=3,
+        )
+
+    assert late.status_code == 200, late.text
+    assert late.json()["drill_root_reached_ply"] == 1
+    assert _gs_updates(stmts) == []
+    assert _session(db_session, session_id).drill_root_reached_ply == 1
+
+
+def test_legacy_client_fails_its_drill_after_a_root_pending_serve(
+    client, auth_headers, db_session
+):
+    """PINS THE ACCEPTED ROLLOUT COST — this is not a regression.
+
+    A tab loaded before the cutover does not recognise ``root_pending``. It leaves the
+    drill "active", plays on, and its next route-check posts a position one ply PAST the
+    root with no current_ply and no decision_id. That position is neither the target nor
+    on route, so the drill fails off_route. Only OPPONENT-reached roots are affected,
+    and only for the length of the deploy window; player-reached roots go through
+    route-check either way. Deleting this test means the cost has been paid down —
+    check that deliberately, do not just re-align the assertion.
+    """
+    session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
+
+    served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
+    assert served.status_code == 200, served.text
+    assert served.json()["drill_route"]["status"] == "root_pending"
+    assert _session(db_session, session_id).drill_state == "active"
+
+    # The legacy shape: no current_ply, no decision_id, and a FEN past the root.
+    response = _route_check(
+        client,
+        auth_headers,
+        session_id,
+        current_fen=E4_E5_FEN,
+        previous_fen=E4_FEN,
+        played_uci="e7e5",
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+    assert response.json()["failure"]["reason"] == "off_route"
+    session = _session(db_session, session_id)
+    assert session.drill_state == "failed"
     assert session.drill_root_reached_ply is None
 
 

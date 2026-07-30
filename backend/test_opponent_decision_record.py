@@ -563,52 +563,58 @@ def test_preroot_route_decision_is_recorded_with_root_flag(
     assert response.status_code == 200
     data = response.json()
     assert data["move"] == {"uci": "e2e4", "san": "e4"}
-    assert data["drill_route"]["status"] == "root_reached"
+    assert data["drill_route"]["status"] == "root_pending"
+    assert data["drill_route"]["reaches_root"] is True
 
     rows = _decisions(db_session, session_id)
     assert len(rows) == 1
     row = rows[0]
     assert row.target_blunder_id is None
+    # Derived from the explicit reaches_root flag, NOT from the served status —
+    # which is root_pending precisely for the decisions confirmation is about.
     assert row.reaches_drill_root is True
     assert row.resulting_fen == data["drill_route"]["resulting_fen"]
     assert row.ply_before == 0
     assert json.loads(row.response_payload)["decision_source"] == "ghost_path"
 
-    # The drill_state write rides the same commit as the decision that produced it.
+    # Serving is not a transition: the decision row is the ONLY thing written.
     session = (
         db_session.query(GameSession)
         .filter(GameSession.id == uuid.UUID(session_id))
         .one()
     )
-    assert session.drill_state == "root_reached"
+    assert session.drill_state == "active"
+    assert session.drill_root_reached_ply is None
 
 
-def test_route_retry_after_root_commit_replays_instead_of_falling_through(
+def test_route_retry_of_a_lost_root_pending_response_replays_verbatim(
     client, auth_headers, db_session
 ):
-    """The concrete hazard the replay lookup's placement closes.
+    """A lost first response must be answered by replay, not recomputation.
 
-    The serve path commits ``drill_state='root_reached'`` BEFORE returning the route
-    move that would reach it. Without replay, a first response lost after that commit
-    makes the retry read ``drill_state != 'active'``, release the lock, fall through to
-    the normal ghost/engine path, and answer from a still-pre-root FEN with a
-    DIFFERENT move — leaving the database claiming a root no client ever applied.
+    getNextOpponentMove retries, so one root-reaching decision can arrive as several
+    requests. The retry has to serve the SAME move under the SAME decision_id: that id
+    is what the client later confirms, and confirmation validates the applied position
+    against exactly that row. It must also leave the drill untouched — serving is not a
+    transition, so no number of retries may advance drill_state or stamp a boundary.
     """
     session_id = _start_steering_drill(client, auth_headers)
 
     with patch("app.api.game.get_opening_graph", return_value=_steering_graph()):
         first = _post(client, auth_headers, session_id, START_FEN, moves=[])
     assert first.status_code == 200
+    assert first.json()["drill_route"]["status"] == "root_pending"
 
     session = (
         db_session.query(GameSession)
         .filter(GameSession.id == uuid.UUID(session_id))
         .one()
     )
-    assert session.drill_state == "root_reached"
+    assert session.drill_state == "active"
+    assert session.drill_root_reached_ply is None
 
-    # The retry now takes the normal ghost/engine dispatch — so if it fell through, the
-    # engine would answer. It must not even be consulted.
+    # If the retry ever fell through to the normal ghost/engine dispatch, the engine
+    # would answer with a different move. It must not even be consulted.
     with patch(
         "app.opponent_move_controller.choose_move",
         return_value=_engine_move(uci="d2d4", san="d4"),
@@ -617,9 +623,14 @@ def test_route_retry_after_root_commit_replays_instead_of_falling_through(
 
     assert second.status_code == 200
     mock_choose.assert_not_called()
+    # Byte-identical, decision_id included.
     assert second.json() == first.json()
-    assert second.json()["drill_route"]["status"] == "root_reached"
+    assert second.json()["drill_route"]["status"] == "root_pending"
     assert len(_decisions(db_session, session_id)) == 1
+
+    db_session.refresh(session)
+    assert session.drill_state == "active"
+    assert session.drill_root_reached_ply is None
 
 
 # ---------------------------------------------------------------------------

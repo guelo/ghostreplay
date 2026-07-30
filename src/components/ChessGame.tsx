@@ -15,6 +15,7 @@ import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
+import type { DrillRootConfirmRequest } from "../stores/useGameStore";
 import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
 import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
@@ -52,6 +53,7 @@ import type { EndGameFanfareTrigger } from "./chess-game/ui/EndGameFanfare";
 import {
   MAIA_BOT_NAMES,
   MAIA_ELO_BINS,
+  ROUTE_CHECK_TIMEOUT_MS,
   STARTING_FEN,
 } from "./chess-game/config";
 import { sampleDrillEloBin } from "./chess-game/elo";
@@ -95,7 +97,14 @@ const resolveStrictnessCp = (
 
 type DrillRecovery =
   | { kind: "analysis"; result: Extract<PlayerMoveApplyResult, { applied: true }> }
-  | { kind: "opponent"; fen: string; uciHistory: string[] };
+  | { kind: "opponent"; fen: string; uciHistory: string[] }
+  // A root confirmation that failed. Retry re-issues it; the applied board stays.
+  | { kind: "root-confirm"; request: DrillRootConfirmRequest }
+  // A player-arrival route-check that failed AT the root. Retry must re-issue the
+  // route-check, not the opponent request — the latter would advance the drill
+  // with the evidence boundary never stamped. Carries no payload: the move is held
+  // durably in `drillPendingRouteMove`, which is also what invalidates it.
+  | { kind: "player-route" };
 
 /** Router marker placed by DrillAnalysisPage's "Back to drill" control (g-65ve). */
 type ReturnFromDrillAnalysisMarker = {
@@ -358,6 +367,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
   const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
   const [drillRecovery, setDrillRecovery] = useState<DrillRecovery | null>(null);
+  // The drill root confirmation barrier, owned by useGameStore so it outlives a
+  // remount the way the board it is about does (see the field's comment). NON-NULL
+  // ⇒ engaged, covering both the in-flight and the failed case: a root-reaching
+  // move has been applied but the backend has not confirmed it, so the drill is
+  // NOT root-reached and no further gameplay may proceed.
+  const rootConfirm = useGameStore((s) => s.drillRootConfirm);
+  const setRootConfirmBarrier = useGameStore((s) => s.setDrillRootConfirm);
+  // Its player-arrival counterpart: the applied move whose route-check has not
+  // settled. Durable for the same reasons — see the store field's comment.
+  const pendingRouteMove = useGameStore((s) => s.drillPendingRouteMove);
+  const setPendingRouteMove = useGameStore((s) => s.setDrillPendingRouteMove);
   const pendingDrillSetupRef = useRef<{ openingKey: string; playerColor: string } | null>(null);
   // Set when handleAgainSettings seeds the setup panel from live store state, so
   // the localStorage prefill effect doesn't clobber the exact store values.
@@ -649,6 +669,149 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const opponentColor = playerColor === "white" ? "black" : "white";
 
+  /**
+   * Confirm an applied root-reaching move against the position the backend
+   * recorded, and transition the drill only if it agrees.
+   *
+   * Serving a route move is no longer a transition — the drill becomes
+   * root_reached here, or not at all. Every exit path re-checks
+   * `isStillCurrentRootConfirm` because this awaits a network round trip that a
+   * revert, an abandon, or a new game can outlive.
+   */
+  const confirmDrillRoot = useCallback(
+    async (request: DrillRootConfirmRequest): Promise<boolean> => {
+      // A fresh object per attempt, so its REFERENCE is this attempt's ownership
+      // token for the barrier. Retry and the remount resume both re-submit the
+      // same `request`, so an attempt must never treat the request's own identity
+      // as proof of ownership.
+      const claim: DrillRootConfirmRequest = { ...request };
+      // Synchronous, before any await: the barrier must be engaged by the time
+      // this function yields, or a drop between the serve and the first await
+      // would slip through applyPlayerMove's guard.
+      setRootConfirmBarrier(claim);
+      // Clearing here is what makes every attempt look the same, retries
+      // included. Left set, a retry would keep the Retry button mounted for the
+      // whole second request and invite a concurrent confirmation on top of the
+      // in-flight one. In flight ⇒ no recovery ⇒ Abandon only.
+      setDrillRecovery((current) =>
+        current?.kind === "root-confirm" ? null : current,
+      );
+      setEngineMessage("Confirming the opening root…");
+
+      // Attempt ownership, checked before ANY write on a late response. A
+      // confirmation can outlive an abandon, and the drill that replaces it can
+      // engage a barrier of its own; without this check the older attempt would
+      // settle stale and clear the NEWER attempt's barrier, re-enabling the board
+      // while that confirmation is still unresolved. An attempt that no longer
+      // owns the barrier is discarded whole — including a successful answer,
+      // which the owning attempt will obtain for itself.
+      const ownsBarrier = () =>
+        useGameStore.getState().drillRootConfirm === claim;
+
+      // Identity, not shape. Session id + history length + "not reverting" all
+      // still match after abandoning the drill, and after replaying a DIFFERENT
+      // branch back to the same ply — a late response would then stamp
+      // root_reached onto an abandoned or non-root position.
+      const isStillCurrentRootConfirm = () => {
+        const current = useGameStore.getState();
+        return (
+          current.sessionId === request.sessionId &&
+          current.isGameActive &&
+          current.drillOpeningKey !== null &&
+          current.drillState === "active" &&
+          current.moveHistory.length === request.ply &&
+          current.moveHistory[request.ply - 1]?.uci === request.uci &&
+          chess.fen() === request.fen &&
+          !isRevertPendingRef.current
+        );
+      };
+
+      try {
+        const route = await checkDrillRoute(
+          request.sessionId,
+          {
+            current_fen: request.fen,
+            current_ply: request.ply,
+            ...(request.decisionId ? { decision_id: request.decisionId } : {}),
+          },
+          { signal: AbortSignal.timeout(ROUTE_CHECK_TIMEOUT_MS) },
+        );
+        if (!ownsBarrier()) {
+          return false;
+        }
+        if (!isStillCurrentRootConfirm()) {
+          setRootConfirmBarrier(null);
+          return false;
+        }
+        if (route.status === "root_reached") {
+          setRootConfirmBarrier(null);
+          useGameStore.getState().setDrillState("root_reached");
+          setDrillRecovery(null);
+          setEngineMessage("Opening root reached. Drill is live.");
+          return true;
+        }
+        // Anything else is a confirmation the backend would not make. Keep the
+        // barrier engaged and offer recovery; the applied board is untouched.
+        setDrillRecovery({ kind: "root-confirm", request });
+        setEngineMessage(
+          "Could not confirm the opening root. Try again or abandon the drill.",
+        );
+        return false;
+      } catch (error) {
+        if (!ownsBarrier()) {
+          return false;
+        }
+        if (!isStillCurrentRootConfirm()) {
+          setRootConfirmBarrier(null);
+          return false;
+        }
+        setDrillRecovery({ kind: "root-confirm", request });
+        setEngineMessage(
+          error instanceof Error && error.name === "TimeoutError"
+            ? "Confirming the opening root timed out. Try again or abandon the drill."
+            : "Could not confirm the opening root. Try again or abandon the drill.",
+        );
+        return false;
+      }
+    },
+    [chess, setEngineMessage, setRootConfirmBarrier],
+  );
+
+  const isDrillRootConfirmPending = useCallback(
+    () => useGameStore.getState().drillRootConfirm !== null,
+    [],
+  );
+
+  // The barrier's invariant: it may only be engaged while the exact position it is
+  // about is still on the board. This clears it on revert, new game, reset and
+  // resign without any of those paths having to know it exists. A late response
+  // that arrives afterwards is separately rejected by isStillCurrentRootConfirm.
+  useEffect(() => {
+    if (rootConfirm && (!isGameActive || moveHistory.length !== rootConfirm.ply)) {
+      setRootConfirmBarrier(null);
+      setDrillRecovery((current) =>
+        current?.kind === "root-confirm" ? null : current,
+      );
+    }
+  }, [isGameActive, moveHistory.length, rootConfirm, setRootConfirmBarrier]);
+
+  // The same invariant for the player-arrival confirmation: a pending route move is
+  // only pending while that exact move is still live history. A revert-and-replace
+  // must drop it, or the Retry it keeps mounted would submit a proof for a move no
+  // longer on the board — which the backend can prove and stamp regardless.
+  useEffect(() => {
+    if (
+      pendingRouteMove &&
+      (!isGameActive ||
+        moveHistory[pendingRouteMove.moveIndex]?.uci !== pendingRouteMove.moveUci)
+    ) {
+      setPendingRouteMove(null);
+      setDrillRecovery((current) =>
+        current?.kind === "player-route" ? null : current,
+      );
+    }
+  }, [isGameActive, moveHistory, pendingRouteMove, setPendingRouteMove]);
+
   const { applyPlayerMove, handleDrop, applyEngineMove, applyGhostMove } =
     useChessGameController({
       chess,
@@ -670,6 +833,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       handleGameEnd: handleGameEndStable,
       clearMoveHighlights,
       clearBlunderBoardOverride,
+      confirmDrillRoot,
+      isDrillRootConfirmPending,
     });
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
@@ -680,7 +845,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         store.isGameActive &&
         store.sessionId === requestSessionId &&
         store.drillState !== "failed" &&
-        !isRevertPendingRef.current
+        !isRevertPendingRef.current &&
+        // An unconfirmed root is not a root: no opponent move may be applied on
+        // top of a position the drill has not yet been proven to have reached.
+        store.drillRootConfirm === null
       );
     },
     onApplyBackendMove: async (...args) => {
@@ -730,23 +898,84 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return true;
       }
       const requestSessionId = store.sessionId;
+      // Identity, not shape — and the ply this request CLAIMS (`current_ply` below
+      // is `uciHistory.length`) must still be the live ply. The played move's uci
+      // at its own index is not enough on its own: it still matches after the game
+      // moved on past it, which is exactly what a concurrent attempt does when it
+      // completes first and appends the opponent's reply.
       const isStillCurrentRouteCheck = () => {
         const current = useGameStore.getState();
+        const live = current.moveHistory[result.moveIndex];
         return (
           current.sessionId === requestSessionId &&
-          current.moveHistory[result.moveIndex]?.uci === result.moveUci &&
+          current.moveHistory.length === result.uciHistory.length &&
+          live?.uci === result.moveUci &&
+          live?.fen === result.fenAfter &&
           current.drillOpeningKey !== null &&
           current.drillState === "active" &&
           !isRevertPendingRef.current
         );
       };
 
+      // Checked BEFORE dispatch, not only after. A retry re-submits a move the
+      // player may since have reverted and replaced, and AT the root the backend
+      // would replay `previous_fen` + `played_uci`, prove that arrival, and stamp
+      // state and boundary for a move no longer on the board — something no
+      // post-await guard can undo. The invariant effect on `drillPendingRouteMove`
+      // disarms every retry path that can reach here today, so this is the last
+      // line rather than the first: it survives that effect's dependency list or
+      // declaration order being changed by someone who does not know about this.
+      if (!isStillCurrentRouteCheck()) {
+        return false;
+      }
+      // Durable record of the pending confirmation, cleared on every settled
+      // outcome below. It survives a remount so the interrupted continuation can be
+      // resumed instead of stranding the drill with the opponent to move.
+      store.setDrillPendingRouteMove(result);
+
+      // Attempt ownership, checked before ANY write on a late response — the same
+      // whole-response rule the root confirmation uses. `result`'s REFERENCE is this
+      // attempt's token: the remount resume and Retry both spread the durable record
+      // into a fresh object, so a second attempt for the same move owns a different
+      // token. Without this, an attempt whose component unmounted mid-flight still
+      // passes every identity field and goes on to request and apply an opponent move
+      // through its own dead Chess instance — while the resumed attempt does the same,
+      // appending twice to the one shared history. An attempt that no longer owns the
+      // record is discarded whole, successful answers included; the owning attempt
+      // obtains its own.
+      const ownsPending = () =>
+        useGameStore.getState().drillPendingRouteMove === result;
+      // Unconditional: every call site below is gated on ownsPending() with no await
+      // in between, so one ownership rule governs the whole response.
+      const releasePending = () =>
+        useGameStore.getState().setDrillPendingRouteMove(null);
+
       try {
-        const route = await checkDrillRoute(requestSessionId, {
-          current_fen: result.fenAfter,
-          previous_fen: result.fenBefore,
-          played_uci: result.moveUci,
-        });
+        // current_ply is ordinary metadata away from the root; AT the root it is a
+        // boundary claim, and this call becomes the confirmation for drills where
+        // the PLAYER moves into the root. decision_id is deliberately absent —
+        // the backend rejects it on a player arrival and proves the ply from
+        // previous_fen + played_uci instead.
+        //
+        // Bounded for the same reason the opponent-arrival confirmation is: the
+        // drill cannot advance until this settles, and the Retry that re-enters
+        // here drops the recovery banner for the duration. Unbounded, a request
+        // that never settles would strand the committed move with no message and
+        // no way out.
+        const route = await checkDrillRoute(
+          requestSessionId,
+          {
+            current_fen: result.fenAfter,
+            previous_fen: result.fenBefore,
+            played_uci: result.moveUci,
+            current_ply: result.uciHistory.length,
+          },
+          { signal: AbortSignal.timeout(ROUTE_CHECK_TIMEOUT_MS) },
+        );
+        if (!ownsPending()) {
+          return false;
+        }
+        releasePending();
         if (!isStillCurrentRouteCheck()) {
           return false;
         }
@@ -789,12 +1018,27 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         setDrillRecovery(null);
         return true;
       } catch (error) {
-        if (!isStillCurrentRouteCheck()) {
+        if (!ownsPending()) {
           return false;
         }
+        if (!isStillCurrentRouteCheck()) {
+          releasePending();
+          return false;
+        }
+        // This call can BE a boundary stamp (a player arrival at the root), so a
+        // failure must be retryable as itself. Without a recovery the Retry button
+        // falls through to applyOpponentMove and the drill advances with the
+        // boundary never stamped — the exact outcome the two-phase transition
+        // exists to prevent.
+        // The pending record deliberately survives — it IS the retryable work.
+        setDrillRecovery({ kind: "player-route" });
         const message =
-          error instanceof Error ? error.message : "Failed to check drill route.";
-        setEngineMessage(message);
+          error instanceof Error && error.name === "TimeoutError"
+            ? "Checking the opening route timed out."
+            : error instanceof Error
+              ? error.message
+              : "Failed to check drill route.";
+        setEngineMessage(`${message} Try again or abandon the drill.`);
         return false;
       }
     },
@@ -1402,6 +1646,34 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     ],
   );
 
+  // Remount resume. Both pending confirmations survive navigation, but the requests
+  // that issued them do not — their promises belonged to the unmounted component,
+  // and so did the recovery message and the Retry button. Re-issue once per mount so
+  // a returning player finds the drill moving again instead of a board frozen behind
+  // a barrier, or a pre-root drill stranded with the opponent to move and nothing
+  // left to drive it. Declared after both invariant effects above, whose synchronous
+  // store writes have already dropped records the current board no longer matches.
+  //
+  // Only the pre-root route-check is resumed here: post-root, the pending work is a
+  // local analysis grade with its own recovery, and re-running it on every mount
+  // would raise a banner on an ordinary route round trip.
+  const didResumeDrillWorkRef = useRef(false);
+  useEffect(() => {
+    if (didResumeDrillWorkRef.current) return;
+    didResumeDrillWorkRef.current = true;
+    const store = useGameStore.getState();
+    if (store.drillRootConfirm) {
+      void confirmDrillRoot(store.drillRootConfirm);
+      return;
+    }
+    if (store.drillPendingRouteMove && store.drillState === "active") {
+      void continueAfterPlayerMove({
+        applied: true,
+        ...store.drillPendingRouteMove,
+      });
+    }
+  }, [confirmDrillRoot, continueAfterPlayerMove]);
+
   const applyPlayerMoveAndAdvance = useCallback(
     (sourceSquare: string, targetSquare: string, promotion?: string): boolean => {
       const result = applyPlayerMove(sourceSquare, targetSquare, promotion);
@@ -1951,11 +2223,20 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const canRetryDrillSteering =
     Boolean(engineMessage) &&
     drillOpeningKey !== null &&
-    (drillState === "active" || (drillState === "root_reached" && drillRecovery !== null)) &&
     isGameActive &&
-    !isPlayersTurn &&
     !isRevertPending &&
-    isViewingLive;
+    isViewingLive &&
+    (drillRecovery?.kind === "root-confirm"
+      ? // A failed root confirmation. The opponent already moved into the root, so
+        // it IS the player's turn — the !isPlayersTurn gate below cannot apply.
+        drillState === "active"
+      : // Everything else must never fall through to applyOpponentMove while a
+        // confirmation is outstanding: that would advance the drill past a root it
+        // has not been proven to have reached.
+        rootConfirm === null &&
+        !isPlayersTurn &&
+        (drillState === "active" ||
+          (drillState === "root_reached" && drillRecovery !== null)));
   const handleRetryDrillSteering = useCallback(() => {
     if (!canRetryDrillSteering) return;
     setEngineMessage(null);
@@ -1964,6 +2245,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       coordinator.restartAnalysisWorker();
       coordinator.analyzeMove(result.fenBefore, result.moveUci, playerColor, result.moveIndex);
       void continueAfterPlayerMove(result);
+      return;
+    }
+    if (drillRecovery?.kind === "root-confirm") {
+      void confirmDrillRoot(drillRecovery.request);
+      return;
+    }
+    if (drillRecovery?.kind === "player-route") {
+      // Re-entry is safe and complete: the move is already applied to `chess` and
+      // drillState is still "active", so continueAfterPlayerMove re-runs the
+      // route-check and, on success, carries on to handleGameEnd or the opponent
+      // request exactly as the first pass would have. The move comes from the
+      // durable record, and checkPostPlayerDrillRoute re-validates its identity
+      // before dispatching.
+      const pending = useGameStore.getState().drillPendingRouteMove;
+      if (pending) {
+        void continueAfterPlayerMove({ applied: true, ...pending });
+      }
       return;
     }
     if (drillRecovery?.kind === "opponent") {
@@ -1978,6 +2276,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     applyOpponentMove,
     canRetryDrillSteering,
     chess,
+    confirmDrillRoot,
     continueAfterPlayerMove,
     coordinator,
     drillRecovery,
@@ -1990,7 +2289,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isPlayersTurn &&
     !isRevertPending &&
     isViewingLive &&
-    !isBlunderBoardOverrideActive;
+    !isBlunderBoardOverrideActive &&
+    rootConfirm === null;
   // Also let the piece lift while reviewing a past move — not to allow a move
   // (handleDropPiece rejects it) but so a drag ATTEMPT fires onPieceDrop and can
   // trigger the return-to-live shake (g-1y68 A3 drag path). Includes the

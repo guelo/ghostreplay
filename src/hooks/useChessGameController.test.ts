@@ -37,6 +37,10 @@ type SetupOptions = {
   sessionId?: string | null;
   isGameActive?: boolean;
   decisionOwner?: DecisionOwnerSpy;
+  /** What the injected root confirmation resolves to. */
+  confirmDrillRootResult?: boolean;
+  /** Whether the barrier reads as engaged (blocks player moves). */
+  isDrillRootConfirmPending?: boolean;
 };
 
 const createSetup = ({
@@ -50,6 +54,8 @@ const createSetup = ({
   sessionId = "session-1",
   isGameActive = true,
   decisionOwner = createDecisionOwnerSpy(),
+  confirmDrillRootResult = true,
+  isDrillRootConfirmPending: rootConfirmPending = false,
 }: SetupOptions = {}) => {
   // Set up store state
   useGameStore.setState({
@@ -73,6 +79,8 @@ const createSetup = ({
   const evaluatePosition = vi.fn().mockResolvedValue({ move: "(none)", raw: "" });
   const handleGameEnd = vi.fn().mockResolvedValue(undefined);
   const clearMoveHighlights = vi.fn();
+  const confirmDrillRoot = vi.fn().mockResolvedValue(confirmDrillRootResult);
+  const isDrillRootConfirmPending = vi.fn(() => rootConfirmPending);
 
   const { result } = renderHook(() =>
     useChessGameController({
@@ -94,12 +102,16 @@ const createSetup = ({
       evaluatePosition,
       handleGameEnd,
       clearMoveHighlights,
+      confirmDrillRoot,
+      isDrillRootConfirmPending,
     })
   );
 
   return {
     result,
     chess,
+    confirmDrillRoot,
+    isDrillRootConfirmPending,
     decisionOwner,
     markSkipped,
     setEngineMessage,
@@ -629,5 +641,177 @@ describe("useChessGameController", () => {
 
     expect(playMoveSound).toHaveBeenCalledTimes(1);
     expect(playMoveSound).toHaveBeenCalledWith(false);
+  });
+
+  describe("drill root confirmation barrier", () => {
+    /** A served route move that reaches the root, as applyGhostMove receives it. */
+    const rootReachingRoute = {
+      status: "root_pending" as const,
+      target_fen: "target-fen",
+      resulting_fen: "target-fen",
+      plies_to_target: 0,
+      reaches_root: true,
+    };
+
+    it("confirms the applied position instead of transitioning on the serve", async () => {
+      const { result, confirmDrillRoot } = createSetup({ playerColor: "black" });
+
+      await act(async () => {
+        await result.current.applyGhostMove(
+          "e4",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+        );
+      });
+
+      // sessionId and uci are what the staleness guard is built on, so both must
+      // be carried explicitly rather than re-derived later.
+      expect(confirmDrillRoot).toHaveBeenCalledWith({
+        decisionId: "decision-1",
+        sessionId: "session-1",
+        fen: expect.stringContaining("rnbqkbnr/pppppppp"),
+        ply: 1,
+        uci: "e2e4",
+      });
+      // The serve transitions nothing — only the confirmation may.
+      expect(useGameStore.getState().drillState).toBe(
+        initialStoreState.drillState,
+      );
+    });
+
+    it("leaves the drill untransitioned when confirmation fails", async () => {
+      useGameStore.setState({ drillState: "active" });
+      const { result } = createSetup({
+        playerColor: "black",
+        confirmDrillRootResult: false,
+      });
+      useGameStore.setState({ drillState: "active" });
+
+      await act(async () => {
+        await result.current.applyGhostMove(
+          "e4",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+        );
+      });
+
+      expect(useGameStore.getState().drillState).toBe("active");
+    });
+
+    it("ends a game-ending root move only after a successful confirmation", async () => {
+      // Fool's mate: the root-reaching move is also checkmate.
+      const mateSetup = () => {
+        const chess = new Chess();
+        chess.move("f3");
+        chess.move("e5");
+        chess.move("g4");
+        return chess;
+      };
+
+      const confirmed = createSetup({
+        chess: mateSetup(),
+        playerColor: "white",
+        moveHistory: [],
+      });
+      await act(async () => {
+        await confirmed.result.current.applyGhostMove(
+          "Qh4#",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+        );
+      });
+      expect(confirmed.handleGameEnd).toHaveBeenCalledTimes(1);
+
+      const refused = createSetup({
+        chess: mateSetup(),
+        playerColor: "white",
+        moveHistory: [],
+        confirmDrillRootResult: false,
+      });
+      await act(async () => {
+        await refused.result.current.applyGhostMove(
+          "Qh4#",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+        );
+      });
+      expect(refused.handleGameEnd).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the session was torn down mid-flight", async () => {
+      // sessionId null means a new game or reset happened while the move was in
+      // flight: there is nothing to confirm, nothing to transition, and no game
+      // to end — even for a move that ends the game.
+      const chess = new Chess();
+      chess.move("f3");
+      chess.move("e5");
+      chess.move("g4");
+      const { result, confirmDrillRoot, handleGameEnd } = createSetup({
+        chess,
+        playerColor: "white",
+        sessionId: null,
+      });
+
+      await act(async () => {
+        await result.current.applyGhostMove(
+          "Qh4#",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+        );
+      });
+
+      expect(confirmDrillRoot).not.toHaveBeenCalled();
+      expect(handleGameEnd).not.toHaveBeenCalled();
+      expect(useGameStore.getState().drillState).toBe(
+        initialStoreState.drillState,
+      );
+    });
+
+    it("rejects player moves while a confirmation is pending", async () => {
+      const { result } = createSetup({ isDrillRootConfirmPending: true });
+
+      const applied = result.current.applyPlayerMove("e2", "e4");
+
+      expect(applied.applied).toBe(false);
+      expect(useGameStore.getState().moveHistory).toHaveLength(0);
+    });
+
+    it("does not confirm an on-route move that stops short of the root", async () => {
+      const { result, confirmDrillRoot } = createSetup({ playerColor: "black" });
+
+      await act(async () => {
+        await result.current.applyGhostMove(
+          "e4",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          { ...rootReachingRoute, status: "on_route", reaches_root: false },
+          "decision-1",
+        );
+      });
+
+      expect(confirmDrillRoot).not.toHaveBeenCalled();
+    });
   });
 });

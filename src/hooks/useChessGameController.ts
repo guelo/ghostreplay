@@ -10,6 +10,10 @@ import {
 } from "../components/chess-game/domain/reviewState";
 import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
+import type {
+  AppliedPlayerMove,
+  DrillRootConfirmRequest,
+} from "../stores/useGameStore";
 import { playMoveSound } from "../utils/moveSound";
 import type { DecisionOwner } from "../services/DecisionOwner";
 
@@ -35,16 +39,9 @@ export type PendingSrsReview = {
 
 export type PlayerMoveApplyResult =
   | { applied: false; requiresPromotion?: true }
-  | {
-    applied: true;
-    fenAfter: string;
-    fenBefore: string;
-    uciHistory: string[];
-    gameOver: boolean;
-    moveIndex: number;
-    moveSan: string;
-    moveUci: string;
-  };
+  // Composed from the store's AppliedPlayerMove so the durable pending-route-move
+  // record and this result can never drift apart.
+  | ({ applied: true } & AppliedPlayerMove);
 
 type AnalyzeMoveFn = (
   fen: string,
@@ -79,6 +76,12 @@ type UseChessGameControllerOptions = {
   handleGameEnd: () => Promise<void>;
   clearMoveHighlights: () => void;
   clearBlunderBoardOverride?: () => void;
+  /** Confirms an applied root-reaching move with the backend. Resolves true only
+   *  when the drill actually transitioned to root_reached. Must engage its own
+   *  barrier SYNCHRONOUSLY, before awaiting. */
+  confirmDrillRoot: (request: DrillRootConfirmRequest) => Promise<boolean>;
+  /** True while a root confirmation is in flight or has failed without recovery. */
+  isDrillRootConfirmPending: () => boolean;
 };
 
 function isPromotionNeeded(chess: Chess, from: string, to: string): boolean {
@@ -112,6 +115,8 @@ export const useChessGameController = ({
   handleGameEnd,
   clearMoveHighlights,
   clearBlunderBoardOverride,
+  confirmDrillRoot,
+  isDrillRootConfirmPending,
 }: UseChessGameControllerOptions) => {
   const clearReviewTarget = useCallback(() => {
     setBlunderReviewId(null);
@@ -210,6 +215,13 @@ export const useChessGameController = ({
 
   const applyPlayerMove = useCallback(
     (sourceSquare: string, targetSquare: string, promotion?: string): PlayerMoveApplyResult => {
+      // Gameplay barrier. Until the applied root-reaching move is confirmed the
+      // drill is not root-reached, so no further move may be played onto it. One
+      // guard covers drag and click alike — both funnel through here.
+      if (isDrillRootConfirmPending()) {
+        return { applied: false };
+      }
+
       const fenBeforeMove = chess.fen();
       const legalMoveCount = chess.moves().length;
 
@@ -301,6 +313,7 @@ export const useChessGameController = ({
       clearReviewTarget,
       commitAppliedMove,
       decisionOwner,
+      isDrillRootConfirmPending,
       resolvedReview,
       setBlunderAlert,
       setResolvedReview,
@@ -408,6 +421,7 @@ export const useChessGameController = ({
       targetBlunderSrs: TargetBlunderSrs | null,
       targetFen: string | null,
       drillRoute?: DrillRouteMetadata | null,
+      decisionId?: string | null,
     ) => {
       try {
         const fenBeforeMove = chess.fen();
@@ -421,7 +435,7 @@ export const useChessGameController = ({
         const playerColor = useGameStore.getState().playerColor;
         const opponentColor =
           playerColor === "white" ? "black" : "white";
-        commitAppliedMove(
+        const committed = commitAppliedMove(
           appliedMove,
           fenBeforeMove,
           legalMoveCount,
@@ -443,9 +457,31 @@ export const useChessGameController = ({
           setShowGhostInfo(false);
         }
 
-        if (drillRoute?.status === "root_reached") {
-          useGameStore.getState().setDrillState("root_reached");
-          setEngineMessage("Opening root reached. Drill is live.");
+        if (drillRoute?.reaches_root) {
+          // A barrier, not a transition. confirmDrillRoot engages the block
+          // SYNCHRONOUSLY before it awaits, and only IT sets drillState —
+          // on a confirmation the backend proved, never on the serve.
+          //
+          // sessionId is read from the store (the same getState() idiom this file
+          // already uses for SRS reviews) and FAILS CLOSED: null means the session
+          // was torn down — new game or reset — while the move was in flight, so
+          // there is nothing to confirm, nothing to transition, and no game to end.
+          const sessionId = useGameStore.getState().sessionId;
+          if (sessionId) {
+            const confirmed = await confirmDrillRoot({
+              decisionId: decisionId ?? null,
+              sessionId,
+              fen: chess.fen(),
+              ply: committed.uciHistory.length,
+              uci: committed.uciMove,
+            });
+            // Ordering is deliberate: a root-reaching move that also ends the game
+            // ends it only AFTER the barrier clears. Previously such a move never
+            // reached handleGameEnd at all.
+            if (confirmed && chess.isGameOver()) {
+              await handleGameEnd();
+            }
+          }
         } else if (chess.isGameOver()) {
           await handleGameEnd();
         }
@@ -461,6 +497,7 @@ export const useChessGameController = ({
       chess,
       clearReviewTarget,
       commitAppliedMove,
+      confirmDrillRoot,
       handleGameEnd,
       setBlunderReviewId,
       setBlunderReviewSrs,

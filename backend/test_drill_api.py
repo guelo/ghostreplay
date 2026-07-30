@@ -213,11 +213,16 @@ def test_route_check_fails_only_when_no_path_remains(client, auth_headers, db_se
     assert session.drill_state == "failed"
 
 
-def test_next_opponent_move_steers_active_drill_and_persists_root_reached(
+def test_next_opponent_move_steers_active_drill_without_transitioning(
     client,
     auth_headers,
     db_session,
 ):
+    """Serving the root-reaching route move is NOT a transition.
+
+    The response says ``root_pending``; drill state only advances once the client
+    confirms the position it actually applied.
+    """
     graph = _steering_graph()
     with (
         patch("app.api.drills.get_opening_roots", return_value=_roots_for(ROOT_FEN)),
@@ -247,9 +252,11 @@ def test_next_opponent_move_steers_active_drill_and_persists_root_reached(
     assert data["decision_source"] == "ghost_path"
     assert data["move"] == {"uci": "e2e4", "san": "e4"}
     assert data["target_blunder_id"] is None
-    assert data["drill_route"]["status"] == "root_reached"
+    assert data["drill_route"]["status"] == "root_pending"
+    assert data["drill_route"]["reaches_root"] is True
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_state == "root_reached"
+    assert session.drill_state == "active"
+    assert session.drill_root_reached_ply is None
 
 
 def test_continue_drill_sets_boundary_and_resegments(client, auth_headers, db_session):
@@ -1492,8 +1499,10 @@ def test_next_opponent_move_steers_through_a_densified_edge(
     body = resp.json()
     assert body["mode"] == "ghost"
     assert body["move"]["uci"] == "d2d4"
-    # The transposing move IS the move that reaches the root.
-    assert body["drill_route"]["status"] == "root_reached"
+    # The transposing move IS the move that reaches the root — served as pending,
+    # since serving it is not a transition.
+    assert body["drill_route"]["status"] == "root_pending"
+    assert body["drill_route"]["reaches_root"] is True
 
 
 def test_route_cache_is_keyed_by_overlay_fingerprint(client, auth_headers, tmp_path):
@@ -1894,7 +1903,7 @@ def test_next_opponent_move_steers_offbook_drill_by_line(client, auth_headers, d
         assert r1.status_code == 200
         assert r1.json()["move"] == {"uci": "e2e4", "san": "e4"}
         assert r1.json()["drill_route"]["status"] == "on_route"
-        # White to move again after 1.e4 e5 → Nf3 reaches target → root_reached.
+        # White to move again after 1.e4 e5 → Nf3 reaches target → root_pending.
         r2 = client.post(
             "/api/game/next-opponent-move",
             json={
@@ -1907,9 +1916,9 @@ def test_next_opponent_move_steers_offbook_drill_by_line(client, auth_headers, d
 
     assert r2.status_code == 200
     assert r2.json()["move"] == {"uci": "g1f3", "san": "Nf3"}
-    assert r2.json()["drill_route"]["status"] == "root_reached"
+    assert r2.json()["drill_route"]["status"] == "root_pending"
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_state == "root_reached"
+    assert session.drill_state == "active"
 
 
 def _adhoc_start(client, auth_headers, *, opening_key, line=None):

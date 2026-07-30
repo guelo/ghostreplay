@@ -101,6 +101,13 @@ export const STARTING_FEN =
 
 export const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
 
+/** Bound on every gameplay-blocking route-check POST — the opponent-arrival root
+ *  confirmation and the post-player-move check that IS the confirmation when the
+ *  player is the one who moves into the root. Both hold the drill: an unbounded
+ *  wait would block the board indefinitely with no recovery offered. On expiry the
+ *  request rejects and lands in the same recovery path as any other failure. */
+export const ROUTE_CHECK_TIMEOUT_MS = 6000;
+
 export const BLUNDER_AUDIO_CLIPS = Array.from(
   { length: 10 },
   (_, index) => `/audio/blunder${index + 1}.m4a`,

@@ -89,10 +89,11 @@ class DrillRouteCheckRequest(BaseModel):
     current_fen: str = Field(..., min_length=1)
     previous_fen: str | None = Field(None, min_length=1)
     played_uci: str | None = Field(None, min_length=4, max_length=5)
-    # Plies played to reach current_fen. OPTIONAL on purpose: this endpoint predates
-    # confirmation and the live client posts every route-check without it, so requiring
-    # it would 422 each drill move until g-root-confirm-cutover ships the sender.
+    # Plies played to reach current_fen. The live client now sends it on every check,
+    # but it stays OPTIONAL through the deploy window: a tab loaded before the deploy
+    # posts without it, and requiring it would 422 every drill move for that tab.
     # Absent = no boundary claim, which is exactly the legacy behaviour.
+    # Tighten to required once the window closes (g-route-check-ply-required).
     current_ply: int | None = Field(None, ge=0)
     # The opponent_decisions row whose served move the client just applied. Required to
     # confirm a root the OPPONENT moved into, rejected on one the player moved into —
@@ -212,9 +213,12 @@ def _refreshed_route_guard(
 
     ``boundary_pending`` narrows the root-reached case by exactly one situation: a
     VALIDATED boundary claim for a row that carries no boundary yet must proceed to
-    stamp it. The serve path still transitions to ``root_reached`` before the client
-    applies the move (g-root-confirm-cutover removes that), so the confirmation must be
-    able to stamp a boundary onto a row whose state a serve already advanced.
+    stamp it. Serving a route move is no longer a transition and the observed-root
+    fallback in /api/game/next-opponent-move stamps state and boundary together, so
+    the remaining producers of state-without-boundary are soft-declined
+    confirmations (a well-formed but unprovable claim transitions without stamping;
+    a later provable claim may still stamp) and rows written before this endpoint
+    existed.
     """
     if session.status != "active":
         raise HTTPException(status_code=400, detail="Drill session is not active")
@@ -753,8 +757,9 @@ def check_drill_route(
         # Entry snapshot: this response writes nothing and may reflect state that
         # changes concurrently. Do NOT lock — snapshot semantics are intentional. The
         # one case that must NOT stop here is a PROVEN boundary for a row that has
-        # none: the serve path still transitions state before the client applies the
-        # move, so confirmation has to be able to stamp a boundary onto an
+        # none: state can reach root_reached without a boundary (the observed-root
+        # fallback stamps both, but soft-declined confirmations and pre-boundary rows
+        # do not), so confirmation has to be able to stamp a boundary onto an
         # already-root_reached row. Reading the boundary unlocked is safe because it is
         # write-once.
         return _root_reached_response(
@@ -782,10 +787,10 @@ def check_drill_route(
         if confirmed_ply is not None and root_ply is None:
             # Write-once, and in the SAME transaction as any state transition it
             # accompanies. The invariant is ONE-WAY: a non-NULL boundary always implies
-            # root_reached, but root_reached does NOT imply a boundary — the serve path,
-            # legacy sessions and soft-declined confirmations all leave it NULL
-            # permanently. A concurrent confirmation that won the lock first has already
-            # stamped, so this one converges on ITS ply instead of restamping.
+            # root_reached, but root_reached does NOT imply a boundary — legacy sessions
+            # and soft-declined confirmations leave it NULL permanently. A concurrent
+            # confirmation that won the lock first has already stamped, so this one
+            # converges on ITS ply instead of restamping.
             session.drill_root_reached_ply = confirmed_ply
             root_ply = confirmed_ply
         db.commit()

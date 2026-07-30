@@ -1980,7 +1980,7 @@ The deterministic fill remains deliberately **final-ply-only**. The bounded wait
 
 **Parent-row writer locking and evidence sink.** Writers that mutate `game_sessions` or `blunders` serialize same-row changes with PostgreSQL `FOR NO KEY UPDATE` (centralized by `app.row_locks.for_no_key_update`, with `populate_existing()` for identity-map safety). This still conflicts with another writer lock on the same row while remaining compatible with foreign-key `KEY SHARE` locks taken by child inserts. For moves, game end, drill transitions, first-blunder recording, and SRS reviews, all entity writes are explicitly flushed before `opening_score_cursors.evidence_seq` is advanced; the cursor upsert is the transaction's final blocking database statement before commit. Manual target adds do not lock their source session and therefore bump every newly inserted target unconditionally, whether the source is active or already ended; duplicate targets do not bump.
 
-**Branch-scoped stale-write locks (g-branch-locks).** The drill route-check and next-opponent endpoints also take the session's `FOR NO KEY UPDATE` lock, but only around the **branch that actually mutates**. Route-check re-reads the drill state under the lock: the `root_reached` and on-route branches are pure **snapshots** that write nothing (and take no lock work beyond the read), while the target-reached and off-route branches lock and write; a snapshot branch preserves a concurrently-recorded failure rather than clobbering it. The `root_reached` snapshot has exactly one exception (§17.4.1): a **validated root confirmation** for a session whose evidence boundary is still NULL locks and stamps it, since the serve path can advance the state before the client has confirmed the arrival. Confirmation claims are validated **before** the lock is taken — they read only immutable inputs — so a false claim fails fast without ever locking. Next-opponent returns **400** on a stale drill that has already `failed` under the lock, and **falls through** (no drill write) on one that has already `converted`. Critically, next-opponent **releases the session lock before the engine call** so a concurrent `/moves` upload can commit while the (potentially slow) engine computes the reply — the lock spans only the stale-write check, not the engine work.
+**Branch-scoped stale-write locks (g-branch-locks).** The drill route-check and next-opponent endpoints also take the session's `FOR NO KEY UPDATE` lock, but only around the **branch that actually mutates**. Route-check re-reads the drill state under the lock: the `root_reached` and on-route branches are pure **snapshots** that write nothing (and take no lock work beyond the read), while the target-reached and off-route branches lock and write; a snapshot branch preserves a concurrently-recorded failure rather than clobbering it. The `root_reached` snapshot has exactly one exception (§17.4.1): a **validated root confirmation** for a session whose evidence boundary is still NULL locks and stamps it, since a session can hold `root_reached` without a boundary — legacy rows and soft-declined confirmations both produce state without one (the observed-root fallback stamps both together). Confirmation claims are validated **before** the lock is taken — they read only immutable inputs — so a false claim fails fast without ever locking. Next-opponent returns **400** on a stale drill that has already `failed` under the lock, and **falls through** (no drill write) on one that has already `converted`. Critically, next-opponent **releases the session lock before the engine call** so a concurrent `/moves` upload can commit while the (potentially slow) engine computes the reply — the lock spans only the stale-write check, not the engine work.
 
 **NKU writer inventory (source-scanned).** The complete set of sanctioned `game_sessions` / `blunders` writer-lock sites — game end (×2), post-end `/moves`, the five drill writers, route-check (two branches), next-opponent, first/auto and manual blunder recording, and SRS review — is pinned by `test_writer_locks.py`, which also **source-scans** the lock modules and fails if any `.with_for_update()` there is not `FOR NO KEY UPDATE` (i.e. `key_share=True`, non-`read`). This keeps the inventory honest: a new non-NKU lock on these tables breaks the guard rather than shipping a silent `FOR UPDATE`/`FOR KEY SHARE` deadlock regression. The `analysis_cache` / `position_analysis` repos deliberately take a different (bare `FOR UPDATE`) lock on their own tables and are out of this inventory's scope.
 
@@ -2278,7 +2278,7 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
 The row is an **envelope**, not the response: `decision_id` and `served_at` are envelope-level, `response_payload` is the serialized `NextOpponentMoveResponse`, and `target_blunder_id` / `resulting_fen` / `reaches_drill_root` are extracted off that payload for indexing and validation. The payload is stored rather than reconstructed because UCI + SAN + resulting FEN cannot replay a response verbatim: `target_blunder_id IS NULL` cannot distinguish a pre-root route ghost move from an engine move, and `target_blunder_srs` snapshots counters that move between the original request and its retry.
 
 - **Grain.** Opaque `decision_id` PK with `UNIQUE (session_id, request_fingerprint)` as the replay key. The fingerprint covers the normalized request FEN **and** the full UCI history — Maia consumes the history, and two transpositions can share a FEN and a ply while being different inputs. `(session_id, ply_before)` is deliberately not the grain: a revert continues on the same session, so a new branch legitimately asks at the same ply from a different position, and replaying the old row could return a move that is illegal there.
-- **Replay, not recompute.** `getNextOpponentMove` sets `retries: 2`, so one decision can arrive as three requests. A duplicate fingerprint returns the stored payload — including the stored `decision_id` — which makes the endpoint idempotent at the source rather than deduplicating downstream. The lookup runs **before** the pre-root drill branch: that branch commits `drill_state='root_reached'` before returning the route move that would reach it, so without replay a lost first response would make the retry fall through and answer from a still-pre-root FEN with a different move.
+- **Replay, not recompute.** `getNextOpponentMove` sets `retries: 2`, so one decision can arrive as three requests. A duplicate fingerprint returns the stored payload — including the stored `decision_id` — which makes the endpoint idempotent at the source rather than deduplicating downstream. The lookup runs **before** the pre-root drill branch. Since the cutover that branch writes no drill state at all (§17.4.1), so replay is what keeps the *decision* stable: without it, a lost `root_pending` response would make the retry recompute from the same pre-root FEN and can answer with a **different** route move, leaving the client to confirm a position no decision row records.
 - **The unique constraint is the arbiter, not a lock.** The normal ghost/engine path holds no row lock (the pre-root branch rolls it back before falling through) and `find_ghost_move` is randomized, so two concurrent identical requests can both compute and disagree. The insert is `ON CONFLICT DO NOTHING RETURNING`; a loser **discards its own move** and re-reads the winner's payload. Serving its own would serve a move no row records, and root confirmation would then fail its `resulting_fen` check against the winner's row.
 - **`served_at` is the targeted timeline.** `blunder_opportunity_events` stamps `session.started_at` instead, which would assign a late-session decision the session's opening time and drop targeting of any blunder created during that same session. Indexed as `(target_blunder_id, served_at)`.
 - **Retention** is session-lifetime via `ON DELETE CASCADE`, with no independent TTL: the 30-day p_reach window is a query concern, not a storage boundary, and this log is the authoritative source for rebuilding targeted evidence.
@@ -3945,10 +3945,14 @@ The same `route_map_for_target` selector drives opponent steering (`/api/game/ne
 | Status | Meaning |
 |--------|---------|
 | `on_route` | Position is on the path to target; response includes route-preserving move suggestions |
-| `root_reached` | Target FEN reached; `drill_state` advances to `root_reached` |
+| `root_reached` | Target FEN reached; `drill_state` advances to `root_reached`. **Route-check's answer only** — it is the sole status that advances drill state |
 | `failed` | Position left the route (`off_route`) or an accuracy threshold was exceeded (`accuracy`) |
 
-#### 17.4.1 Root confirmation and the evidence boundary (g-root-confirm-api)
+`/api/game/next-opponent-move` has its own, narrower vocabulary for the route move it
+serves: `on_route`, or `root_pending` when applying that move would land on the root.
+`root_pending` transitions nothing — it tells the client it must confirm (§17.4.1).
+
+#### 17.4.1 Root confirmation and the evidence boundary (g-root-confirm-api, g-root-confirm-cutover)
 
 `drill_state='root_reached'` records that the drill *is* at its opening root.
 `game_sessions.drill_root_reached_ply` records **which ply that happened on** — the
@@ -3961,14 +3965,61 @@ The two are deliberately different claims, and the boundary is held to a much hi
 - It is **write-once** and stamped only by `POST /api/drills/:id/route-check`, inside the
   same locked transaction as any state transition it accompanies. The invariant is
   **one-way**: a non-NULL boundary implies `drill_state='root_reached'`, but
-  `root_reached` does **not** imply a boundary — the serve-time transition, legacy
-  sessions, and soft-declined confirmations all leave it NULL permanently.
+  `root_reached` does **not** imply a boundary — legacy sessions and soft-declined
+  confirmations leave it NULL permanently.
 - It is **never re-derived at runtime.** The opening graph is an input to FEN
   reconstruction, so recomputing a historical boundary could move or erase it after a
   graph change and make the same session account differently at two different times.
-- It is **never stamped by serving a route move.** `/api/game/next-opponent-move` returning
-  the move that *would* reach the root is not the client applying it; a response lost after
-  commit would otherwise make a root no client ever reached durable.
+
+**Serving a route move is not a transition at all.** `/api/game/next-opponent-move`
+answers a root-reaching route move with `drill_route.status = "root_pending"` and
+`reaches_root: true`, writes nothing but the decision row, and leaves `drill_state`
+`active`. Only a confirmation the server can prove advances state, and state and boundary
+are then written together. A boundary derived from a serve is a boundary a lost response
+can fabricate.
+
+The one exception is the **observed-root fallback**: when the *request* FEN already is the
+route target, the position is client-observed rather than merely served, so that branch
+transitions and stamps `len(request.moves)` write-once — a ply the branch's own
+history-replay check has already proven. Under the client barrier below current clients
+never take it; it remains the fallback for legacy tabs and lost confirmations.
+
+**The client treats confirmation as a gameplay barrier.** On `root_pending` the client
+applies the move, then calls route-check with `current_ply` and `decision_id` under a
+bounded timeout. Until that succeeds the drill is not root-reached and no further move,
+opponent request, review, or SRS write may proceed; a failure keeps the applied board and
+offers Retry/Abandon. Because the confirmation outlives a network round trip, a late
+response is accepted only if the exact position it was issued for is still on the board —
+session, drill, ply, the move's own UCI, and the live FEN — so an abandoned drill or a
+replayed different branch at the same ply can never be stamped. A late response must also
+still **own** the barrier: each attempt engages a fresh object whose reference is its
+ownership token, because an attempt that outlives an abandon would otherwise clear the
+barrier a *later* confirmation had engaged and re-open the board under it.
+
+The barrier is **game state, not view state.** It lives in the game store alongside the
+board it constrains, so it survives the remount that a route round trip causes — `ChessGame`
+rebuilds Chess from `liveFen` on mount, so a component-local barrier would come back cleared
+and leave the applied root position playable. On mount a still-pending barrier is re-issued
+once, which also restores the recovery message and Retry that unmounted with the component.
+It is not persisted: a reload drops the live board along with it.
+
+The post-player-move route-check gets the same treatment throughout — bounded timeout,
+durable pending record, position identity, and whole-response attempt ownership — since it
+*is* the confirmation whenever the player is the one who moves into the root. Two
+differences follow from it being a *proof* rather than a claim about a served decision.
+Its identity check runs **before dispatch** as well as after: the backend replays
+`previous_fen` + `played_uci`, so a stale proof is one the server can prove and stamp for a
+move the board has since replaced, which no post-response guard can undo. And its identity
+check binds the ply it claims, not just the move at its index — a move's own UCI still
+matches after play has moved past it, which is precisely what a *second* attempt for the
+same move produces when it finishes first. Both attempts otherwise pass every field and
+each goes on to request and apply an opponent reply through its own `Chess` instance,
+appending twice to the one shared history; ownership discards the loser whole.
+
+*Accepted rollout cost (no compatibility shim):* a tab loaded before the cutover ignores
+`root_pending`, plays on, and fails its drill `off_route` on the next player move. Only
+opponent-reached roots are affected; player-reached roots go through route-check either
+way. Pinned by `test_legacy_client_fails_its_drill_after_a_root_pending_serve`.
 - `NULL` means "no confirmed root" and is a real, expected residue — legacy sessions and
   drills abandoned mid-route. A NULL-boundary session contributes no reach evidence, while
   its targeted attempts survive independently in the `opponent_decisions` log (§8.3).
@@ -4028,7 +4079,9 @@ move, so the confirmation fails, not the drill.
 
 `current_ply` is optional and, away from the root, is ordinary metadata rather than a
 boundary claim: a route-check without it behaves exactly as it did before confirmation
-existed, which is what lets the backend ship ahead of the client that sends it.
+existed. The live client now sends it on every check; it stays optional only for the length
+of the deploy window, since requiring it would `422` every drill move for an already-open
+tab (g-route-check-ply-required).
 
 ### 17.5 Conversion
 

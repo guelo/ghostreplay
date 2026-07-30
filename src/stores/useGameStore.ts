@@ -27,6 +27,32 @@ export type SessionOpeningDelta = {
 
 export type LateOpeningDelta = SessionOpeningDelta & { nonce: number };
 
+/** Identity of the applied position a drill root confirmation is about. Every
+ *  field is load-bearing: the confirmation's staleness guard re-checks all of
+ *  them before acting on a late response. */
+export type DrillRootConfirmRequest = {
+  /** The decision the served move came from; null means the id was never returned. */
+  decisionId: string | null;
+  sessionId: string;
+  /** The live FEN after applying the move. */
+  fen: string;
+  /** Plies played to reach `fen` — the boundary this confirmation claims. */
+  ply: number;
+  /** The move that reached the root. */
+  uci: string;
+};
+
+/** An applied player move, as `applyPlayerMove` reports it. */
+export type AppliedPlayerMove = {
+  fenAfter: string;
+  fenBefore: string;
+  uciHistory: string[];
+  gameOver: boolean;
+  moveIndex: number;
+  moveSan: string;
+  moveUci: string;
+};
+
 /** Late-notification queue cap. Matches DELTA_POLL_MAX_CONCURRENT so the two
  *  layers can never hold different numbers of drills in flight. */
 export const LATE_OPENING_DELTA_LIMIT = 3;
@@ -97,6 +123,29 @@ export type GameState = {
   drillStrictness: DrillStrictness | null;
   drillStrictnessCp: number | null;
   drillTerminalReason: 'off_route' | 'accuracy' | 'natural_end' | null;
+  /** A root-reaching move applied to the board that the backend has not yet
+   *  confirmed. NON-NULL ⇒ the drill is NOT root_reached and no further gameplay
+   *  may proceed; it covers both the in-flight and the failed case (§17.4.1).
+   *
+   *  It lives in the store rather than in ChessGame because it must survive a
+   *  remount exactly as far as the board and the session do: ChessGame
+   *  reconstructs Chess from `liveFen` on mount, so a component-local barrier
+   *  would vanish on a route round trip and leave the applied root position
+   *  playable — the next player move would then run past an unconfirmed root and
+   *  fail the drill off-route. Not persisted: a reload drops the board with it.
+   *
+   *  The stored object's REFERENCE is also the owning attempt's token — only the
+   *  attempt whose object is still here may clear the barrier. */
+  drillRootConfirm: DrillRootConfirmRequest | null;
+  /** The applied player move whose pre-root route-check has not settled. That
+   *  check IS the boundary confirmation when the PLAYER is the one who moves into
+   *  the root, so the pending work is durable for the same reason
+   *  `drillRootConfirm` is: it must survive a remount (the drill is otherwise
+   *  stranded — opponent to move, nothing left to re-drive it) and it must be
+   *  invalidated the moment its move leaves live history, or a Retry would submit
+   *  a proof for a move no longer on the board. Single source of truth: the
+   *  `player-route` recovery carries no payload of its own. */
+  drillPendingRouteMove: AppliedPlayerMove | null;
   playerRating: number;
   isProvisional: boolean;
   ratingScores: RatingScores;
@@ -150,6 +199,12 @@ export type GameActions = {
   setDrillStrictnessCp: (update: SetStateAction<number | null>) => void;
   setDrillTerminalReason: (
     update: SetStateAction<'off_route' | 'accuracy' | 'natural_end' | null>,
+  ) => void;
+  setDrillRootConfirm: (
+    update: SetStateAction<DrillRootConfirmRequest | null>,
+  ) => void;
+  setDrillPendingRouteMove: (
+    update: SetStateAction<AppliedPlayerMove | null>,
   ) => void;
   setPlayerRating: (update: SetStateAction<number>) => void;
   setIsProvisional: (update: SetStateAction<boolean>) => void;
@@ -210,6 +265,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   drillStrictness: null,
   drillStrictnessCp: null,
   drillTerminalReason: null,
+  drillRootConfirm: null,
+  drillPendingRouteMove: null,
   playerRating: 1200,
   isProvisional: true,
   ratingScores: {
@@ -261,6 +318,10 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ drillStrictnessCp: resolve(u, s.drillStrictnessCp) })),
   setDrillTerminalReason: (u) =>
     set((s) => ({ drillTerminalReason: resolve(u, s.drillTerminalReason) })),
+  setDrillRootConfirm: (u) =>
+    set((s) => ({ drillRootConfirm: resolve(u, s.drillRootConfirm) })),
+  setDrillPendingRouteMove: (u) =>
+    set((s) => ({ drillPendingRouteMove: resolve(u, s.drillPendingRouteMove) })),
   setPlayerRating: (u) =>
     set((s) => ({ playerRating: resolve(u, s.playerRating) })),
   setIsProvisional: (u) =>

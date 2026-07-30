@@ -622,13 +622,25 @@ export interface DrillRouteCheckResponse {
   target_fen: string
   suggestions: DrillRouteSuggestion[]
   failure: DrillRouteFailure | null
+  /** The session's evidence boundary, once confirmation has stamped it. */
+  drill_root_reached_ply?: number | null
 }
 
 export interface DrillRouteMetadata {
-  status: Exclude<DrillRouteStatus, 'failed'>
+  /**
+   * Serving is not a transition. `root_pending` means applying this move lands on
+   * the drill root but nothing is root-reached yet — only a confirmed route-check
+   * advances drill state. `root_reached` is route-check's vocabulary, not this one's.
+   */
+  status: 'on_route' | 'root_pending'
   target_fen: string
   resulting_fen: string
   plies_to_target: number
+  /**
+   * True exactly when applying this move lands on the drill root. The client must
+   * CONFIRM before treating the drill as root-reached.
+   */
+  reaches_root: boolean
 }
 
 export interface OpeningRootItem {
@@ -975,7 +987,12 @@ export const checkDrillRoute = async (
     current_fen: string
     previous_fen?: string
     played_uci?: string
+    /** Plies played to reach current_fen. At the root this is a boundary claim. */
+    current_ply?: number
+    /** The served decision whose move was applied. Confirms an OPPONENT arrival. */
+    decision_id?: string
   },
+  options?: { signal?: AbortSignal },
 ): Promise<DrillRouteCheckResponse> => {
   return requestJson<DrillRouteCheckResponse>(
     `${API_BASE_URL}/api/drills/${sessionId}/route-check`,
@@ -983,6 +1000,7 @@ export const checkDrillRoute = async (
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(request),
+      signal: options?.signal,
     },
     { fallbackMessage: 'Failed to check drill route' },
   )

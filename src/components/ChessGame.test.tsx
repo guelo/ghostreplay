@@ -16,6 +16,7 @@ const getNextOpponentMoveMock = vi.fn();
 const continueDrillMock = vi.fn();
 const failDrillMock = vi.fn();
 const checkDrillRouteMock = vi.fn();
+const naturalEndDrillMock = vi.fn();
 const abandonDrillMock = vi.fn();
 const startDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
@@ -49,6 +50,7 @@ vi.mock("../utils/api", async (importOriginal) => {
     continueDrill: (...args: unknown[]) => continueDrillMock(...args),
     failDrill: (...args: unknown[]) => failDrillMock(...args),
     checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
+    naturalEndDrill: (...args: unknown[]) => naturalEndDrillMock(...args),
     abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
     startDrill: (...args: unknown[]) => startDrillMock(...args),
     getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
@@ -145,6 +147,33 @@ const createTestDecisionOwner = () =>
       };
     },
   });
+
+/** The live FEN after 1.e4 — the position an opponent-reached root confirmation is
+ *  about, and what the barrier's staleness guard compares against. */
+const E4_FEN = (() => {
+  const board = new Chess();
+  board.move("e4");
+  return board.fen();
+})();
+
+/**
+ * A served route move that REACHES the drill root. Serving it transitions nothing:
+ * the client must apply it and then confirm before the drill is root-reached.
+ */
+const openingRootPendingResponse = (decisionId: string | null = "decision-1") => ({
+  mode: "ghost" as const,
+  move: { uci: "e2e4", san: "e4" },
+  target_blunder_id: null,
+  decision_source: "ghost_path" as const,
+  ...(decisionId === null ? {} : { decision_id: decisionId }),
+  drill_route: {
+    status: "root_pending" as const,
+    target_fen: E4_FEN,
+    resulting_fen: E4_FEN,
+    plies_to_target: 0,
+    reaches_root: true,
+  },
+});
 
 const benignResult = (moveIndex: number, uci: string): AnalysisResult => ({
   id: `auto-${moveIndex}`,
@@ -313,6 +342,7 @@ const initialGameStoreState = useGameStore.getInitialState();
 
 beforeEach(() => {
   stockfishStatus = "ready";
+  naturalEndDrillMock.mockReset();
   mockLocation = { state: null, pathname: "/play" };
   mockNavigate.mockReset();
   useDrillAnalysisStore.getState().clear();
@@ -630,6 +660,13 @@ describe("ChessGame characterization safeguards", () => {
     });
     expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
     expect(continueDrillMock).not.toHaveBeenCalled();
+    // This call IS the boundary confirmation for a player arrival, and the drill
+    // cannot advance until it settles — so it is bounded like the opponent one.
+    expect(checkDrillRouteMock).toHaveBeenCalledWith(
+      "session-characterization",
+      expect.objectContaining({ current_ply: 1, played_uci: "e2e4" }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("starts live drill play after an opponent-reached root without an immediate opponent move", async () => {
@@ -638,22 +675,40 @@ describe("ChessGame characterization safeguards", () => {
       engine_elo: 1500,
       player_color: "black",
     });
-    getNextOpponentMoveMock.mockResolvedValueOnce({
-      mode: "ghost",
-      move: { uci: "e2e4", san: "e4" },
-      target_blunder_id: null,
-      decision_source: "ghost_path",
-      drill_route: {
-        status: "root_reached",
-        target_fen: "target-fen",
-        resulting_fen: "target-fen",
-        plies_to_target: 0,
-      },
-    });
+    // Hold the opponent response so the drill can be armed before it lands — the
+    // confirmation's staleness guard requires a live drill to act on.
+    let serveRootReachingMove!: (response: unknown) => void;
+    getNextOpponentMoveMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        serveRootReachingMove = resolve;
+      }),
+    );
     render(<ChessGame />);
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play black/i }));
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    });
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: E4_FEN,
+        drillState: "active",
+      });
+    });
+    // The serve does not transition; only this confirmation does.
+    checkDrillRouteMock.mockResolvedValueOnce({
+      status: "root_reached",
+      current_fen: E4_FEN,
+      target_fen: E4_FEN,
+      suggestions: [],
+      drill_root_reached_ply: 1,
+    });
+
+    await act(async () => {
+      serveRootReachingMove(openingRootPendingResponse());
+    });
 
     await waitFor(() => {
       expect(useGameStore.getState().drillState).toBe("root_reached");
@@ -690,6 +745,570 @@ describe("ChessGame characterization safeguards", () => {
     await waitFor(() => {
       expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
     });
+  });
+
+  // --- Two-phase drill root confirmation (g-root-confirm-cutover) -----------
+  //
+  // Serving a root-reaching route move transitions nothing. The client applies
+  // it, then confirms the resulting position; until that succeeds the drill is
+  // NOT root-reached and gameplay is barred. These drive the whole barrier
+  // through the real component.
+
+  /**
+   * Start a drill as black, serve the root-reaching route move, and return once
+   * the confirmation this triggers is in flight (or settled, if its mock
+   * settles). The drill is armed after the request is issued but before the
+   * response lands, which is the only ordering that reaches applyGhostMove with
+   * a live drill in this harness.
+   */
+  const serveRootReachingRouteMove = async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      engine_elo: 1500,
+      player_color: "black",
+    });
+    let serve!: (response: unknown) => void;
+    getNextOpponentMoveMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        serve = resolve;
+      }),
+    );
+
+    const view = render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play black/i }));
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: E4_FEN,
+        drillState: "active",
+      });
+    });
+
+    await act(async () => {
+      serve(openingRootPendingResponse());
+    });
+
+    return view;
+  };
+
+  const rootReachedRouteResponse = {
+    status: "root_reached",
+    current_fen: E4_FEN,
+    target_fen: E4_FEN,
+    suggestions: [],
+    drill_root_reached_ply: 1,
+  };
+
+  /** A promise the test settles by hand, plus its settlers. */
+  const deferred = () => {
+    let resolve!: (value: unknown) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    // Attached so an eventual rejection is never an unhandled one.
+    promise.catch(() => undefined);
+    return { promise, resolve, reject };
+  };
+
+  it("confirms the applied root against the served decision, under a bounded signal", async () => {
+    checkDrillRouteMock.mockResolvedValueOnce(rootReachedRouteResponse);
+
+    await serveRootReachingRouteMove();
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(checkDrillRouteMock).toHaveBeenCalledWith(
+      "session-characterization",
+      {
+        current_fen: E4_FEN,
+        current_ply: 1,
+        decision_id: "decision-1",
+      },
+      // Unbounded, this POST would block the board indefinitely.
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
+  it("bars gameplay while the confirmation is in flight, offering only Abandon", async () => {
+    const confirmation = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(confirmation.promise);
+
+    await serveRootReachingRouteMove();
+
+    // Applied, but not confirmed: the position is on the board and nothing else
+    // has happened to the drill.
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(useGameStore.getState().drillState).toBe("active");
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e7", targetSquare: "e5" });
+    });
+
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    // In flight ⇒ no recovery ⇒ Abandon only. A Retry here would invite a second
+    // concurrent confirmation on top of the first.
+    expect(await screen.findByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+  });
+
+  it("retains the board and offers recovery when the confirmation fails, then Retry confirms", async () => {
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+
+    await serveRootReachingRouteMove();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+    // The applied position survives the failure untouched.
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(useGameStore.getState().moveHistory[0]?.uci).toBe("e2e4");
+    expect(useGameStore.getState().drillState).toBe("active");
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+
+    checkDrillRouteMock.mockResolvedValueOnce(rootReachedRouteResponse);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("hides Retry while a retried confirmation is itself in flight", async () => {
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    await serveRootReachingRouteMove();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+
+    const retried = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(retried.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+    });
+
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes a confirmation timeout into recovery with the board retained", async () => {
+    // The shape AbortSignal.timeout produces.
+    checkDrillRouteMock.mockRejectedValueOnce(
+      new DOMException("timed out", "TimeoutError"),
+    );
+
+    await serveRootReachingRouteMove();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(useGameStore.getState().drillState).toBe("active");
+  });
+
+  it("ignores a confirmation that lands after the drill was abandoned", async () => {
+    const confirmation = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(confirmation.promise);
+    await serveRootReachingRouteMove();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^abandon$/i }));
+    });
+    const resignDialog = screen.getByRole("alertdialog");
+    await act(async () => {
+      fireEvent.click(within(resignDialog).getByRole("button", { name: /^resign$/i }));
+    });
+
+    await act(async () => {
+      confirmation.resolve(rootReachedRouteResponse);
+    });
+
+    // Session id, history length and "not reverting" all still match here — only
+    // an identity guard rejects this.
+    expect(useGameStore.getState().drillState).not.toBe("root_reached");
+  });
+
+  it("ignores a confirmation that lands after a different branch reached the same ply", async () => {
+    const confirmation = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(confirmation.promise);
+    await serveRootReachingRouteMove();
+
+    // Revert-and-replay: same session, same ply, DIFFERENT move. A guard built on
+    // shape rather than identity would stamp root_reached onto this position.
+    act(() => {
+      useGameStore.setState({
+        moveHistory: [{ san: "d4", fen: "other-fen", uci: "d2d4" }],
+      });
+    });
+
+    await act(async () => {
+      confirmation.resolve(rootReachedRouteResponse);
+    });
+
+    expect(useGameStore.getState().drillState).not.toBe("root_reached");
+  });
+
+  it("keeps the barrier across a remount and resumes the confirmation", async () => {
+    // Navigating away and back remounts ChessGame, which rebuilds the board from
+    // the store. A barrier that did not survive with it would hand the player an
+    // applied-but-unconfirmed root position to move from — straight off-route.
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    const view = await serveRootReachingRouteMove();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+
+    const resumed = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(resumed.promise);
+    view.unmount();
+    await act(async () => {
+      render(<ChessGame />);
+    });
+
+    // The remount re-issues the confirmation rather than leaving the board frozen
+    // behind a barrier whose Retry button unmounted with the old component.
+    await waitFor(() => {
+      expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+    });
+    expect(useGameStore.getState().drillRootConfirm).not.toBeNull();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e7", targetSquare: "e5" });
+    });
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(useGameStore.getState().drillState).toBe("active");
+
+    await act(async () => {
+      resumed.resolve(rootReachedRouteResponse);
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(useGameStore.getState().drillRootConfirm).toBeNull();
+  });
+
+  it("discards a confirmation that no longer owns the barrier", async () => {
+    // A/B: the pre-remount confirmation settles AFTER the remount engaged a
+    // barrier of its own. Every identity field still matches — same session, ply,
+    // move and FEN — so only attempt ownership rejects it. Clearing the barrier
+    // here would re-open the board while B is still unresolved.
+    const first = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(first.promise);
+    const view = await serveRootReachingRouteMove();
+
+    const second = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(second.promise);
+    view.unmount();
+    await act(async () => {
+      render(<ChessGame />);
+    });
+    await waitFor(() => {
+      expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      first.resolve(rootReachedRouteResponse);
+    });
+    expect(useGameStore.getState().drillState).toBe("active");
+    expect(useGameStore.getState().drillRootConfirm).not.toBeNull();
+
+    // The owning attempt still lands normally.
+    await act(async () => {
+      second.resolve(rootReachedRouteResponse);
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+  });
+
+  /** Arm a white drill whose root is reached by the player's own e4. */
+  const armPlayerArrivalDrill = () => {
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: STARTING_FEN,
+    });
+    const view = render(<ChessGame />);
+    act(() => {
+      useGameStore.setState({ drillOpeningKey: E4_FEN, drillState: "active" });
+    });
+    return view;
+  };
+
+  it("drops a player-route retry whose move left live history", async () => {
+    // Revert-and-replace: e4 reached the root and its check failed, then the player
+    // reverted and played something else. The stale proof must not stay armed — the
+    // backend can replay previous_fen + played_uci, prove that arrival, and stamp
+    // state and boundary for a move no longer on the board.
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    armPlayerArrivalDrill();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+    expect(useGameStore.getState().drillPendingRouteMove).not.toBeNull();
+
+    act(() => {
+      useGameStore.setState({
+        moveHistory: [{ san: "d4", fen: "other-fen", uci: "d2d4" }],
+      });
+    });
+
+    expect(useGameStore.getState().drillPendingRouteMove).toBeNull();
+
+    // Retry is still offered — but as ordinary drill steering, not as the stale
+    // proof: no second route-check leaves the client.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+    });
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(1);
+    expect(getNextOpponentMoveMock).toHaveBeenCalled();
+  });
+
+  it("never re-issues a route proof for a move that left live history", async () => {
+    // A stale pending record found at mount: the player reverted e4 and played d4
+    // in a session that never got to clear it. Neither the invariant nor the
+    // pre-dispatch check may let that proof reach the backend.
+    const afterD4 = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1";
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: afterD4,
+      moveHistory: [{ san: "d4", fen: afterD4, uci: "d2d4" }],
+      drillOpeningKey: E4_FEN,
+      drillState: "active",
+      drillPendingRouteMove: {
+        fenAfter: E4_FEN,
+        fenBefore: STARTING_FEN,
+        uciHistory: ["e2e4"],
+        gameOver: false,
+        moveIndex: 0,
+        moveSan: "e4",
+        moveUci: "e2e4",
+      },
+    });
+
+    render(<ChessGame />);
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillPendingRouteMove).toBeNull();
+    });
+    expect(checkDrillRouteMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().drillState).toBe("active");
+  });
+
+  it("resumes an interrupted player-arrival route-check after a remount", async () => {
+    // Without a durable record the drill is stranded here: the move is applied, the
+    // opponent is to move, and Retry unmounted with the component — nothing left
+    // re-drives the drill (the opponent effect only covers the opening).
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    const view = armPlayerArrivalDrill();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+
+    const resumed = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(resumed.promise);
+    getNextOpponentMoveMock.mockClear();
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => undefined));
+    view.unmount();
+    await act(async () => {
+      render(<ChessGame />);
+    });
+
+    // Re-issued from the durable record — byte-identical to the first attempt.
+    await waitFor(() => {
+      expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+    });
+    // Same session and same proof body; only the abort signal is a fresh object.
+    expect(checkDrillRouteMock.mock.calls[1]?.slice(0, 2)).toEqual(
+      checkDrillRouteMock.mock.calls[0]?.slice(0, 2),
+    );
+
+    await act(async () => {
+      resumed.resolve(rootReachedRouteResponse);
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(useGameStore.getState().drillPendingRouteMove).toBeNull();
+    // The continuation the interrupted pass owed: only now does the drill advance.
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("discards a player-route response that no longer owns the pending record", async () => {
+    // A/B while A is still IN FLIGHT — the case the resume test above cannot reach,
+    // because there the first request has already rejected. Every identity field
+    // still matches when A lands: same session, ply, move and FEN. Only attempt
+    // ownership rejects it. Left ungated, A confirms the root and applies an
+    // opponent move through the unmounted component's own Chess instance while B is
+    // still unresolved, and both attempts append to the one shared history.
+    const first = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(first.promise);
+    const view = armPlayerArrivalDrill();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillPendingRouteMove).not.toBeNull();
+    });
+
+    const second = deferred();
+    checkDrillRouteMock.mockReturnValueOnce(second.promise);
+    getNextOpponentMoveMock.mockClear();
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => undefined));
+    view.unmount();
+    await act(async () => {
+      render(<ChessGame />);
+    });
+    await waitFor(() => {
+      expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+    });
+
+    await act(async () => {
+      first.resolve(rootReachedRouteResponse);
+    });
+    expect(useGameStore.getState().drillState).toBe("active");
+    // B's record survives A's settlement, and the board has not advanced.
+    expect(useGameStore.getState().drillPendingRouteMove).not.toBeNull();
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+
+    // The owning attempt still lands normally, once.
+    await act(async () => {
+      second.resolve(rootReachedRouteResponse);
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(useGameStore.getState().drillPendingRouteMove).toBeNull();
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("retries a failed player-arrival route-check as itself, not as an opponent request", async () => {
+    // A player move INTO the root: this route-check is the boundary stamp, so its
+    // failure must be retryable as a route-check. Falling through to an opponent
+    // request would advance the drill with the boundary never stamped.
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: STARTING_FEN,
+    });
+    render(<ChessGame />);
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: E4_FEN,
+        drillState: "active",
+      });
+    });
+
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    getNextOpponentMoveMock.mockClear();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(useGameStore.getState().drillState).toBe("active");
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+
+    checkDrillRouteMock.mockResolvedValueOnce(rootReachedRouteResponse);
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => undefined));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+    });
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
+    // Only after the boundary is stamped does the drill advance.
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("ends the game only after a retried player-arrival route-check succeeds", async () => {
+    // The game-ending variant: the player's mating move is also the root arrival.
+    // A failed route-check must not end the game — the boundary is unstamped, so
+    // the drill would be finalized with no proof it ever reached its opening.
+    // After f3 e5 g4, black mates with Qh4#.
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "black",
+      boardOrientation: "black",
+      liveFen: "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq g3 0 2",
+    });
+    render(<ChessGame />);
+    act(() => {
+      useGameStore.setState({ drillOpeningKey: E4_FEN, drillState: "active" });
+    });
+
+    checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
+    naturalEndDrillMock.mockResolvedValue({
+      session_id: "session-characterization",
+      drill_state: "root_reached",
+      terminal_reason: "natural_end",
+      opening_score_changes: null,
+    });
+    getNextOpponentMoveMock.mockClear();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "d8", targetSquare: "h4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+    });
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    // Unconfirmed root ⇒ the drill is not finalized, mate on the board or not.
+    expect(naturalEndDrillMock).not.toHaveBeenCalled();
+
+    checkDrillRouteMock.mockResolvedValueOnce(rootReachedRouteResponse);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+    });
+
+    await waitFor(() => {
+      expect(naturalEndDrillMock).toHaveBeenCalled();
+    });
+    expect(useGameStore.getState().drillState).toBe("root_reached");
+    // A terminal position never asks for another opponent move.
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
   });
 
   it("seeds the New Game popup difficulty from the rating sample — not the stored drill pref — without mutating the committed store (g-fxrm)", async () => {

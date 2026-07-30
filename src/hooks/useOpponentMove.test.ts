@@ -52,6 +52,7 @@ describe("determineOpponentMove", () => {
       targetFen: null,
       decisionSource: "ghost_path",
       drillRoute: null,
+      decisionId: null,
     });
     expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
       "session-123",
@@ -75,6 +76,7 @@ describe("determineOpponentMove", () => {
       targetFen: null,
       decisionSource: "backend_engine",
       drillRoute: null,
+      decisionId: null,
     });
   });
 
@@ -104,6 +106,46 @@ describe("useOpponentMove", () => {
     expect(result.current.opponentMode).toBe("engine");
   });
 
+  it("threads decision_id through to onApplyBackendMove", async () => {
+    // The id names the row a root confirmation validates against, so it has to
+    // survive the whole hop from response to the move-applying callback.
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      ...backendResponse("ghost", "Nf3", null),
+      decision_id: "decision-abc",
+      drill_route: {
+        status: "root_pending",
+        target_fen: "target-fen",
+        resulting_fen: "resulting-fen",
+        plies_to_target: 0,
+        reaches_root: true,
+      },
+    });
+
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        onApplyBackendMove,
+        onApplyLocalFallback: vi.fn(),
+      })
+    );
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+
+    expect(onApplyBackendMove).toHaveBeenCalledWith(
+      "Nf3",
+      "ghost_path",
+      null,
+      null,
+      null,
+      expect.objectContaining({ status: "root_pending", reaches_root: true }),
+      "decision-abc",
+    );
+  });
+
   it("applies ghost move from backend", async () => {
     getNextOpponentMoveMock.mockResolvedValueOnce(
       backendResponse("ghost", "Nf3", 42)
@@ -125,7 +167,15 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", "ghost_path", 42, null, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith(
+      "Nf3",
+      "ghost_path",
+      42,
+      null,
+      null,
+      null,
+      null,
+    );
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
@@ -150,7 +200,15 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", "backend_engine", null, null, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith(
+      "e4",
+      "backend_engine",
+      null,
+      null,
+      null,
+      null,
+      null,
+    );
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 

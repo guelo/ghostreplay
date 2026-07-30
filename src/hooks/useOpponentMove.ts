@@ -16,6 +16,8 @@ export type OpponentMoveResult = {
   targetFen: string | null;
   decisionSource: Exclude<SessionDecisionSource, "local_fallback">;
   drillRoute: DrillRouteMetadata | null;
+  /** The decision row this move was served from — the id a root confirmation names. */
+  decisionId: string | null;
 };
 
 /**
@@ -38,6 +40,7 @@ export const determineOpponentMove = async (
       targetFen: response.target_fen,
       decisionSource: response.decision_source,
       drillRoute: response.drill_route ?? null,
+      decisionId: response.decision_id ?? null,
     };
   } catch (error) {
     console.error("[OpponentMove] Backend unavailable:", error);
@@ -55,6 +58,7 @@ type UseOpponentMoveOptions = {
     targetBlunderSrs: TargetBlunderSrs | null,
     targetFen: string | null,
     drillRoute: DrillRouteMetadata | null,
+    decisionId: string | null,
   ) => Promise<void>;
   onApplyLocalFallback: () => Promise<void>;
   shouldUseLocalFallback?: () => boolean;
@@ -138,6 +142,7 @@ export const useOpponentMove = ({
           result.targetBlunderSrs,
           result.targetFen,
           result.drillRoute,
+          result.decisionId,
         );
       } else {
         setOpponentMode("engine");
