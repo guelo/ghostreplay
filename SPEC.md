@@ -4126,7 +4126,9 @@ discard.
 `ply-1` and `ply` respectively (`ply_after(move_number, color)`). Dropping `fen_before`
 would discard the starting position and every opponent-to-move position the session passed
 through; dating it at the row's own ply would push the whole pre-boundary prefix one ply
-later and leak it back across the boundary. Each FEN hash keeps its **latest** ply.
+later and leak it back across the boundary. The shared scan retains each FEN hash's
+earliest and latest observed ply: runtime evidence uses the **latest**, while legacy
+boundary reconstruction uses the **earliest**.
 
 **Two roles, one boundary.** Observations at or after the boundary are `seed_hashes` and
 feed the opponent-colour forward BFS; observations *strictly* after it are `reach_hashes`
@@ -4153,8 +4155,37 @@ time-based schedule". Counting rows the predicate rejects routed a blunder into 
 branch with an `opportunities_since_review` of 0, i.e. a priority of exactly 0, permanently
 not-due.
 
-Historical boundary reconstruction, the recompute CLI's session-grain modes, and retirement
-of pre-boundary rows already in production are **g-boundary-backfill**.
+#### 17.4.3 Historical boundary repair (g-boundary-backfill)
+
+Historical reconstruction is explicitly **legacy-only**, never a runtime fallback. The
+all-session boundary CLI requires a frozen, exclusive `started_at` cutoff captured before
+boundary-runtime activation; reusing that cutoff on every retry prevents a new session
+whose live proof was declined from later acquiring a boundary merely because its uploaded
+FENs contain the target.
+
+For each legacy drill whose boundary is NULL, the repair hashes `fen_after` at ply P and
+`fen_before` at ply P-1, compares them with the persisted `drill_opening_key` target, and
+writes the **minimum** matching ply under an `IS NULL` guard. It never reads route-map
+distance: distance-to-target can be shorter than a transposed route's actual arrival and
+would readmit scripted plies. Missing/invalid targets and targets never observed remain
+NULL, are reported as permanent residue, and contribute no broad evidence unless
+`rated_start_ply` independently opens the evidence window.
+
+`scripts/recompute_srs_opportunities.py` has four explicit modes. `--blunder-id` and
+`--all-blunders` resolve the shared seed/reach sets and use the reverse-walk dual of the
+runtime forward BFS. `--session-id` and `--all-sessions` call the runtime writer itself;
+the session modes are the production cleanup because a single pass deletes every unmatched
+row for that session. There is no implicit full recompute. All-session cleanup supports the
+same frozen cutoff, UUID keyset resume, a bounded page limit, and a commit per session.
+The grains share boundary scoping, not creation-time pruning: blunder-grain repair drops
+session evidence older than `blunder.created_at`, while session-grain cleanup preserves
+live-writer parity and may retain a broad pre-creation row; targeted counters filter that
+evidence independently.
+
+Neither CLI writes `opponent_decisions`. The production rollout freezes an as-of timestamp
+and verifies a per-blunder fingerprint of `targeted_30d` and `targeted_reached_30d` before
+and after cleanup. The measured, resumable commands, verification SQL, and PostgreSQL 18
+timings are in `backend/scripts/BACKFILL_SRS_BOUNDARIES.md`.
 
 ### 17.5 Conversion
 

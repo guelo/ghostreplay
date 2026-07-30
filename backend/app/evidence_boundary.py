@@ -60,6 +60,20 @@ class EvidenceHashes:
         return bool(self.seed)
 
 
+@dataclass(frozen=True)
+class ObservedPlyBounds:
+    """Earliest and latest ply at which one normalized position was observed.
+
+    Runtime evidence uses :attr:`latest` so a genuine post-boundary repetition counts
+    as a reach. The legacy boundary repair uses :attr:`earliest` so a later
+    transposition cannot move the historical root forward. Keeping both views over one
+    scan prevents their FEN parsing and ply arithmetic from drifting.
+    """
+
+    earliest: int
+    latest: int
+
+
 def evidence_start_ply(session: GameSession) -> int | None:
     """The ply before which this session's observations are not SRS evidence.
 
@@ -85,8 +99,10 @@ def evidence_start_ply(session: GameSession) -> int | None:
     return min(candidates) if candidates else None
 
 
-def observed_position_plies(db: Session, *, session_id: uuid.UUID) -> dict[str, int]:
-    """Latest ply at which each normalized FEN hash was observed in this session.
+def observed_position_ply_bounds(
+    db: Session, *, session_id: uuid.UUID
+) -> dict[str, ObservedPlyBounds]:
+    """Earliest/latest observed plies for every normalized FEN hash in a session.
 
     BOTH ``fen_before`` and ``fen_after`` are observations, at ``ply-1`` and ``ply``
     respectively — dropping ``fen_before`` would silently discard the starting
@@ -94,8 +110,6 @@ def observed_position_plies(db: Session, *, session_id: uuid.UUID) -> dict[str, 
     hashing it at the row's own ply would date a pre-boundary position one ply late
     and leak it back into the evidence set.
 
-    Keeping the LATEST ply per hash is what makes a repetition count: the root is a
-    seed at the boundary, but a later transposition back into it is a genuine reach.
     Unparseable FENs are skipped, which is how a corrupted row retires its events
     rather than poisoning the set.
     """
@@ -109,7 +123,7 @@ def observed_position_plies(db: Session, *, session_id: uuid.UUID) -> dict[str, 
         .filter(SessionMove.session_id == session_id)
         .all()
     )
-    latest: dict[str, int] = {}
+    bounds: dict[str, ObservedPlyBounds] = {}
     for move_number, color, fen_before, fen_after in rows:
         ply = ply_after(move_number, color)
         for fen, observed_ply in ((fen_before, ply - 1), (fen_after, ply)):
@@ -119,9 +133,32 @@ def observed_position_plies(db: Session, *, session_id: uuid.UUID) -> dict[str, 
                 hashed = fen_hash(fen)
             except ValueError:
                 continue
-            if observed_ply > latest.get(hashed, observed_ply - 1):
-                latest[hashed] = observed_ply
-    return latest
+            current = bounds.get(hashed)
+            if current is None:
+                bounds[hashed] = ObservedPlyBounds(
+                    earliest=observed_ply,
+                    latest=observed_ply,
+                )
+            else:
+                bounds[hashed] = ObservedPlyBounds(
+                    earliest=min(current.earliest, observed_ply),
+                    latest=max(current.latest, observed_ply),
+                )
+    return bounds
+
+
+def observed_position_plies(db: Session, *, session_id: uuid.UUID) -> dict[str, int]:
+    """Latest ply at which each normalized FEN hash was observed in this session.
+
+    Keeping the LATEST ply per hash is what makes a repetition count: the root is a
+    seed at the boundary, but a later transposition back into it is a genuine reach.
+    """
+    return {
+        hashed: observed.latest
+        for hashed, observed in observed_position_ply_bounds(
+            db, session_id=session_id
+        ).items()
+    }
 
 
 def split_evidence_hashes(

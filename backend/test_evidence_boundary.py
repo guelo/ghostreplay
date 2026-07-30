@@ -39,6 +39,7 @@ from app.api.session import _compute_blunder_opportunity_events
 from app.evidence_boundary import (
     NORMAL_SESSION_EVIDENCE_START_PLY,
     evidence_start_ply,
+    observed_position_ply_bounds,
     observed_position_plies,
     session_evidence_hashes,
     split_evidence_hashes,
@@ -280,10 +281,14 @@ def test_repeated_position_keeps_its_latest_ply(db_session):
     game_session = _normal(db_session, moves=ROUTE_AND_PLAY + REVISIT_ROOT)
     db_session.commit()
 
+    bounds = observed_position_ply_bounds(db_session, session_id=game_session.id)
     observations = observed_position_plies(db_session, session_id=game_session.id)
 
     # The root is seen at ply 3 and again at ply 7. Keeping the LATEST is what lets a
-    # genuine transposition back into the root count as a reach later on.
+    # genuine transposition back into the root count as a reach later on, while the
+    # legacy repair keeps the EARLIEST arrival as its persisted boundary.
+    assert bounds[fen_hash(ROOT)].earliest == 3
+    assert bounds[fen_hash(ROOT)].latest == 7
     assert observations[fen_hash(ROOT)] == 7
 
 
