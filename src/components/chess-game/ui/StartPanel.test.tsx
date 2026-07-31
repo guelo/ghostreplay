@@ -3,6 +3,47 @@ import { fireEvent, render, screen } from "../../../test/utils";
 import StartPanel from "./StartPanel";
 import type { OpeningRootItem } from "../../../utils/api";
 
+vi.mock("./OpeningPicker", () => ({
+  default: ({
+    openingFamilies,
+    onSelect,
+  }: {
+    openingFamilies: Array<{ roots: OpeningRootItem[] }> | null;
+    onSelect: (selection: {
+      opening: OpeningRootItem;
+      line: string[] | null;
+    }) => void;
+  }) => (
+    <div>
+      <button
+        type="button"
+        onClick={() =>
+          onSelect({ opening: openingFamilies![0].roots[0], line: null })
+        }
+      >
+        Pick registered opening
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          onSelect({
+            opening: {
+              opening_key: "tree-target-fen",
+              opening_name: "Sicilian Defense",
+              opening_family: "",
+              eco: "B20",
+              depth: 3,
+            },
+            line: ["e2e4", "c7c5", "g1f3"],
+          })
+        }
+      >
+        Pick deep tree opening
+      </button>
+    </div>
+  ),
+}));
+
 const adHocOpening: OpeningRootItem = {
   opening_key: "adhoc-fen",
   opening_name: "Custom line",
@@ -97,8 +138,9 @@ describe("StartPanel", () => {
     };
     render(<StartPanel {...props} />);
 
-    fireEvent.click(screen.getByRole("combobox"));
-    fireEvent.click(screen.getByRole("option", { name: /Sicilian Defense/ }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /pick registered opening/i }),
+    );
 
     // Start stays gated until a strictness tier is consciously picked (g-09mu).
     expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
@@ -111,6 +153,35 @@ describe("StartPanel", () => {
         line: null,
       }),
     );
+  });
+
+  it("preserves a confirmed Tree line through strictness choice and Start Drill", () => {
+    const props = {
+      ...baseProps(),
+      isDrillMode: true,
+      seedOpening: registered,
+    };
+    render(<StartPanel {...props} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /pick deep tree opening/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+
+    expect(props.onStartDrill).toHaveBeenCalledWith({
+      engineElo: 1000,
+      strictnessCp: 25,
+      playerColor: "white",
+      opening: {
+        opening_key: "tree-target-fen",
+        opening_name: "Sicilian Defense",
+        opening_family: "",
+        eco: "B20",
+        depth: 3,
+      },
+      line: ["e2e4", "c7c5", "g1f3"],
+    });
   });
 
   it("resyncs the draft when a seed prop changes (async reseed, null → number)", () => {

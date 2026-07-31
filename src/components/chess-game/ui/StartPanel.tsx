@@ -151,11 +151,12 @@ const StartPanel = ({
         </button>
       </div>
 
-      <div className={`chess-start-scroll${isDrillMode ? " chess-start-scroll--drill" : ""}`}>
-        {isDrillMode ? (
+      {isDrillMode ? (
+        <div className="chess-start-scroll chess-start-scroll--drill">
           <DrillSetupPanel
             openingFamilies={openingFamilies}
             selectedOpening={draftOpening}
+            selectedLine={draftLine}
             playerColor={draftColor}
             engineElo={draftElo}
             strictnessCp={draftStrictnessCp}
@@ -164,12 +165,9 @@ const StartPanel = ({
             isLoadingOpenings={isLoadingOpenings}
             isStarting={isStartingGame}
             startError={startError}
-            onSelectOpening={(opening) => {
-              setDraftOpening(opening);
-              // A newly picked opening is a registered root — drop any ad-hoc
-              // line locally. The line stays only on the original draft, which
-              // is discarded on cancel (no committed state is touched).
-              setDraftLine(null);
+            onSelectOpening={(selection) => {
+              setDraftOpening(selection.opening);
+              setDraftLine(selection.line);
             }}
             onPlayerColorChange={setDraftColor}
             onEngineEloChange={setDraftElo}
@@ -185,8 +183,10 @@ const StartPanel = ({
               });
             }}
           />
-        ) : (
-          <>
+        </div>
+      ) : (
+        <>
+          <div className="chess-start-scroll">
             <p className="chess-start-title">Difficulty</p>
             <div className="chess-elo-selector">
               <div className="chess-elo-slider-row">
@@ -217,53 +217,54 @@ const StartPanel = ({
               <span className="elo-stakes__loss">Loss {lossDelta}</span>
             </p>
             <p className="chess-start-title">Side</p>
-            <div className="chess-start-options">
-              <button
-                className="play-side-button"
-                type="button"
-                aria-label="Play White"
-                onClick={() => onStartPlay("white", draftElo)}
-                disabled={isStartingGame}
-              >
-                <span className="play-side-button__piece">
+          </div>
+
+          <div className="chess-start-options">
+            <button
+              className="play-side-button"
+              type="button"
+              aria-label="Play White"
+              onClick={() => onStartPlay("white", draftElo)}
+              disabled={isStartingGame}
+            >
+              <span className="play-side-button__piece">
+                <WhiteKing />
+              </span>
+              <span className="play-side-button__label">White</span>
+            </button>
+            <button
+              className="play-side-button"
+              type="button"
+              aria-label="Play Random"
+              onClick={() => onStartPlay("random", draftElo)}
+              disabled={isStartingGame}
+            >
+              <span className="play-side-button__piece play-side-button__piece--split">
+                <span className="play-side-king play-side-king--left">
                   <WhiteKing />
                 </span>
-                <span className="play-side-button__label">White</span>
-              </button>
-              <button
-                className="play-side-button"
-                type="button"
-                aria-label="Play Random"
-                onClick={() => onStartPlay("random", draftElo)}
-                disabled={isStartingGame}
-              >
-                <span className="play-side-button__piece play-side-button__piece--split">
-                  <span className="play-side-king play-side-king--left">
-                    <WhiteKing />
-                  </span>
-                  <span className="play-side-king play-side-king--right">
-                    <BlackKing />
-                  </span>
-                </span>
-                <span className="play-side-button__label">Random</span>
-              </button>
-              <button
-                className="play-side-button"
-                type="button"
-                aria-label="Play Black"
-                onClick={() => onStartPlay("black", draftElo)}
-                disabled={isStartingGame}
-              >
-                <span className="play-side-button__piece">
+                <span className="play-side-king play-side-king--right">
                   <BlackKing />
                 </span>
-                <span className="play-side-button__label">Black</span>
-              </button>
-            </div>
-            {startError && <p className="chess-start-error">{startError}</p>}
-          </>
-        )}
-      </div>
+              </span>
+              <span className="play-side-button__label">Random</span>
+            </button>
+            <button
+              className="play-side-button"
+              type="button"
+              aria-label="Play Black"
+              onClick={() => onStartPlay("black", draftElo)}
+              disabled={isStartingGame}
+            >
+              <span className="play-side-button__piece">
+                <BlackKing />
+              </span>
+              <span className="play-side-button__label">Black</span>
+            </button>
+          </div>
+          {startError && <p className="chess-start-error">{startError}</p>}
+        </>
+      )}
     </div>
   );
 };

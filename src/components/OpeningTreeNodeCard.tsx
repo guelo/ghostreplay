@@ -86,11 +86,9 @@ interface OpeningTreeNodeCardProps {
    *  name collapses to the visible text; the lineage passes its action name. */
   ariaLabel?: string;
 
-  /** Expanded: handler for the owned "Start Drill" button. */
-  onStartDrill?: () => void;
   /** Expanded: when set, a full-surface overlay button collapses the card (used
    *  by the in-place lineage expansion). Requires `--expanded` to be a
-   *  positioning context; the Start Drill button is raised above the overlay. */
+   *  positioning context; footer actions are raised above the overlay. */
   onCollapse?: () => void;
   /** Expanded: optional footer node (e.g. a "View in Openings" link) rendered
    *  inside the card, raised above the `onCollapse` overlay so it stays
@@ -445,26 +443,19 @@ function CompactBody({
 }
 
 /** Expanded body: header (opening name), the played move list under it, the
- *  score/eval panel, metrics, terminal note, and Start Drill. The `family` kind
+ *  score/eval panel, metrics, and terminal note. The `family` kind
  *  drops the Eval tile, the move-type chips and the terminal note (a family has
  *  no SAN/eval); the synthesized `/openings` root shows "Starting position" with
  *  no move list. */
 function ExpandedBody({
   node,
   kind,
-  onStartDrill,
   scorePending,
 }: {
   node: OpeningTreeNodeView;
   kind: "move" | "family";
-  onStartDrill?: () => void;
   scorePending?: boolean;
 }) {
-  // Every expanded card is drillable; the page decides drillability by passing
-  // onStartDrill (wired for move/family cards, omitted for the synthesized root
-  // and the live-panel lineage). drillOpeningKey no longer gates this.
-  const showDrill = onStartDrill != null;
-
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
   const headerLabel = isRoot
@@ -529,15 +520,6 @@ function ExpandedBody({
         </p>
       )}
 
-      {showDrill && (
-        <button
-          type="button"
-          className="tree-node-card__drill-button"
-          onClick={onStartDrill}
-        >
-          Start Drill
-        </button>
-      )}
     </>
   );
 }
@@ -546,8 +528,8 @@ function ExpandedBody({
  * Reusable presentational card for an opening-tree node. The compact variant is
  * the primary rendering for every non-expanded node (and reused by
  * GameOpeningLineage); the expanded variant renders the single deepest selected
- * node. Self-contained: the card owns its selection button and Start Drill
- * button, but the business logic behind them arrives as injected callbacks.
+ * node. Self-contained: the card owns its selection button while callers inject
+ * expanded actions through the router-free `footerAction` channel.
  */
 function OpeningTreeNodeCard({
   variant,
@@ -558,7 +540,6 @@ function OpeningTreeNodeCard({
   isExpanded,
   controlsId,
   ariaLabel,
-  onStartDrill,
   onCollapse,
   footerAction,
   scorePending,
@@ -600,8 +581,8 @@ function OpeningTreeNodeCard({
   return (
     <div className={className}>
       {onCollapse && (
-        // Full-surface overlay that collapses the card. Sits behind the Start
-        // Drill button (raised via z-index) so that control stays clickable.
+        // Full-surface overlay that collapses the card. Sits behind footer
+        // actions (raised via z-index) so those controls stay clickable.
         <button
           type="button"
           className="tree-node-card__collapse-nav"
@@ -612,7 +593,6 @@ function OpeningTreeNodeCard({
       <ExpandedBody
         node={node}
         kind={kind}
-        onStartDrill={onStartDrill}
         scorePending={scorePending}
       />
       {footerAction && (

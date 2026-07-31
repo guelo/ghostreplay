@@ -3012,6 +3012,11 @@
     border: 1px solid var(--border-color-strong);
     background: var(--modal-bg);
     box-shadow: var(--shadow-xl);
+    /* The overlay is fixed and center-aligned, so an uncapped panel overflows
+       equally above and below a short landscape viewport. Let the mode-specific
+       content scroller absorb that shortfall instead. */
+    max-height: min(100%, calc(100dvh - 2rem));
+    box-sizing: border-box;
 }
 
 .chess-start-close {
@@ -7483,6 +7488,14 @@
     gap: 1rem;
 }
 
+.openings-tree-explorer {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
 .openings-tree__header {
     display: flex;
     flex-direction: column;
@@ -7638,6 +7651,7 @@
 }
 
 .openings-page .openings-tree,
+.openings-page .openings-tree-explorer,
 .openings-page .openings-tree-workspace {
     flex: 1;
     min-height: 0;
@@ -7923,6 +7937,10 @@
        dropped because their controls already carry equivalent aria-labels. */
     /* Gap below the header (header -> workspace). */
     .openings-tree {
+        gap: 0.4rem;
+    }
+
+    .openings-tree-explorer {
         gap: 0.4rem;
     }
 
@@ -8863,6 +8881,16 @@
     width: 100%;
 }
 
+/* Play keeps the mode toggle and side actions reachable while its difficulty
+   controls take the remaining height and scroll on short landscape screens. */
+.chess-start-scroll:not(.chess-start-scroll--drill) {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+}
+
 /* Drill mode splits into a scrolling fields region and a pinned action row, so
    this wrapper only has to hand its leftover height down (g-drill-cta-clip). */
 .chess-start-scroll--drill {
@@ -8972,16 +9000,12 @@
 .chess-start-panel--drill {
     width: min(calc(100vw - 2rem), 30rem);
     max-width: 100%;
-    /* Cap against the fixed overlay instead of a hardcoded px height: 100%
-       honours the overlay's safe-area padding, the dvh term keeps desktop
-       breathing room. The fields region absorbs any shortfall by scrolling,
-       so the toggle row and Start button stay on screen (g-drill-cta-clip). */
-    max-height: min(100%, calc(100dvh - 2rem));
-    box-sizing: border-box;
 }
 
-/* Fixed chrome: only .chess-start-scroll--drill may give up height. */
-.chess-start-panel--drill > .mode-toggle-row {
+/* Fixed chrome: the mode toggle and Play side actions do not give up height. */
+.chess-start-panel > .mode-toggle-row,
+.chess-start-panel > .chess-start-options,
+.chess-start-panel > .chess-start-error {
     flex: 0 0 auto;
 }
 
@@ -9011,7 +9035,7 @@
     gap: 0.5rem;
 }
 
-/* ---- Opening picker (portal popover; list + board) ---- */
+/* ---- Opening picker (anchored List popover + near-fullscreen Tree dialog) ---- */
 .opening-picker {
     width: 100%;
 }
@@ -9054,6 +9078,10 @@
     box-shadow: var(--shadow-xl);
     box-sizing: border-box;
     overflow: hidden;
+}
+
+.opening-picker__popover--list {
+    position: fixed;
 }
 
 .opening-picker__toggle {
@@ -9113,48 +9141,74 @@
     text-align: center;
 }
 
-.opening-picker__board-mode {
+.opening-picker__tree-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(15, 23, 42, 0.62);
+}
+
+.opening-picker__tree-modal {
+    position: fixed;
+    top: max(1rem, env(safe-area-inset-top));
+    right: max(1rem, env(safe-area-inset-right));
+    bottom: max(1rem, env(safe-area-inset-bottom));
+    left: max(1rem, env(safe-area-inset-left));
     display: flex;
     flex-direction: column;
-    align-items: center;
-    gap: 0.5rem;
-    flex: 1 1 auto;
+    gap: 0.75rem;
+    min-width: 0;
     min-height: 0;
-    overflow-y: auto;
-    scrollbar-width: thin;
+    padding: 0.75rem;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid var(--border-color-strong);
+    border-radius: 0.9rem;
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
 }
 
-.opening-picker__board {
-    width: min(240px, 100%);
-    aspect-ratio: 1;
-}
-
-.opening-picker__board > * {
-    width: 100%;
-    height: 100%;
-}
-
-.opening-picker__board-controls {
+.opening-picker__tree-chrome {
+    flex: 0 0 auto;
     display: flex;
-    gap: 0.5rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
 }
 
-.opening-picker__match {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: var(--text-primary);
-    text-align: center;
+.opening-picker__tree-chrome .opening-picker__toggle {
+    flex: 1 1 auto;
 }
 
-.opening-picker__match--none {
-    font-weight: 500;
-    color: var(--text-tertiary);
+.opening-picker__tree-body {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
 }
 
-.opening-picker__moves {
-    font-size: 0.8rem;
-    color: var(--text-secondary);
-    text-align: center;
+.opening-picker__tree-body .openings-tree-explorer,
+.opening-picker__tree-body .openings-tree-workspace {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+
+.opening-picker__tree-body .openings-tree-workspace {
+    width: 100%;
+}
+
+.opening-picker__tree-body .openings-tree-scroll {
+    align-self: stretch;
+    /* Keep the horizontal overflow owner inside the modal's height budget.
+       Without an explicit border-box, its padding + scrollbar can extend past
+       the clipped flex body even though the canvas itself still scrolls. */
+    box-sizing: border-box;
+}
+
+.opening-picker__tree-body .openings-tree-canvas {
+    height: 100%;
 }
 
 @media (max-width: 767px) {
@@ -9166,6 +9220,32 @@
     /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
     .game-page .chess-start-panel--drill {
         width: min(calc(100vw - 1.5rem), 30rem);
+    }
+
+    .opening-picker__tree-modal {
+        padding: 0.55rem;
+    }
+}
+
+@media (max-width: 720px) {
+    .opening-picker__tree-body {
+        display: block;
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
+
+    .opening-picker__tree-body .openings-tree-explorer {
+        width: 100%;
+        min-height: min-content;
+    }
+
+    .opening-picker__tree-body .openings-tree-explorer,
+    .opening-picker__tree-body .openings-tree-workspace {
+        flex: 0 0 auto;
+    }
+
+    .opening-picker__tree-body .openings-tree-workspace {
+        width: 100%;
     }
 }
 
@@ -11352,7 +11432,7 @@ button.tree-node-card--compact {
     color: var(--text-secondary);
 }
 
-.tree-node-card__drill-button {
+.tree-node-card__action-button {
     /* Raised above the collapse overlay (z-index:0) so it stays clickable when
        the card is rendered with a collapse surface (lineage expansion). */
     position: relative;
@@ -11366,23 +11446,24 @@ button.tree-node-card--compact {
     font-size: 0.85rem;
     font-weight: 700;
     cursor: pointer;
+    flex: 1 1 auto;
     transition: border-color 200ms ease, background 200ms ease;
 }
 
-.tree-node-card__drill-button:hover {
+.tree-node-card__action-button:hover {
     border-color: var(--text-primary);
     background: var(--gradient-brand);
     color: var(--text-on-gradient);
 }
 
-.tree-node-card__drill-button:focus-visible {
+.tree-node-card__action-button:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
     outline-offset: 2px;
 }
 
 /* Stretched click target that collapses the expanded card; sits behind the
-   raised Start Drill button so that control stays clickable (same pattern as
-   the former .opening-family-card__collapse-nav). */
+   raised footer actions so those controls stay clickable (same pattern as the
+   former .opening-family-card__collapse-nav). */
 .tree-node-card__collapse-nav {
     position: absolute;
     inset: 0;
@@ -11460,4 +11541,6 @@ button.tree-node-card--compact {
     position: relative;
     z-index: 1;
     display: flex;
+    align-items: center;
+    gap: 0.6rem;
 }

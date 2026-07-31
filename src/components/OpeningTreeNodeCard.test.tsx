@@ -374,46 +374,35 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(screen.queryByRole("img")).toBeNull();
   });
 
-  it("renders one Start Drill button that fires onStartDrill when drillable", async () => {
+  it("renders caller-owned footer controls without assigning their semantics", async () => {
     const user = userEvent.setup();
-    const onStartDrill = vi.fn();
+    const onAction = vi.fn();
     render(
       <OpeningTreeNodeCard
         variant="expanded"
         node={{ ...childView, drillOpeningKey: "ruy-key" }}
-        onStartDrill={onStartDrill}
+        footerAction={
+          <button type="button" onClick={onAction}>
+            Use this opening
+          </button>
+        }
       />,
     );
 
-    const drill = screen.getByRole("button", { name: "Start Drill" });
-    await user.click(drill);
-    expect(onStartDrill).toHaveBeenCalledTimes(1);
+    await user.click(
+      screen.getByRole("button", { name: "Use this opening" }),
+    );
+    expect(onAction).toHaveBeenCalledTimes(1);
   });
 
-  it("shows Start Drill whenever a handler is provided, even without a drill key", () => {
-    // drillOpeningKey no longer gates the button — every drillable card passes a
-    // handler (the page wires it for move cards, omits it for the root).
-    const { rerender } = render(
-      <OpeningTreeNodeCard
-        variant="expanded"
-        node={{ ...childView, drillOpeningKey: null }}
-        onStartDrill={vi.fn()}
-      />,
-    );
-    expect(
-      screen.getByRole("button", { name: "Start Drill" }),
-    ).toBeInTheDocument();
-
-    // No handler (e.g. the synthesized root) → no button.
-    rerender(
+  it("does not infer an action from drillOpeningKey", () => {
+    render(
       <OpeningTreeNodeCard
         variant="expanded"
         node={{ ...childView, drillOpeningKey: "ruy-key" }}
       />,
     );
-    expect(
-      screen.queryByRole("button", { name: "Start Drill" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("renders a terminal note for terminal nodes", () => {
@@ -575,23 +564,36 @@ describe("OpeningTreeNodeCard — family mode", () => {
     expect(screen.queryByText("Confidence")).toBeNull();
   });
 
-  it("expanded: a collapse surface fires onCollapse while Start Drill still fires", async () => {
+  it("expanded: a collapse surface stays independent from multiple footer controls", async () => {
     const user = userEvent.setup();
     const onCollapse = vi.fn();
     const onStartDrill = vi.fn();
+    const onView = vi.fn();
     render(
       <OpeningTreeNodeCard
         variant="expanded"
         kind="family"
         node={familyView}
         onCollapse={onCollapse}
-        onStartDrill={onStartDrill}
+        footerAction={
+          <>
+            <button type="button" onClick={onStartDrill}>
+              Start Drill
+            </button>
+            <button type="button" onClick={onView}>
+              View in Openings
+            </button>
+          </>
+        }
       />,
     );
 
-    // Start Drill fires its own handler and does NOT collapse the card.
     await user.click(screen.getByRole("button", { name: "Start Drill" }));
     expect(onStartDrill).toHaveBeenCalledTimes(1);
+    expect(onCollapse).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "View in Openings" }));
+    expect(onView).toHaveBeenCalledTimes(1);
     expect(onCollapse).not.toHaveBeenCalled();
 
     // The full-surface collapse overlay fires onCollapse.

@@ -38,6 +38,7 @@ const makeProps = () => {
       },
     ],
     selectedOpening: null,
+    selectedLine: null as string[] | null,
     playerColor: "white" as const,
     engineElo: 1000,
     strictnessCp: 25 as number | null,
@@ -84,7 +85,10 @@ describe("DrillSetupPanel", () => {
 
     expect(props.onSelectOpening).toHaveBeenCalledWith(
       expect.objectContaining({
-        opening_key: props.openingFamilies![0].roots[0].opening_key,
+        opening: expect.objectContaining({
+          opening_key: props.openingFamilies![0].roots[0].opening_key,
+        }),
+        line: null,
       }),
     );
   });

@@ -430,6 +430,7 @@ describe("OpeningsPage tree", () => {
     // selection are flushed before we assert (keeps the run act()-warning free).
     await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
     expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      source: "openings_page",
       from_key: "",
       to_key: "e2e4",
       depth: 1,
@@ -557,6 +558,7 @@ describe("OpeningsPage tree", () => {
       .toMatch(/4P3/);
     // The board-drop path flows through selectLine too, so it captures directly.
     expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      source: "openings_page",
       from_key: "",
       to_key: "e2e4",
       depth: 1,
@@ -589,6 +591,7 @@ describe("OpeningsPage tree", () => {
     expect(location()).toBe("/openings?color=white&move=a2a3");
     // The off-tree drop flows through selectLine, so it captures directly.
     expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      source: "openings_page",
       from_key: "",
       to_key: "a2a3",
       depth: 1,
@@ -1033,6 +1036,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
     clickSquare("e4");
     expect(location()).toBe("/openings?color=white&move=e2e4");
     expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      source: "openings_page",
       from_key: "",
       to_key: "e2e4",
       depth: 1,
@@ -1055,6 +1059,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
     clickSquare("a3");
     expect(location()).toBe("/openings?color=white&move=a2a3");
     expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      source: "openings_page",
       from_key: "",
       to_key: "a2a3",
       depth: 1,

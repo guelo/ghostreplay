@@ -122,8 +122,8 @@ function toNodeView(
  * expanded variant — the same card /openings uses, minus the mini board. When
  * `onSelectRoot` is provided, tapping a card ALSO selects that opening's root on
  * the board/MoveList/graph (history); when omitted the card is expand-only (live
- * panel). The "View in Openings" link is re-homed as the expanded card's footer,
- * and the optional Start Drill button lives inside the expanded card.
+ * panel). "View in Openings" and the optional Start Drill button share the
+ * expanded card's generic footer-action channel.
  *
  * With `activeMoveIndex` supplied the stack also follows the board (g-m1xc): the
  * card the board is inside (see `matchCard`) is expanded automatically, so the
@@ -229,28 +229,35 @@ function GameOpeningLineage({
             >
               {isExpanded ? (
                 // Expanded card replaces the collapsed one; its full-surface
-                // overlay button collapses it. The "View in Openings" link is
-                // passed as the card's footerAction — rendered inside the card,
-                // raised above the collapse overlay, with its clicks stopped so
-                // tapping it never collapses the card. This component owns the
-                // router Link so the card stays router-free.
+                // overlay button collapses it. Both caller-owned actions share
+                // footerAction, where they stay above and independent from the
+                // collapse surface. This component owns the router Link so the
+                // card stays router-free.
                 <div className="opening-lineage-card" id={cardId}>
                   <OpeningTreeNodeCard
                     variant="expanded"
                     kind="family"
                     node={view}
                     scorePending={scorePending}
-                    onStartDrill={
-                      onStartDrill ? () => onStartDrill(item) : undefined
-                    }
                     onCollapse={() => setManual({ token: syncToken, key: null })}
                     footerAction={
-                      <Link
-                        className="opening-lineage-card__openings-link"
-                        to={openingsHref}
-                      >
-                        View in Openings
-                      </Link>
+                      <>
+                        {onStartDrill && (
+                          <button
+                            type="button"
+                            className="tree-node-card__action-button"
+                            onClick={() => onStartDrill(item)}
+                          >
+                            Start Drill
+                          </button>
+                        )}
+                        <Link
+                          className="opening-lineage-card__openings-link"
+                          to={openingsHref}
+                        >
+                          View in Openings
+                        </Link>
+                      </>
                     }
                   />
                 </div>

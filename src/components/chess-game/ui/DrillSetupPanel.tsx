@@ -2,7 +2,7 @@ import { memo } from "react";
 import { defaultPieces } from "react-chessboard";
 import type { OpeningRootItem } from "../../../utils/api";
 import OpponentAvatar from "./OpponentAvatar";
-import OpeningPicker from "./OpeningPicker";
+import OpeningPicker, { type OpeningPickerSelection } from "./OpeningPicker";
 import {
   STRICTNESS_TIERS,
   bandForCp,
@@ -17,6 +17,7 @@ type DrillSetupPanelProps = {
   // Data
   openingFamilies: Array<{ family_name: string; roots: OpeningRootItem[] }> | null;
   selectedOpening: OpeningRootItem | null;
+  selectedLine: string[] | null;
   playerColor: "white" | "black";
   engineElo: number;
   // null = no tier chosen yet; Start stays disabled until the user picks one.
@@ -30,7 +31,7 @@ type DrillSetupPanelProps = {
   startError: string | null;
 
   // Handlers
-  onSelectOpening: (opening: OpeningRootItem | null) => void;
+  onSelectOpening: (selection: OpeningPickerSelection) => void;
   onPlayerColorChange: (color: "white" | "black") => void;
   onEngineEloChange: (elo: number) => void;
   onStrictnessChange: (cp: number) => void;
@@ -40,6 +41,7 @@ type DrillSetupPanelProps = {
 const DrillSetupPanel = ({
   openingFamilies,
   selectedOpening,
+  selectedLine,
   playerColor,
   engineElo,
   strictnessCp,
@@ -65,6 +67,8 @@ const DrillSetupPanel = ({
             <OpeningPicker
               openingFamilies={openingFamilies}
               selectedOpening={selectedOpening}
+              selectedLine={selectedLine}
+              playerColor={playerColor}
               disabled={isStarting}
               isLoading={isLoadingOpenings}
               onSelect={onSelectOpening}

@@ -2,37 +2,194 @@ import React, {
   memo,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { Chess } from "chess.js";
-import { Chessboard } from "react-chessboard";
-import type { PieceDropHandlerArgs } from "react-chessboard";
-import type { OpeningRootItem } from "../../../utils/api";
-import { normalize_fen } from "../../../utils/fen";
+import { captureEvent } from "../../../analytics/posthog";
+import OpeningsTreeExplorer, {
+  type OpeningsTreeActionTarget,
+} from "../../OpeningsTreeExplorer";
+import type { OpeningsTreeRoute } from "../../../hooks/useOpeningsTree";
+import type {
+  OpeningPlayerColor,
+  OpeningRootItem,
+} from "../../../utils/api";
 
 type OpeningFamily = { family_name: string; roots: OpeningRootItem[] };
+
+export type OpeningPickerSelection = {
+  opening: OpeningRootItem;
+  line: string[] | null;
+};
 
 type OpeningPickerProps = {
   openingFamilies: OpeningFamily[] | null;
   selectedOpening: OpeningRootItem | null;
+  selectedLine: string[] | null;
+  playerColor: OpeningPlayerColor;
   disabled?: boolean;
   isLoading?: boolean;
-  onSelect: (opening: OpeningRootItem | null) => void;
+  onSelect: (selection: OpeningPickerSelection) => void;
 };
 
-type PickerMode = "list" | "board";
+type PickerMode = "list" | "tree";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "area[href]",
+  "button:not([disabled])",
+  "input:not([disabled]):not([type=\"hidden\"])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "iframe",
+  "object",
+  "embed",
+  "[contenteditable=\"true\"]",
+  "[tabindex]:not([tabindex=\"-1\"])",
+].join(", ");
+
+function isVisibleFocusable(element: HTMLElement, dialog: HTMLElement): boolean {
+  for (
+    let current: HTMLElement | null = element;
+    current && current !== dialog;
+    current = current.parentElement
+  ) {
+    if (
+      current.hidden ||
+      current.getAttribute("aria-hidden") === "true" ||
+      current.hasAttribute("inert")
+    ) {
+      return false;
+    }
+    const style = window.getComputedStyle(current);
+    if (style.display === "none" || style.visibility === "hidden") {
+      return false;
+    }
+  }
+  return true;
+}
 
 function rootLabel(root: OpeningRootItem): string {
   return `${root.eco ? `${root.eco} — ` : ""}${root.opening_name}`;
 }
 
+function initialTreeRoute(
+  playerColor: OpeningPlayerColor,
+  selectedOpening: OpeningRootItem | null,
+  selectedLine: string[] | null,
+): OpeningsTreeRoute {
+  if (selectedLine !== null) {
+    return {
+      playerColor,
+      moves: [...selectedLine],
+      opening: null,
+    };
+  }
+  if (selectedOpening) {
+    return {
+      playerColor,
+      moves: [],
+      opening: selectedOpening.opening_key,
+    };
+  }
+  return { playerColor, moves: [], opening: null };
+}
+
+/**
+ * Tentative tree route. It mounts only while the modal's Tree panel is visible,
+ * so closing or switching to List discards unconfirmed exploration.
+ */
+function OpeningPickerTree({
+  playerColor,
+  selectedOpening,
+  selectedLine,
+  onConfirm,
+}: {
+  playerColor: OpeningPlayerColor;
+  selectedOpening: OpeningRootItem | null;
+  selectedLine: string[] | null;
+  onConfirm: (selection: OpeningPickerSelection) => void;
+}) {
+  const [route, setRoute] = useState<OpeningsTreeRoute>(() =>
+    initialTreeRoute(playerColor, selectedOpening, selectedLine),
+  );
+
+  const selectLine = useCallback(
+    (line: string[]) => {
+      captureEvent("opening_explored", {
+        source: "drill_picker",
+        from_key: route.moves.join(","),
+        to_key: line.join(","),
+        depth: line.length,
+        player_color: playerColor,
+      });
+      setRoute({ playerColor, moves: [...line], opening: null });
+    },
+    [playerColor, route.moves],
+  );
+
+  const adoptCanonicalLine = useCallback(
+    (line: string[]) => {
+      setRoute((current) => {
+        const alreadyCanonical =
+          current.opening === null &&
+          current.moves.length === line.length &&
+          current.moves.every((move, index) => move === line[index]);
+        return alreadyCanonical
+          ? current
+          : { playerColor, moves: [...line], opening: null };
+      });
+    },
+    [playerColor],
+  );
+
+  const confirm = useCallback(
+    (target: OpeningsTreeActionTarget) => {
+      const line = [...target.line];
+      captureEvent("drill_opening_selected", {
+        source: "tree",
+        opening_key: target.targetFen,
+        depth: line.length,
+        player_color: playerColor,
+      });
+      onConfirm({
+        opening: {
+          opening_key: target.targetFen,
+          opening_name: target.displayName ?? "Custom line",
+          opening_family: "",
+          eco: target.eco,
+          depth: line.length,
+        },
+        line,
+      });
+    },
+    [onConfirm, playerColor],
+  );
+
+  const expandedAction = useMemo(
+    () => ({ label: "Use this opening", onSelect: confirm }),
+    [confirm],
+  );
+
+  return (
+    <OpeningsTreeExplorer
+      route={route}
+      onSelectLine={selectLine}
+      onCanonicalLine={adoptCanonicalLine}
+      expandedAction={expandedAction}
+    />
+  );
+}
+
 const OpeningPicker = ({
   openingFamilies,
   selectedOpening,
+  selectedLine,
+  playerColor,
   disabled = false,
   isLoading = false,
   onSelect,
@@ -43,18 +200,15 @@ const OpeningPicker = ({
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [popoverStyle, setPopoverStyle] = useState<React.CSSProperties>({});
 
+  const id = useId().replace(/:/g, "");
+  const listPanelId = `opening-picker-list-${id}`;
+  const treePanelId = `opening-picker-tree-${id}`;
+  const activePanelId = mode === "tree" ? treePanelId : listPanelId;
+
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
-
-  // opening_key (4-field FEN) -> root, for board-position resolution.
-  const index = useMemo(() => {
-    const map = new Map<string, OpeningRootItem>();
-    openingFamilies?.forEach((family) => {
-      family.roots.forEach((root) => map.set(root.opening_key, root));
-    });
-    return map;
-  }, [openingFamilies]);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
 
   // Filtered families preserving API grouping/order.
   const filteredFamilies = useMemo(() => {
@@ -65,83 +219,26 @@ const OpeningPicker = ({
       .map((family) => ({
         ...family,
         roots: family.roots.filter(
-          (r) =>
-            r.opening_name.toLowerCase().includes(q) ||
-            (r.eco ?? "").toLowerCase().includes(q),
+          (root) =>
+            root.opening_name.toLowerCase().includes(q) ||
+            (root.eco ?? "").toLowerCase().includes(q),
         ),
       }))
       .filter((family) => family.roots.length > 0);
   }, [openingFamilies, query]);
 
   const flatRoots = useMemo(
-    () => filteredFamilies.flatMap((f) => f.roots),
+    () => filteredFamilies.flatMap((family) => family.roots),
     [filteredFamilies],
   );
 
-  // ---- Board mode state ----
-  const chessRef = useRef(new Chess());
-  const [boardFen, setBoardFen] = useState(
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-  );
-  const [moveStack, setMoveStack] = useState<string[]>([]);
-  const [boardMatch, setBoardMatch] = useState<OpeningRootItem | null>(null);
-  const [boardMessage, setBoardMessage] = useState<string | null>(null);
-
-  const recomputeBoard = useCallback(() => {
-    const chess = chessRef.current;
-    setBoardFen(chess.fen());
-    const key = normalize_fen(chess.fen());
-    const root = index.get(key);
-    if (root) {
-      setBoardMatch(root);
-      setBoardMessage(null);
-      onSelect(root);
-    } else if (chess.history().length > 0) {
-      setBoardMessage("No named opening for this position");
-    } else {
-      setBoardMatch(null);
-      setBoardMessage(null);
-    }
-  }, [index, onSelect]);
-
-  const handleBoardDrop = useCallback(
-    ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
-      if (!targetSquare) return false;
-      const chess = chessRef.current;
-      try {
-        const move = chess.move({
-          from: sourceSquare,
-          to: targetSquare,
-          promotion: "q",
-        });
-        if (!move) return false;
-        setMoveStack((prev) => [...prev, move.san]);
-        recomputeBoard();
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    [recomputeBoard],
-  );
-
-  const handleBoardUndo = useCallback(() => {
-    const chess = chessRef.current;
-    if (chess.history().length === 0) return;
-    chess.undo();
-    setMoveStack((prev) => prev.slice(0, -1));
-    recomputeBoard();
-  }, [recomputeBoard]);
-
-  const handleBoardReset = useCallback(() => {
-    chessRef.current.reset();
-    setMoveStack([]);
-    setBoardMatch(null);
-    setBoardMessage(null);
-    setBoardFen(chessRef.current.fen());
+  const closePicker = useCallback(() => {
+    setOpen(false);
+    setMode("list");
+    triggerRef.current?.focus();
   }, []);
 
-  // ---- Popover positioning ----
+  // ---- Anchored List positioning ------------------------------------------
   const updatePosition = useCallback(() => {
     const trigger = triggerRef.current;
     if (!trigger) return;
@@ -172,12 +269,12 @@ const OpeningPicker = ({
   }, []);
 
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!open || mode !== "list") return;
     updatePosition();
   }, [open, mode, updatePosition]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || mode !== "list") return;
     const handle = () => updatePosition();
     window.addEventListener("resize", handle);
     window.addEventListener("scroll", handle, true);
@@ -185,88 +282,138 @@ const OpeningPicker = ({
       window.removeEventListener("resize", handle);
       window.removeEventListener("scroll", handle, true);
     };
-  }, [open, updatePosition]);
+  }, [open, mode, updatePosition]);
 
-  // Outside-click + Escape close, focus restore.
+  // List outside-click. Tree dismissal is owned by its full-viewport backdrop.
   useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (e: MouseEvent) => {
-      const target = e.target as Node;
+    if (!open || mode !== "list") return;
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
       if (
         popoverRef.current?.contains(target) ||
         triggerRef.current?.contains(target)
       ) {
         return;
       }
-      setOpen(false);
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
+      closePicker();
     };
     document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown, true);
-    };
-  }, [open]);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [closePicker, mode, open]);
 
-  // Focus the search input when the list opens.
+  // Capture-phase Escape keeps the parent start overlay open. Tree also traps
+  // Tab/Shift+Tab within the dialog.
   useEffect(() => {
-    if (open && mode === "list") {
-      searchRef.current?.focus();
-    }
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        closePicker();
+        return;
+      }
+      if (mode !== "tree" || event.key !== "Tab") return;
+
+      const dialog = popoverRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      ).filter((element) => isVisibleFocusable(element, dialog));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [closePicker, mode, open]);
+
+  // Focus the active panel's first control.
+  useEffect(() => {
+    if (!open) return;
+    if (mode === "list") searchRef.current?.focus();
+    else closeRef.current?.focus();
   }, [open, mode]);
 
-  const openPopover = useCallback(() => {
+  // The near-fullscreen Tree layer owns the viewport while mounted.
+  useEffect(() => {
+    if (!open || mode !== "tree") return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open, mode]);
+
+  const openPicker = useCallback(() => {
     if (disabled || isLoading || openingFamilies === null) return;
     setActiveKey(selectedOpening?.opening_key ?? flatRoots[0]?.opening_key ?? null);
     setOpen(true);
-  }, [disabled, isLoading, openingFamilies, selectedOpening, flatRoots]);
+  }, [disabled, flatRoots, isLoading, openingFamilies, selectedOpening]);
 
   const selectRoot = useCallback(
-    (root: OpeningRootItem | null) => {
-      onSelect(root);
-      setOpen(false);
-      triggerRef.current?.focus();
+    (root: OpeningRootItem) => {
+      captureEvent("drill_opening_selected", {
+        source: "list",
+        opening_key: root.opening_key,
+        depth: root.depth,
+        player_color: playerColor,
+      });
+      onSelect({ opening: root, line: null });
+      closePicker();
     },
-    [onSelect],
+    [closePicker, onSelect, playerColor],
+  );
+
+  const confirmTreeSelection = useCallback(
+    (selection: OpeningPickerSelection) => {
+      onSelect(selection);
+      closePicker();
+    },
+    [closePicker, onSelect],
   );
 
   // The active option must stay within the filtered list, otherwise Enter has
-  // no target after the active row is filtered out. Derive it (rather than store
-  // it) so narrowing the filter falls back to the first visible row.
-  const resolvedActiveKey = flatRoots.some((r) => r.opening_key === activeKey)
+  // no target after the active row is filtered out.
+  const resolvedActiveKey = flatRoots.some((root) => root.opening_key === activeKey)
     ? activeKey
     : (flatRoots[0]?.opening_key ?? null);
 
-  const handleListKeyDown = (e: React.KeyboardEvent) => {
+  const handleListKeyDown = (event: React.KeyboardEvent) => {
     if (flatRoots.length === 0) return;
-    const idx = flatRoots.findIndex((r) => r.opening_key === resolvedActiveKey);
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      const next = flatRoots[Math.min(flatRoots.length - 1, idx + 1)] ?? flatRoots[0];
+    const index = flatRoots.findIndex(
+      (root) => root.opening_key === resolvedActiveKey,
+    );
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const next =
+        flatRoots[Math.min(flatRoots.length - 1, index + 1)] ?? flatRoots[0];
       setActiveKey(next.opening_key);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      const prev = flatRoots[Math.max(0, idx - 1)] ?? flatRoots[0];
-      setActiveKey(prev.opening_key);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const previous =
+        flatRoots[Math.max(0, index - 1)] ?? flatRoots[0];
+      setActiveKey(previous.opening_key);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
       const active =
-        flatRoots.find((r) => r.opening_key === resolvedActiveKey) ?? flatRoots[0];
+        flatRoots.find((root) => root.opening_key === resolvedActiveKey) ??
+        flatRoots[0];
       if (active) selectRoot(active);
     }
   };
 
-  // null families while not loading means the fetch failed.
   const loadFailed = !isLoading && openingFamilies === null;
-  // A selection wins over loading/failed so an ad-hoc card drill shows its
-  // synthesized name even when the roots list is still loading or failed.
   const triggerLabel = selectedOpening
     ? rootLabel(selectedOpening)
     : isLoading
@@ -274,6 +421,29 @@ const OpeningPicker = ({
       : loadFailed
         ? "Failed to load openings"
         : "Select opening";
+
+  const toggle = (
+    <div className="opening-picker__toggle segmented-toggle" role="tablist">
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "list"}
+        className={`chess-button toggle${mode === "list" ? " active" : ""}`}
+        onClick={() => setMode("list")}
+      >
+        List
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "tree"}
+        className={`chess-button toggle${mode === "tree" ? " active" : ""}`}
+        onClick={() => setMode("tree")}
+      >
+        Tree
+      </button>
+    </div>
+  );
 
   return (
     <div className="opening-picker">
@@ -283,131 +453,125 @@ const OpeningPicker = ({
         className="opening-picker__trigger"
         role="combobox"
         aria-expanded={open}
-        aria-controls="opening-picker-popover"
-        aria-haspopup="listbox"
+        aria-controls={activePanelId}
+        aria-haspopup={mode === "tree" ? "dialog" : "listbox"}
         disabled={disabled || isLoading || loadFailed}
-        onClick={() => (open ? setOpen(false) : openPopover())}
+        onClick={() => (open ? closePicker() : openPicker())}
       >
         <span className="opening-picker__trigger-label">{triggerLabel}</span>
-        <span className="opening-picker__trigger-caret" aria-hidden="true">▾</span>
+        <span className="opening-picker__trigger-caret" aria-hidden="true">
+          ▾
+        </span>
       </button>
 
       {open &&
         createPortal(
-          <div
-            ref={popoverRef}
-            id="opening-picker-popover"
-            className="opening-picker__popover"
-            style={popoverStyle}
-          >
-            <div className="opening-picker__toggle segmented-toggle" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "list"}
-                className={`chess-button toggle${mode === "list" ? " active" : ""}`}
-                onClick={() => setMode("list")}
-              >
-                List
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={mode === "board"}
-                className={`chess-button toggle${mode === "board" ? " active" : ""}`}
-                onClick={() => setMode("board")}
-              >
-                Board
-              </button>
-            </div>
-
-            {mode === "list" ? (
-              <>
-                <input
-                  ref={searchRef}
-                  type="search"
-                  className="opening-picker__search"
-                  placeholder="Search openings..."
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={handleListKeyDown}
-                />
-                <div className="opening-picker__list" role="listbox">
-                  {flatRoots.length === 0 ? (
-                    <div className="opening-picker__empty">No openings found</div>
-                  ) : (
-                    filteredFamilies.map((family) => (
-                      <div key={family.family_name} className="opening-picker__group">
-                        <div className="opening-picker__group-label">
-                          {family.family_name}
-                        </div>
-                        {family.roots.map((root) => {
-                          const isSelected =
-                            root.opening_key === selectedOpening?.opening_key;
-                          const isActive = root.opening_key === resolvedActiveKey;
-                          return (
-                            <div
-                              key={root.opening_key}
-                              role="option"
-                              aria-selected={isSelected}
-                              className={`opening-picker__row${
-                                isActive ? " opening-picker__row--active" : ""
-                              }${isSelected ? " opening-picker__row--selected" : ""}`}
-                              onMouseEnter={() => setActiveKey(root.opening_key)}
-                              onClick={() => selectRoot(root)}
-                            >
-                              {rootLabel(root)}
-                            </div>
-                          );
-                        })}
+          mode === "list" ? (
+            <div
+              ref={popoverRef}
+              id={listPanelId}
+              className="opening-picker__popover opening-picker__popover--list"
+              style={popoverStyle}
+            >
+              {toggle}
+              <input
+                ref={searchRef}
+                type="search"
+                className="opening-picker__search"
+                placeholder="Search openings..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={handleListKeyDown}
+              />
+              <div className="opening-picker__list" role="listbox">
+                {flatRoots.length === 0 ? (
+                  <div className="opening-picker__empty">No openings found</div>
+                ) : (
+                  filteredFamilies.map((family) => (
+                    <div
+                      key={family.family_name}
+                      className="opening-picker__group"
+                    >
+                      <div className="opening-picker__group-label">
+                        {family.family_name}
                       </div>
-                    ))
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="opening-picker__board-mode">
-                <div className="opening-picker__board">
-                  <Chessboard
-                    options={{
-                      position: boardFen,
-                      onPieceDrop: handleBoardDrop,
-                      allowDragging: true,
-                    }}
-                  />
-                </div>
-                <div className="opening-picker__board-controls">
-                  <button
-                    type="button"
-                    className="chess-button"
-                    onClick={handleBoardUndo}
-                    disabled={moveStack.length === 0}
-                  >
-                    Undo
-                  </button>
-                  <button
-                    type="button"
-                    className="chess-button"
-                    onClick={handleBoardReset}
-                    disabled={moveStack.length === 0}
-                  >
-                    Reset
-                  </button>
-                </div>
-                {boardMatch && (
-                  <div className="opening-picker__match">{rootLabel(boardMatch)}</div>
-                )}
-                {boardMessage && (
-                  <div className="opening-picker__match opening-picker__match--none">
-                    {boardMessage}
-                  </div>
-                )}
-                {moveStack.length > 0 && (
-                  <div className="opening-picker__moves">{moveStack.join(" ")}</div>
+                      {family.roots.map((root) => {
+                        const isSelected =
+                          root.opening_key === selectedOpening?.opening_key;
+                        const isActive =
+                          root.opening_key === resolvedActiveKey;
+                        return (
+                          <div
+                            key={root.opening_key}
+                            role="option"
+                            aria-selected={isSelected}
+                            className={`opening-picker__row${
+                              isActive ? " opening-picker__row--active" : ""
+                            }${
+                              isSelected
+                                ? " opening-picker__row--selected"
+                                : ""
+                            }`}
+                            onMouseEnter={() =>
+                              setActiveKey(root.opening_key)
+                            }
+                            onClick={() => selectRoot(root)}
+                          >
+                            {rootLabel(root)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))
                 )}
               </div>
-            )}
-          </div>,
+            </div>
+          ) : (
+            <div
+              className="opening-picker__tree-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) closePicker();
+              }}
+            >
+              <div
+                ref={popoverRef}
+                id={treePanelId}
+                className="opening-picker__tree-modal"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Choose an opening from the tree"
+                tabIndex={-1}
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <div className="opening-picker__tree-chrome">
+                  {toggle}
+                  <button
+                    ref={closeRef}
+                    type="button"
+                    className="chess-button"
+                    onClick={closePicker}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="opening-picker__tree-body">
+                  <OpeningPickerTree
+                    key={`${playerColor}\u0000${
+                      selectedOpening?.opening_key ?? ""
+                    }\u0000${
+                      selectedLine === null
+                        ? "<registered>"
+                        : selectedLine.join("\u0000")
+                    }`}
+                    playerColor={playerColor}
+                    selectedOpening={selectedOpening}
+                    selectedLine={selectedLine}
+                    onConfirm={confirmTreeSelection}
+                  />
+                </div>
+              </div>
+            </div>
+          ),
           document.body,
         )}
     </div>
