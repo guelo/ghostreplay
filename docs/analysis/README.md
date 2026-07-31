@@ -1,17 +1,18 @@
 # Analysis benchmark results
 
-Committed JSONL from the two-search grading benchmark
+Committed results from the two-search grading benchmark
 (bead `g-two-search-grade` §10; the browser half is `g-grade-device-runner`).
 
-Both harnesses write the SAME schema — `src/bench/benchRecord.ts`,
-`BENCH_SCHEMA_VERSION` — so a device run and a Node corpus run are directly
-comparable:
+The device harness and the Node harness's **current-protocol pass** write the
+SAME JSONL schema — `src/bench/benchRecord.ts`, `BENCH_SCHEMA_VERSION` — so their
+correctness and phase counters are directly comparable. The Node harness also
+writes a separate typed JSON artifact for the two depth-26/27 references:
 
 - **browser device runner** (`src/bench/device/`, this bead) — the only source of
   iPhone/Safari and Android/Chrome timing. Loads the actual bundled
   `analysisWorker` and measures the shipping orchestration.
-- **Node corpus harness** (`g-grade-corpus-harness`, not yet built) — correctness
-  vectors, the 200-position corpus, and the depth-26/27 references.
+- **Node corpus harness** (`src/bench/node/`) — 224 checked-in correctness
+  vectors and the two independent depth-26/27 references.
 
 Never quote Node timing as mobile evidence (§10.1).
 
@@ -23,6 +24,8 @@ Never quote Node timing as mobile evidence (§10.1).
 | `device-baseline-cold-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode cold` (fresh worker per measurement) |
 | `device-baseline-warm-desktop-chromium-*.jsonl` | Desktop control, smoke set, `--mode sequence --warmup` — the warm pair for the file above |
 | `kill-gate-best30-android-pixel-7-pro-2026-07-30.jsonl` | **The mobile kill gate** — both arms, `best-30`, 4 repeats, on the declared Pixel 7 Pro. Verdict below |
+| `grade-corpus-current-*.jsonl` | Shipping depth-17 protocol over every checked-in corpus row; same records and file-level checks as the device harness |
+| `grade-corpus-references-*.json` | Primary root-26/restricted-27 and bias root-27/post-26 references, dual-reference adjudication, and the unadjudicable-rate gate |
 
 Gate evidence (`plan.positionSetId === 'best-30'`) is registered in
 `KILL_GATE_EVIDENCE` (`src/bench/killGate.ts`) and held to the preconditions
@@ -114,6 +117,56 @@ from every summary statistic — they are visible, not hidden, and not counted.
 `workerBootMs` is recorded separately on each block's first row (and on any row
 that follows a mid-run worker rebuild), so worker construction is never buried
 inside a move's latency.
+
+## Running the Node corpus harness
+
+The harness imports the exact `stockfish@18.0.7` Lite single-thread WASM used by
+production, sets `Hash=128`, and performs one `ucinewgame`/`isready` barrier per
+independent corpus row. Related phases intentionally share the transposition
+table. Full evidence runs refuse a dirty tree, a corpus slice, a depth override,
+an output outside this directory, or an existing output path. That final-path
+check happens before Stockfish starts.
+
+After each row, the runner atomically replaces a hidden sibling
+`.NAME.checkpoint.json`. Repeating the exact command resumes from the next row
+only when the checkpoint still matches the mode, corpus digest and row order,
+source revision/dirty state, slice, and depths. The checkpoint is ignored by
+Git, retained after interruption or final-validation failure, and removed only
+after the complete JSON/JSONL validates and is atomically published. Reference
+searches use a one-hour per-search ceiling; an engine failure declines only the
+primary or bias observation that failed, preserving the other observation.
+
+Run the shipping protocol at its fixed depth 17:
+
+```bash
+npm run bench:corpus -- \
+  --mode current \
+  --output docs/analysis/grade-corpus-current-<date>.jsonl
+```
+
+Run both fixed references. This is the expensive pass: primary root 26 followed
+by restricted MultiPV 2 at 27, plus the independently reset bias reference at
+root 27/post-played 26 and restricted resolution 27 when required.
+
+```bash
+npm run bench:corpus -- \
+  --mode references \
+  --output docs/analysis/grade-corpus-references-<date>.json
+```
+
+Use a shallow slice only to diagnose the harness. Diagnostic output is marked
+incomplete, must live outside this directory, and is never evidence:
+
+```bash
+npm run bench:corpus -- \
+  --mode references --diagnostic --depth 6 --limit 4 \
+  --output /tmp/grade-corpus-references-d6.json
+```
+
+Regenerate the corpus with
+`node scripts/bench/generate-node-corpus.mjs`. Its test pins the exact byte
+digest, proves all 224 FEN/move pairs are legal and unique, and checks the named
+terminal and regression vectors.
 
 ## Cool down between blocks — every run, not just a comparison
 

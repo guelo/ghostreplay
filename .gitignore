@@ -72,3 +72,7 @@ backend/scripts/fixtures/cohort_provenance.json.tmp-*
 .beads/proxieddb/
 /tmp/
 /backend/.tmp/
+
+# Resumable corpus captures checkpoint beside their final analysis artifact.
+# The final JSON/JSONL is reviewed and committed; an in-progress checkpoint is not.
+/docs/analysis/.*.checkpoint.json

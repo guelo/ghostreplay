@@ -24,7 +24,8 @@
     "bench:device:build": "BENCH=1 vite build",
     "bench:device:preview": "vite preview --host",
     "bench:device:dev": "vite --host",
-    "bench:baseline": "node scripts/bench/run-device-baseline.mjs"
+    "bench:baseline": "node scripts/bench/run-device-baseline.mjs",
+    "bench:corpus": "node scripts/bench/run-node-corpus.mjs"
   },
   "dependencies": {
     "@posthog/react": "^1.10.2",

@@ -1,0 +1,3075 @@
+{
+  "schemaVersion": 1,
+  "description": "GhostReplay two-search grading corpus (g-grade-corpus-harness)",
+  "positions": [
+    {
+      "id": "regression-1e4",
+      "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      "playedMove": "e2e4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "regression-1e4",
+        "drill-0cp"
+      ],
+      "label": "1.e4 root/post-horizon regression",
+      "source": "g-two-search-grade §10.3"
+    },
+    {
+      "id": "regression-g-kgiq-nb6",
+      "fen": "2kr1b1r/pp1q4/2p5/P1P2p2/2NP2pp/8/1B3PPP/R2QR1K1 w - - 0 22",
+      "playedMove": "c4b6",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-excellent",
+        "regression-g-kgiq",
+        "depth-best-change"
+      ],
+      "label": "g-kgiq 22.Nb6+ root/post ordering regression",
+      "source": "session aa05b29f-4409-4713-bd9b-719cdefcdb68, move 22 white"
+    },
+    {
+      "id": "terminal-mate-in-one",
+      "fen": "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1",
+      "playedMove": "f7f8",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "tactical",
+        "target-best",
+        "mate-winning",
+        "mate-in-1",
+        "checkmate",
+        "forced-mate-below-depth"
+      ],
+      "label": "Qf8 checkmate",
+      "source": "constructed terminal vector"
+    },
+    {
+      "id": "terminal-stalemate",
+      "fen": "k7/2Q5/2K5/8/8/8/8/8 w - - 0 1",
+      "playedMove": "c7b6",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "stalemate",
+        "mate-losing",
+        "blunder-boundary-30pct"
+      ],
+      "label": "Qb6 stalemate throws away a winning position",
+      "source": "constructed terminal vector"
+    },
+    {
+      "id": "terminal-insufficient-material",
+      "fen": "8/8/8/8/8/2k5/1b6/K1B5 w - - 0 1",
+      "playedMove": "c1b2",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best",
+        "insufficient-material"
+      ],
+      "label": "Bxb2 leaves king and bishop versus king",
+      "source": "constructed terminal vector"
+    },
+    {
+      "id": "single-legal-move-block",
+      "fen": "7k/8/8/8/8/8/5RPP/r6K w - - 0 1",
+      "playedMove": "f2f1",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "tactical",
+        "target-best",
+        "single-legal-move"
+      ],
+      "label": "Rf1 is the only legal response to the rook check",
+      "source": "constructed single-legal-move vector"
+    },
+    {
+      "id": "mate-winning-preserved",
+      "fen": "6k1/5ppp/8/8/8/5Q2/5PPP/6K1 w - - 0 1",
+      "playedMove": "f3a8",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "tactical",
+        "mate-winning",
+        "target-best"
+      ],
+      "label": "Winning-mate candidate",
+      "source": "constructed mate-transition vector"
+    },
+    {
+      "id": "mate-winning-lost",
+      "fen": "6k1/5ppp/8/8/8/5Q2/5PPP/6K1 w - - 0 1",
+      "playedMove": "f3f6",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "tactical",
+        "mate-losing",
+        "target-mistake",
+        "win-chance-20pct"
+      ],
+      "label": "Winning-mate loss candidate",
+      "source": "constructed mate-transition vector"
+    },
+    {
+      "id": "mate-sign-change",
+      "fen": "r3r1k1/ppp2ppp/2n5/8/8/2P2Q2/PP3PPP/R3R1K1 w - - 0 1",
+      "playedMove": "f3f7",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "mate-changing",
+        "target-blunder",
+        "win-chance-30pct"
+      ],
+      "label": "Mate-sign-change candidate",
+      "source": "constructed mate-transition vector"
+    },
+    {
+      "id": "threshold-recording-50cp",
+      "fen": "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2PP1N2/PP3PPP/RNBQ1RK1 w - - 2 7",
+      "playedMove": "a2a3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good",
+        "recording-50cp",
+        "drill-50cp"
+      ],
+      "label": "50cp recording/drill boundary candidate",
+      "source": "Italian middlegame vector"
+    },
+    {
+      "id": "threshold-drill-10cp",
+      "fen": "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2PP1N2/PP3PPP/RNBQ1RK1 w - - 2 7",
+      "playedMove": "h2h3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "drill-10cp",
+        "win-chance-02pct"
+      ],
+      "label": "10cp drill / 2% win-chance boundary candidate",
+      "source": "Italian middlegame vector"
+    },
+    {
+      "id": "threshold-drill-25cp",
+      "fen": "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2PP1N2/PP3PPP/RNBQ1RK1 w - - 2 7",
+      "playedMove": "b1d2",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good",
+        "drill-25cp",
+        "win-chance-10pct"
+      ],
+      "label": "25cp drill / 10% win-chance boundary candidate",
+      "source": "Italian middlegame vector"
+    },
+    {
+      "id": "threshold-tactical-blunder",
+      "fen": "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2PP1N2/PP3PPP/RNBQ1RK1 w - - 2 7",
+      "playedMove": "c4f7",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-blunder",
+        "win-chance-30pct",
+        "blunder-boundary-30pct"
+      ],
+      "label": "Bxf7 tactical blunder candidate",
+      "source": "Italian middlegame vector"
+    },
+    {
+      "id": "eco-001-a00",
+      "fen": "rnbqkbnr/pppp1ppp/8/8/3p3P/8/PPP1PPP1/RNBQKBNR w KQkq - 0 3",
+      "playedMove": "c2c3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct",
+        "depth-best-change"
+      ],
+      "label": "A00 Kádas Opening: Kádas Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-002-a00",
+      "fen": "r1bqkbnr/pp1ppppp/2n5/8/3p4/2N2N2/PPP1PPPP/R1BQKB1R w KQkq - 0 4",
+      "playedMove": "f3d4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "A00 Van Geet Opening: Sicilian Two Knights",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-003-a02",
+      "fen": "rnbqkbnr/ppppp1pp/8/5p2/4PP2/8/PPPP2PP/RNBQKBNR b KQkq - 0 2",
+      "playedMove": "g8f6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "A02 Bird Opening: Wagner-Zwitersch Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-004-a04",
+      "fen": "r1bqkbnr/pppppppp/n7/8/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 2",
+      "playedMove": "g7g5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "A04 Zukertort Defense: Sicilian Knight Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-005-a06",
+      "fen": "rnbqkbnr/pp2pppp/8/2p5/2p5/1P3N2/P2PPPPP/RNBQKB1R w KQkq - 0 4",
+      "playedMove": "b1a3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "A06 Zukertort Opening: Regina-Nu Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-006-a09",
+      "fen": "r1bqkbnr/ppp1pppp/2n5/8/2Pp4/5NP1/PP1PPP1P/RNBQKB1R w KQkq - 1 4",
+      "playedMove": "f3g1",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "A09 Reti: Advance, 3.g3 Nc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-007-a12",
+      "fen": "rn1qkb1r/pp2pppp/2p2n2/3p4/2P3b1/1P3NP1/P2PPPBP/RNBQK2R b KQkq - 2 5",
+      "playedMove": "e7e6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "A12 English: Torre Defence",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-008-a16",
+      "fen": "rnbqkb1r/pppppppp/5n2/8/2P5/2N5/PP1PPPPP/R1BQKBNR b KQkq - 2 2",
+      "playedMove": "c7c5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "A16 English, Symmetrical",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-009-a20",
+      "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/2P5/6P1/PP1PPPBP/RNBQK1NR b KQkq - 2 3",
+      "playedMove": "a7a6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "A20 English: King's, 2.g3 Nf6 3.Bg2 Nc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-010-a25",
+      "fen": "r1bqk2r/pppp1ppp/2n2n2/4p3/1bP5/2N3P1/PP1PPPBP/R1BQK1NR w KQkq - 3 5",
+      "playedMove": "b2b3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "A25 English: Closed",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-011-a30",
+      "fen": "rn1qkb1r/pb1ppppp/1p3n2/2p5/2P5/5NP1/PP1PPPBP/RNBQK2R w KQkq - 2 5",
+      "playedMove": "f3d4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "A30 English: Symmetrical, b6 System",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-012-a34",
+      "fen": "rnbqkb1r/pp2pppp/5n2/2pP4/8/2N3P1/PP1PPP1P/R1BQKBNR b KQkq - 0 4",
+      "playedMove": "g7g5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "A34 English: Symmetrical, 2...Nf6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-013-a38",
+      "fen": "r1bq1rk1/pp1pppbp/2n2np1/2p5/2P5/2N2NP1/PP1PPPBP/R1BQ1RK1 w - - 2 7",
+      "playedMove": "d2d3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "A38 English Opening: Symmetrical Variation, Duchamp Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-014-a40",
+      "fen": "rnbqk1nr/ppppppbp/6p1/8/2PP4/5N2/PP2PPPP/RNBQKB1R b KQkq - 2 3",
+      "playedMove": "c7c5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "A40 Queen's Pawn: Modern",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-015-a41",
+      "fen": "rn1qk1nr/ppp1ppbp/3p2p1/8/2PP2b1/2N1PN2/PP3PPP/R1BQKB1R b KQkq - 0 5",
+      "playedMove": "a7a5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "A41 Neo-Old Indian: Modern, 3.Nc3 Bg7 4.Nf3 Bf4 5.e3 Nc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-016-a44",
+      "fen": "rnbqkbnr/pp3ppp/3p4/2pPp3/2P1P3/8/PP3PPP/RNBQKBNR b KQkq - 0 4",
+      "playedMove": "c8d7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "A44 Old Benoni: Czech, 3.c4 d6 4.e4 Be7",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-017-a45",
+      "fen": "rnbqkb1r/ppp1pppp/3p4/8/3PP1n1/8/PPP1BP1P/RNBQK1NR b KQkq - 1 4",
+      "playedMove": "c8f5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "A45 Indian Defense: Gibbins-Weidenhagen Gambit Accepted",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-018-a47",
+      "fen": "rnbqkb1r/p1pppppp/1p3n2/8/3P4/2P2N2/PP2PPPP/RNBQKB1R b KQkq - 0 3",
+      "playedMove": "b8a6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "A47 Indian Defense: Schnepper Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-019-a52",
+      "fen": "rnbqk2r/pppp1ppp/8/2b1P3/2P3n1/5N2/PP2PPPP/RNBQKB1R w KQkq - 3 5",
+      "playedMove": "e2e3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "A52 Budapest: Adler, 4...Bc5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-020-a56",
+      "fen": "rnbqkb1r/pp1ppppp/5n2/2pP4/2P5/8/PP2PPPP/RNBQKBNR b KQkq - 0 3",
+      "playedMove": "a7a6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct",
+        "depth-best-change"
+      ],
+      "label": "A56 Benoni: 3.d5 a6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-021-a59",
+      "fen": "rn1qk2r/4ppbp/3p1np1/2pP4/4P3/2N2N2/PP3PPP/R1BQ1K1R w kq - 2 10",
+      "playedMove": "c1f4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "A59 Benko Gambit: 7.e4 Line, 9.Nf3 Bg7 10.h3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-022-a66",
+      "fen": "rnbqk2r/pp3pbp/3p1np1/2pP4/4PP2/2N5/PP4PP/R1BQKBNR w KQkq - 1 8",
+      "playedMove": "f1a6",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "A66 Benoni Defense: Mikenas Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-023-a72",
+      "fen": "rnbq1rk1/pp3pbp/3p1np1/2pP2B1/4P3/2N2N2/PP2BPPP/R2QK2R b KQ - 5 9",
+      "playedMove": "d8b6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "A72 Benoni: Classical, 8.Be2 O-O 9.Bg5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-024-a80",
+      "fen": "rnbqkb1r/ppp3pp/4pn2/3p1p2/3P4/5NP1/PPP1PPBP/RNBQK2R w KQkq - 0 5",
+      "playedMove": "c1d2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "A80 Dutch: 2.Nf3 e6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-025-a86",
+      "fen": "rnbqk2r/ppppp1bp/5np1/5p2/2PP4/2N3P1/PP2PPBP/R1BQK1NR b KQkq - 3 5",
+      "playedMove": "e8g8",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "A86 Dutch: Leningrad, 4.Bg2 Bg7 5.Nc3 O-O",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-026-a94",
+      "fen": "rnbq1rk1/pp4pp/2p1pn2/3p1p2/2PP4/bP3NP1/P3PPBP/RN1Q1RK1 w - - 0 9",
+      "playedMove": "b1a3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "A94 Dutch: Stonewall, Botvinnik, 8.Ba3 Bxa3 9.Nxa3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-027-b00",
+      "fen": "r1bqkbnr/ppppp1pp/2n5/5p2/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 3",
+      "playedMove": "f3h4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "B00 Nimzowitsch Defense: Colorado Countergambit Accepted",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-028-b01",
+      "fen": "rnbqkbnr/ppp2ppp/8/3Pp3/8/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 3",
+      "playedMove": "d1f3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "B01 Scandinavian: Boehnke Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-029-b01",
+      "fen": "rn1qkb1r/ppp1pppp/1n6/8/2PP2b1/5N2/PP2BPPP/RNBQK2R b KQkq - 4 6",
+      "playedMove": "d8d5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "B01 Scandinavian: Marshall, 4.c4 Nb6 5.Nf3 Bg4 6.Be2 e6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-030-b03",
+      "fen": "rnbqk2r/pp2ppbp/1n1p2p1/8/2PP4/5N2/PP2BPPP/RNBQK2R w KQkq - 2 8",
+      "playedMove": "d1d3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "B03 Alekhine: Exchange, 5...cxd6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-031-b06",
+      "fen": "rnbqk1nr/ppppppbp/6p1/8/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3",
+      "playedMove": "b7b6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "B06 Modern Defense: Mongredien Defense, with Nf3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-032-b07",
+      "fen": "r1bqkb1r/pppnpppp/3p1n2/8/3PPP2/2N5/PPP3PP/R1BQKBNR b KQkq - 0 4",
+      "playedMove": "e7e5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "B07 Lion Defense: Anti-Philidor, Lion's Cave",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-033-b10",
+      "fen": "rnbqkbnr/pp2pppp/2p5/3p4/4P3/2N5/PPPP1PPP/R1BQKBNR w KQkq - 0 3",
+      "playedMove": "a1b1",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "B10 Caro-Kann Defense: Goldman Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-034-b12",
+      "fen": "rn1qkbnr/pp3ppp/2p1p3/3pPb2/3P4/5N2/PPP2PPP/RNBQKB1R w KQkq - 0 5",
+      "playedMove": "e1d2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "B12 Caro-Kann: Advance, 4.Nf3 e6 5.Be2",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-035-b15",
+      "fen": "rnbqkbnr/pp2pppp/2p5/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR b KQkq - 1 3",
+      "playedMove": "e7e6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "B15 Caro-Kann Defense: Gurgenidze Counterattack",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-036-b19",
+      "fen": "rn1qkb1r/pp2ppp1/2p2nbp/4N3/3P3P/6N1/PPP2PP1/R1BQKB1R b KQkq - 3 8",
+      "playedMove": "c6c5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "B19 Caro-Kann: Classical, 7.Nf3 Nf6 8.Ne5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-037-b21",
+      "fen": "r1bqkbnr/pp1ppppp/2n5/2p5/4PP2/5N2/PPPP2PP/RNBQKB1R b KQkq - 2 3",
+      "playedMove": "e7e6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "B21 Sicilian: Grand Prix, 2...Nc6 3.Nf3 e6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-038-b22",
+      "fen": "r1b1kbnr/pp2pppp/2n5/3q4/3P4/8/PP3PPP/RNBQKBNR w KQkq - 1 6",
+      "playedMove": "g1f3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "B22 Sicilian: Alapin, 2...d5 3.exd5 Qxd5 4.d4 cxd4 5.cxd4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-039-b26",
+      "fen": "r1bqk1nr/pp2ppbp/2np2p1/2p5/4P3/2NP2P1/PPP2PBP/R1BQK1NR w KQkq - 0 6",
+      "playedMove": "d1f3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct",
+        "depth-best-change"
+      ],
+      "label": "B26 Sicilian Defense: Closed",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-040-b30",
+      "fen": "r1bqkbnr/pp1p1ppp/2n1p3/2p5/4P3/3P1NP1/PPP2P1P/RNBQKB1R b KQkq - 0 4",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "B30 Sicilian: 2...Nc6 3.g3 e6 4.d3 d5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-041-b33",
+      "fen": "r1bqk2r/5pbp/p1np4/1p1NpP2/8/N1P5/PP3PPP/R2QKB1R b KQkq - 0 12",
+      "playedMove": "d8h4",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "B33 Sicilian: Pelikan, Sveshnikov, 11.c3 Bg7 12.exf5 Bxf5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-042-b44",
+      "fen": "r1bqkb1r/pp3ppp/2nppn2/1N6/2P1P3/8/PP3PPP/RNBQKB1R w KQkq - 1 7",
+      "playedMove": "d1d6",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "B44 Sicilian, Taimanov, Szen, 7.N5c3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-043-b48",
+      "fen": "r1b1kb1r/1pqp1ppp/p1n1pn2/8/3NP3/2NBB3/PPP2PPP/R2Q1RK1 b kq - 3 8",
+      "playedMove": "c6e5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "B48 Sicilian: Taimanov, 6.Be3 a6 7.Bd3 Nf6 8.O-O Ne5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-044-b52",
+      "fen": "r3kbnr/pp1qpppp/2np4/2p5/2P1P3/2N2N2/PP1P1PPP/R1BQK2R b KQkq - 2 6",
+      "playedMove": "g8f6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "B52 Sicilian: 3.Bb5+, Sokolsky, 5...Nc6 6.Nc3 Nf6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-045-b58",
+      "fen": "r1bq1rk1/pp2bpp1/2np1n1p/4p3/4P3/2N2N1P/PPP1BPP1/R1BQR1K1 b - - 0 10",
+      "playedMove": "c8h3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "B58 Sicilian: Boleslavsky, 7.Nf3, 9.Re1 O-O 10.h3 a6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-046-b67",
+      "fen": "r2qkb1r/1p1b1ppp/p1nppn2/6B1/3NPP2/2N5/PPPQ2PP/2KR1B1R b kq - 0 9",
+      "playedMove": "h7h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "B67 Sicilian: Richter-Rauzer, 7...a6, 9.f4 b5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-047-b76",
+      "fen": "r1bq1rk1/p3ppbp/2p3p1/3n4/8/2N1BP2/PPPQ2PP/2KR1B1R w - - 0 12",
+      "playedMove": "c3a4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "B76 Sicilian: Dragon, Yugoslav, 9.O-O-O d5: 12.Nxd5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-048-b83",
+      "fen": "rnbqkb1r/pp3ppp/3ppn2/8/3NP3/2N5/PPP1BPPP/R1BQK2R b KQkq - 1 6",
+      "playedMove": "e8d7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "B83 Sicilian: Scheveningen, 6.Be2",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-049-b91",
+      "fen": "rnbqkb1r/1p2pppp/p2p1n2/8/3NP3/2N3P1/PPP2P1P/R1BQKB1R b KQkq - 0 6",
+      "playedMove": "e7e5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "B91 Sicilian: Najdorf, 6.g3 e5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-050-b96",
+      "fen": "rnb1kb1r/2q2ppp/p3pP2/1p4B1/3N4/2N5/PPP3PP/R2QKB1R b KQkq - 0 10",
+      "playedMove": "c7e5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "B96 Polugaevsky Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-051-c01",
+      "fen": "rnbqkb1r/ppp2ppp/5n2/3p4/2PP4/2N5/PP3PPP/R1BQKBNR b KQkq - 2 5",
+      "playedMove": "a7a5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "C01 French: Exchange, 4.c4 Nf6 5.Nc3 c6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-052-c06",
+      "fen": "r1b1kb1r/pp1n1ppp/1qn1p3/3pP3/3P4/3B4/PP1NNPPP/R1BQK2R w KQkq - 1 9",
+      "playedMove": "b2b3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "C06 French: Tarrasch, Closed, 8...Qb6 9.O-O",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-053-c10",
+      "fen": "r2qkb1r/pppn1ppp/2b1pn2/8/3PN3/3B1N2/PPP2PPP/R1BQ1RK1 w kq - 7 8",
+      "playedMove": "g2g3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "C10 French: Rubinstein, 4...Bd7 5.Nf3 Bc6 6.Bd3 Nd7 7.O-O Ngf6 8.Ng3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-054-c14",
+      "fen": "rnb1k2r/pppnqppp/4p3/3pP3/3P1P2/2N5/PPP3PP/R2QKBNR b KQkq - 0 7",
+      "playedMove": "c7c5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "C14 French: Classical, Steinitz, 7...a6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-055-c18",
+      "fen": "r1bqk2r/pp2nppp/2n1p3/2ppP3/3P3P/P1P5/2P2PP1/R1BQKBNR w KQkq - 1 8",
+      "playedMove": "g1f3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "C18 French: Winawer, 6...Ne7 7.h4 Nbc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-056-c21",
+      "fen": "rnbqkbnr/pppp1ppp/8/8/3pP3/2P5/PP3PPP/RNBQKBNR b KQkq - 0 3",
+      "playedMove": "g8e7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "C21 Danish Gambit Accepted: Svenonius Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-057-c23",
+      "fen": "rnbqk1nr/pppp1ppp/8/8/2BPP2b/5N2/P1P4p/RNBQ1RK1 w kq - 0 9",
+      "playedMove": "g1g2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "C23 Bishop's Opening: Four Pawns Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-058-c26",
+      "fen": "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/2N3P1/PPPP1P1P/R1BQKBNR b KQkq - 0 3",
+      "playedMove": "d7d5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct",
+        "depth-best-change"
+      ],
+      "label": "C26 Vienna: Smyslov, 3...Nc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-059-c30",
+      "fen": "rnbqk1nr/pppp1ppp/8/2b1p3/4PP2/8/PPPP2PP/RNBQKBNR w KQkq - 1 3",
+      "playedMove": "c2c3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "C30 King's Gambit Declined: Classical Variation, Walthoffen Attack",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-060-c33",
+      "fen": "rnbqkbnr/pppp1ppp/8/8/2B1Pp2/8/PPPP2PP/RNBQK1NR b KQkq - 1 3",
+      "playedMove": "f7f6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "C33 King's Gambit Accepted: Bishop's Gambit, Cozio Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-061-c37",
+      "fen": "rnbqkbnr/pppp1p1p/8/4N3/2B1Ppp1/8/PPPP2PP/RNBQK2R b KQkq - 1 5",
+      "playedMove": "d8h4",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "C37 King's Gambit Accepted: Salvio Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-062-c39",
+      "fen": "rnb1k2r/ppp2p1p/5n2/3qN3/1b1P1ppP/2N5/PPP3P1/R1BQKB1R w KQkq - 2 9",
+      "playedMove": "e1f2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "C39 KGA: Kieseritsky, Brentano Defence, Kaplanek Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-063-c41",
+      "fen": "rnbqkbnr/ppp2ppp/3p4/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 0 3",
+      "playedMove": "h7h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "C41 Philidor Defense: Philidor Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-064-c42",
+      "fen": "r1bqkb1r/ppp2ppp/2p2n2/8/4P3/8/PPPP1PPP/RNBQKB1R w KQkq - 0 5",
+      "playedMove": "f1d3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "C42 Petrov Defense: Stafford Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-065-c44",
+      "fen": "r1bqkbnr/pppp1ppp/2n5/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq - 0 3",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "C44 Irish Gambit Accepted",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-066-c44",
+      "fen": "r1bq3r/pppp1k1p/2n3p1/2Q5/3pP3/8/PPP2PPP/RNB1K2R b KQ - 0 9",
+      "playedMove": "h7h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "C44 Scotch Game: Cochrane-Shumov Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-067-c47",
+      "fen": "r1bqkb1r/pppp1ppp/2n2n2/4p3/3PP3/2N2N2/PPP2PPP/R1BQKB1R b KQkq - 0 4",
+      "playedMove": "f8b4",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "C47 Four Knights: Scotch, Bogoljubow",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-068-c49",
+      "fen": "r1bq1rk1/pppp1ppp/2n2n2/1B2p3/1b2P3/2NP1N2/PPP2PPP/R1BQ1RK1 b - - 0 6",
+      "playedMove": "d8e7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "C49 Four Knights Game: Spanish Variation, Double Spanish",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-069-c51",
+      "fen": "r1bqk1nr/pppp1ppp/2n5/2b5/2BpP3/2P2N2/P4PPP/RNBQ1RK1 b kq - 1 7",
+      "playedMove": "a7a5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "C51 Italian Game: Evans Gambit, McDonnell Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-070-c54",
+      "fen": "r1bqk2r/pppp1pp1/2n2n1p/2b1p3/2B1P3/3P1N2/PPP2PPP/RNBQ1RK1 w kq - 0 6",
+      "playedMove": "c4f7",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "C54 Italian Game: Classical Variation, Giuoco Pianissimo",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-071-c57",
+      "fen": "r1bq1b1r/ppp3pp/2n1k3/3np3/2B5/5Q2/PPPP1PPP/RNB1K2R w KQ - 2 8",
+      "playedMove": "f3f5",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "C57 Fried Liver Attack",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-072-c60",
+      "fen": "r1bqkbnr/pppp1p1p/2n3p1/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4",
+      "playedMove": "h2h3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "C60 Spanish: Fianchetto, 4.O-O",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-073-c63",
+      "fen": "r1b1kb1r/pp4pp/2p2n2/1B2N3/3Pp2q/8/PPP1Q1PP/R1B1K2R w KQkq - 1 12",
+      "playedMove": "g2g3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "C63 Ruy Lopez: Schliemann Defense, Classical Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-074-c68",
+      "fen": "r1bqkbnr/1ppp1ppp/p1B5/4p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 0 4",
+      "playedMove": "b7c6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "C68 Ruy Lopez: Exchange Variation, Lutikov Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-075-c75",
+      "fen": "r2qkbnr/1ppb1ppp/p1np4/4p3/B2PP3/2P2N2/PP3PPP/RNBQK2R b KQkq - 0 6",
+      "playedMove": "h7h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "C75 Ruy Lopez: Morphy Defense, Modern Steinitz Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-076-c80",
+      "fen": "r1bqkb1r/2p2ppp/p1n5/1p1pP3/4n3/1B3N2/PPP2PPP/RNBQ1RK1 b kq - 0 8",
+      "playedMove": "c8h3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "C80 Ruy Lopez: Open, Main Line",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-077-c85",
+      "fen": "r1bqk2r/1pp1bppp/p1p2n2/4p3/4P3/5N2/PPPP1PPP/RNB1QRK1 b kq - 1 7",
+      "playedMove": "h7h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp",
+        "depth-best-change"
+      ],
+      "label": "C85 Spanish: Closed, Exchange, 7.Qe1 c5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-078-c95",
+      "fen": "r2q1rk1/1bpnbppp/p2p1n2/1p2p3/3PP3/2P2N1P/PPBN1PP1/R1BQR1K1 b - - 4 12",
+      "playedMove": "b5b4",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "C95 Spanish: Closed, Breyer, Main Line",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-079-d00",
+      "fen": "rnbqkb1r/ppp1pppp/5n2/3p2B1/3P4/8/PPP1PPPP/RN1QKBNR w KQkq - 0 3",
+      "playedMove": "e2e3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "D00 Trompowsky: 2...d5 3.e3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-080-d00",
+      "fen": "rnbqk2r/ppp2ppp/4p3/8/3Pn3/2PB4/P1P3PP/R1BQK1NR w KQkq - 0 8",
+      "playedMove": "c1e3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "D00 Pfrang Gambit, BDG",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-081-d03",
+      "fen": "r1bqkb1r/pppn1ppp/4pn2/3p2B1/3P4/4PN2/PPPN1PPP/R2QKB1R b KQkq - 2 5",
+      "playedMove": "d7b8",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "D03 Torre Attack: 3...e6 4.e3 Nbd7",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-082-d07",
+      "fen": "r1b1k1nr/ppp2ppp/2n5/3qp3/3P4/2B1P3/PP3PPP/R2QKBNR b KQkq - 0 7",
+      "playedMove": "c8f5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "D07 QGD: Chigorin, 3.cxd5 Main Line, 7.Bxc3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-083-d11",
+      "fen": "rnbqkb1r/pp2pp1p/2p2np1/3p4/2PP4/5N2/PPQ1PPPP/RNB1KB1R w KQkq - 0 5",
+      "playedMove": "f3d2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "D11 Slav: 4.Qc2 g6 5.Bf4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-084-d16",
+      "fen": "rnbqkb1r/pp2pppp/2p2n2/8/P1pP4/2N2N2/1P2PPPP/R1BQKB1R b KQkq - 0 5",
+      "playedMove": "b7b6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "D16 Slav Defense: Smyslov Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-085-d20",
+      "fen": "rnbqkbnr/ppp1pppp/8/8/2pPP3/8/PP3PPP/RNBQKBNR b KQkq - 0 3",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "D20 Queen's Gambit Accepted: Central Variation, Greco Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-086-d24",
+      "fen": "r1bqkb1r/1pp1pppp/p1n2n2/8/P1pP4/2N2N2/1P2PPPP/R1BQKB1R w KQkq - 1 6",
+      "playedMove": "e2e4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "D24 QGA: 4.Nc3 a6 5.a4 Nc6 5.e4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-087-d28",
+      "fen": "r1bqkb1r/5ppp/p3pn2/1p6/2pP4/2N1PN2/PPQ2PPP/R1BR2K1 b kq - 0 12",
+      "playedMove": "f8a3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "D28 QGA: Classical, 7.Qe2 b5 8.Bb3 Nc6 9.Rd1 c4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-088-d31",
+      "fen": "r2qkbnr/pp2pppp/2n5/8/Q2P4/8/PP2PPPP/1RB1KBNR b Kkq - 0 6",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "D31 Argentinian Gambit, QGD",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-089-d34",
+      "fen": "r1bqkb1r/pp3ppp/2n2n2/2pp4/3P4/2N2NP1/PP2PPBP/R1BQK2R b KQkq - 2 7",
+      "playedMove": "c8g4",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "D34 Tarrasch Defense: Prague Variation, Main Line",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-090-d36",
+      "fen": "r1bqr1k1/pp1nbppp/2p2n2/3p2B1/3P4/2NBP3/PPQ1NPPP/R3K2R w KQ - 5 10",
+      "playedMove": "c2b3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "D36 QGD: Exchange, Main Line, 9.Nge2 Re8 10.O-O",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-091-d40",
+      "fen": "r1bq1rk1/pp3ppp/2nbpn2/2pp4/2PP4/2NBPN2/PP3PPP/R1BQ1RK1 w - - 5 8",
+      "playedMove": "d1e2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "D40 Queen's Gambit Declined: Semi-Tarrasch Defense, Symmetrical Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-092-d44",
+      "fen": "rnbqkb1r/pp3ppp/2p1pn2/6B1/2pPP3/2N2N2/PP3PPP/R2QKB1R b KQkq - 0 6",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "D44 Semi-Slav: Botvinnik, 6.e4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-093-d47",
+      "fen": "r1bqkb1r/p2n1ppp/2p1pn2/1p6/3P4/2N1PN2/PP2BPPP/R1BQK2R b KQkq - 1 8",
+      "playedMove": "e6e5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "D47 Semi-Slav: Meran, Capablanca, 8...Bb7",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-094-d53",
+      "fen": "rnbqkb1r/ppp2ppp/4pn2/3p2B1/2PP4/2N5/PP2PPPP/R2QKBNR b KQkq - 3 4",
+      "playedMove": "f6h5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "D53 Queen's Gambit Declined",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-095-d59",
+      "fen": "rnbq1rk1/p1p1bpp1/1p2p2p/3n4/3P3B/2N1PN2/PP3PPP/R2QKB1R w KQ - 0 9",
+      "playedMove": "h4g5",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "D59 QGD: Tartakower, 8.cxd5 Nxd5 9.Nxd5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-096-d68",
+      "fen": "r1b2rk1/pp1nqppp/2p1p3/8/2BP4/2R1PN2/PP3PPP/3Q1RK1 b - - 0 12",
+      "playedMove": "f7f5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp",
+        "depth-best-change"
+      ],
+      "label": "D68 Queen's Gambit Declined: Orthodox Defense, Classical Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-097-d78",
+      "fen": "rnbq1rk1/pp2ppbp/2p2np1/8/2pP4/1Q3NP1/PP2PPBP/RNB2RK1 w - - 0 8",
+      "playedMove": "b3c4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "D78 Neo-Gruenfeld, 6.O-O c6 7.Qb3 dxc4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-098-d85",
+      "fen": "rnb1k2r/pp2ppbp/6p1/q1p5/3PP3/2P1B3/P2Q1PPP/R3KBNR w KQkq - 2 9",
+      "playedMove": "a1b1",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "D85 Gruenfeld: Exchange, 7.Be3 c5 8.Qd2 Qa5 9.Rb1",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-099-d91",
+      "fen": "rnbqk2r/ppp1ppbp/6p1/3p4/2PPn2B/2N2N2/PP2PPPP/R2QKB1R b KQkq - 5 6",
+      "playedMove": "e8d7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "D91 Gruenfeld: 5.Bg5 Ne4 6.Bh4 Nxc3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-100-d99",
+      "fen": "rn1q1rk1/pppnppbp/6p1/8/3PP1b1/1QN1BN2/PP3PPP/R3KB1R b KQ - 4 9",
+      "playedMove": "b7b6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "D99 Grünfeld Defense: Russian Variation, Yugoslav Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-101-e05",
+      "fen": "rn1q1rk1/1bp1bppp/p3pn2/1p6/3P4/5NP1/PPQ1PPBP/RNB2RK1 w - - 2 10",
+      "playedMove": "c2d2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "E05 Catalan: Open, Classical, 8.Qxc4, 10.Bf4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-102-e11",
+      "fen": "rnbqk2r/pppp1ppp/4pn2/8/1bPP4/5N2/PP1BPPPP/RN1QKB1R b KQkq - 3 4",
+      "playedMove": "b4a3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "E11 Bogo-Indian Defense: Wade-Smyslov Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-103-e12",
+      "fen": "rn1qkb1r/p2p1ppp/bp3n2/2pp4/2P5/P4N2/1PQ1PPPP/RNB1KB1R w KQkq - 0 7",
+      "playedMove": "c4d5",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "E12 Queen's Indian: Petrosian, 4...c5 5.d5 Ba6 6.Qc2",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-104-e15",
+      "fen": "rn1qkb1r/p1pp1ppp/bp2pn2/8/Q1PP4/5NP1/PP2PP1P/RNB1KB1R b KQkq - 2 5",
+      "playedMove": "c7c6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "E15 Queen's Indian: Nimzowitsch, 5.Qa4 c6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-105-e18",
+      "fen": "rn1q1rk1/pbppb1pp/1p2p3/5p2/2PPn3/2N2NP1/PP1BPPBP/R2Q1RK1 w - - 0 9",
+      "playedMove": "b2b3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "E18 Queen's Indian: 7.Nc3 Ne4 8.Bd2 f5 9.d5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-106-e26",
+      "fen": "rnbqk2r/pp1p1ppp/4pn2/2p5/2PP4/P1P5/4PPPP/R1BQKBNR w KQkq - 0 6",
+      "playedMove": "e2e4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "E26 Nimzo-Indian Defense: Sämisch Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-107-e37",
+      "fen": "r1bqk2r/ppp2ppp/2n1p3/3p4/2PPn3/P7/1PQ1PPPP/R1B1KBNR w KQkq - 3 8",
+      "playedMove": "b2b4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "E37 Nimzo-Indian: Classical, Noa, Main Line, 7.Qc2 Nc6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-108-e45",
+      "fen": "rnbqk2r/p1pp1ppp/1p2pn2/8/1bPP4/2N1P3/PP2NPPP/R1BQKB1R b KQkq - 1 5",
+      "playedMove": "b4c3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "E45 Nimzo-Indian Defense: St. Petersburg Variation, Fischer Variation",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-109-e58",
+      "fen": "r1bq1rk1/pp3ppp/2n1pn2/2pp4/1bPP4/P1NBPN2/1P3PPP/R1BQ1RK1 b - - 0 8",
+      "playedMove": "b4c3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best",
+        "win-chance-02pct"
+      ],
+      "label": "E58 Nimzo-Indian: Main Line, 8...Bxc3",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-110-e61",
+      "fen": "rnbq1rk1/pp2ppbp/2pp1np1/8/2PP4/2N2NP1/PP2PPBP/R1BQ1RK1 b - - 1 7",
+      "playedMove": "d8b6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "E61 King's Indian Defense: Fianchetto Variation, Benjamin Defense",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-111-e69",
+      "fen": "r1b2rk1/pp1n1pbp/1qpp1np1/8/2PpP3/2N2NPP/PP3PB1/R1BQR1K1 w - - 0 11",
+      "playedMove": "g3g4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "E69 King's Indian: Fianchetto, Classical, 9.h3 Qb6 10.Re1 exd4",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-112-e75",
+      "fen": "rnbq1rk1/pp3pb1/3ppnpp/2pP2B1/2P1P3/2N2N2/PP2BPPP/R2QK2R w KQ - 0 9",
+      "playedMove": "a1c1",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "E75 King's Indian: Averbakh, 7.d5 e6 8.Nf3 h6 9.Bd2",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-113-e81",
+      "fen": "rnbq1rk1/pp3pbp/3ppnp1/2pP2B1/2P1P3/2N2P2/PP4PP/R2QKBNR w KQ - 0 8",
+      "playedMove": "g5e3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "E81 King's Indian: Saemisch, 5...O-O 6.Bg5 c5 7.d5 e6 8.Qd2",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-114-e90",
+      "fen": "rnbq1rk1/ppp1ppbp/3p1np1/8/2PPP3/2N1BN2/PP3PPP/R2QKB1R b KQ - 3 6",
+      "playedMove": "h7h6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "E90 King's Indian: Larsen, 6...e5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-115-e94",
+      "fen": "r1bq1rk1/ppp2pbp/n2p1np1/4p3/2PPP3/2N2N2/PP2BPPP/R1BQR1K1 b - - 3 8",
+      "playedMove": "c7c6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-best",
+        "win-chance-02pct",
+        "depth-best-change"
+      ],
+      "label": "E94 King's Indian: Glek, 8.Re1 c6",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-116-e99",
+      "fen": "r1bq1rk1/pppnn1bp/3p2p1/3Pp3/2P1Pp2/2N2P2/PP2BBPP/R2QNRK1 b - - 1 12",
+      "playedMove": "g6g5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "win-chance-10pct"
+      ],
+      "label": "E99 King's Indian: Mar del Plata, 10.f3 f5 11.Be3 f4 12.Bf2 g5",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-117-a00",
+      "fen": "r1bqkbnr/ppp1pppp/2n5/3p4/8/2N3P1/PPPPPP1P/R1BQKBNR w KQkq - 0 3",
+      "playedMove": "f1h3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-good",
+        "win-chance-20pct"
+      ],
+      "label": "A00 Hungarian Opening",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-118-a00",
+      "fen": "rnbqkb1r/ppp2ppp/5n2/3pp3/8/PPP5/3PPPPP/RNBQKBNR w KQkq - 1 4",
+      "playedMove": "a1a2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-inaccuracy",
+        "win-chance-30pct"
+      ],
+      "label": "A00 Saragossa Opening",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-119-a04",
+      "fen": "rnbqkbnr/ppppp1pp/8/5p2/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 0 2",
+      "playedMove": "c7c5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "recording-50cp"
+      ],
+      "label": "A04 Lisitsin Gambit",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "eco-120-a06",
+      "fen": "rnbqkbnr/ppp1pppp/8/6N1/4p3/8/PPPP1PPP/RNBQKB1R b KQkq - 1 3",
+      "playedMove": "c8h3",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder",
+        "drill-50cp"
+      ],
+      "label": "A06 Reti: Tennison Gambit Accepted",
+      "source": "JeffML/eco.json f398993004c7a84701e24691573af3c9bd196ffd"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-002",
+      "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+      "playedMove": "d7d6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "1... d6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-003",
+      "fen": "rnbqkbnr/ppp1pppp/3p4/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+      "playedMove": "d2d4",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "2. d4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-004",
+      "fen": "rnbqkbnr/ppp1pppp/3p4/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq - 0 2",
+      "playedMove": "g8f6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "2... Nf6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-005",
+      "fen": "rnbqkb1r/ppp1pppp/3p1n2/8/3PP3/8/PPP2PPP/RNBQKBNR w KQkq - 1 3",
+      "playedMove": "b1c3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "3. Nc3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-006",
+      "fen": "rnbqkb1r/ppp1pppp/3p1n2/8/3PP3/2N5/PPP2PPP/R1BQKBNR b KQkq - 2 3",
+      "playedMove": "g7g6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "3... g6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-007",
+      "fen": "rnbqkb1r/ppp1pp1p/3p1np1/8/3PP3/2N5/PPP2PPP/R1BQKBNR w KQkq - 0 4",
+      "playedMove": "c1e3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "4. Be3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-008",
+      "fen": "rnbqkb1r/ppp1pp1p/3p1np1/8/3PP3/2N1B3/PPP2PPP/R2QKBNR b KQkq - 1 4",
+      "playedMove": "f8g7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "4... Bg7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-009",
+      "fen": "rnbqk2r/ppp1ppbp/3p1np1/8/3PP3/2N1B3/PPP2PPP/R2QKBNR w KQkq - 2 5",
+      "playedMove": "d1d2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "5. Qd2",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-010",
+      "fen": "rnbqk2r/ppp1ppbp/3p1np1/8/3PP3/2N1B3/PPPQ1PPP/R3KBNR b KQkq - 3 5",
+      "playedMove": "c7c6",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "5... c6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-011",
+      "fen": "rnbqk2r/pp2ppbp/2pp1np1/8/3PP3/2N1B3/PPPQ1PPP/R3KBNR w KQkq - 0 6",
+      "playedMove": "f2f3",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "6. f3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-012",
+      "fen": "rnbqk2r/pp2ppbp/2pp1np1/8/3PP3/2N1BP2/PPPQ2PP/R3KBNR b KQkq - 0 6",
+      "playedMove": "b7b5",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "6... b5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-013",
+      "fen": "rnbqk2r/p3ppbp/2pp1np1/1p6/3PP3/2N1BP2/PPPQ2PP/R3KBNR w KQkq - 0 7",
+      "playedMove": "g1e2",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "7. Nge2",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-014",
+      "fen": "rnbqk2r/p3ppbp/2pp1np1/1p6/3PP3/2N1BP2/PPPQN1PP/R3KB1R b KQkq - 1 7",
+      "playedMove": "b8d7",
+      "playerColor": "black",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-excellent",
+        "depth-best-change"
+      ],
+      "label": "7... Nbd7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-015",
+      "fen": "r1bqk2r/p2nppbp/2pp1np1/1p6/3PP3/2N1BP2/PPPQN1PP/R3KB1R w KQkq - 2 8",
+      "playedMove": "e3h6",
+      "playerColor": "white",
+      "phase": "opening",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "8. Bh6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-016",
+      "fen": "r1bqk2r/p2nppbp/2pp1npB/1p6/3PP3/2N2P2/PPPQN1PP/R3KB1R b KQkq - 3 8",
+      "playedMove": "g7h6",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "8... Bxh6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-017",
+      "fen": "r1bqk2r/p2npp1p/2pp1npb/1p6/3PP3/2N2P2/PPPQN1PP/R3KB1R w KQkq - 0 9",
+      "playedMove": "d2h6",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "9. Qxh6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-018",
+      "fen": "r1bqk2r/p2npp1p/2pp1npQ/1p6/3PP3/2N2P2/PPP1N1PP/R3KB1R b KQkq - 0 9",
+      "playedMove": "c8b7",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "9... Bb7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-019",
+      "fen": "r2qk2r/pb1npp1p/2pp1npQ/1p6/3PP3/2N2P2/PPP1N1PP/R3KB1R w KQkq - 1 10",
+      "playedMove": "a2a3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "10. a3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-020",
+      "fen": "r2qk2r/pb1npp1p/2pp1npQ/1p6/3PP3/P1N2P2/1PP1N1PP/R3KB1R b KQkq - 0 10",
+      "playedMove": "e7e5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "10... e5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-021",
+      "fen": "r2qk2r/pb1n1p1p/2pp1npQ/1p2p3/3PP3/P1N2P2/1PP1N1PP/R3KB1R w KQkq - 0 11",
+      "playedMove": "e1c1",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "11. O-O-O",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-022",
+      "fen": "r2qk2r/pb1n1p1p/2pp1npQ/1p2p3/3PP3/P1N2P2/1PP1N1PP/2KR1B1R b kq - 1 11",
+      "playedMove": "d8e7",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "11... Qe7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-023",
+      "fen": "r3k2r/pb1nqp1p/2pp1npQ/1p2p3/3PP3/P1N2P2/1PP1N1PP/2KR1B1R w kq - 2 12",
+      "playedMove": "c1b1",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "12. Kb1",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-024",
+      "fen": "r3k2r/pb1nqp1p/2pp1npQ/1p2p3/3PP3/P1N2P2/1PP1N1PP/1K1R1B1R b kq - 3 12",
+      "playedMove": "a7a6",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "12... a6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-025",
+      "fen": "r3k2r/1b1nqp1p/p1pp1npQ/1p2p3/3PP3/P1N2P2/1PP1N1PP/1K1R1B1R w kq - 0 13",
+      "playedMove": "e2c1",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "13. Nc1",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-026",
+      "fen": "r3k2r/1b1nqp1p/p1pp1npQ/1p2p3/3PP3/P1N2P2/1PP3PP/1KNR1B1R b kq - 1 13",
+      "playedMove": "e8c8",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "13... O-O-O",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-027",
+      "fen": "2kr3r/1b1nqp1p/p1pp1npQ/1p2p3/3PP3/P1N2P2/1PP3PP/1KNR1B1R w - - 2 14",
+      "playedMove": "c1b3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good",
+        "depth-best-change"
+      ],
+      "label": "14. Nb3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-028",
+      "fen": "2kr3r/1b1nqp1p/p1pp1npQ/1p2p3/3PP3/PNN2P2/1PP3PP/1K1R1B1R b - - 3 14",
+      "playedMove": "e5d4",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "14... exd4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-029",
+      "fen": "2kr3r/1b1nqp1p/p1pp1npQ/1p6/3pP3/PNN2P2/1PP3PP/1K1R1B1R w - - 0 15",
+      "playedMove": "d1d4",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "15. Rxd4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-030",
+      "fen": "2kr3r/1b1nqp1p/p1pp1npQ/1p6/3RP3/PNN2P2/1PP3PP/1K3B1R b - - 0 15",
+      "playedMove": "c6c5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "15... c5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-031",
+      "fen": "2kr3r/1b1nqp1p/p2p1npQ/1pp5/3RP3/PNN2P2/1PP3PP/1K3B1R w - - 0 16",
+      "playedMove": "d4d1",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "16. Rd1",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-032",
+      "fen": "2kr3r/1b1nqp1p/p2p1npQ/1pp5/4P3/PNN2P2/1PP3PP/1K1R1B1R b - - 1 16",
+      "playedMove": "d7b6",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "16... Nb6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-033",
+      "fen": "2kr3r/1b2qp1p/pn1p1npQ/1pp5/4P3/PNN2P2/1PP3PP/1K1R1B1R w - - 2 17",
+      "playedMove": "g2g3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "17. g3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-034",
+      "fen": "2kr3r/1b2qp1p/pn1p1npQ/1pp5/4P3/PNN2PP1/1PP4P/1K1R1B1R b - - 0 17",
+      "playedMove": "c8b8",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "17... Kb8",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-035",
+      "fen": "1k1r3r/1b2qp1p/pn1p1npQ/1pp5/4P3/PNN2PP1/1PP4P/1K1R1B1R w - - 1 18",
+      "playedMove": "b3a5",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "18. Na5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-036",
+      "fen": "1k1r3r/1b2qp1p/pn1p1npQ/Npp5/4P3/P1N2PP1/1PP4P/1K1R1B1R b - - 2 18",
+      "playedMove": "b7a8",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "18... Ba8",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-037",
+      "fen": "bk1r3r/4qp1p/pn1p1npQ/Npp5/4P3/P1N2PP1/1PP4P/1K1R1B1R w - - 3 19",
+      "playedMove": "f1h3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "19. Bh3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-038",
+      "fen": "bk1r3r/4qp1p/pn1p1npQ/Npp5/4P3/P1N2PPB/1PP4P/1K1R3R b - - 4 19",
+      "playedMove": "d6d5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "19... d5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-039",
+      "fen": "bk1r3r/4qp1p/pn3npQ/Nppp4/4P3/P1N2PPB/1PP4P/1K1R3R w - - 0 20",
+      "playedMove": "h6f4",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "20. Qf4+",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-040",
+      "fen": "bk1r3r/4qp1p/pn3np1/Nppp4/4PQ2/P1N2PPB/1PP4P/1K1R3R b - - 1 20",
+      "playedMove": "b8a7",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy",
+        "depth-best-change"
+      ],
+      "label": "20... Ka7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-041",
+      "fen": "b2r3r/k3qp1p/pn3np1/Nppp4/4PQ2/P1N2PPB/1PP4P/1K1R3R w - - 2 21",
+      "playedMove": "h1e1",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "21. Rhe1",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-042",
+      "fen": "b2r3r/k3qp1p/pn3np1/Nppp4/4PQ2/P1N2PPB/1PP4P/1K1RR3 b - - 3 21",
+      "playedMove": "d5d4",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "21... d4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-043",
+      "fen": "b2r3r/k3qp1p/pn3np1/Npp5/3pPQ2/P1N2PPB/1PP4P/1K1RR3 w - - 0 22",
+      "playedMove": "c3d5",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "22. Nd5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-044",
+      "fen": "b2r3r/k3qp1p/pn3np1/NppN4/3pPQ2/P4PPB/1PP4P/1K1RR3 b - - 1 22",
+      "playedMove": "b6d5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "22... Nbxd5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-045",
+      "fen": "b2r3r/k3qp1p/p4np1/Nppn4/3pPQ2/P4PPB/1PP4P/1K1RR3 w - - 0 23",
+      "playedMove": "e4d5",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "23. exd5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-046",
+      "fen": "b2r3r/k3qp1p/p4np1/NppP4/3p1Q2/P4PPB/1PP4P/1K1RR3 b - - 0 23",
+      "playedMove": "e7d6",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "23... Qd6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-047",
+      "fen": "b2r3r/k4p1p/p2q1np1/NppP4/3p1Q2/P4PPB/1PP4P/1K1RR3 w - - 1 24",
+      "playedMove": "d1d4",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "24. Rxd4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-048",
+      "fen": "b2r3r/k4p1p/p2q1np1/NppP4/3R1Q2/P4PPB/1PP4P/1K2R3 b - - 0 24",
+      "playedMove": "c5d4",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "24... cxd4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-049",
+      "fen": "b2r3r/k4p1p/p2q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K2R3 w - - 0 25",
+      "playedMove": "e1e7",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "25. Re7+",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-050",
+      "fen": "b2r3r/k3Rp1p/p2q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K6 b - - 1 25",
+      "playedMove": "a7b6",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "25... Kb6",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-051",
+      "fen": "b2r3r/4Rp1p/pk1q1np1/Np1P4/3p1Q2/P4PPB/1PP4P/1K6 w - - 2 26",
+      "playedMove": "f4d4",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "26. Qxd4+",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-052",
+      "fen": "b2r3r/4Rp1p/pk1q1np1/Np1P4/3Q4/P4PPB/1PP4P/1K6 b - - 0 26",
+      "playedMove": "b6a5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "26... Kxa5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-053",
+      "fen": "b2r3r/4Rp1p/p2q1np1/kp1P4/3Q4/P4PPB/1PP4P/1K6 w - - 0 27",
+      "playedMove": "b2b4",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake",
+        "depth-best-change"
+      ],
+      "label": "27. b4+",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-054",
+      "fen": "b2r3r/4Rp1p/p2q1np1/kp1P4/1P1Q4/P4PPB/2P4P/1K6 b - - 0 27",
+      "playedMove": "a5a4",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "27... Ka4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-055",
+      "fen": "b2r3r/4Rp1p/p2q1np1/1p1P4/kP1Q4/P4PPB/2P4P/1K6 w - - 1 28",
+      "playedMove": "d4c3",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-best"
+      ],
+      "label": "28. Qc3",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-056",
+      "fen": "b2r3r/4Rp1p/p2q1np1/1p1P4/kP6/P1Q2PPB/2P4P/1K6 b - - 2 28",
+      "playedMove": "d6d5",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "28... Qxd5",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-057",
+      "fen": "b2r3r/4Rp1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 w - - 0 29",
+      "playedMove": "e7a7",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "29. Ra7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-058",
+      "fen": "b2r3r/R4p1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 b - - 1 29",
+      "playedMove": "a8b7",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "tactical",
+        "target-inaccuracy"
+      ],
+      "label": "29... Bb7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-059",
+      "fen": "3r3r/Rb3p1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 w - - 2 30",
+      "playedMove": "a7b7",
+      "playerColor": "white",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "30. Rxb7",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "kasparov-topalov-1999-ply-060",
+      "fen": "3r3r/1R3p1p/p4np1/1p1q4/kP6/P1Q2PPB/2P4P/1K6 b - - 0 30",
+      "playedMove": "d5c4",
+      "playerColor": "black",
+      "phase": "middlegame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "30... Qc4",
+      "source": "Kasparov–Topalov, Wijk aan Zee 1999"
+    },
+    {
+      "id": "constructed-endgame-001",
+      "fen": "8/5pk1/6p1/7p/4P3/5KP1/5P1P/8 w - - 0 1",
+      "playedMove": "e4e5",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 1, ply 1",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-002",
+      "fen": "8/5pk1/6p1/4P2p/8/5KP1/5P1P/8 b - - 0 1",
+      "playedMove": "g6g5",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 1, ply 2",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-003",
+      "fen": "8/5pk1/8/4P1pp/8/5KP1/5P1P/8 w - - 0 2",
+      "playedMove": "h2h3",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "Constructed endgame seed 1, ply 3",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-004",
+      "fen": "8/5pk1/8/4P1pp/8/5KPP/5P2/8 b - - 0 2",
+      "playedMove": "f7f5",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-inaccuracy"
+      ],
+      "label": "Constructed endgame seed 1, ply 4",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-005",
+      "fen": "8/6k1/8/4Pppp/8/5KPP/5P2/8 w - f6 0 3",
+      "playedMove": "e5e6",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "Constructed endgame seed 1, ply 5",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-006",
+      "fen": "8/6k1/4P3/5ppp/8/5KPP/5P2/8 b - - 0 3",
+      "playedMove": "g7g6",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "Constructed endgame seed 1, ply 6",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-007",
+      "fen": "8/8/4P1k1/5ppp/8/5KPP/5P2/8 w - - 1 4",
+      "playedMove": "e6e7",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 1, ply 7",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-008",
+      "fen": "8/4P3/6k1/5ppp/8/5KPP/5P2/8 b - - 0 4",
+      "playedMove": "g6g7",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 1, ply 8",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-009",
+      "fen": "8/4P1k1/8/5ppp/8/5KPP/5P2/8 w - - 1 5",
+      "playedMove": "e7e8r",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "tactical",
+        "target-good"
+      ],
+      "label": "Constructed endgame seed 1, ply 9",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-010",
+      "fen": "4R3/6k1/8/5ppp/8/5KPP/5P2/8 b - - 0 5",
+      "playedMove": "h5h4",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-inaccuracy"
+      ],
+      "label": "Constructed endgame seed 1, ply 10",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-011",
+      "fen": "4R3/6k1/8/5pp1/7p/5KPP/5P2/8 w - - 0 6",
+      "playedMove": "e8a8",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "Constructed endgame seed 1, ply 11",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-012",
+      "fen": "R7/6k1/8/5pp1/7p/5KPP/5P2/8 b - - 1 6",
+      "playedMove": "f5f4",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "Constructed endgame seed 1, ply 12",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-013",
+      "fen": "R7/6k1/8/6p1/5p1p/5KPP/5P2/8 w - - 0 7",
+      "playedMove": "a8b8",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 1, ply 13",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-014",
+      "fen": "1R6/6k1/8/6p1/5p1p/5KPP/5P2/8 b - - 1 7",
+      "playedMove": "g7f6",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 1, ply 14",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-015",
+      "fen": "1R6/8/5k2/6p1/5p1p/5KPP/5P2/8 w - - 2 8",
+      "playedMove": "f3e4",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "Constructed endgame seed 1, ply 15",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-016",
+      "fen": "1R6/8/5k2/6p1/4Kp1p/6PP/5P2/8 b - - 3 8",
+      "playedMove": "f4f3",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-inaccuracy"
+      ],
+      "label": "Constructed endgame seed 1, ply 16",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-017",
+      "fen": "1R6/8/5k2/6p1/4K2p/5pPP/5P2/8 w - - 0 9",
+      "playedMove": "b8b6",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "Constructed endgame seed 1, ply 17",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-018",
+      "fen": "8/8/1R3k2/6p1/4K2p/5pPP/5P2/8 b - - 1 9",
+      "playedMove": "f6g7",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "Constructed endgame seed 1, ply 18",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-019",
+      "fen": "8/6k1/1R6/6p1/4K2p/5pPP/5P2/8 w - - 2 10",
+      "playedMove": "b6b2",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 1, ply 19",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-020",
+      "fen": "8/6k1/8/6p1/4K2p/5pPP/1R3P2/8 b - - 3 10",
+      "playedMove": "g7h7",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 1, ply 20",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-021",
+      "fen": "8/7k/8/6p1/4K2p/5pPP/1R3P2/8 w - - 4 11",
+      "playedMove": "e4d5",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "Constructed endgame seed 1, ply 21",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-022",
+      "fen": "8/7k/8/3K2p1/7p/5pPP/1R3P2/8 b - - 5 11",
+      "playedMove": "h7g8",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-inaccuracy"
+      ],
+      "label": "Constructed endgame seed 1, ply 22",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-023",
+      "fen": "6k1/8/8/3K2p1/7p/5pPP/1R3P2/8 w - - 6 12",
+      "playedMove": "d5c5",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "Constructed endgame seed 1, ply 23",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-024",
+      "fen": "6k1/8/8/2K3p1/7p/5pPP/1R3P2/8 b - - 7 12",
+      "playedMove": "g8h8",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "Constructed endgame seed 1, ply 24",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-025",
+      "fen": "8/5pk1/6p1/7p/4P3/5KP1/4RP1P/7r w - - 0 1",
+      "playedMove": "h2h3",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 2, ply 1",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-026",
+      "fen": "8/5pk1/6p1/7p/4P3/5KPP/4RP2/7r b - - 0 1",
+      "playedMove": "h1a1",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 2, ply 2",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-027",
+      "fen": "8/5pk1/6p1/7p/4P3/5KPP/4RP2/r7 w - - 1 2",
+      "playedMove": "f3f4",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-good"
+      ],
+      "label": "Constructed endgame seed 2, ply 3",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-028",
+      "fen": "8/5pk1/6p1/7p/4PK2/6PP/4RP2/r7 b - - 2 2",
+      "playedMove": "g6g5",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-inaccuracy"
+      ],
+      "label": "Constructed endgame seed 2, ply 4",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-029",
+      "fen": "8/5pk1/8/6pp/4PK2/6PP/4RP2/r7 w - - 0 3",
+      "playedMove": "f4e3",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-mistake"
+      ],
+      "label": "Constructed endgame seed 2, ply 5",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-030",
+      "fen": "8/5pk1/8/6pp/4P3/4K1PP/4RP2/r7 b - - 1 3",
+      "playedMove": "a1e1",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-blunder"
+      ],
+      "label": "Constructed endgame seed 2, ply 6",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-031",
+      "fen": "8/5pk1/8/6pp/4P3/4K1PP/4RP2/4r3 w - - 2 4",
+      "playedMove": "e3d2",
+      "playerColor": "white",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-best"
+      ],
+      "label": "Constructed endgame seed 2, ply 7",
+      "source": "deterministic constructed endgame"
+    },
+    {
+      "id": "constructed-endgame-032",
+      "fen": "8/5pk1/8/6pp/4P3/6PP/3KRP2/4r3 b - - 3 4",
+      "playedMove": "g7g8",
+      "playerColor": "black",
+      "phase": "endgame",
+      "tags": [
+        "quiet",
+        "target-excellent"
+      ],
+      "label": "Constructed endgame seed 2, ply 8",
+      "source": "deterministic constructed endgame"
+    }
+  ]
+}

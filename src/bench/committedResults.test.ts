@@ -12,6 +12,9 @@ import {
   killGateVerdict,
 } from './killGate'
 import { buildPositionSet } from './device/positions'
+import { corpusSha256, loadCorpus } from './node/corpus'
+import type { ReferenceArtifact } from './node/referenceArtifact'
+import { referenceArtifactProblems } from './node/referenceArtifact'
 
 /**
  * The committed benchmark files must be readable by the code that reads them,
@@ -35,6 +38,17 @@ const jsonlFiles = (): string[] => {
   try {
     return readdirSync(ANALYSIS_DIR)
       .filter((name) => name.endsWith('.jsonl'))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+const referenceFiles = (): string[] => {
+  try {
+    return readdirSync(ANALYSIS_DIR)
+      .filter((name) =>
+        name.startsWith('grade-corpus-references-') && name.endsWith('.json'))
       .sort()
   } catch {
     return []
@@ -148,6 +162,25 @@ describe('committed benchmark results', () => {
         expect(killGateProblems(file, { deviceLabel, positionIds }), filename).toEqual([])
         // Computable, not passing: the verdict itself is recorded in the bead.
         expect(killGateVerdict(file), filename).not.toBeNull()
+      }
+    })
+  })
+
+  describe('Node corpus references', () => {
+    const files = referenceFiles()
+
+    it('keeps every committed reference artifact complete and reproducible', () => {
+      const positions = loadCorpus().positions
+      for (const file of files) {
+        const artifact = JSON.parse(
+          readFileSync(resolve(ANALYSIS_DIR, file), 'utf8'),
+        ) as ReferenceArtifact
+
+        expect(referenceArtifactProblems(artifact, positions), file).toEqual([])
+        expect(artifact.complete, file).toBe(true)
+        expect(artifact.source.gitDirty, file).toBe(false)
+        expect(artifact.source.corpusSha256, file).toBe(corpusSha256())
+        expect(artifact.summary.withinTenPercentGate, file).toBe(true)
       }
     })
   })
