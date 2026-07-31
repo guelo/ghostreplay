@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Iterable, Literal
 
-from sqlalchemy import func, text, update
+from sqlalchemy import func, insert, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -1404,26 +1404,27 @@ def recompute_opening_scores(
 
         if position_scores:
             insert_started = time.monotonic()
-            db.add_all(
+            db.execute(
+                insert(OpeningPositionScore),
                 [
-                    OpeningPositionScore(
-                        batch_id=batch.id,
-                        user_id=user_id,
-                        player_color=player_color,
-                        normalized_fen=position.normalized_fen,
-                        in_book=position.in_book,
-                        has_evidence=position.has_evidence,
-                        opening_score=position.opening_score,
-                        confidence=position.confidence,
-                        coverage=position.coverage,
-                        weighted_depth=position.weighted_depth,
-                        sample_size=position.sample_size,
-                        game_count=position.game_count,
-                        last_practiced_at=position.last_practiced_at,
-                        computed_at=computed_at,
-                    )
+                    {
+                        "batch_id": batch.id,
+                        "user_id": user_id,
+                        "player_color": player_color,
+                        "normalized_fen": position.normalized_fen,
+                        "in_book": position.in_book,
+                        "has_evidence": position.has_evidence,
+                        "opening_score": position.opening_score,
+                        "confidence": position.confidence,
+                        "coverage": position.coverage,
+                        "weighted_depth": position.weighted_depth,
+                        "sample_size": position.sample_size,
+                        "game_count": position.game_count,
+                        "last_practiced_at": position.last_practiced_at,
+                        "computed_at": computed_at,
+                    }
                     for position in position_scores
-                ]
+                ],
             )
             logger.info(
                 "opening position-score rows staged",
@@ -1437,23 +1438,24 @@ def recompute_opening_scores(
 
         if overlay.edges:
             edge_insert_started = time.monotonic()
-            db.add_all(
+            db.execute(
+                insert(OpeningPositionEdge),
                 [
-                    OpeningPositionEdge(
-                        batch_id=batch.id,
-                        user_id=user_id,
-                        player_color=player_color,
-                        parent_fen=edge.parent_fen,
-                        child_fen=edge.child_fen,
-                        uci=edge.uci,
-                        traversal_count=edge.traversal_count,
-                        live_attempts=edge.live_attempts,
-                        live_passes=edge.live_passes,
-                        live_fails=edge.live_fails,
-                        computed_at=computed_at,
-                    )
+                    {
+                        "batch_id": batch.id,
+                        "user_id": user_id,
+                        "player_color": player_color,
+                        "parent_fen": edge.parent_fen,
+                        "child_fen": edge.child_fen,
+                        "uci": edge.uci,
+                        "traversal_count": edge.traversal_count,
+                        "live_attempts": edge.live_attempts,
+                        "live_passes": edge.live_passes,
+                        "live_fails": edge.live_fails,
+                        "computed_at": computed_at,
+                    }
                     for edge in overlay.edges.values()
-                ]
+                ],
             )
             logger.info(
                 "opening position-edge rows staged",

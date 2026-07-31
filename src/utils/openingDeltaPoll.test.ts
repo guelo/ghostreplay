@@ -183,14 +183,13 @@ describe("pollFreshOpeningDelta", () => {
     const done = pollFreshOpeningDelta("s1");
     await settle();
     // One extra tick past the ceiling to prove the loop stops on its own.
-    for (let i = 0; i < 31; i += 1) {
+    for (let i = 0; i < 29; i += 1) {
       await tick();
     }
     await done;
 
-    // Matches DELTA_POLL_MAX_ATTEMPTS (~45s ceiling; raised from 15 in
-    // g-drill-delta-latency's cheap fallback).
-    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(30);
+    // Matches the Phase-2 measured-bound formula in openingDeltaPoll.ts.
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(28);
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
   });
 

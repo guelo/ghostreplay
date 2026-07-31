@@ -6,7 +6,9 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import event
 
+from conftest import engine as test_engine
 from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import active_color, normalize_fen
 from app.models import (
@@ -1978,6 +1980,70 @@ def test_ensure_tree_cache_bootstrap_timeout_serves_stale_batch_distinctly(db_se
 # ---------------------------------------------------------------------------
 # Direct position-score read model persistence + lookup (g-tree-score-model).
 # ---------------------------------------------------------------------------
+
+
+def test_large_read_models_use_core_executemany_without_returning(db_session):
+    """The two large row sets use one id-free Core executemany apiece."""
+    _seed_black_opening_session(db_session)
+    statements: list[tuple[str, bool]] = []
+
+    def capture_statement(_conn, _cursor, statement, _params, _context, executemany):
+        normalized = statement.lower()
+        if (
+            "insert into opening_position_scores" in normalized
+            or "insert into opening_position_edges" in normalized
+        ):
+            statements.append((normalized, executemany))
+
+    event.listen(test_engine, "before_cursor_execute", capture_statement)
+    try:
+        batch = recompute_opening_scores(db_session, 123, "black")
+    finally:
+        event.remove(test_engine, "before_cursor_execute", capture_statement)
+
+    position_statements = [
+        item for item in statements if "opening_position_scores" in item[0]
+    ]
+    edge_statements = [
+        item for item in statements if "opening_position_edges" in item[0]
+    ]
+    assert len(position_statements) == 1
+    assert len(edge_statements) == 1
+    assert position_statements[0][1] is True
+    assert edge_statements[0][1] is True
+    assert all(" returning " not in statement for statement, _ in statements)
+    assert (
+        db_session.query(OpeningPositionScore)
+        .filter(OpeningPositionScore.batch_id == batch.id)
+        .count()
+        > 0
+    )
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .count()
+        > 0
+    )
+
+
+def test_large_read_model_insert_failure_rolls_back_whole_batch(db_session):
+    """A failing second bulk insert leaves no partial batch or position rows."""
+    _seed_black_opening_session(db_session)
+
+    def fail_edge_insert(_conn, _cursor, statement, _params, _context, _many):
+        if "insert into opening_position_edges" in statement.lower():
+            raise RuntimeError("injected edge insert failure")
+
+    event.listen(test_engine, "before_cursor_execute", fail_edge_insert)
+    try:
+        with pytest.raises(RuntimeError, match="injected edge insert failure"):
+            recompute_opening_scores(db_session, 123, "black")
+    finally:
+        event.remove(test_engine, "before_cursor_execute", fail_edge_insert)
+
+    assert db_session.query(OpeningScoreBatch).count() == 0
+    assert db_session.query(OpeningPositionScore).count() == 0
+    assert db_session.query(OpeningPositionEdge).count() == 0
 
 
 def test_recompute_writes_direct_position_rows(db_session):

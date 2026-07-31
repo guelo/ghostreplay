@@ -6,6 +6,7 @@ natural-end, drill accuracy-fail, and the off-route route-check failure path.
 """
 
 import json
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -13,15 +14,30 @@ from unittest.mock import Mock, patch
 
 import chess
 import pytest
+from sqlalchemy import text
 
 from conftest import TestingSessionLocal
 
-from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
+from app.models import (
+    AnalysisCache,
+    AnalysisCacheSubmission,
+    GameSession,
+    OpeningScoreBatch,
+    PositionAnalysisRow,
+    SessionMove,
+    User,
+    UserOpeningScore,
+)
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
-from app.opening_score_scheduler import OpeningScoreTrigger
+from app.opening_score_scheduler import OpeningScoreScheduler, OpeningScoreTrigger
 from app.opening_cache import (
+    OpeningScoreRecomputeResult,
+    RecomputeDisposition,
     SCORE_MODEL_VERSION,
+    bump_evidence_seq,
     capture_freshness_snapshot,
+    current_cache_epoch,
+    current_evidence_seq,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
 )
@@ -35,9 +51,12 @@ from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
 from app.opening_score_delta import (
     OPENING_BASELINE_SCHEMA_VERSION,
+    _current_scoped_delta,
     _parse_compatible_baseline,
     compute_opening_score_delta,
+    publish_scoped_opening_score_deltas,
     read_opening_score_delta,
+    reserve_scoped_delta_generation,
     run_baseline_snapshot_job,
     snapshot_opening_baseline,
 )
@@ -262,6 +281,85 @@ def _ruy_roots() -> OpeningRoots:
     })
 
 
+def _ruy_graph() -> OpeningGraph:
+    board = chess.Board()
+    nodes: dict[str, OpeningGraphNode] = {}
+    parent = _fen_from_board(board)
+    nodes[parent] = OpeningGraphNode(parent, "white")
+    for san in [*RUY_SANS, "Ba4"]:
+        move = board.parse_san(san)
+        uci = move.uci()
+        board.push(move)
+        child = _fen_from_board(board)
+        nodes.setdefault(
+            child,
+            OpeningGraphNode(child, "white" if board.turn else "black"),
+        )
+        nodes[parent].children[uci] = child
+        nodes[child].parents.add((parent, uci))
+        parent = child
+    graph = OpeningGraph(nodes, _fen_from_board(chess.Board()))
+    graph.freeze()
+    return graph
+
+
+@contextmanager
+def _patched_delta_registry(graph: OpeningGraph, roots: OpeningRoots):
+    """Bind scorer, publisher, and batch validator to one synthetic registry."""
+    with (
+        patch("app.opening_score_delta.get_opening_graph", return_value=graph),
+        patch("app.opening_score_delta.get_opening_roots", return_value=roots),
+        patch("app.opening_cache.get_opening_graph", return_value=graph),
+        patch("app.opening_cache.get_opening_roots", return_value=roots),
+    ):
+        yield
+
+
+def _insert_scoped_evidence(db_session, session_id) -> None:
+    board = chess.Board()
+    for index, san in enumerate([*RUY_SANS, "Ba4"]):
+        fen_before = board.fen()
+        color = "white" if board.turn else "black"
+        board.push_san(san)
+        db_session.add(
+            SessionMove(
+                session_id=uuid.UUID(str(session_id)),
+                move_number=index // 2 + 1,
+                color=color,
+                move_san=san,
+                fen_before=fen_before,
+                fen_after=board.fen(),
+                eval_delta=20 if color == "white" else None,
+                segment="normal",
+            )
+        )
+    db_session.commit()
+
+
+def _make_fresh_batch_for_registry(
+    db_session,
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+    *,
+    generation: int = 1,
+) -> int:
+    snapshot = capture_freshness_snapshot(db_session, 123, "white")
+    batch = OpeningScoreBatch(
+        user_id=123,
+        player_color="white",
+        generation=generation,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        inputs_fingerprint=snapshot.inputs_fingerprint,
+        evidence_seq=snapshot.evidence_seq,
+        cache_epoch=snapshot.cache_epoch,
+        scoped_shared_digest=snapshot.scoped_shared_digest,
+        computed_at=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+    db_session.add(batch)
+    db_session.flush()
+    return batch.id
+
+
 def _make_batch(db_session, *, user_id=123, player_color="white", generation=1,
                 fresh=True) -> int:
     """Seed a batch. ``fresh=True`` stamps the registry fingerprint AND the full
@@ -308,9 +406,18 @@ def _add_score_row(db_session, *, batch_id, opening_key, opening_score,
     ))
 
 
-def _make_session(db_session, *, user_id=123, player_color="white",
-                  baseline=None, status="ended",
-                  started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)) -> GameSession:
+def _make_session(
+    db_session,
+    *,
+    user_id=123,
+    player_color="white",
+    baseline=None,
+    status="ended",
+    session_mode="normal",
+    drill_state=None,
+    drill_terminal_reason=None,
+    started_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+) -> GameSession:
     sid = uuid.uuid4()
     db_session.add(GameSession(
         id=sid, user_id=user_id,
@@ -318,7 +425,11 @@ def _make_session(db_session, *, user_id=123, player_color="white",
         status=status,
         result="checkmate_win" if status == "ended" else None,
         engine_elo=1500,
-        player_color=player_color, session_mode="normal",
+        player_color=player_color,
+        is_rated=session_mode == "normal",
+        session_mode=session_mode,
+        drill_state=drill_state,
+        drill_terminal_reason=drill_terminal_reason,
         opening_score_baseline=baseline,
     ))
     db_session.commit()
@@ -581,7 +692,10 @@ def test_delta_enqueues_background_recompute(db_session):
         compute_opening_score_delta(db_session, session)
 
     mock_enqueue.assert_called_once_with(
-        123, "white", source=OpeningScoreTrigger.SCORE_DELTA
+        123,
+        "white",
+        source=OpeningScoreTrigger.SCORE_DELTA,
+        terminal_session_id=session.id,
     )
 
 
@@ -934,6 +1048,431 @@ def test_read_delta_cold_returns_empty_and_false(db_session):
     assert is_fresh is False
 
 
+def test_batch_cold_scoped_publication_returns_fresh_after_scores(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert is_fresh is True
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[KP_KEY].after is not None
+    assert by_key[RUY_KEY].after is not None
+    assert by_key[MORPHY_KEY].after is not None
+    assert all(item.is_new for item in items)
+
+
+@pytest.mark.parametrize(
+    ("session_mode", "status", "drill_state", "drill_terminal_reason"),
+    [
+        ("normal", "ended", None, None),
+        ("drill", "active", "failed", "accuracy"),
+    ],
+)
+def test_scoped_poll_is_fresh_while_full_recompute_remains_inflight(
+    db_session,
+    session_mode,
+    status,
+    drill_state,
+    drill_terminal_reason,
+):
+    """Normal and drill polls can read publication before the full writer returns."""
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        session_mode=session_mode,
+        status=status,
+        drill_state=drill_state,
+        drill_terminal_reason=drill_terminal_reason,
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    full_entered = threading.Event()
+    release_full = threading.Event()
+
+    def blocked_full(_db, _user_id, _player_color):
+        full_entered.set()
+        assert release_full.wait(timeout=5.0)
+        return OpeningScoreRecomputeResult(
+            disposition=RecomputeDisposition.NO_EVIDENCE,
+            batch=None,
+        )
+
+    scheduler = OpeningScoreScheduler(
+        session_factory=TestingSessionLocal,
+        recompute=blocked_full,
+        scoped_recompute=publish_scoped_opening_score_deltas,
+        quiet_window=0.0,
+        auto_start=False,
+    )
+    scheduler.request_recompute(
+        123,
+        "white",
+        source=OpeningScoreTrigger.SCORE_DELTA,
+        terminal_session_id=session.id,
+    )
+    worker = threading.Thread(
+        target=scheduler.run_due,
+        kwargs={"now": float("inf")},
+    )
+
+    with _patched_delta_registry(graph, roots):
+        worker.start()
+        try:
+            assert full_entered.wait(timeout=5.0)
+            assert scheduler.is_inflight(123, "white") is True
+            with TestingSessionLocal() as reader_db:
+                authoritative = reader_db.get(GameSession, session.id)
+                items, is_fresh = read_opening_score_delta(
+                    reader_db, authoritative
+                )
+            assert items
+            assert is_fresh is True
+            assert scheduler.is_inflight(123, "white") is True
+        finally:
+            release_full.set()
+            worker.join(timeout=5.0)
+
+    assert worker.is_alive() is False
+
+
+def test_fresh_batch_precedes_scoped_publication(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 5.0}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        scoped_score = dict(_current_scoped_delta(session.id).scored_roots)[RUY_KEY]
+        batch_id = _make_fresh_batch_for_registry(db_session, graph, roots)
+        _add_score_row(
+            db_session,
+            batch_id=batch_id,
+            opening_key=RUY_KEY,
+            opening_score=scoped_score + 7.0,
+        )
+        db_session.commit()
+
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert is_fresh is True
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].after == pytest.approx(scoped_score + 7.0)
+
+
+def test_scoped_publication_rejects_generation_drift(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+
+        # A newer enqueue invalidates the older completion before it runs.
+        reserve_scoped_delta_generation(session.id)
+        assert read_opening_score_delta(db_session, session) == ([], False)
+
+
+def test_scoped_publication_rejects_new_per_user_fallback_scope(
+    client,
+    auth_headers,
+    db_session,
+):
+    """A real eligible /moves upload invalidates before the old scope can rehash."""
+    auth_headers(user_id=123)  # Seed the token's backing user row.
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        publication = _current_scoped_delta(session.id)
+        assert publication is not None
+
+        # Upload a second, already-ended game's legitimate Queen's Gambit line.
+        # Its third ply contributes a player-colour fallback candidate at a FEN
+        # absent from the stored Ruy scope.  The production /moves path performs
+        # the matching evidence_seq bump in the same transaction.
+        added_session = _make_session(db_session, baseline=_baseline_json({}))
+        board = chess.Board()
+        moves = []
+        for index, san in enumerate(("d4", "d5", "c4")):
+            fen_before = board.fen()
+            move = board.parse_san(san)
+            board.push(move)
+            moves.append(
+                {
+                    "move_number": index // 2 + 1,
+                    "color": "white" if index % 2 == 0 else "black",
+                    "move_san": san,
+                    "move_uci": move.uci(),
+                    "fen_before": fen_before,
+                    "fen_after": board.fen(),
+                    "eval_delta": 20 if index % 2 == 0 else None,
+                }
+            )
+        added_fallback_fen = moves[2]["fen_before"]
+        assert added_fallback_fen not in publication.shared_raw_fens
+
+        # The deferred evidence worker is orthogonal here; keep the mutation at
+        # the endpoint's durable per-user session-move + cursor transaction.
+        with patch("app.api.session.enqueue_session_evidence"):
+            response = client.post(
+                f"/api/session/{added_session.id}/moves",
+                json={"moves": moves, "recompute_opportunity": False},
+                headers=auth_headers(user_id=123),
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["moves_inserted"] == 3
+        assert (
+            current_evidence_seq(db_session, 123, "white")
+            > publication.evidence_seq
+        )
+
+        # Sequence mismatch is checked before epoch/scoped-digest recovery, so
+        # the old stored scope cannot accept the newly introduced candidate.
+        with patch(
+            "app.opening_score_delta.shared_scope_digest",
+            side_effect=AssertionError("sequence drift must reject before rehash"),
+        ) as scoped_digest:
+            assert read_opening_score_delta(db_session, session) == ([], False)
+        scoped_digest.assert_not_called()
+
+
+def test_scoped_epoch_drift_rehashes_scope_and_rearms(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        before = _current_scoped_delta(session.id)
+        assert before is not None
+        db_session.execute(
+            text("UPDATE evidence_epoch SET value = value + 1 WHERE id = 1")
+        )
+        db_session.commit()
+        live_epoch = current_cache_epoch(db_session)
+        assert live_epoch != before.cache_epoch
+
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert items and is_fresh is True
+    assert _current_scoped_delta(session.id).cache_epoch == live_epoch
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ("analysis_cache", "position_analysis", "analysis_cache_submission"),
+)
+def test_scoped_epoch_drift_rejects_real_in_scope_shared_mutation(
+    db_session,
+    surface,
+):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    if db_session.get(User, 123) is None:
+        db_session.add(User(id=123, username=None, is_anonymous=True))
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+    raw_fen = chess.Board().fen()
+    norm_fen = _fen_from_board(chess.Board())
+    cache_row = AnalysisCache(
+        fen_before=raw_fen,
+        normalized_fen_before=norm_fen,
+        move_uci="e2e4",
+        move_san="e4",
+        source="game",
+    )
+    db_session.add(cache_row)
+    position_row = None
+    if surface == "position_analysis":
+        position_row = PositionAnalysisRow(
+            normalized_fen=norm_fen,
+            fen=raw_fen,
+            best_move_uci="e2e4",
+            source="precomputed",
+        )
+        db_session.add(position_row)
+    db_session.commit()
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        publication = _current_scoped_delta(session.id)
+        assert publication is not None
+        assert raw_fen in publication.shared_raw_fens
+        assert norm_fen in publication.shared_norm_fens
+
+        if surface == "analysis_cache":
+            cache_row.classification = "good"
+        elif surface == "position_analysis":
+            assert position_row is not None
+            position_row.best_move_uci = "d2d4"
+        else:
+            db_session.add(
+                AnalysisCacheSubmission(
+                    analysis_cache_id=cache_row.id,
+                    user_id=123,
+                )
+            )
+        db_session.commit()
+        assert current_cache_epoch(db_session) > publication.cache_epoch
+
+        assert read_opening_score_delta(db_session, session) == ([], False)
+
+
+def test_scoped_publication_rejects_missing_epoch_and_registry_drift(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        with patch(
+            "app.opening_score_delta.opening_score_inputs_fingerprint",
+            return_value="registry-drift",
+        ):
+            assert read_opening_score_delta(db_session, session) == ([], False)
+
+        db_session.execute(text("DELETE FROM evidence_epoch WHERE id = 1"))
+        db_session.commit()
+        assert read_opening_score_delta(db_session, session) == ([], False)
+
+
+def test_scoped_publication_cache_loss_is_a_safe_miss(db_session):
+    from app.opening_score_delta import reset_scoped_delta_cache
+
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        reset_scoped_delta_cache()
+        assert read_opening_score_delta(db_session, session) == ([], False)
+
+
+def test_scoped_build_discards_counter_drift_and_avoids_full_snapshot(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    session_id = session.id
+    _insert_scoped_evidence(db_session, session.id)
+
+    with (
+        _patched_delta_registry(graph, roots),
+        patch(
+            "app.opening_score_delta.current_evidence_seq",
+            side_effect=[4, 5],
+        ),
+        patch(
+            "app.opening_cache.capture_freshness_snapshot",
+            side_effect=AssertionError("full freshness snapshot is forbidden"),
+        ) as full_snapshot,
+        patch(
+            "app.opening_evidence.raw_evidence_inputs_snapshot",
+            side_effect=AssertionError("raw digest is forbidden"),
+        ) as raw_snapshot,
+    ):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 0
+
+    assert db_session.in_transaction() is False
+    assert _current_scoped_delta(session_id) is None
+    full_snapshot.assert_not_called()
+    raw_snapshot.assert_not_called()
+
+
+def test_scoped_build_rolls_back_read_transaction_when_no_candidate(db_session):
+    request = reserve_scoped_delta_generation(uuid.uuid4())
+
+    assert publish_scoped_opening_score_deltas(
+        db_session, 123, "white", (request,)
+    ) == 0
+    assert db_session.in_transaction() is False
+
+
+def test_scoped_publication_rejects_authoritative_state_change(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(session.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        session.status = "active"
+        session.result = None
+        db_session.commit()
+        assert read_opening_score_delta(db_session, session) == ([], False)
+
+
+def test_back_to_back_active_session_does_not_invalidate_until_terminal(
+    db_session,
+):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    first = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, first.id)
+
+    with _patched_delta_registry(graph, roots):
+        request = reserve_scoped_delta_generation(first.id)
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+
+        second = _make_session(
+            db_session, baseline=_baseline_json({}), status="active"
+        )
+        _insert_scoped_evidence(db_session, second.id)
+        assert read_opening_score_delta(db_session, first)[1] is True
+
+        second.status = "ended"
+        second.result = "checkmate_win"
+        bump_evidence_seq(db_session, 123, "white")
+        db_session.commit()
+        assert read_opening_score_delta(db_session, first) == ([], False)
+
+
 def test_read_delta_no_chain_returns_empty_and_true(db_session):
     # No opening crossed -> nothing will ever appear, so stop the poll (True).
     session = _make_session(db_session, baseline=_baseline_json({}))
@@ -970,12 +1509,10 @@ def test_read_delta_never_touches_scheduler(db_session):
     mock_enqueue.assert_not_called()
 
 
-def test_read_delta_skips_digest_while_recompute_scheduled(db_session):
-    # g-xmhv: while a recompute is pending/in-flight, the batch is by definition not
-    # yet known-fresh, so the poll returns is_fresh=False CHEAPLY — the O(evidence)
-    # digest must NOT run (this is what killed the 9-17s poll GETs). The warm items
-    # are still served. read swallows exceptions, so assert_not_called() is the
-    # load-bearing check (a stray digest call would degrade items to []).
+def test_read_delta_fresh_batch_ignores_recompute_scheduled(db_session):
+    # g-delta-commit-decouple: scheduler state is observability, not freshness.
+    # A provably-fresh batch remains fresh while another run is pending/in-flight;
+    # the cheap signal still never calls the O(evidence) raw digest.
     import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
@@ -995,7 +1532,7 @@ def test_read_delta_skips_digest_while_recompute_scheduled(db_session):
     ):
         items, is_fresh = read_opening_score_delta(db_session, session)
 
-    assert is_fresh is False
+    assert is_fresh is True
     mock_fp.assert_not_called()
     by_key = {item.opening_key: item for item in items}
     assert by_key[RUY_KEY].after == pytest.approx(44.0)

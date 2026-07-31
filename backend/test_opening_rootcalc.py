@@ -24,6 +24,7 @@ from app.opening_rootcalc import (
     compute_all_root_scores,
     compute_all_scores,
     compute_root_score,
+    compute_scoped_root_scores,
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -317,6 +318,60 @@ def test_cycle_cut_is_seed_independent_and_renormalized():
     ):
         assert total == 0 or total == pytest.approx(1.0)
     assert not (calc._score_children(a) and calc._score_children(b))
+
+
+def test_scoped_root_scores_match_full_named_rows_at_fixed_now():
+    root, e4, e4e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(
+        _root(root, "Root", children={e4}),
+        _root(e4, "E4", parents={root}, children={e4e5}),
+        _root(e4e5, "E4 E5", parents={e4}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.edges[(e4, e4e5)] = EdgeEvidence(e4, e4e5, "e7e5")
+    overlay.nodes[e4e5] = _quality(e4e5, 0.7, count=2)
+    now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+    full, _ = compute_all_root_scores(
+        "white", graph, overlay, roots, now=now
+    )
+    scoped = compute_scoped_root_scores(
+        "white", graph, overlay, roots, [root, e4, e4e5], now=now
+    )
+
+    assert set(scoped) == set(full)
+    for opening_key in scoped:
+        assert scoped[opening_key].opening_score == full[opening_key].opening_score
+        assert scoped[opening_key].strongest_branch is None
+        assert scoped[opening_key].weakest_branch is None
+        assert scoped[opening_key].underexposed_branch is None
+
+
+def test_scoped_root_scores_omit_requested_root_without_mastery_below():
+    root, e4 = _positions(["e2e4"])
+    d4 = _positions(["d2d4"])[1]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    roots = _roots(_root(e4, "Requested"), _root(d4, "Elsewhere"))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[d4] = _quality(d4, 0.8)
+
+    assert compute_scoped_root_scores(
+        "white", graph, overlay, roots, [e4]
+    ) == {}
+
+
+def test_scoped_root_scores_empty_when_overlay_has_no_quality():
+    root = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[root] = NodeEvidence(root, review_attempts=1)
+
+    assert compute_scoped_root_scores(
+        "white", graph, overlay, roots, [root]
+    ) == {}
 
 
 def test_scc_cut_does_not_activate_observed_opponent_fallback_cycle():

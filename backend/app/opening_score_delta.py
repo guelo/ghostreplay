@@ -1,9 +1,11 @@
 """End-of-session opening-score deltas (g-xanz).
 
-A game or drill that ends recomputes the user's opening scores and reports how
-the *played* openings' scores changed, broadest -> deepest. The "after" side is
-the freshly-recomputed cached score; the "before" side is the per-session
-baseline captured shortly after session start (``GameSession.opening_score_baseline``).
+A game or drill that ends reports how the *played* openings' scores changed,
+broadest -> deepest. The "before" side is the per-session baseline captured
+shortly after session start (``GameSession.opening_score_baseline``). The "after"
+side prefers a provably-fresh persisted batch, then a freshness-bound
+process-local scoped publication computed before the full batch writer, and
+finally a warm batch as an explicitly unverified fallback.
 
 Why a baseline is required: opening scores are cumulative over all evidence and
 live play feeds ``request_recompute`` incrementally as moves upload, so by the
@@ -21,16 +23,21 @@ bound — see ``opening_cache._utcnow``). Otherwise the baseline stays NULL and 
 end-of-session delta degrades to "no delta". A post-session baseline is never
 written.
 
-Both public helpers are best-effort and never raise: the delta is supplementary
-to the end-of-session response (rating change, drill contract), so a failure
-degrades to "no delta shown" rather than breaking the endpoint.
+The terminal and poll helpers are best-effort and never raise: the delta is
+supplementary to the end-of-session response (rating change, drill contract), so
+a failure degrades to "no delta shown" rather than breaking the endpoint.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+import threading
 import time
+import uuid
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from pydantic import BaseModel
@@ -48,10 +55,24 @@ from app.models import (
 from app.opening_cache import (
     SCORE_MODEL_VERSION,
     _is_batch_fresh,
+    current_cache_epoch,
+    current_evidence_seq,
     has_opening_evidence,
     list_cached_opening_scores,
+    opening_score_inputs_fingerprint,
 )
-from app.opening_rootcalc import root_calc_config_fingerprint
+from app.opening_evidence import (
+    overlay_evidence,
+    session_is_evidence_eligible,
+    shared_scope_digest,
+    shared_scope_snapshot,
+)
+from app.opening_graph import get_opening_graph
+from app.opening_rootcalc import (
+    RootCalcConfig,
+    compute_scoped_root_scores,
+    root_calc_config_fingerprint,
+)
 from app.opening_roots import get_opening_roots, played_opening_chain
 
 logger = logging.getLogger(__name__)
@@ -141,6 +162,133 @@ class OpeningScoreDeltaItem(BaseModel):
     after: float | None
     delta: float | None
     is_new: bool
+
+
+SCOPED_DELTA_PUBLICATION_CAPACITY = 128
+SCOPED_DELTA_GENERATION_CAPACITY = 256
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedDeltaRequest:
+    session_id: uuid.UUID
+    generation: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ScopedDeltaCandidate:
+    request: ScopedDeltaRequest
+    session_id: str
+    user_id: int
+    player_color: str
+    session_mode: str
+    status: str
+    drill_state: str | None
+    drill_terminal_reason: str | None
+    played_root_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedDeltaPublication:
+    """Process-local, freshness-bound score result for one terminal session."""
+
+    session_id: str
+    generation: int
+    user_id: int
+    player_color: str
+    session_mode: str
+    status: str
+    drill_state: str | None
+    drill_terminal_reason: str | None
+    played_root_keys: tuple[str, ...]
+    scored_roots: tuple[tuple[str, float], ...]
+    registry_fingerprint: str
+    evidence_seq: int
+    cache_epoch: int
+    shared_raw_fens: tuple[str, ...]
+    shared_norm_fens: tuple[str, ...]
+    scoped_shared_digest: str
+    computed_at: datetime
+
+
+# One worker AND one replica are load-bearing for this cache, exactly as for the
+# scheduler that writes it.  Adding either requires moving publications and
+# request generations to a shared store; a process-local miss is safe, but
+# accepting another process's absent generation as current would not be.
+_scoped_delta_lock = threading.Lock()
+_scoped_delta_publications: OrderedDict[str, ScopedDeltaPublication] = OrderedDict()
+_scoped_delta_generations: OrderedDict[str, int] = OrderedDict()
+_scoped_delta_generation_counter = itertools.count(1)
+
+
+def reserve_scoped_delta_generation(session_id) -> ScopedDeltaRequest:
+    """Assign the next monotonic generation before terminal work is enqueued."""
+    parsed = (
+        session_id
+        if isinstance(session_id, uuid.UUID)
+        else uuid.UUID(str(session_id))
+    )
+    key = str(parsed)
+    generation = next(_scoped_delta_generation_counter)
+    with _scoped_delta_lock:
+        _scoped_delta_generations[key] = generation
+        _scoped_delta_generations.move_to_end(key)
+        while len(_scoped_delta_generations) > SCOPED_DELTA_GENERATION_CAPACITY:
+            evicted_key, _ = _scoped_delta_generations.popitem(last=False)
+            _scoped_delta_publications.pop(evicted_key, None)
+    return ScopedDeltaRequest(session_id=parsed, generation=generation)
+
+
+def _publish_scoped_delta(publication: ScopedDeltaPublication) -> bool:
+    """Compare-and-swap publication against the latest requested generation."""
+    with _scoped_delta_lock:
+        if (
+            _scoped_delta_generations.get(publication.session_id)
+            != publication.generation
+        ):
+            return False
+        _scoped_delta_publications[publication.session_id] = publication
+        _scoped_delta_publications.move_to_end(publication.session_id)
+        while len(_scoped_delta_publications) > SCOPED_DELTA_PUBLICATION_CAPACITY:
+            _scoped_delta_publications.popitem(last=False)
+        return True
+
+
+def _current_scoped_delta(session_id) -> ScopedDeltaPublication | None:
+    key = str(session_id)
+    with _scoped_delta_lock:
+        publication = _scoped_delta_publications.get(key)
+        if publication is None:
+            return None
+        if _scoped_delta_generations.get(key) != publication.generation:
+            return None
+        _scoped_delta_publications.move_to_end(key)
+        return publication
+
+
+def _rearm_scoped_delta_epoch(
+    publication: ScopedDeltaPublication,
+    epoch: int,
+) -> ScopedDeltaPublication | None:
+    """Re-arm one still-current publication after an equal scoped digest."""
+    with _scoped_delta_lock:
+        current = _scoped_delta_publications.get(publication.session_id)
+        if (
+            current != publication
+            or _scoped_delta_generations.get(publication.session_id)
+            != publication.generation
+        ):
+            return None
+        rearmed = replace(publication, cache_epoch=epoch)
+        _scoped_delta_publications[publication.session_id] = rearmed
+        _scoped_delta_publications.move_to_end(publication.session_id)
+        return rearmed
+
+
+def reset_scoped_delta_cache() -> None:
+    """Test/lifecycle hook: clear publications and request bindings."""
+    with _scoped_delta_lock:
+        _scoped_delta_publications.clear()
+        _scoped_delta_generations.clear()
 
 
 def _capture_baseline_json(
@@ -428,6 +576,254 @@ def _session_played_fens(db: Session, session_id) -> list[str]:
     return [move.fen_after for move in moves]
 
 
+def _scoped_request_is_current(request: ScopedDeltaRequest) -> bool:
+    with _scoped_delta_lock:
+        return (
+            _scoped_delta_generations.get(str(request.session_id))
+            == request.generation
+        )
+
+
+def publish_scoped_opening_score_deltas(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    requests: tuple[ScopedDeltaRequest, ...],
+) -> int:
+    """Build and publish coalesced terminal-session root scores without a batch.
+
+    Runs on the existing serialized opening-score scheduler thread immediately
+    before its whole-graph recompute.  The queued ``user_id``/``player_color`` are
+    routing hints only: every session row is reloaded and must agree.  All valid
+    sessions share one overlay and one union-of-roots calculation, while each
+    publication retains its own authoritative state, played order, and request
+    generation.
+
+    Returns the number of publications committed to the process-local cache.
+    Unexpected failures propagate to the scheduler's best-effort boundary, which
+    rolls this DB session back and still runs the ordinary whole recompute.
+    """
+    started = time.perf_counter()
+    stage_ms: dict[str, float] = {}
+    sessions: list[_ScopedDeltaCandidate] = []
+
+    def finish(outcome: str, published: int = 0) -> int:
+        # Every exit leaves the scheduler-owned Session in the same clean state.
+        # The success path already rolls back before CPU scoring to release its
+        # connection; a second rollback here is intentionally harmless.  Early
+        # rejects, however, have performed reads and would otherwise hand an open
+        # READ COMMITTED transaction to the following whole-graph recompute.
+        db.rollback()
+        logger.info(
+            "scoped_opening_delta outcome=%s request_count=%s candidate_count=%s "
+            "published_count=%s session_load_ms=%s counter_ms=%s overlay_ms=%s "
+            "digest_ms=%s score_ms=%s publish_ms=%s total_ms=%.3f",
+            outcome,
+            len(requests),
+            len(sessions),
+            published,
+            stage_ms.get("session_load"),
+            stage_ms.get("counter"),
+            stage_ms.get("overlay"),
+            stage_ms.get("digest"),
+            stage_ms.get("score"),
+            stage_ms.get("publish"),
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return published
+
+    if not requests:
+        return finish("no_requests")
+
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    stage_started = time.perf_counter()
+    for request in sorted(requests, key=lambda item: str(item.session_id)):
+        if not _scoped_request_is_current(request):
+            continue
+        session = db.get(GameSession, request.session_id, populate_existing=True)
+        if session is None:
+            continue
+        if (session.user_id, session.player_color) != (user_id, player_color):
+            logger.warning("scoped opening delta rejected mismatched session routing")
+            continue
+        if not session_is_evidence_eligible(session):
+            continue
+        chain = tuple(played_opening_chain(_session_played_fens(db, session.id), roots))
+        if not chain:
+            continue
+        sessions.append(
+            _ScopedDeltaCandidate(
+                request=request,
+                session_id=str(session.id),
+                user_id=session.user_id,
+                player_color=session.player_color,
+                session_mode=session.session_mode,
+                status=session.status,
+                drill_state=session.drill_state,
+                drill_terminal_reason=session.drill_terminal_reason,
+                played_root_keys=tuple(root.opening_key for root in chain),
+            )
+        )
+    stage_ms["session_load"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+    if not sessions:
+        return finish("no_candidates")
+
+    # Immutable lower-bound stamp BEFORE every overlay/shared-evidence read.
+    stage_started = time.perf_counter()
+    registry_fingerprint = opening_score_inputs_fingerprint(graph, roots)
+    evidence_seq = current_evidence_seq(db, user_id, player_color)
+    cache_epoch = current_cache_epoch(db)
+    stage_ms["counter"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+    if cache_epoch is None:
+        return finish("missing_epoch")
+
+    stage_started = time.perf_counter()
+    overlay = overlay_evidence(db, user_id, player_color, graph)
+    stage_ms["overlay"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+    scope = overlay.shared_scope
+    stage_started = time.perf_counter()
+    shared_snapshot = shared_scope_snapshot(
+        db, scope.raw_fens, scope.norm_fens
+    )
+    stage_ms["digest"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+    # Load-bearing row-identity equality: the move rows whose viewer associations
+    # influenced the overlay must be exactly those hashed into its shared proof.
+    if shared_snapshot.move_row_ids != scope.move_row_ids:
+        return finish("scope_identity_drift")
+
+    # A changed counter means the reads above may span incompatible snapshots.
+    # Discard; never stamp the result with the later values.
+    if (
+        current_evidence_seq(db, user_id, player_color) != evidence_seq
+        or current_cache_epoch(db) != cache_epoch
+    ):
+        return finish("counter_drift")
+
+    # Release the checked-out connection before CPU scoring.  Everything needed
+    # below is immutable process memory, and the stamp remains the pre-read one.
+    db.rollback()
+    computed_at = datetime.now(timezone.utc)
+    requested_keys = [
+        opening_key
+        for candidate in sessions
+        for opening_key in candidate.played_root_keys
+    ]
+    stage_started = time.perf_counter()
+    scores = compute_scoped_root_scores(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        requested_keys,
+        RootCalcConfig(),
+        computed_at,
+    )
+    stage_ms["score"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+
+    stage_started = time.perf_counter()
+    published = 0
+    for candidate in sessions:
+        publication = ScopedDeltaPublication(
+            session_id=candidate.session_id,
+            generation=candidate.request.generation,
+            user_id=candidate.user_id,
+            player_color=candidate.player_color,
+            session_mode=candidate.session_mode,
+            status=candidate.status,
+            drill_state=candidate.drill_state,
+            drill_terminal_reason=candidate.drill_terminal_reason,
+            played_root_keys=candidate.played_root_keys,
+            scored_roots=tuple(
+                (opening_key, scores[opening_key].opening_score)
+                for opening_key in candidate.played_root_keys
+                if opening_key in scores
+            ),
+            registry_fingerprint=registry_fingerprint,
+            evidence_seq=evidence_seq,
+            cache_epoch=cache_epoch,
+            shared_raw_fens=scope.raw_fens,
+            shared_norm_fens=scope.norm_fens,
+            scoped_shared_digest=shared_snapshot.digest,
+            computed_at=computed_at,
+        )
+        published += int(_publish_scoped_delta(publication))
+    stage_ms["publish"] = round(
+        (time.perf_counter() - stage_started) * 1000.0, 3
+    )
+    return finish("published" if published else "superseded", published)
+
+
+def _validated_scoped_score_map(
+    db: Session,
+    session: GameSession,
+    played_root_keys: tuple[str, ...],
+) -> dict[str, float] | None:
+    """Return a scoped score map only while every binding/proof still holds."""
+    publication = _current_scoped_delta(session.id)
+    if publication is None:
+        return None
+    if (
+        publication.user_id != session.user_id
+        or publication.player_color != session.player_color
+        or publication.session_mode != session.session_mode
+        or publication.status != session.status
+        or publication.drill_state != session.drill_state
+        or publication.drill_terminal_reason != session.drill_terminal_reason
+        or publication.played_root_keys != played_root_keys
+        or not session_is_evidence_eligible(session)
+    ):
+        return None
+
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    if publication.registry_fingerprint != opening_score_inputs_fingerprint(
+        graph, roots
+    ):
+        return None
+    if (
+        current_evidence_seq(db, session.user_id, session.player_color)
+        != publication.evidence_seq
+    ):
+        return None
+
+    # Sample the live epoch before a possible scoped read so a successful re-arm
+    # is a lower bound on the evidence that read observed.
+    epoch = current_cache_epoch(db)
+    if epoch is None:
+        return None
+    if epoch != publication.cache_epoch:
+        if (
+            shared_scope_digest(
+                db,
+                publication.shared_raw_fens,
+                publication.shared_norm_fens,
+            )
+            != publication.scoped_shared_digest
+        ):
+            return None
+        publication = _rearm_scoped_delta_epoch(publication, epoch)
+        if publication is None:
+            return None
+    else:
+        # Close the request-generation race after all DB checks.
+        current = _current_scoped_delta(session.id)
+        if current is None or current.generation != publication.generation:
+            return None
+        publication = current
+    return dict(publication.scored_roots)
+
+
 def _delta_items_from_cache(
     db: Session, session: GameSession
 ) -> tuple[
@@ -477,14 +873,25 @@ def _delta_items_from_cache(
     if batch is None:
         return [], None, [], "skipped_cold"
 
-    rows_by_key = {row.opening_key: row for row in rows}
+    items, baseline_compatible = _delta_items_from_score_map(
+        session,
+        chain,
+        {row.opening_key: row.opening_score for row in rows},
+    )
+    status = "warm" if baseline_compatible else "warm_suppressed"
+    return items, batch, rows, status
 
+
+def _delta_items_from_score_map(
+    session: GameSession,
+    chain,
+    scores_by_key: dict[str, float],
+) -> tuple[list[OpeningScoreDeltaItem], bool]:
+    """Apply one delta/baseline contract to either batch or scoped scores."""
     baseline = _parse_compatible_baseline(session.opening_score_baseline)
-
     items: list[OpeningScoreDeltaItem] = []
     for root in chain:
-        row = rows_by_key.get(root.opening_key)
-        after = row.opening_score if row is not None else None
+        after = scores_by_key.get(root.opening_key)
         if baseline is None:
             before: float | None = None
             is_new = False
@@ -509,8 +916,7 @@ def _delta_items_from_cache(
                 is_new=is_new,
             )
         )
-    status = "warm" if baseline is not None else "warm_suppressed"
-    return items, batch, rows, status
+    return items, baseline is not None
 
 
 def compute_opening_score_delta(
@@ -562,6 +968,7 @@ def compute_opening_score_delta(
             session.user_id,
             session.player_color,
             source=OpeningScoreTrigger.SCORE_DELTA,
+            terminal_session_id=session.id,
         )
         return items
     except Exception:  # noqa: BLE001 — delta is supplementary; never 500 the end
@@ -588,37 +995,58 @@ def read_opening_score_delta(
 ) -> tuple[list[OpeningScoreDeltaItem], bool]:
     """Non-blocking poll reader for GET /api/openings/score-delta/{session_id}.
 
-    Returns ``(items, is_fresh)`` from the latest cached batch WITHOUT blocking the
-    scheduler — no ``refresh_now`` and (unlike the immediate compute) no
-    ``request_recompute``: re-enqueuing on every poll would push the scheduler's
-    ``quiet_window`` debounce forward and *delay* convergence. ``is_fresh`` tells the
-    frontend when to stop polling (no chain / already-fresh) vs keep going (cold,
-    batch still building / recompute pending). Best-effort: any failure degrades to
-    ``([], False)``.
+    Fresh-source precedence is:
 
-    Freshness is proven at most ONCE per poll (g-xmhv): only a quiescent scheduler
-    reaches ``_is_batch_fresh`` (cheap since g-jact — counter reads, or a scoped
-    shared digest under analysis churn; never the O(evidence) raw digest). While a
-    recompute is pending/in-flight (``is_recompute_scheduled``) the batch is, by
-    definition, not yet known-fresh — return ``False`` CHEAPLY and let the next poll
-    re-check once the worker settles.
+    1. a provably-fresh persisted batch;
+    2. a freshness-bound process-local scoped publication;
+    3. any warm batch as stale-while-revalidate fallback.
+
+    Scheduler pending/in-flight state is deliberately absent from this decision:
+    the evidence proof decides freshness, so a scoped result can become visible
+    while the same scheduler thread is blocked in the later whole-batch commit.
+    The reader never enqueues or waits. Best-effort: any failure degrades to
+    ``([], False)``.
     """
     try:
-        items, batch, rows, status = _delta_items_from_cache(db, session)
-        if status == "no_chain":
-            return items, True  # nothing will ever appear -> stop polling
-        if status == "skipped_cold":
-            return items, False  # batch still building -> keep polling
-        # Warm and warm_suppressed items are served for any freshness; decide the
-        # poll-stop signal. Cheap NOT-fresh gate first (lazy import: the scheduler imports
-        # opening_cache at module load, so a top-level import risks a cycle).
-        from app.opening_score_scheduler import is_recompute_scheduled
+        authoritative = db.get(GameSession, session.id, populate_existing=True)
+        if authoritative is None:
+            return [], False
+        chain = played_opening_chain(
+            _session_played_fens(db, authoritative.id),
+            get_opening_roots(),
+        )
+        if not chain:
+            return [], True
+        played_root_keys = tuple(root.opening_key for root in chain)
 
-        if is_recompute_scheduled(session.user_id, session.player_color):
-            return items, False  # pending/in-flight recompute -> not yet fresh
-        # Quiescent: the O(evidence) fingerprint is the ONLY thing that may assert
-        # is_fresh=True, and it runs at most once here.
-        return items, _is_batch_fresh(db, batch, rows)
+        batch, rows = list_cached_opening_scores(
+            db, authoritative.user_id, authoritative.player_color
+        )
+        if batch is not None and _is_batch_fresh(db, batch, rows):
+            items, _ = _delta_items_from_score_map(
+                authoritative,
+                chain,
+                {row.opening_key: row.opening_score for row in rows},
+            )
+            return items, True
+
+        scoped_scores = _validated_scoped_score_map(
+            db, authoritative, played_root_keys
+        )
+        if scoped_scores is not None:
+            items, _ = _delta_items_from_score_map(
+                authoritative, chain, scoped_scores
+            )
+            return items, True
+
+        if batch is not None:
+            items, _ = _delta_items_from_score_map(
+                authoritative,
+                chain,
+                {row.opening_key: row.opening_score for row in rows},
+            )
+            return items, False
+        return [], False
     except Exception:  # noqa: BLE001 — supplementary poll must never raise
         logger.warning(
             "opening delta poll failed session_id=%s",

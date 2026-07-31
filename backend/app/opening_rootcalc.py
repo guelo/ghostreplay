@@ -1372,6 +1372,66 @@ def compute_all_root_scores(
     return result, eligible
 
 
+def compute_scoped_root_scores(
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    opening_keys: list[str] | tuple[str, ...],
+    config: RootCalcConfig | None = None,
+    now: datetime | None = None,
+) -> dict[str, RootScore]:
+    """Score only the requested named roots from one reachability-closed domain.
+
+    This is the terminal-delta fast path: it creates one shared calculator for the
+    union of every coalesced session's played roots, emits no synthetic repertoire
+    row or direct position rows, and skips branch summaries because the delta
+    surface consumes only ``opening_score``.  Missing keys stay missing when the
+    requested root has no mastery at/below it; callers must not fabricate the
+    calculator prior as an ``after`` value.
+
+    Seeding the calculator with the union, rather than looping over
+    :func:`compute_root_score`, preserves shared traversal/SCC work and makes the
+    result structurally equivalent to the corresponding entries from
+    :func:`compute_all_root_scores`.
+    """
+    if not any(node.quality_count > 0 for node in overlay.nodes.values()):
+        return {}
+
+    requested: list[OpeningRoot] = []
+    seen: set[str] = set()
+    for opening_key in opening_keys:
+        if opening_key in seen:
+            continue
+        seen.add(opening_key)
+        root = roots.get_root(opening_key)
+        if root is not None:
+            requested.append(root)
+    if not requested:
+        return {}
+
+    config = config or RootCalcConfig()
+    now = now or datetime.now(timezone.utc)
+    calculator = _SharedCalculator(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        now,
+        seeds=[root.opening_key for root in requested],
+    )
+    selected = [
+        root
+        for root in requested
+        if calculator.has_mastery_below(root.opening_key)
+    ]
+    return calculator.compute_roots(
+        selected,
+        include_branch_summaries=False,
+    )
+
+
 def compute_all_scores(
     player_color: str,
     graph: OpeningGraph,

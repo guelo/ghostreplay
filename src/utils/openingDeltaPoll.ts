@@ -6,15 +6,16 @@ import { useGameStore } from "../stores/useGameStore";
 // recompute cycle apart; the max-attempts ceiling bounds total work even if the
 // user lingers on the end screen.
 const DELTA_POLL_INTERVAL_MS = 1500;
-// Ceiling must clear the backend recompute FLOOR. g-drill-delta-latency Phase 0
-// measured that floor at ~26s in prod (heavy user): scheduler debounce + the
-// whole-(user,color) evidence-overlay rebuild + the ~17k-row batch commit — NOT
-// the score pass. The old 15-attempt / ~22s ceiling sat *below* that floor, so
-// the badge almost never went fresh before the poll gave up. 30 attempts ≈ 45s
-// clears the observed worst case with margin; the g-f3m4 "last drill" toast
-// still catches anything slower. (Cutting the floor itself is g-delta-commit-
-// decouple + g-overlay-evidence-reuse, not this fallback.)
-const DELTA_POLL_MAX_ATTEMPTS = 30; // ≈ 45s ceiling
+// Phase 2 publishes played-root scores before the whole-batch commit, but keeps
+// the scheduler's 1.5s quiet window and can still queue behind an already-running
+// whole-graph job. On the restored PostgreSQL 18 copy the measured worst
+// durable-terminal-to-fresh-read bound was 37.2s (a process-cold prior job, then
+// warm scoped publication/read). Formula:
+//   1 + ceil((37.2s + 2 * 1.5s) / 1.5s) = 28 attempts.
+// The first request is immediate, so this is a ~40.5s sampling span. It is not a
+// strict wall-clock ceiling: request timeouts can extend elapsed time. Phase 3's
+// immediate priority lane may tighten it after remeasurement.
+const DELTA_POLL_MAX_ATTEMPTS = 28;
 const DELTA_POLL_REQUEST_TIMEOUT_MS = 4000;
 // Matches the store's LATE_OPENING_DELTA_LIMIT: a poll that survives to commit
 // needs a queue slot to land in, so holding more polls than the queue can hold

@@ -308,6 +308,11 @@ def snapshot(overlay) -> dict:
             (p.opening_interval_len, p.middle_ply, p.end_ply)
             for p in overlay.phase_samples
         ],
+        "shared_scope": (
+            overlay.shared_scope.raw_fens,
+            overlay.shared_scope.norm_fens,
+            overlay.shared_scope.move_row_ids,
+        ),
     }
 
 
@@ -325,7 +330,12 @@ def equivalence_violations(reused: dict, scratch: dict) -> list[str]:
                 f"{len(only_scratch)} scratch-only, {len(changed)} differing "
                 f"(first: {(only_reused + only_scratch + changed)[:1]})"
             )
-    for field in ("source_counts", "excluded_sessions", "phase_samples"):
+    for field in (
+        "source_counts",
+        "excluded_sessions",
+        "phase_samples",
+        "shared_scope",
+    ):
         if reused[field] != scratch[field]:
             violations.append(
                 f"{field}: reused={reused[field]!r} scratch={scratch[field]!r}"

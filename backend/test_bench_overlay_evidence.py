@@ -165,6 +165,7 @@ def test_equivalence_violations_names_the_field_and_key():
         "source_counts": {"x": 1},
         "excluded_sessions": 0,
         "phase_samples": [],
+        "shared_scope": ((), (), ()),
     }
     other = {
         "nodes": {"a": (9,), "c": (3,)},
@@ -172,6 +173,7 @@ def test_equivalence_violations_names_the_field_and_key():
         "source_counts": {"x": 2},
         "excluded_sessions": 1,
         "phase_samples": [(1, None, None)],
+        "shared_scope": (("raw",), ("norm",), (1,)),
     }
     violations = bench.equivalence_violations(base, other)
     joined = " ".join(violations)
@@ -179,6 +181,7 @@ def test_equivalence_violations_names_the_field_and_key():
     assert "source_counts" in joined
     assert "excluded_sessions" in joined
     assert "phase_samples" in joined
+    assert "shared_scope" in joined
 
 
 def test_equivalence_violations_accepts_identical_snapshots():
@@ -188,6 +191,7 @@ def test_equivalence_violations_accepts_identical_snapshots():
         "source_counts": {"x": 1},
         "excluded_sessions": 2,
         "phase_samples": [(4, 5, None)],
+        "shared_scope": (("raw",), ("norm",), (1,)),
     }
     assert bench.equivalence_violations(snap, dict(snap)) == []
 
@@ -196,7 +200,14 @@ def test_equivalence_violations_accepts_identical_snapshots():
 # The equivalence check must not go blind when a field is added
 # --------------------------------------------------------------------------- #
 def test_snapshot_covers_every_overlay_field():
-    compared = {"nodes", "edges", "source_counts", "excluded_sessions", "phase_samples"}
+    compared = {
+        "nodes",
+        "edges",
+        "source_counts",
+        "excluded_sessions",
+        "phase_samples",
+        "shared_scope",
+    }
     identity = {"user_id", "player_color"}
     actual = {f.name for f in dataclasses.fields(EvidenceOverlay)}
     assert actual == compared | identity, (

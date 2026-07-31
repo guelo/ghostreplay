@@ -2664,3 +2664,45 @@ class TestAssociationFreshness:
         assert snapshot.scoped_shared_digest == opening_evidence.shared_scope_digest(
             db_session, snapshot.shared_raw_fens, snapshot.shared_norm_fens
         )
+
+    def test_overlay_scope_and_digest_hash_the_same_move_row_ids(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """The overlay viewer query and scoped digest must select one identical
+        raw-FEN row set, including multiple rows at the same position."""
+        first = self._seed_candidate(db_session)
+        second = TestOpeningEvidenceCapabilityScoping._browser_row(
+            db_session,
+            RAW_ROOT,
+            "d2d4",
+            "d4",
+            played_eval=10,
+            best_eval=10,
+            best_move_uci="d2d4",
+            best_line_uci="d2d4 d7d5",
+            classification="best",
+            eval_delta=0,
+        )
+        db_session.commit()
+
+        seen: list[tuple[int, ...]] = []
+        real = opening_evidence.viewer_associated_ids
+
+        def recording_viewer_ids(db, user_id, row_ids):
+            seen.append(tuple(sorted(int(row_id) for row_id in row_ids)))
+            return real(db, user_id, row_ids)
+
+        monkeypatch.setattr(
+            opening_evidence, "viewer_associated_ids", recording_viewer_ids
+        )
+        overlay = overlay_evidence(db_session, 1, "white", branching_graph)
+        snapshot = opening_evidence.shared_scope_snapshot(
+            db_session,
+            overlay.shared_scope.raw_fens,
+            overlay.shared_scope.norm_fens,
+        )
+
+        expected = tuple(sorted((first.id, second.id)))
+        assert seen == [expected]
+        assert overlay.shared_scope.move_row_ids == expected
+        assert snapshot.move_row_ids == expected

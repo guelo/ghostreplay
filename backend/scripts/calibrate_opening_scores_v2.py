@@ -99,6 +99,7 @@ SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/opening_quality.py",
     "backend/app/opening_rootcalc.py",
     "backend/app/opening_roots.py",
+    "backend/app/opening_score_delta.py",
     "backend/app/opening_score_scheduler.py",
     "backend/app/position_analysis_policy.py",
     "backend/app/position_analysis_repo.py",

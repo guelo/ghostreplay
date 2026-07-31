@@ -235,6 +235,21 @@ class EvidenceOverlay:
     excluded_sessions: int = 0
     # Per-session horizon telemetry from the Lichess divider (calibration only).
     phase_samples: list[PhaseSample] = field(default_factory=list)
+    # Exact shared-table dependency scope consumed by ``_apply_cache_fallbacks``.
+    # The terminal-delta scoped publisher hashes this narrow scope instead of the
+    # batch writer's deliberately-broad raw-digest scope.  Row ids are retained
+    # so the publisher can enforce that the move rows hashed after the build are
+    # exactly those whose viewer associations influenced this overlay.
+    shared_scope: "OverlaySharedScope" = field(
+        default_factory=lambda: OverlaySharedScope()
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class OverlaySharedScope:
+    raw_fens: tuple[str, ...] = ()
+    norm_fens: tuple[str, ...] = ()
+    move_row_ids: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1031,7 +1046,9 @@ def _build_move_rows(
             player_color,
         )
 
-    _apply_cache_fallbacks(db, user_id, opening_moves, cache_candidates)
+    overlay.shared_scope = _apply_cache_fallbacks(
+        db, user_id, opening_moves, cache_candidates
+    )
     return opening_moves
 
 
@@ -1040,7 +1057,7 @@ def _apply_cache_fallbacks(
     user_id: int,
     opening_moves: list[_MoveRow],
     candidates: list[tuple[int, str, str, str]],
-) -> None:
+) -> OverlaySharedScope:
     """Upgrade eval_delta-only user moves to trusted win-chance quality.
 
     Pairs a position best eval with the played eval of the SAME analysis through
@@ -1069,7 +1086,7 @@ def _apply_cache_fallbacks(
     move keeps its eval_delta quality, exactly as before.
     """
     if not candidates:
-        return
+        return OverlaySharedScope()
 
     fen_set = sorted({fen for _, fen, _, _ in candidates})
     rows = db.query(AnalysisCache).filter(AnalysisCache.fen_before.in_(fen_set)).all()
@@ -1082,6 +1099,11 @@ def _apply_cache_fallbacks(
         db, set(norm_by_fen.values()), Capability.OPENING_EVIDENCE, user_id
     )
     associated_ids = viewer_associated_ids(db, user_id, [r.id for r in rows])
+    scope = OverlaySharedScope(
+        raw_fens=tuple(fen_set),
+        norm_fens=tuple(sorted(set(norm_by_fen.values()))),
+        move_row_ids=tuple(sorted(int(row.id) for row in rows)),
+    )
 
     for move_index, fen_before, uci, stm in candidates:
         row = by_key.get((fen_before, uci))
@@ -1140,6 +1162,7 @@ def _apply_cache_fallbacks(
         )
         mr.quality = quality
         mr.quality_source = source
+    return scope
 
 
 def _collect_session_moves(
@@ -1475,6 +1498,8 @@ def _shared_evidence_lines(
     db: Session,
     candidate_fens: list[str],
     norm_list: list[str],
+    *,
+    move_row_ids_out: set[int] | None = None,
 ) -> list[str]:
     """Shared digest lines (``AC|``/``PA|``/``ACP|``) over a SUPPLIED FEN scope.
 
@@ -1552,6 +1577,8 @@ def _shared_evidence_lines(
             WHERE fen_before IN :fens
         """).bindparams(bindparam("fens", expanding=True))
         move_rows = db.execute(move_stmt, {"fens": list(candidate_fens)}).fetchall()
+        if move_row_ids_out is not None:
+            move_row_ids_out.update(int(row.id) for row in move_rows)
         # Bulk projection join, inside this function's own scoped query — NOT
         # through the resolved-evidence descriptor (which carries only one viewer's
         # membership) and NOT inside the four-SELECT lookup ceiling, which this
@@ -1653,6 +1680,39 @@ def _shared_evidence_lines(
     return lines
 
 
+@dataclass(frozen=True, slots=True)
+class SharedScopeSnapshot:
+    """Digest plus the raw move-row identities selected for one shared scope."""
+
+    digest: str
+    move_row_ids: tuple[int, ...]
+
+
+def shared_scope_snapshot(
+    db: Session,
+    raw_fens: Iterable[str],
+    norm_fens: Iterable[str],
+) -> SharedScopeSnapshot:
+    """Hash a supplied shared scope and expose the move-row identity set.
+
+    The identity set is used only by the scoped terminal-delta build to enforce
+    that the ``analysis_cache`` rows hashed here are exactly those passed to
+    ``viewer_associated_ids`` while its overlay was built.  Ordinary batch
+    freshness checks consume :func:`shared_scope_digest` below.
+    """
+    move_row_ids: set[int] = set()
+    lines = _shared_evidence_lines(
+        db,
+        sorted(raw_fens),
+        sorted(norm_fens),
+        move_row_ids_out=move_row_ids,
+    )
+    return SharedScopeSnapshot(
+        digest=_hash_digest_lines(lines),
+        move_row_ids=tuple(sorted(move_row_ids)),
+    )
+
+
 def shared_scope_digest(
     db: Session,
     raw_fens: Iterable[str],
@@ -1666,9 +1726,7 @@ def shared_scope_digest(
     iff no shared row at this batch's positions changed, because both sides use
     ``_shared_evidence_lines`` + ``_hash_digest_lines`` verbatim.
     """
-    return _hash_digest_lines(
-        _shared_evidence_lines(db, sorted(raw_fens), sorted(norm_fens))
-    )
+    return shared_scope_snapshot(db, raw_fens, norm_fens).digest
 
 
 def raw_evidence_inputs_snapshot(

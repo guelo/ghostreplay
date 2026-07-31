@@ -48,6 +48,16 @@ Read side (stale-while-revalidate):
     inferring anything from batch presence; an exception is the fourth outcome,
     ``failed``.
 
+Terminal delta path (g-delta-commit-decouple):
+    A ``SCORE_DELTA`` enqueue may also carry its terminal ``session_id``. Pending
+    entries retain the newest request generation per session. At worker dispatch,
+    all coalesced sessions for the key share one evidence overlay and one
+    union-of-played-roots calculation; their freshness-bound process-local
+    publications become visible before the ordinary whole-graph recompute starts.
+    The full recompute still runs immediately afterward to converge dashboard/tree
+    rows. A scoped failure is rolled back and logged without suppressing that full
+    run. This adds no scorer thread and therefore preserves serialized scoring.
+
 Timing instrumentation (g-score-queue-timing):
     Every enqueue carries a required ``source`` from the closed
     ``OpeningScoreTrigger`` vocabulary, validated at the enqueue boundary BEFORE any
@@ -82,6 +92,11 @@ from app.db import SessionLocal
 from app.opening_cache import (
     OpeningScoreRecomputeResult,
     recompute_opening_scores_if_needed,
+)
+from app.opening_score_delta import (
+    ScopedDeltaRequest,
+    publish_scoped_opening_score_deltas,
+    reserve_scoped_delta_generation,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,6 +182,10 @@ class _Entry:
     # AHEAD of its configured deadline. Such runs stay visible operationally but are
     # excluded from steady-state queue-time distributions.
     forced_dispatch: bool = False
+    # Latest terminal-delta request per session folded into this (user, color)
+    # burst. Multiple sessions share one overlay/scoped calculation; a duplicate
+    # session keeps only its newest compare-and-swap generation.
+    scoped_delta_requests: dict[str, ScopedDeltaRequest] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +266,7 @@ class OpeningScoreScheduler:
 
     session_factory: Callable = SessionLocal
     recompute: Callable = staticmethod(recompute_opening_scores_if_needed)
+    scoped_recompute: Callable = staticmethod(publish_scoped_opening_score_deltas)
     clock: Callable[[], float] = time.monotonic
     quiet_window: float = 1.5
     max_wait: float = 10.0
@@ -269,7 +289,12 @@ class OpeningScoreScheduler:
     # Enqueue
     # ------------------------------------------------------------------
     def _enqueue_locked(
-        self, key: Key, *, immediate: bool, source: OpeningScoreTrigger
+        self,
+        key: Key,
+        *,
+        immediate: bool,
+        source: OpeningScoreTrigger,
+        scoped_delta_request: ScopedDeltaRequest | None = None,
     ) -> int:
         """Coalesce an enqueue for ``key``. Caller must hold ``_cond``.
 
@@ -315,11 +340,20 @@ class OpeningScoreScheduler:
             entry.trigger_last = source
             entry.trigger_sources.add(source)
         entry.enqueue_count += 1
+        if scoped_delta_request is not None:
+            entry.scoped_delta_requests[str(scoped_delta_request.session_id)] = (
+                scoped_delta_request
+            )
         self._cond.notify_all()
         return seq
 
     def request_recompute(
-        self, user_id: int, player_color: str, *, source: OpeningScoreTrigger | str
+        self,
+        user_id: int,
+        player_color: str,
+        *,
+        source: OpeningScoreTrigger | str,
+        terminal_session_id=None,
     ) -> None:
         """Coalesce a recompute request for ``(user_id, player_color)``.
 
@@ -332,11 +366,28 @@ class OpeningScoreScheduler:
         never propagate into the ``/moves`` or SRS request handlers.
         """
         trigger = _coerce_trigger(source)
+        if (
+            terminal_session_id is not None
+            and trigger is not OpeningScoreTrigger.SCORE_DELTA
+        ):
+            raise ValueError(
+                "terminal_session_id is valid only for SCORE_DELTA requests"
+            )
         key: Key = (user_id, player_color)
         with self._cond:
             if self._shutdown:
                 return
-            self._enqueue_locked(key, immediate=False, source=trigger)
+            scoped_delta_request = (
+                reserve_scoped_delta_generation(terminal_session_id)
+                if terminal_session_id is not None
+                else None
+            )
+            self._enqueue_locked(
+                key,
+                immediate=False,
+                source=trigger,
+                scoped_delta_request=scoped_delta_request,
+            )
         if self.auto_start:
             try:
                 self.start()
@@ -662,6 +713,22 @@ class OpeningScoreScheduler:
         try:
             token = _run_context.set(context)
             db = self.session_factory()
+            if entry.scoped_delta_requests:
+                try:
+                    self.scoped_recompute(
+                        db,
+                        user_id,
+                        player_color,
+                        tuple(entry.scoped_delta_requests.values()),
+                    )
+                except Exception:
+                    # The terminal delta is supplementary.  A failed scoped build
+                    # must not suppress the whole-graph convergence run.
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    logger.exception("scoped opening delta recompute failed")
             result = self.recompute(db, user_id, player_color)
             # Sample the operational duration immediately, before session close and
             # logging, so teardown never inflates it.
@@ -722,7 +789,11 @@ def get_scheduler() -> OpeningScoreScheduler:
 
 
 def request_recompute(
-    user_id: int, player_color: str, *, source: OpeningScoreTrigger | str
+    user_id: int,
+    player_color: str,
+    *,
+    source: OpeningScoreTrigger | str,
+    terminal_session_id=None,
 ) -> None:
     """Schedule a coalesced opening-score recompute (best-effort).
 
@@ -734,7 +805,12 @@ def request_recompute(
     or (via a rendered traceback) a log line.
     """
     try:
-        _scheduler.request_recompute(user_id, player_color, source=source)
+        _scheduler.request_recompute(
+            user_id,
+            player_color,
+            source=source,
+            terminal_session_id=terminal_session_id,
+        )
     except UnknownOpeningScoreTrigger:
         logger.error(
             "opening score recompute enqueue dropped: unknown trigger source "

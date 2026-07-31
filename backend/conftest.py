@@ -757,6 +757,16 @@ def _reset_session_evidence_cache():
     reset_session_evidence_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_scoped_opening_delta_cache():
+    """Keep process-local terminal publications/generations test-isolated."""
+    from app.opening_score_delta import reset_scoped_delta_cache
+
+    reset_scoped_delta_cache()
+    yield
+    reset_scoped_delta_cache()
+
+
 @pytest.fixture
 def client(_db_override):
     # Patch the scheduler getters so the FastAPI lifespan never starts a real daemon
