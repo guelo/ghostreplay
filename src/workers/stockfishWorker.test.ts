@@ -109,6 +109,15 @@ describe('stockfishWorker', () => {
     return (call![0] as Extract<WorkerResponse, { type: 'bestmove' }>).snapshot
   }
 
+  const engineCommandsAfterHandshake = (): string[] => {
+    const commands = engineWorkerPostMessageMock.mock.calls.map(
+      ([command]) => command as string,
+    )
+    const readyIndex = commands.indexOf('isready')
+    expect(readyIndex, 'the boot isready command was issued').toBeGreaterThanOrEqual(0)
+    return commands.slice(readyIndex + 1)
+  }
+
   it('accumulates MultiPV slots and emits one completed snapshot at bestmove', async () => {
     const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
     await bootReadyAnd({
@@ -119,11 +128,15 @@ describe('stockfishWorker', () => {
       multipv: 3,
     })
 
-    // The request is issued to the engine as an unrestricted depth-21 MultiPV-3 go.
-    expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+    // The evidence-bearing search configures the pinned hash once, then starts
+    // from a clean TT before the unchanged MultiPV/position/depth request.
+    expect(engineCommandsAfterHandshake()).toEqual([
+      'setoption name Hash value 64',
+      'ucinewgame',
       'setoption name MultiPV value 3',
-    )
-    expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 21')
+      `position fen ${FEN}`,
+      'go depth 21',
+    ])
 
     // Shallow pass across three slots...
     engineMessageHandler?.('info depth 12 multipv 1 score cp 25 pv e2e4 e7e5')
@@ -159,12 +172,16 @@ describe('stockfishWorker', () => {
       id: 'req-2',
       fen: FEN,
       depth: 21,
-      multipv: 3,
-      searchmoves: ['e2e4'],
+      multipv: 2,
+      searchmoves: ['e2e4', 'd2d4'],
     })
-    expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
-      'go depth 21 searchmoves e2e4',
-    )
+    expect(engineCommandsAfterHandshake()).toEqual([
+      'setoption name Hash value 64',
+      'ucinewgame',
+      'setoption name MultiPV value 2',
+      `position fen ${FEN}`,
+      'go depth 21 searchmoves e2e4 d2d4',
+    ])
 
     // A PV-less info line (e.g. a currmove/nodes update) must NOT create a slot.
     engineMessageHandler?.('info depth 5 currmove e2e4 currmovenumber 1')
@@ -176,6 +193,70 @@ describe('stockfishWorker', () => {
     expect(snapshot.lines).toHaveLength(1)
     expect(snapshot.lines[0].pv).toEqual(['e2e4', 'e7e5'])
     // The restricted request shape is faithfully recorded for local eligibility.
-    expect(snapshot.searchmoves).toEqual(['e2e4'])
+    expect(snapshot.multipv).toBe(2)
+    expect(snapshot.searchmoves).toEqual(['e2e4', 'd2d4'])
+  })
+
+  it('resets each queued depth search only after the prior bestmove is drained', async () => {
+    const FIRST_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    const SECOND_FEN = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2'
+    await bootReadyAnd({
+      type: 'evaluate-position',
+      id: 'req-first',
+      fen: FIRST_FEN,
+      depth: 21,
+      multipv: 3,
+    })
+
+    outerMessageHandler?.(new MessageEvent('message', {
+      data: {
+        type: 'evaluate-position',
+        id: 'req-second',
+        fen: SECOND_FEN,
+        depth: 21,
+        multipv: 3,
+      } satisfies WorkerRequest,
+    }))
+
+    expect(engineCommandsAfterHandshake()).toEqual([
+      'setoption name Hash value 64',
+      'ucinewgame',
+      'setoption name MultiPV value 3',
+      `position fen ${FIRST_FEN}`,
+      'go depth 21',
+      'stop',
+    ])
+
+    engineMessageHandler?.('bestmove e2e4')
+
+    expect(engineCommandsAfterHandshake()).toEqual([
+      'setoption name Hash value 64',
+      'ucinewgame',
+      'setoption name MultiPV value 3',
+      `position fen ${FIRST_FEN}`,
+      'go depth 21',
+      'stop',
+      'ucinewgame',
+      'setoption name MultiPV value 3',
+      `position fen ${SECOND_FEN}`,
+      'go depth 21',
+    ])
+  })
+
+  it('keeps movetime searches on the shared TT', async () => {
+    const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    await bootReadyAnd({
+      type: 'evaluate-position',
+      id: 'req-movetime',
+      fen: FEN,
+      movetime: 1200,
+    })
+
+    expect(engineCommandsAfterHandshake()).toEqual([
+      'setoption name MultiPV value 1',
+      `position fen ${FEN}`,
+      'go movetime 1200',
+    ])
+    expect(engineCommandsAfterHandshake()).not.toContain('ucinewgame')
   })
 })

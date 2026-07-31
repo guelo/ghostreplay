@@ -610,7 +610,12 @@ performs for arrows/lines. Key points:
   NON-authoritative, `replacement_eligible`, ACTIVE. It correctively replaces a
   defective `browser-analysis-v1` row (PROTOCOL_CORRECTION) and a weaker
   `browser-game-v1` d17 row (TIER_BASELINE) for the exact key, but never dominates
-  canonical, reclaims legacy rows, or becomes read-trusted.
+  canonical, reclaims legacy rows, or becomes read-trusted. Every newly executed
+  visible depth search starts with `ucinewgame`, before MultiPV/position/go, so its
+  Hash-64 TT is clean and its displayed/evidence-bearing opinion cannot inherit the
+  browsing path. Display-cache hits reuse their already-frozen snapshot without a
+  search; timer-bounded movetime searches remain warm. This changes no profile shape
+  and does not rewrite historical rows.
 - **`browser-analysis-v1` retirement.** The hidden root + independent post-move
   protocol (`browser-analyzer-v1`) is internally inconsistent and is RETIRED
   (`active=False`) in this release. Its stored rows stay `identity_verified` (the

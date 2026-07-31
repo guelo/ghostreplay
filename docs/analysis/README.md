@@ -118,6 +118,27 @@ from every summary statistic — they are visible, not hidden, and not counted.
 that follows a mid-run worker rebuild), so worker construction is never buried
 inside a move's latency.
 
+## Checking visible-search TT determinism
+
+The visible analysis worker's depth-limited searches use the
+`browser-analysis-multipv-v2` profile: `stockfish@18.0.7` Lite single-thread,
+Hash 64, MultiPV 3, and depth 21. Every newly executed depth search now sends
+`ucinewgame` immediately before MultiPV, position, and go; movetime searches
+remain warm.
+
+Run the manual real-engine check:
+
+```bash
+npm run check:visible-tt-determinism
+```
+
+Expect roughly 30–60 seconds on a development machine. The command searches the
+g-kgiq target once, browses Kasparov–Topalov positions derived at plies 24, 30,
+36, and 42, then searches the target again. It passes only when both target
+searches have the same best move and the same three ordered depth-21
+`{multipv, score, pv}` lines. It always terminates the package engine, writes no
+artifact, and is intentionally outside the pre-push test gate.
+
 ## Running the Node corpus harness
 
 The harness imports the exact `stockfish@18.0.7` Lite single-thread WASM used by

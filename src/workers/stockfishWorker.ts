@@ -127,6 +127,14 @@ function startEvaluation(request: EvaluatePositionMessage) {
     engineConfigured = true
   }
 
+  // Visible depth searches are durable evidence inputs, so each one must start
+  // from the same empty-TT state regardless of which positions were browsed
+  // earlier. Keep movetime searches warm: the in-game fallback is timer-bound
+  // and does not feed the visible depth-21 evidence contract.
+  if (request.depth) {
+    sendEngineCommand('ucinewgame')
+  }
+
   runningSearch = request
   runningSlots = new Map()
   ctx.postMessage({ type: 'thinking', id: request.id, fen: request.fen } satisfies WorkerResponse)
