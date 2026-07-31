@@ -78,6 +78,59 @@ const playToSeededReviewPosition = async (page: Page): Promise<void> => {
   ).toBeVisible();
 };
 
+test("play setup stays usable in a short landscape viewport", async ({
+  page,
+  loginAs,
+}) => {
+  const viewport = { width: 667, height: 375 };
+  await page.setViewportSize(viewport);
+  await loginAs(page, "stable");
+  await page.goto("/game");
+
+  const panel = page.locator(
+    ".chess-start-panel:not(.chess-start-panel--drill)",
+  );
+  const modeToggle = panel.locator(".mode-toggle-row");
+  const playActions = panel.locator(".chess-start-options");
+  const scrollRegion = panel.locator(".chess-start-scroll");
+
+  await expect(panel).toBeVisible();
+  await expect(modeToggle).toBeVisible();
+  await expect(playActions).toBeVisible();
+  await expect(page.getByRole("button", { name: /play white/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /play random/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /play black/i })).toBeVisible();
+
+  const panelBox = await panel.boundingBox();
+  expect(panelBox).not.toBeNull();
+  expect(panelBox!.y).toBeGreaterThanOrEqual(0);
+  expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(viewport.height);
+
+  for (const fixedControl of [modeToggle, playActions]) {
+    const controlBox = await fixedControl.boundingBox();
+    expect(controlBox).not.toBeNull();
+    expect(controlBox!.y).toBeGreaterThanOrEqual(panelBox!.y);
+    expect(controlBox!.y + controlBox!.height).toBeLessThanOrEqual(
+      panelBox!.y + panelBox!.height,
+    );
+  }
+
+  const canScroll = await scrollRegion.evaluate(
+    (element) => element.scrollHeight > element.clientHeight,
+  );
+  expect(canScroll).toBe(true);
+
+  await scrollRegion.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect
+    .poll(() => scrollRegion.evaluate((element) => element.scrollTop))
+    .toBeGreaterThan(0);
+
+  // The side choice remains available while the setup fields scroll.
+  await expect(playActions).toBeVisible();
+});
+
 test("narrow game layout keeps controls usable and overlays in viewport", async ({
   page,
   loginAs,
