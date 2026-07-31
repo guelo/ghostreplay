@@ -4,8 +4,9 @@ A game or drill that ends reports how the *played* openings' scores changed,
 broadest -> deepest. The "before" side is the per-session baseline captured
 shortly after session start (``GameSession.opening_score_baseline``). The "after"
 side prefers a provably-fresh persisted batch, then a freshness-bound
-process-local scoped publication computed before the full batch writer, and
-finally a warm batch as an explicitly unverified fallback.
+process-local scoped publication computed on the immediate terminal lane
+independently of the full batch writer, and finally a warm batch as an explicitly
+unverified fallback.
 
 Why a baseline is required: opening scores are cumulative over all evidence and
 live play feeds ``request_recompute`` incrementally as moves upload, so by the
@@ -39,6 +40,7 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from typing import Callable
 
 from pydantic import BaseModel
 from sqlalchemy import case, select, update
@@ -334,13 +336,15 @@ def _capture_baseline_json(
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
     if skip_when_inflight:
-        # IN-FLIGHT-ONLY gate (lazy import: the scheduler imports opening_cache at
-        # module load, so a top-level import risks a cycle). A RUNNING recompute is
-        # the only thing that makes the O(evidence) digest serialize against the
-        # worker; a pending/debounced entry is idle and NOT gated here.
+        # IN-FLIGHT-ONLY gate (lazy imports avoid scheduler/cache cycles). Either
+        # opening-score worker can make the O(evidence) digest GIL-serialize; a
+        # merely pending entry is idle and is deliberately not gated here.
+        from app.opening_score_delta_lane import is_delta_lane_inflight
         from app.opening_score_scheduler import is_recompute_inflight
 
-        if is_recompute_inflight(user_id, player_color):
+        if is_recompute_inflight(
+            user_id, player_color
+        ) or is_delta_lane_inflight(user_id, player_color):
             if batch is not None:
                 # Running worker is rebuilding the batch; we cannot prove the
                 # current one fresh without paying the digest it would serialize
@@ -576,7 +580,8 @@ def _session_played_fens(db: Session, session_id) -> list[str]:
     return [move.fen_after for move in moves]
 
 
-def _scoped_request_is_current(request: ScopedDeltaRequest) -> bool:
+def is_scoped_delta_request_current(request: ScopedDeltaRequest) -> bool:
+    """Return whether ``request`` is still the latest reserved generation."""
     with _scoped_delta_lock:
         return (
             _scoped_delta_generations.get(str(request.session_id))
@@ -584,36 +589,54 @@ def _scoped_request_is_current(request: ScopedDeltaRequest) -> bool:
         )
 
 
+# Backwards-compatible private spelling retained for focused Phase-2 tests.
+_scoped_request_is_current = is_scoped_delta_request_current
+
+
 def publish_scoped_opening_score_deltas(
     db: Session,
     user_id: int,
     player_color: str,
     requests: tuple[ScopedDeltaRequest, ...],
+    *,
+    on_complete: Callable[[dict[str, object]], None] | None = None,
 ) -> int:
     """Build and publish coalesced terminal-session root scores without a batch.
 
-    Runs on the existing serialized opening-score scheduler thread immediately
-    before its whole-graph recompute.  The queued ``user_id``/``player_color`` are
-    routing hints only: every session row is reloaded and must agree.  All valid
-    sessions share one overlay and one union-of-roots calculation, while each
-    publication retains its own authoritative state, played order, and request
-    generation.
+    Runs on the dedicated immediate delta lane, independently of the debounced
+    whole-graph scheduler. The queued ``user_id``/``player_color`` are routing
+    hints only: every session row is reloaded and must agree. All valid sessions
+    share one overlay and one union-of-roots calculation, while each publication
+    retains its own authoritative state, played order, and request generation.
 
     Returns the number of publications committed to the process-local cache.
-    Unexpected failures propagate to the scheduler's best-effort boundary, which
-    rolls this DB session back and still runs the ordinary whole recompute.
+    Unexpected failures propagate to the lane's best-effort retry boundary.
     """
     started = time.perf_counter()
     stage_ms: dict[str, float] = {}
     sessions: list[_ScopedDeltaCandidate] = []
 
     def finish(outcome: str, published: int = 0) -> int:
-        # Every exit leaves the scheduler-owned Session in the same clean state.
+        # Every exit leaves the lane-owned Session in the same clean state.
         # The success path already rolls back before CPU scoring to release its
         # connection; a second rollback here is intentionally harmless.  Early
         # rejects, however, have performed reads and would otherwise hand an open
         # READ COMMITTED transaction to the following whole-graph recompute.
         db.rollback()
+        total_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        report: dict[str, object] = {
+            "outcome": outcome,
+            "request_count": len(requests),
+            "candidate_count": len(sessions),
+            "published_count": published,
+            "stage_ms": dict(stage_ms),
+            "total_ms": total_ms,
+        }
+        if on_complete is not None:
+            try:
+                on_complete(report)
+            except Exception:
+                logger.exception("scoped opening delta timing callback failed")
         logger.info(
             "scoped_opening_delta outcome=%s request_count=%s candidate_count=%s "
             "published_count=%s session_load_ms=%s counter_ms=%s overlay_ms=%s "
@@ -628,7 +651,7 @@ def publish_scoped_opening_score_deltas(
             stage_ms.get("digest"),
             stage_ms.get("score"),
             stage_ms.get("publish"),
-            (time.perf_counter() - started) * 1000.0,
+            total_ms,
         )
         return published
 
@@ -639,7 +662,7 @@ def publish_scoped_opening_score_deltas(
     roots = get_opening_roots()
     stage_started = time.perf_counter()
     for request in sorted(requests, key=lambda item: str(item.session_id)):
-        if not _scoped_request_is_current(request):
+        if not is_scoped_delta_request_current(request):
             continue
         session = db.get(GameSession, request.session_id, populate_existing=True)
         if session is None:
@@ -958,18 +981,37 @@ def compute_opening_score_delta(
             source = "cached_suppressed"
         else:
             source = status
-        # Enqueue a BACKGROUND recompute so the cache converges (cold builds its
-        # first batch; stale refreshes) for the poll to read. Lazy import mirrors
-        # the historical load_cached_rows pattern: opening_score_scheduler imports
-        # opening_cache at module load, so a top-level import risks a cycle.
+        # Submit the immediate played-chain publication and the ordinary debounced
+        # whole-graph convergence independently. Each facade is swallowing in
+        # production, but separate boundaries preserve the contract under an
+        # injected/test failure too. Lazy imports avoid scheduler/cache cycles.
+        from app.opening_score_delta_lane import enqueue_scoped_delta
         from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 
-        request_recompute(
-            session.user_id,
-            session.player_color,
-            source=OpeningScoreTrigger.SCORE_DELTA,
-            terminal_session_id=session.id,
-        )
+        try:
+            enqueue_scoped_delta(
+                session.user_id,
+                session.player_color,
+                session.id,
+            )
+        except Exception:
+            logger.warning(
+                "opening score delta lane submission failed session_id=%s",
+                session.id,
+                exc_info=True,
+            )
+        try:
+            request_recompute(
+                session.user_id,
+                session.player_color,
+                source=OpeningScoreTrigger.SCORE_DELTA,
+            )
+        except Exception:
+            logger.warning(
+                "opening score whole-graph submission failed session_id=%s",
+                session.id,
+                exc_info=True,
+            )
         return items
     except Exception:  # noqa: BLE001 — delta is supplementary; never 500 the end
         source = "failed"
@@ -1003,9 +1045,8 @@ def read_opening_score_delta(
 
     Scheduler pending/in-flight state is deliberately absent from this decision:
     the evidence proof decides freshness, so a scoped result can become visible
-    while the same scheduler thread is blocked in the later whole-batch commit.
-    The reader never enqueues or waits. Best-effort: any failure degrades to
-    ``([], False)``.
+    while the independent whole-graph worker remains blocked. The reader never
+    enqueues or waits. Best-effort: any failure degrades to ``([], False)``.
     """
     try:
         authoritative = db.get(GameSession, session.id, populate_existing=True)

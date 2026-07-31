@@ -60,6 +60,7 @@ from app.opening_score_delta import (
     run_baseline_snapshot_job,
     snapshot_opening_baseline,
 )
+from app.opening_score_delta_lane import OpeningScoreDeltaLane
 
 
 @contextmanager
@@ -593,6 +594,35 @@ def test_snapshot_inflight_with_batch_skips_digest_and_evidence(db_session, capl
     assert "source=skipped_recompute_inflight" in caplog.text
 
 
+def test_snapshot_delta_lane_inflight_with_batch_skips_digest(db_session, caplog):
+    """The synchronous baseline guard recognizes either opening-score worker."""
+    import logging
+
+    batch_id = _make_batch(db_session)
+    _add_score_row(
+        db_session,
+        batch_id=batch_id,
+        opening_key=RUY_KEY,
+        opening_score=41.0,
+    )
+    db_session.commit()
+
+    spy_fresh = Mock(
+        side_effect=AssertionError("digest must not run while delta lane is in-flight")
+    )
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch("app.opening_score_scheduler.is_recompute_inflight", return_value=False),
+        patch("app.opening_score_delta_lane.is_delta_lane_inflight", return_value=True),
+        patch("app.opening_score_delta._is_batch_fresh", new=spy_fresh),
+    ):
+        result = snapshot_opening_baseline(db_session, 123, "white")
+
+    assert result is None
+    spy_fresh.assert_not_called()
+    assert "source=skipped_recompute_inflight" in caplog.text
+
+
 def test_snapshot_inflight_no_batch_with_evidence_skips(db_session, caplog):
     # In-flight, no batch, but the user HAS evidence (cold-with-evidence during a
     # recompute): can't prove a baseline -> NULL, source=skipped_recompute_inflight.
@@ -673,9 +703,9 @@ def test_delta_does_not_call_refresh_now(db_session):
     mock_refresh.assert_not_called()
 
 
-def test_delta_enqueues_background_recompute(db_session):
-    # The immediate compute serves the warm delta and enqueues a BACKGROUND
-    # recompute so the cache converges for the reconcile-poll to read.
+def test_delta_enqueues_immediate_scoped_and_debounced_full_recompute(db_session):
+    # The terminal helper submits the immediate scoped lane first, then preserves
+    # the ordinary debounced whole-graph request for dashboard/tree convergence.
     import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
@@ -685,17 +715,60 @@ def test_delta_enqueues_background_recompute(db_session):
 
     with (
         patch(
+            "app.opening_score_delta_lane.enqueue_scoped_delta", new=Mock()
+        ) as mock_scoped,
+        patch(
             "app.opening_score_scheduler.request_recompute", new=Mock()
-        ) as mock_enqueue,
+        ) as mock_full,
         patch(PATCH_ROOTS, return_value=_ruy_roots()),
     ):
         compute_opening_score_delta(db_session, session)
 
-    mock_enqueue.assert_called_once_with(
+    mock_scoped.assert_called_once_with(123, "white", session.id)
+    mock_full.assert_called_once_with(
         123,
         "white",
         source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=session.id,
+    )
+
+
+@pytest.mark.parametrize("failed_submission", ["scoped", "full"])
+def test_delta_submission_failures_are_independent_and_keep_cached_items(
+    db_session, failed_submission
+):
+    session = _make_session(
+        db_session, baseline=_baseline_json({RUY_KEY: 41.0})
+    )
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(
+        db_session,
+        batch_id=batch_id,
+        opening_key=RUY_KEY,
+        opening_score=44.0,
+    )
+    db_session.commit()
+
+    scoped = Mock()
+    full = Mock()
+    {"scoped": scoped, "full": full}[failed_submission].side_effect = RuntimeError(
+        "submission failed"
+    )
+    with (
+        patch("app.opening_score_delta_lane.enqueue_scoped_delta", scoped),
+        patch("app.opening_score_scheduler.request_recompute", full),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        items = compute_opening_score_delta(db_session, session)
+
+    assert {item.opening_key: item for item in items}[RUY_KEY].after == pytest.approx(
+        44.0
+    )
+    scoped.assert_called_once_with(123, "white", session.id)
+    full.assert_called_once_with(
+        123,
+        "white",
+        source=OpeningScoreTrigger.SCORE_DELTA,
     )
 
 
@@ -1109,7 +1182,6 @@ def test_scoped_poll_is_fresh_while_full_recompute_remains_inflight(
     scheduler = OpeningScoreScheduler(
         session_factory=TestingSessionLocal,
         recompute=blocked_full,
-        scoped_recompute=publish_scoped_opening_score_deltas,
         quiet_window=0.0,
         auto_start=False,
     )
@@ -1117,8 +1189,13 @@ def test_scoped_poll_is_fresh_while_full_recompute_remains_inflight(
         123,
         "white",
         source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=session.id,
     )
+    lane = OpeningScoreDeltaLane(
+        session_factory=TestingSessionLocal,
+        publish=publish_scoped_opening_score_deltas,
+        auto_start=False,
+    )
+    lane.enqueue(123, "white", session.id)
     worker = threading.Thread(
         target=scheduler.run_due,
         kwargs={"now": float("inf")},
@@ -1129,6 +1206,7 @@ def test_scoped_poll_is_fresh_while_full_recompute_remains_inflight(
         try:
             assert full_entered.wait(timeout=5.0)
             assert scheduler.is_inflight(123, "white") is True
+            lane.run_due()
             with TestingSessionLocal() as reader_db:
                 authoritative = reader_db.get(GameSession, session.id)
                 items, is_fresh = read_opening_score_delta(

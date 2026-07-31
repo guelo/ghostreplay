@@ -513,17 +513,17 @@ def test_flush_pending_times_out_on_wedged_run():
     sched.shutdown(drain=True, timeout=5.0)
 
 
-def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(monkeypatch):
-    # The lifespan starts all three schedulers, and on teardown drains them in a
-    # load-bearing order: the baseline scheduler (a leaf worker) FIRST, then the
-    # evidence scheduler BEFORE the opening scheduler — the evidence drain enqueues
-    # opening-score recomputes via request_recompute, which silently early-returns
-    # once the opening scheduler's _shutdown is set.
+def test_lifespan_starts_all_and_drains_delta_before_opening(monkeypatch):
+    # The lifespan starts all four schedulers. Teardown drains baseline first,
+    # evidence while the whole-graph scheduler can still accept its final enqueue,
+    # then the independent terminal delta leaf before the whole-graph scheduler.
     parent = Mock()
     opening = Mock()
+    delta = Mock()
     evidence = Mock()
     baseline = Mock()
     parent.attach_mock(opening, "opening")
+    parent.attach_mock(delta, "delta")
     parent.attach_mock(evidence, "evidence")
     parent.attach_mock(baseline, "baseline")
 
@@ -532,6 +532,7 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
     connection.__exit__ = Mock(return_value=False)
 
     monkeypatch.setattr(main, "get_scheduler", lambda: opening)
+    monkeypatch.setattr(main, "get_delta_lane", lambda: delta)
     monkeypatch.setattr(main, "get_evidence_scheduler", lambda: evidence)
     monkeypatch.setattr(main, "get_baseline_scheduler", lambda: baseline)
     monkeypatch.setattr(main.engine, "connect", lambda: connection)
@@ -546,10 +547,12 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
     anyio.run(exercise_lifespan)
 
     opening.start.assert_called_once_with()
+    delta.start.assert_called_once_with()
     evidence.start.assert_called_once_with()
     baseline.start.assert_called_once_with()
     start_prewarm.assert_called_once_with()
     opening.shutdown.assert_called_once_with(drain=True)
+    delta.shutdown.assert_called_once_with(drain=True)
     evidence.shutdown.assert_called_once_with(drain=True)
     baseline.shutdown.assert_called_once_with(drain=True)
 
@@ -557,6 +560,7 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
     assert shutdown_calls == [
         call.baseline.shutdown(drain=True),
         call.evidence.shutdown(drain=True),
+        call.delta.shutdown(drain=True),
         call.opening.shutdown(drain=True),
     ]
 

@@ -23,6 +23,7 @@ from app.api.srs import router as srs_router
 from app.db import engine
 from app.opening_baseline_scheduler import get_baseline_scheduler
 from app.opening_prewarm import start_prewarm
+from app.opening_score_delta_lane import get_delta_lane
 from app.opening_score_scheduler import get_scheduler
 from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
@@ -46,6 +47,16 @@ async def lifespan(app: FastAPI):
         get_scheduler().start()
     except Exception:
         logging.getLogger(__name__).exception("opening score scheduler failed to start")
+
+    # Start the immediate terminal-session delta lane independently of the
+    # debounced whole-graph scheduler. A failure drops only the supplementary
+    # scoped fast path; the ordinary SCORE_DELTA enqueue still converges the cache.
+    try:
+        get_delta_lane().start()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "opening score delta lane failed to start"
+        )
 
     # Start the in-process /moves evidence scheduler (deferred graph/opportunity/
     # analysis-cache/recompute side effects). Start failure must not block boot —
@@ -100,6 +111,15 @@ async def lifespan(app: FastAPI):
             get_evidence_scheduler().shutdown(drain=True)
         except Exception:
             logging.getLogger(__name__).exception("session evidence scheduler shutdown failed")
+        # The priority lane is a leaf: it never enqueues a whole recompute. Drain it
+        # before the ordinary opening scheduler and before disposing the engine so
+        # every accepted terminal publication gets its bounded completion chance.
+        try:
+            get_delta_lane().shutdown(drain=True)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "opening score delta lane shutdown failed"
+            )
         try:
             get_scheduler().shutdown(drain=True)
         except Exception:

@@ -606,7 +606,9 @@ def _no_op_recompute_scheduler():
     """
     with patch("app.api.session.request_recompute") as session_stub, patch(
         "app.api.srs.request_recompute"
-    ) as srs_stub, patch("app.opening_score_scheduler.request_recompute"):
+    ) as srs_stub, patch("app.opening_score_scheduler.request_recompute"), patch(
+        "app.opening_score_delta_lane.enqueue_scoped_delta"
+    ):
         yield session_stub, srs_stub
 
 
@@ -702,6 +704,9 @@ def stop_scheduler_daemon(singleton) -> bool:
     with singleton._cond:
         singleton._shutdown = False
         singleton._pending.clear()
+        singleton._inflight.clear()
+        if hasattr(singleton, "_cancel_pending"):
+            singleton._cancel_pending = False
     return stopped
 
 
@@ -709,7 +714,7 @@ def stop_scheduler_daemon(singleton) -> bool:
 def _stop_leaked_scheduler_daemons():
     """Stop any REAL scheduler singleton a test started, at that test's boundary.
 
-    The three module singletons default their ``session_factory`` to ``SessionLocal``,
+    The four module singletons default their ``session_factory`` to ``SessionLocal``,
     i.e. ``DATABASE_URL`` — which in CI is the SHARED PostgreSQL test database, the
     same one ``pg_client`` truncates between tests. A singleton started once is a
     daemon thread for the REST OF THE PROCESS: it opens its own connections, holds its
@@ -734,10 +739,16 @@ def _stop_leaked_scheduler_daemons():
     """
     yield
     from app.opening_baseline_scheduler import _scheduler as baseline_singleton
+    from app.opening_score_delta_lane import _lane as delta_singleton
     from app.opening_score_scheduler import _scheduler as score_singleton
     from app.session_evidence_scheduler import _scheduler as evidence_singleton
 
-    for singleton in (baseline_singleton, score_singleton, evidence_singleton):
+    for singleton in (
+        baseline_singleton,
+        delta_singleton,
+        score_singleton,
+        evidence_singleton,
+    ):
         stop_scheduler_daemon(singleton)
 
 
@@ -774,7 +785,9 @@ def client(_db_override):
     # _sync_session_evidence / _no_op_baseline_enqueue shims handle endpoint behaviour.
     with patch("app.main.engine", engine), patch(
         "app.main.get_scheduler"
-    ) as get_scheduler, patch("app.main.get_evidence_scheduler"), patch(
+    ) as get_scheduler, patch("app.main.get_delta_lane"), patch(
+        "app.main.get_evidence_scheduler"
+    ), patch(
         "app.main.get_baseline_scheduler"
     ), patch("app.main.start_prewarm"):
         with TestClient(app) as client:

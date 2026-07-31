@@ -469,11 +469,28 @@ def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers
     session.drill_state = "root_reached"
     db_session.commit()
 
-    response = client.post(
-        f"/api/drills/{session_id}/fail",
-        json={"terminal_reason": "accuracy"},
-        headers=auth_headers(),
-    )
+    observed = []
+
+    def observe_delta(db, terminal):
+        with TestingSessionLocal() as observer:
+            durable = observer.get(GameSession, terminal.id)
+            observed.append(
+                (
+                    durable.status,
+                    durable.drill_state,
+                    durable.drill_terminal_reason,
+                )
+            )
+        return []
+
+    with patch(
+        "app.api.drills.compute_opening_score_delta", side_effect=observe_delta
+    ):
+        response = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={"terminal_reason": "accuracy"},
+            headers=auth_headers(),
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -483,6 +500,7 @@ def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers
     db_session.refresh(session)
     assert session.drill_state == "failed"
     assert session.drill_terminal_reason == "accuracy"
+    assert observed == [("active", "failed", "accuracy")]
 
 
 def test_fail_drill_rejects_active_and_non_accuracy_reason(client, auth_headers, db_session):
@@ -543,11 +561,83 @@ def test_continue_drill_accepts_failed(client, auth_headers, db_session):
     assert session.converted_at is not None
 
 
+def test_converted_drill_game_end_submits_delta_after_durable_transition(
+    client, auth_headers, db_session
+):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.get(GameSession, session_uuid)
+    session.drill_state = "root_reached"
+    db_session.commit()
+
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        continued = client.post(
+            f"/api/drills/{session_id}/continue",
+            json={"current_ply": 0},
+            headers=auth_headers(),
+        )
+    assert continued.status_code == 200
+    assert continued.json()["drill_state"] == "converted"
+
+    observed = []
+
+    def observe_delta(db, terminal):
+        with TestingSessionLocal() as observer:
+            durable = observer.get(GameSession, terminal.id)
+            observed.append(
+                (
+                    durable.session_mode,
+                    durable.drill_state,
+                    durable.status,
+                    durable.result,
+                )
+            )
+        return []
+
+    with patch(
+        "app.api.game.compute_opening_score_delta", side_effect=observe_delta
+    ):
+        ended = client.post(
+            "/api/game/end",
+            json={
+                "session_id": session_id,
+                "result": "draw",
+                "pgn": "1. e4 e5",
+                "is_rated": True,
+            },
+            headers=auth_headers(),
+        )
+
+    assert ended.status_code == 200, ended.text
+    assert observed == [("drill", "converted", "ended", "draw")]
+
+
 def test_natural_end_marks_session_failed(client, auth_headers, db_session):
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
 
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+    observed = []
+
+    def observe_delta(db, terminal):
+        with TestingSessionLocal() as observer:
+            durable = observer.get(GameSession, terminal.id)
+            observed.append(
+                (
+                    durable.status,
+                    durable.drill_state,
+                    durable.drill_terminal_reason,
+                )
+            )
+        return []
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots()),
+        patch(
+            "app.api.drills.compute_opening_score_delta",
+            side_effect=observe_delta,
+        ),
+    ):
         response = client.post(
             f"/api/drills/{session_id}/natural-end",
             json={"result": "checkmate_loss", "pgn": "1. e4 e5"},
@@ -567,6 +657,7 @@ def test_natural_end_marks_session_failed(client, auth_headers, db_session):
     assert session.ended_at is not None
     assert session.is_rated is False
     assert db_session.query(RatingHistory).filter(RatingHistory.game_session_id == session.id).count() == 0
+    assert observed == [("ended", "failed", "natural_end")]
 
 
 def test_unconverted_drill_rejects_game_end_and_stays_unrated(client, auth_headers, db_session):
@@ -1097,6 +1188,7 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
     with (
         patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
         patch("app.api.drills.get_opening_graph", return_value=graph),
+        patch("app.api.drills.compute_opening_score_delta") as delta,
     ):
         start = _start_drill_cp(client, auth_headers, strictness_cp=50, root_fen=E4_E5_FEN)
         session_id = start.json()["session_id"]
@@ -1112,6 +1204,7 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
     assert data["failure"]["reason"] == "off_route"
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_terminal_reason == "off_route"
+    delta.assert_not_called()
 
 
 def test_unconverted_drill_records_automatic_blunder(client, auth_headers, db_session):
@@ -2425,19 +2518,22 @@ def test_second_abandon_of_failed_drill_is_a_noop(client, auth_headers, db_sessi
 
 def test_abandon_of_unfailed_drill_still_records_abandoned(client, auth_headers, db_session):
     """Guards against over-broad preservation: a drill with no terminal outcome
-    still gets one written by abandon, from both non-terminal states."""
-    for state in ("active", "root_reached"):
-        session_id = _start_drill(client, auth_headers).json()["session_id"]
-        session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-        session.drill_state = state
-        db_session.commit()
+    still gets one written by abandon, from both non-terminal states. Abandon is
+    deliberately outside the delta lane."""
+    with patch("app.api.drills.compute_opening_score_delta") as delta:
+        for state in ("active", "root_reached"):
+            session_id = _start_drill(client, auth_headers).json()["session_id"]
+            session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+            session.drill_state = state
+            db_session.commit()
 
-        response = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
-        assert response.status_code == 200, response.text
-        assert response.json()["drill_state"] == "abandoned", state
+            response = client.post(f"/api/drills/{session_id}/abandon", headers=auth_headers())
+            assert response.status_code == 200, response.text
+            assert response.json()["drill_state"] == "abandoned", state
 
-        db_session.expire_all()
-        session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-        assert session.drill_state == "abandoned", state
-        assert session.drill_terminal_reason is None, state
-        assert session.status == "ended", state
+            db_session.expire_all()
+            session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+            assert session.drill_state == "abandoned", state
+            assert session.drill_terminal_reason is None, state
+            assert session.status == "ended", state
+    delta.assert_not_called()

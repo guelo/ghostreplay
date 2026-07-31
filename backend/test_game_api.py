@@ -303,31 +303,57 @@ def test_end_game_with_pgn(client, auth_headers):
 
 
 def test_end_game_all_result_types(client, auth_headers):
-    """Test all valid result types."""
-    results = ["checkmate_win", "checkmate_loss", "resign", "draw", "abandon"]
+    """Every supported normal terminal result submits delta work after commit."""
+    cases = [
+        ("checkmate_win", True),
+        ("checkmate_loss", True),
+        ("resign", True),
+        ("draw", True),
+        ("draw", False),
+        ("abandon", True),
+    ]
+    observed = []
 
-    for result in results:
-        # Start a new game for each result type
-        start_response = client.post(
-            "/api/game/start",
-            json={"engine_elo": 1500},
-            headers=auth_headers()
-        )
-        session_id = start_response.json()["session_id"]
+    def observe_delta(db, session):
+        # A separate session can see the authoritative terminal transition: the
+        # delta helper is called only after the endpoint commit.
+        with TestingSessionLocal() as observer:
+            durable = observer.get(GameSession, session.id)
+            observed.append(
+                (durable.result, durable.status, durable.is_rated)
+            )
+        return []
 
-        # End with specific result
-        end_response = client.post(
-            "/api/game/end",
-            json={
-                "session_id": session_id,
-                "result": result,
-                "pgn": "1. e4 e5"
-            },
-            headers=auth_headers()
-        )
+    with patch("app.api.game.compute_opening_score_delta", side_effect=observe_delta):
+        for result, is_rated in cases:
+            start_response = client.post(
+                "/api/game/start",
+                json={"engine_elo": 1500},
+                headers=auth_headers()
+            )
+            session_id = start_response.json()["session_id"]
 
-        assert end_response.status_code == 200
-        assert end_response.json()["result"] == result
+            end_response = client.post(
+                "/api/game/end",
+                json={
+                    "session_id": session_id,
+                    "result": result,
+                    "pgn": "1. e4 e5",
+                    "is_rated": is_rated,
+                },
+                headers=auth_headers()
+            )
+
+            assert end_response.status_code == 200
+            assert end_response.json()["result"] == result
+
+    assert observed == [
+        ("checkmate_win", "ended", True),
+        ("checkmate_loss", "ended", True),
+        ("resign", "ended", True),
+        ("draw", "ended", True),
+        ("draw", "ended", False),
+    ]
 
 
 def test_end_game_not_found(client, auth_headers):

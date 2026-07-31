@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from unittest.mock import Mock
 
 import anyio
@@ -178,77 +177,6 @@ def test_coalesces_burst_into_single_recompute():
     clock.advance(2.0)  # past the quiet window
     sched.run_due()
     assert recompute.calls == [(123, "white")]
-
-
-def test_scoped_terminal_sessions_coalesce_and_run_before_full_recompute():
-    clock = _FakeClock()
-    order: list[str] = []
-    scoped_calls = []
-
-    def scoped(db, user_id, player_color, requests):
-        order.append("scoped")
-        scoped_calls.append((user_id, player_color, requests))
-
-    def full(db, user_id, player_color):
-        order.append("full")
-        return _rebuilt()
-
-    sched, _ = _make_scheduler(clock, full, scoped_recompute=scoped)
-    session_a = uuid.uuid4()
-    session_b = uuid.uuid4()
-    sched.request_recompute(
-        123,
-        "white",
-        source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=session_a,
-    )
-    # A duplicate terminal request keeps only its newest generation.
-    sched.request_recompute(
-        123,
-        "white",
-        source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=session_a,
-    )
-    sched.request_recompute(
-        123,
-        "white",
-        source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=session_b,
-    )
-    clock.advance(2.0)
-    sched.run_due()
-
-    assert order == ["scoped", "full"]
-    assert len(scoped_calls) == 1
-    user_id, color, requests = scoped_calls[0]
-    assert (user_id, color) == (123, "white")
-    assert {request.session_id for request in requests} == {session_a, session_b}
-    assert len(requests) == 2
-
-
-def test_scoped_failure_rolls_back_and_does_not_suppress_full_recompute(caplog):
-    clock = _FakeClock()
-    full = _RecordingRecompute()
-
-    def broken_scoped(db, user_id, player_color, requests):
-        raise RuntimeError("scoped boom")
-
-    sched, sessions = _make_scheduler(
-        clock, full, scoped_recompute=broken_scoped
-    )
-    sched.request_recompute(
-        123,
-        "white",
-        source=OpeningScoreTrigger.SCORE_DELTA,
-        terminal_session_id=uuid.uuid4(),
-    )
-    clock.advance(2.0)
-    with caplog.at_level(logging.ERROR):
-        sched.run_due()
-
-    assert full.calls == [(123, "white")]
-    assert sessions[0].rollbacks == 1
-    assert "scoped opening delta recompute failed" in caplog.text
 
 
 def test_immediate_deadline_is_sticky_under_normal_enqueues():
@@ -668,11 +596,17 @@ def test_shutdown_timeout_does_not_run_recompute_on_caller():
 def test_lifespan_swallows_shutdown_timeout_and_disposes_engine(monkeypatch):
     scheduler = Mock()
     scheduler.shutdown.side_effect = TimeoutError("hung recompute")
+    delta = Mock()
+    evidence = Mock()
+    baseline = Mock()
     connection = Mock()
     connection.__enter__ = Mock(return_value=connection)
     connection.__exit__ = Mock(return_value=False)
 
     monkeypatch.setattr(main, "get_scheduler", lambda: scheduler)
+    monkeypatch.setattr(main, "get_delta_lane", lambda: delta)
+    monkeypatch.setattr(main, "get_evidence_scheduler", lambda: evidence)
+    monkeypatch.setattr(main, "get_baseline_scheduler", lambda: baseline)
     monkeypatch.setattr(main.engine, "connect", lambda: connection)
     dispose = Mock()
     monkeypatch.setattr(main.engine, "dispose", dispose)
@@ -687,6 +621,8 @@ def test_lifespan_swallows_shutdown_timeout_and_disposes_engine(monkeypatch):
 
     scheduler.start.assert_called_once_with()
     scheduler.shutdown.assert_called_once_with(drain=True)
+    delta.start.assert_called_once_with()
+    delta.shutdown.assert_called_once_with(drain=True)
     start_prewarm.assert_called_once_with()
     dispose.assert_called_once_with()
 
