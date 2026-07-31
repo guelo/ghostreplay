@@ -14,8 +14,9 @@ Two read shapes exist, deliberately kept apart:
   a per-row query during ranking.
 * :func:`associated_user_ids_by_row` — the FULL association set per row. Reserved
   for the opening digest's shared projection, which must stay user-independent so
-  "scoped digest == full digest's shared slice" holds by construction. The locked
-  writer loads full sets too, but through its own ``FOR UPDATE``-bound helper.
+  every build and re-check over the same stored scope produces one canonical
+  digest, independent of the batch viewer. The locked writer loads full sets too,
+  but through its own ``FOR UPDATE``-bound helper.
 
 The writer's claim pass lives in :mod:`app.analysis_cache_repo`, inside the batch's
 own transaction — never here and never after it.

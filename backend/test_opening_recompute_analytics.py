@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 
 from app.models import SessionMove
 from app.opening_cache import (
@@ -68,8 +69,28 @@ def test_cache_miss_emits_with_full_props(db_session, captured):
     assert props["evidence_change"] is False
     assert props["decay_staleness"] is False
     assert props["player_color"] == "black"
+    assert props["freshness_capture"] == "operational"
     assert isinstance(props["duration_ms"], (int, float))
     assert props["batch_size"] is not None and props["batch_size"] >= 0
+
+
+def test_missing_epoch_emits_and_logs_null_epoch_fallback(
+    db_session, captured, caplog
+):
+    _seed_black_opening_session(db_session)
+    db_session.execute(text("DELETE FROM evidence_epoch"))
+    db_session.commit()
+
+    with caplog.at_level("INFO", logger="app.opening_cache"):
+        result = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert result.disposition is RecomputeDisposition.REBUILT
+    props = _only_props(captured)
+    assert props["freshness_capture"] == "fallback_null_epoch"
+    assert any(
+        "freshness_capture=fallback_null_epoch" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_no_evidence_does_not_emit(db_session, captured):

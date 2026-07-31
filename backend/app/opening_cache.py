@@ -41,6 +41,7 @@ from app.opening_evidence import (
     raw_evidence_inputs_digest,
     raw_evidence_inputs_snapshot,
     shared_scope_digest,
+    shared_scope_snapshot,
 )
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
@@ -58,6 +59,12 @@ from app.posthog_client import capture
 logger = logging.getLogger(__name__)
 
 PlayerColor = Literal["white", "black"]
+FreshnessCapturePath = Literal[
+    "operational",
+    "fallback_null_epoch",
+    "fallback_identity",
+    "fallback_counter",
+]
 _VALID_PLAYER_COLORS = {"white", "black"}
 
 # Explicit score-model version. Bump on any change to the scoring model that is
@@ -202,9 +209,10 @@ def opening_score_raw_inputs_fingerprint(
 
     O(evidence volume): it full-scans + hashes every session_moves row and
     IN-queries the shared caches. Since g-jact it is NOT on any warm freshness
-    path — the cheap partitioned signal (``_is_batch_fresh``) answers there —
-    and is computed only on the REBUILD branch (via
-    ``capture_freshness_snapshot``) as the stored source-of-truth digest.
+    path — the cheap partitioned signal (``_is_batch_fresh``) answers there.
+    Since g-speed-score-run, ordinary scheduler rebuilds also use that signal;
+    this full content identity remains for explicit/direct snapshots, release
+    calibration, and raw-mutation/audit checks.
     """
     _validate_player_color(player_color)
     graph = get_opening_graph()
@@ -495,6 +503,12 @@ class FreshnessSnapshot:
     a newer signal with an older overlay (the hazard the old
     overlay-requires-fingerprint guard existed to prevent).
 
+    ``inputs_fingerprint`` is optional. Explicit/direct snapshots and release
+    calibration carry the full registry-plus-raw-input digest. The ordinary
+    scheduler rebuild path deliberately leaves it NULL after proving the scored
+    overlay against the cheaper partitioned signal below; serving-time freshness
+    never depends on the raw digest.
+
     ``evidence_seq`` / ``cache_epoch`` are sampled BEFORE the evidence read they
     describe, so each stamped value is a LOWER BOUND on the evidence in the
     batch: a write landing during/after the read advances the live counter above
@@ -512,7 +526,7 @@ class FreshnessSnapshot:
     always rebuild), which is the safe degradation.
     """
 
-    inputs_fingerprint: str
+    inputs_fingerprint: str | None
     evidence_seq: int
     cache_epoch: int | None
     shared_raw_fens: tuple[str, ...]
@@ -525,10 +539,12 @@ def capture_freshness_snapshot(
     user_id: int,
     player_color: PlayerColor,
 ) -> FreshnessSnapshot:
-    """One evidence read → the full freshness bundle for a batch build.
+    """One evidence read → the full raw freshness bundle.
 
-    O(evidence): pays the full raw-input digest. Only the REBUILD branch calls
-    this; warm freshness verdicts go through ``_is_batch_fresh`` and never do.
+    O(evidence): pays the full raw-input digest. Explicit/direct batch builds and
+    release calibration call this; the ordinary scheduler rebuild path uses
+    ``_capture_operational_rebuild_inputs`` and falls back here only on drift or
+    an unavailable shared epoch. Warm freshness verdicts never call either.
     """
     _validate_player_color(player_color)
     registry_fp = opening_score_inputs_fingerprint(get_opening_graph(), get_opening_roots())
@@ -549,6 +565,84 @@ def capture_freshness_snapshot(
         shared_raw_fens=snapshot.shared_raw_fens,
         shared_norm_fens=snapshot.shared_norm_fens,
         scoped_shared_digest=snapshot.scoped_shared_digest,
+    )
+
+
+def _capture_operational_rebuild_inputs(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+    graph: OpeningGraph,
+) -> tuple[FreshnessSnapshot, EvidenceOverlay, FreshnessCapturePath]:
+    """Capture one scheduler rebuild's overlay + cheap freshness proof.
+
+    The full raw-input digest is retained for explicit/direct callers and the
+    release-calibration fence, but it is redundant for an ordinary whole-graph
+    rebuild: the serving verdict is already proved by ``evidence_seq`` plus the
+    shared-cache epoch/scoped digest. This is the batch analogue of the terminal
+    scoped publisher's capture discipline:
+
+      1. immutable lower-bound counters before every evidence read;
+      2. the overlay's exact shared FEN and move-row identity scope;
+      3. the scoped digest over that same identity set;
+      4. unchanged counters after both reads.
+
+    A missing epoch, identity mismatch, or counter race falls back to today's
+    conservative full-snapshot-before-overlay sequence. The first overlay is
+    discarded in the drift cases (though it may harmlessly warm the replay LRU).
+    The returned closed-vocabulary path is emitted with the rebuild telemetry so
+    fallback frequency and its extra overlay cost are observable in production.
+    """
+    _validate_player_color(player_color)
+    evidence_seq = current_evidence_seq(db, user_id, player_color)
+    cache_epoch = current_cache_epoch(db)
+
+    def full_fallback(
+        capture_path: FreshnessCapturePath,
+    ) -> tuple[FreshnessSnapshot, EvidenceOverlay, FreshnessCapturePath]:
+        logger.info(
+            "opening rebuild freshness capture fallback freshness_capture=%s",
+            capture_path,
+        )
+        freshness = capture_freshness_snapshot(db, user_id, player_color)
+        return (
+            freshness,
+            overlay_evidence(db, user_id, player_color, graph),
+            capture_path,
+        )
+
+    # With no epoch singleton, shared writes are not observable by the cheap
+    # signal. Preserve the full snapshot path and its fail-closed NULL epoch.
+    if cache_epoch is None:
+        return full_fallback("fallback_null_epoch")
+
+    overlay = overlay_evidence(db, user_id, player_color, graph)
+    scope = overlay.shared_scope
+    shared_snapshot = shared_scope_snapshot(db, scope.raw_fens, scope.norm_fens)
+
+    identity_matches = shared_snapshot.move_row_ids == scope.move_row_ids
+    counters_match = (
+        current_evidence_seq(db, user_id, player_color) == evidence_seq
+        and current_cache_epoch(db) == cache_epoch
+    )
+    if identity_matches and counters_match:
+        return (
+            FreshnessSnapshot(
+                # The operational signal fields below are the freshness proof.
+                # Keep this NULL rather than fabricating a raw-content digest.
+                inputs_fingerprint=None,
+                evidence_seq=evidence_seq,
+                cache_epoch=cache_epoch,
+                shared_raw_fens=scope.raw_fens,
+                shared_norm_fens=scope.norm_fens,
+                scoped_shared_digest=shared_snapshot.digest,
+            ),
+            overlay,
+            "operational",
+        )
+
+    return full_fallback(
+        "fallback_identity" if not identity_matches else "fallback_counter"
     )
 
 
@@ -601,10 +695,10 @@ def _cheap_evidence_fresh(db: Session, batch: OpeningScoreBatch) -> bool:
     Covers the EVIDENCE surfaces only — callers own the registry-fingerprint and
     stale-branch-key checks. Check order:
 
-    1. unstamped signal (NULL signal columns, or a NULL ``inputs_fingerprint``)
-       → False. Covers pre-migration batches (which also fail the registry
-       check upstream via the raw-v5 fold), genuinely corrupt/partial batches,
-       AND batches deliberately stamped with a NULL ``cache_epoch`` because the
+    1. unstamped signal (NULL signal columns) → False. Covers pre-migration
+       batches (which also fail the registry check upstream via the signal
+       contract-version fold), genuinely corrupt/partial batches, AND batches
+       deliberately stamped with a NULL ``cache_epoch`` because the
        ``evidence_epoch`` singleton was missing at build time (see
        ``FreshnessSnapshot`` — a 0-stamp there would alias with a re-seeded
        row). Treat as stale and let a rebuild re-stamp (no oracle-reseed path).
@@ -618,14 +712,21 @@ def _cheap_evidence_fresh(db: Session, batch: OpeningScoreBatch) -> bool:
        the session_moves scan and the python-chess normalize loop (the digest's
        dominant costs). Scoped match → True + best-effort re-arm; else False.
 
-    Soundness: True requires seq match (⇒ no per-user change ⇒ scope unchanged)
-    AND (epoch match ⇒ no shared write anywhere, OR scoped match ⇒ no shared
-    change at this batch's positions) ⇒ every ``raw_evidence_inputs_digest``
-    input unchanged ⇒ overlay identical ⇒ scores identical.
+    Soundness for fresh-v2 operational batches: a seq match proves the per-user
+    rows and therefore the overlay's exact shared-query candidate set are
+    unchanged. At build time that exact scope was hashed only after its
+    analysis-cache move-row identities matched the overlay and both counters
+    stayed stable. An epoch match proves no later shared write; after epoch
+    drift, a scoped match proves every shared input inside that exact dependency
+    set is unchanged. A broad-only shared mutation may therefore change
+    ``raw_evidence_inputs_digest`` while correctly leaving the overlay unchanged.
+    Full-snapshot/fallback batches carry a conservative broad stored scope and
+    satisfy the same overlay proof. Given an unchanged registry, the scorer is a
+    deterministic function of that overlay; wall-clock decay is checked
+    separately by the caller.
     """
     if (
-        batch.inputs_fingerprint is None
-        or batch.evidence_seq is None
+        batch.evidence_seq is None
         or batch.cache_epoch is None
         or batch.scoped_shared_digest is None
     ):
@@ -797,8 +898,10 @@ def _is_batch_fresh(
     branch-key check); the scoped shared digest over the batch's STORED scope when
     a shared write happened somewhere (still no session_moves scan and no
     python-chess normalize loop). The O(evidence) ``raw_evidence_inputs_digest``
-    is NEVER computed here — it survives only on the rebuild branch and as the
-    differential-test reference.
+    is NEVER computed here — it survives only on explicit/full rebuild paths and
+    as a raw-mutation/audit reference. Fresh-v2 differential acceptance compares
+    the derived overlay and score outputs, because a broad-only raw change may be
+    irrelevant to an operational batch's exact dependency scope.
 
     False-negatives are allowed (harmless rebuild); NO false-positives (see
     ``_cheap_evidence_fresh``'s soundness note — a stale batch is never served
@@ -1596,6 +1699,7 @@ def _emit_opening_scores_recomputed(
     stale_branch_keys: bool,
     evidence_change: bool,
     decay_staleness: bool,
+    freshness_capture: FreshnessCapturePath,
 ) -> None:
     """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
 
@@ -1612,6 +1716,11 @@ def _emit_opening_scores_recomputed(
     A direct/offline/test call has no scheduler run context: the event still fires,
     stamped ``scheduler_timed=False`` with no fabricated queue values, and
     production queries filter on ``scheduler_timed = true``.
+
+    ``freshness_capture`` is always present and distinguishes the normal
+    no-full-digest path from each conservative fallback reason. In particular,
+    fallback runs pay both the full digest and (for drift) a discarded overlay,
+    so this property is the production attribution for unexpected duration.
 
     Best-effort: a count/timing/analytics failure must never break the scheduler
     worker or alter the durable batch (``capture`` already swallows its own errors;
@@ -1648,6 +1757,7 @@ def _emit_opening_scores_recomputed(
         "batch_size": batch_size,
         "player_color": player_color,
         "scheduler_timed": timing is not None,
+        "freshness_capture": freshness_capture,
     }
     if timing is not None:
         properties.update(timing)
@@ -1677,9 +1787,11 @@ def recompute_opening_scores_if_needed(
         versions),
       - the batch has legacy/stale branch-key rows.
 
-    The O(evidence) raw-input digest is computed ONLY on the rebuild branches
-    (inside ``capture_freshness_snapshot``, as the stored source-of-truth
-    ``inputs_fingerprint``) — never on the fast cached-batch return.
+    Actual rebuilds normally capture the overlay against the partitioned
+    freshness signal and leave the optional full raw ``inputs_fingerprint``
+    NULL. They pay the O(evidence) raw digest only as a conservative fallback
+    when the shared epoch is unavailable or the operational capture drifts.
+    The fast cached-batch return pays neither capture.
 
     Emits ``opening_scores_recomputed`` (with timing + the trigger reason) ONLY
     when an actual recompute runs — never on the fast cached-batch return.
@@ -1696,10 +1808,12 @@ def recompute_opening_scores_if_needed(
                 disposition=RecomputeDisposition.NO_EVIDENCE, batch=None
             )
         started = time.monotonic()
-        # Freshness bundle BEFORE the overlay evidence read (lower-bound
-        # discipline — see FreshnessSnapshot); this is where the full digest runs.
-        freshness = capture_freshness_snapshot(db, user_id, player_color)
-        overlay = overlay_evidence(db, user_id, player_color, graph)
+        # Capture one matched overlay + lower-bound operational freshness proof.
+        # The stable path skips the redundant full raw-evidence digest; a race
+        # falls back to the legacy full-snapshot-before-overlay sequence.
+        freshness, overlay, freshness_capture = _capture_operational_rebuild_inputs(
+            db, user_id, player_color, graph
+        )
         # Do NOT pass computed_at=now: the writer samples it AFTER the freshness
         # + overlay reads above so it stays an upper bound on the batch's evidence
         # (g-mxeo). ``now`` is kept only for the decay-staleness gate below.
@@ -1722,6 +1836,7 @@ def recompute_opening_scores_if_needed(
             stale_branch_keys=False,
             evidence_change=False,
             decay_staleness=False,
+            freshness_capture=freshness_capture,
         )
         return OpeningScoreRecomputeResult(
             disposition=RecomputeDisposition.REBUILT,
@@ -1768,12 +1883,13 @@ def recompute_opening_scores_if_needed(
     else:
         reason = "decay_staleness"
 
-    # Change / registry drift / stale branch keys / decay-staleness: build the
-    # overlay and recompute. The full raw digest runs HERE (rebuild only), inside
-    # capture_freshness_snapshot, sampled before the overlay evidence read.
+    # Change / registry drift / stale branch keys / decay-staleness: capture one
+    # matched overlay + lower-bound operational freshness proof. The stable path
+    # skips the redundant full raw-evidence digest; a race falls back to it.
     started = time.monotonic()
-    freshness = capture_freshness_snapshot(db, user_id, player_color)
-    overlay = overlay_evidence(db, user_id, player_color, graph)
+    freshness, overlay, freshness_capture = _capture_operational_rebuild_inputs(
+        db, user_id, player_color, graph
+    )
     # As in the cache-miss branch: let the writer sample computed_at after these
     # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
     # for the decay-staleness gate only.
@@ -1796,6 +1912,7 @@ def recompute_opening_scores_if_needed(
         stale_branch_keys=stale_branch_keys,
         evidence_change=evidence_change,
         decay_staleness=decay_staleness,
+        freshness_capture=freshness_capture,
     )
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,

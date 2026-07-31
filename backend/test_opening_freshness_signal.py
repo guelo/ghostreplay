@@ -2,11 +2,19 @@
 
 The acceptance property, checked scenario by scenario and in a randomized loop:
 
-    _is_batch_fresh(batch) == True  ⟹  raw_evidence_inputs_digest unchanged
+    _is_batch_fresh(batch) == True
+        ⟹ evidence overlay unchanged
+        ⟹ score outputs at the batch clock unchanged
 
 False-negatives (stale verdict on unchanged evidence) are allowed — they only
 cost an unnecessary, still-correct rebuild. False-positives (fresh verdict over
 changed evidence) are forbidden: they would serve stale scores forever.
+
+The full raw digest remains a mutation/non-vacuity oracle, but fresh-v2
+operational batches intentionally store the overlay's narrower exact shared
+dependency scope. A shared write at a broad-only candidate may therefore change
+the raw digest while the batch correctly remains fresh; that divergence has an
+explicit regression test below.
 
 Per-user mutation scenarios drive the PRODUCTION choke-points (the /end, /fail,
 /continue, /abandon, /moves, SRS-review endpoints and blunder recording),
@@ -41,10 +49,12 @@ from app.opening_cache import (
     current_evidence_seq,
     list_cached_opening_scores,
     recompute_opening_scores,
+    recompute_opening_scores_if_needed,
     reserve_opening_score_generation,
 )
-from app.opening_evidence import raw_evidence_inputs_digest
+from app.opening_evidence import EvidenceOverlay, raw_evidence_inputs_digest
 from app.opening_graph import OpeningGraph, OpeningGraphNode
+from app.opening_rootcalc import PositionScore, RootScore
 from app.opening_roots import OpeningRoot, OpeningRoots
 
 USER = 4242
@@ -64,6 +74,15 @@ NON_CANDIDATE_FULL = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq - 1 1
 # candidate SQL (its session breaks board continuity, so the overlay excludes
 # the whole session and its narrow fallback candidates never include it).
 BROKEN_CHAIN_FULL = "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2"
+
+# batch_id -> (overlay, named-root scores, direct position scores), all scored
+# under that batch's own fixed computed_at clock. Cleared by the autouse fixture.
+SemanticOracle = tuple[
+    EvidenceOverlay,
+    tuple[RootScore, ...],
+    tuple[PositionScore, ...],
+]
+_SEMANTIC_ORACLES: dict[int, SemanticOracle] = {}
 
 
 def _make_graph() -> OpeningGraph:
@@ -102,11 +121,13 @@ def _make_roots() -> OpeningRoots:
 
 @pytest.fixture(autouse=True)
 def _stub_registry():
+    _SEMANTIC_ORACLES.clear()
     with (
         patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
         patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
     ):
         yield
+    _SEMANTIC_ORACLES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -206,25 +227,73 @@ def _seed_base_evidence(db) -> str:
     return sid
 
 
+def _semantic_snapshot(
+    db,
+    batch: OpeningScoreBatch,
+    user_id: int,
+    color: str,
+) -> SemanticOracle:
+    """The production freshness consequence, independent of the raw digest.
+
+    Rebuild the overlay and deterministic score outputs at the persisted batch
+    clock. Wall-clock decay is therefore held fixed while evidence semantics are
+    compared.
+    """
+    graph = _make_graph()
+    roots = _make_roots()
+    overlay = oc.overlay_evidence(db, user_id, color, graph)
+    computed_at = batch.computed_at
+    if computed_at.tzinfo is None:
+        computed_at = computed_at.replace(tzinfo=timezone.utc)
+    scores, position_scores = oc._build_cached_scores(
+        color, graph, overlay, roots, computed_at
+    )
+    return overlay, tuple(scores), tuple(position_scores)
+
+
+def _remember_semantics(
+    db,
+    batch: OpeningScoreBatch,
+    user_id: int,
+    color: str,
+) -> OpeningScoreBatch:
+    _SEMANTIC_ORACLES[batch.id] = _semantic_snapshot(db, batch, user_id, color)
+    return batch
+
+
 def _build_batch(db, user_id: int = USER, color: str = "white") -> OpeningScoreBatch:
-    return recompute_opening_scores(db, user_id, color)
+    """Build through the production fresh-v2 scheduler decision path."""
+    result = recompute_opening_scores_if_needed(db, user_id, color)
+    assert result.batch is not None
+    return _remember_semantics(db, result.batch, user_id, color)
 
 
-def _check_sound(db, user_id: int, color: str, digest_before: str) -> bool:
-    """The acceptance property: fresh ⟹ digest unchanged. Returns the verdict."""
+def _build_direct_batch(
+    db, user_id: int = USER, color: str = "white"
+) -> OpeningScoreBatch:
+    """Explicit full-snapshot builder for the one broad-scope contrast test."""
+    return _remember_semantics(
+        db, recompute_opening_scores(db, user_id, color), user_id, color
+    )
+
+
+def _check_sound(db, user_id: int, color: str) -> bool:
+    """The acceptance property: fresh ⟹ overlay + score outputs unchanged."""
     batch, rows = list_cached_opening_scores(db, user_id, color)
     assert batch is not None
     fresh = _is_batch_fresh(db, batch, rows)
     if fresh:
-        assert raw_evidence_inputs_digest(db, user_id, color) == digest_before, (
-            "FALSE POSITIVE: batch reported fresh but the raw digest changed"
+        expected = _SEMANTIC_ORACLES[batch.id]
+        actual = _semantic_snapshot(db, batch, user_id, color)
+        assert actual == expected, (
+            "FALSE POSITIVE: batch reported fresh but its overlay/scores changed"
         )
     return fresh
 
 
 def _assert_stale(db, digest_before: str, *, user_id: int = USER,
                   color: str = "white") -> None:
-    assert _check_sound(db, user_id, color, digest_before) is False
+    assert _check_sound(db, user_id, color) is False
     assert raw_evidence_inputs_digest(db, user_id, color) != digest_before, (
         "scenario did not actually change the digest — vacuous test"
     )
@@ -233,7 +302,7 @@ def _assert_stale(db, digest_before: str, *, user_id: int = USER,
 def _assert_fresh_unchanged(db, digest_before: str, *, user_id: int = USER,
                             color: str = "white") -> None:
     assert raw_evidence_inputs_digest(db, user_id, color) == digest_before
-    assert _check_sound(db, user_id, color, digest_before) is True
+    assert _check_sound(db, user_id, color) is True
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +321,7 @@ def test_writer_stamps_signal_and_scope(db_session):
     batch = _build_batch(db_session)
     assert batch.evidence_seq == current_evidence_seq(db_session, USER, "white")
     assert batch.cache_epoch == current_cache_epoch(db_session)
+    assert batch.inputs_fingerprint is None
     assert batch.scoped_shared_digest is not None
     raw_fens, norm_fens = oc._load_batch_shared_scope(db_session, batch.id)
     assert START_FULL in raw_fens
@@ -604,6 +674,51 @@ def test_position_analysis_winner_at_candidate_norm_stales(db_session):
     _assert_stale(db_session, digest)
 
 
+def test_viewer_association_flip_stales_operational_batch_and_changes_scores(
+    db_session,
+):
+    # Association membership is part of the exact shared dependency set. Granting
+    # this viewer access changes no analysis_cache evidence column, but it changes
+    # which coherent browser tuple the overlay may consume.
+    from app.analysis_profiles import (
+        BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        stamp_profile_full,
+    )
+    from app.models import AnalysisCache, AnalysisCacheSubmission
+
+    _seed_base_evidence(db_session)
+    row = AnalysisCache(
+        fen_before=START_FULL,
+        normalized_fen_before=START_FEN,
+        move_uci="e2e4",
+        move_san="e4",
+        played_eval=-30,
+        best_eval=20,
+        best_move_uci="d2d4",
+        best_move_san="d4",
+        best_line_uci="d2d4 d7d5",
+        eval_delta=50,
+        classification="good",
+        source="analysis",
+        analysis_profile_id=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        evidence_contract_id="resolver-complete-v2",
+        **stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
+    )
+    db_session.add(row)
+    db_session.commit()
+    batch = _build_batch(db_session)
+    digest = raw_evidence_inputs_digest(db_session, USER, "white")
+    before_semantics = _SEMANTIC_ORACLES[batch.id]
+
+    db_session.add(
+        AnalysisCacheSubmission(analysis_cache_id=row.id, user_id=USER)
+    )
+    db_session.commit()
+
+    assert _semantic_snapshot(db_session, batch, USER, "white") != before_semantics
+    _assert_stale(db_session, digest)
+
+
 def test_unrelated_shared_churn_stays_fresh_and_rearms(db_session):
     # Scenario 7 + the re-arm test: a shared write at a NON-candidate FEN drifts
     # the epoch but not the scoped digest -> fresh (digest also unchanged), and
@@ -633,12 +748,13 @@ def test_unrelated_shared_churn_stays_fresh_and_rearms(db_session):
         assert scoped_calls["n"] == 1
 
 
-def test_broad_scope_covers_non_overlay_candidates(db_session):
-    # Broad-scope regression: a candidate FEN from a broken-continuity session is
-    # in the DIGEST's broad candidate set but never in the overlay's narrower
-    # fallback candidates (the overlay excludes the whole session). A shared
-    # write there must still stale the batch — a scope captured from the overlay
-    # would miss it (false positive).
+def test_operational_scope_ignores_broad_only_candidate_without_score_change(
+    db_session,
+):
+    # Fresh-v2's intentional divergence: this candidate FEN comes from a
+    # broken-continuity session, so it is in the full raw oracle digest but never
+    # in the overlay's exact fallback dependency set. A shared write there
+    # changes the raw digest but cannot change the overlay or score outputs.
     _seed_base_evidence(db_session)
     broken_sid = _insert_session(db_session)
     # fen_before does not chain from any prior fen_after -> ContinuityError ->
@@ -651,7 +767,26 @@ def test_broad_scope_covers_non_overlay_candidates(db_session):
     raw_fens, _ = oc._load_batch_shared_scope(
         db_session, list_cached_opening_scores(db_session, USER, "white")[0].id
     )
-    assert BROKEN_CHAIN_FULL in raw_fens  # captured from the digest, not the overlay
+    assert BROKEN_CHAIN_FULL not in raw_fens
+
+    digest = raw_evidence_inputs_digest(db_session, USER, "white")
+    _insert_analysis_cache(db_session, BROKEN_CHAIN_FULL, move_uci="d4d5")
+    assert raw_evidence_inputs_digest(db_session, USER, "white") != digest
+    assert _check_sound(db_session, USER, "white") is True
+
+
+def test_direct_snapshot_retains_broad_scope_for_same_candidate(db_session):
+    # Explicit/direct snapshots keep the stronger broad audit scope. The same
+    # broad-only write therefore conservatively stales that batch.
+    _seed_base_evidence(db_session)
+    broken_sid = _insert_session(db_session)
+    _insert_move(
+        db_session, broken_sid, 1, "white", "d4", BROKEN_CHAIN_FULL, START_FULL
+    )
+    batch = _build_direct_batch(db_session)
+
+    raw_fens, _ = oc._load_batch_shared_scope(db_session, batch.id)
+    assert BROKEN_CHAIN_FULL in raw_fens
 
     digest = raw_evidence_inputs_digest(db_session, USER, "white")
     _insert_analysis_cache(db_session, BROKEN_CHAIN_FULL, move_uci="d4d5")
@@ -789,9 +924,9 @@ def test_bumps_from_independent_sessions_compose(db_session):
 
 def test_randomized_differential_loop(db_session):
     """Apply a random mutation sequence; after each step assert
-    fresh ⟹ digest unchanged. Per-user mutations pair the write with the exact
-    production bump rule (this exercises the SIGNAL math; the endpoint wiring is
-    covered scenario-by-scenario above)."""
+    fresh ⟹ overlay and score outputs unchanged. Per-user mutations pair the
+    write with the exact production bump rule (this exercises the SIGNAL math;
+    endpoint wiring is covered scenario-by-scenario above)."""
     _seed_base_evidence(db_session)
     _build_batch(db_session)
 
@@ -849,9 +984,7 @@ def test_randomized_differential_loop(db_session):
     ops = [op_add_eligible_move, op_add_active_move, op_shared_insert,
            op_shared_update, op_shared_delete, op_rebuild]
 
-    digest = raw_evidence_inputs_digest(db_session, USER, "white")
     for _ in range(40):
         rng.choice(ops)()
         db_session.expire_all()
-        _check_sound(db_session, USER, "white", digest)
-        digest = raw_evidence_inputs_digest(db_session, USER, "white")
+        _check_sound(db_session, USER, "white")

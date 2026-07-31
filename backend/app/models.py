@@ -888,8 +888,9 @@ class OpeningScoreBatch(Base):
     player_color: Mapped[str] = mapped_column(String(5), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     registry_fingerprint: Mapped[str | None] = mapped_column(Text)
-    # Content fingerprint over the consumed evidence + registry/config; used to skip
-    # recompute when scoring inputs are unchanged. NULL for pre-migration batches.
+    # Optional full content fingerprint over consumed evidence + registry/config.
+    # Direct/release captures retain it for audit and raw-mutation checks; ordinary
+    # scheduler batches leave it NULL and use the complete cheap signal below.
     inputs_fingerprint: Mapped[str | None] = mapped_column(Text)
     # Cheap freshness signal (g-jact), stamped at build time and SAMPLED BEFORE the
     # evidence read so each is a lower bound on the evidence in the batch:

@@ -285,7 +285,9 @@ def _naive(dt: datetime) -> datetime:
     return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
 
-def _assert_computed_at_after_reads(db_session, recompute_call):
+def _assert_computed_at_after_reads(
+    db_session, recompute_call, *, operational_capture: bool
+):
     # g-mxeo invariant: computed_at is an UPPER BOUND on the evidence reads (sampled
     # AFTER the freshness-snapshot + overlay reads). Each read wrapper advances the
     # shared clock and records its post-read tick; the writer's _utcnow() sample must
@@ -295,6 +297,7 @@ def _assert_computed_at_after_reads(db_session, recompute_call):
     recorded: dict[str, datetime] = {}
     real_snapshot = oc.capture_freshness_snapshot
     real_overlay = oc.overlay_evidence
+    real_shared_snapshot = oc.shared_scope_snapshot
 
     def snapshot_wrap(*args, **kwargs):
         result = real_snapshot(*args, **kwargs)
@@ -306,23 +309,36 @@ def _assert_computed_at_after_reads(db_session, recompute_call):
         recorded["overlay"] = clock()
         return result
 
+    def shared_snapshot_wrap(*args, **kwargs):
+        result = real_shared_snapshot(*args, **kwargs)
+        recorded["shared"] = clock()
+        return result
+
     with (
         patch("app.opening_cache._utcnow", clock),
         patch("app.opening_cache.capture_freshness_snapshot", snapshot_wrap),
         patch("app.opening_cache.overlay_evidence", overlay_wrap),
+        patch("app.opening_cache.shared_scope_snapshot", shared_snapshot_wrap),
     ):
         batch = recompute_call()
 
     assert batch is not None
-    assert "fp" in recorded and "overlay" in recorded
-    latest_read = max(recorded["fp"], recorded["overlay"])
+    assert "overlay" in recorded
+    if operational_capture:
+        assert "shared" in recorded
+        assert "fp" not in recorded
+    else:
+        assert "fp" in recorded
+    latest_read = max(recorded.values())
     assert _naive(batch.computed_at) >= _naive(latest_read)
 
 
 def test_computed_at_is_evidence_read_upper_bound_direct(db_session):
     _seed_black_opening_session(db_session)
     _assert_computed_at_after_reads(
-        db_session, lambda: recompute_opening_scores(db_session, 123, "black")
+        db_session,
+        lambda: recompute_opening_scores(db_session, 123, "black"),
+        operational_capture=False,
     )
 
 
@@ -331,6 +347,7 @@ def test_computed_at_is_evidence_read_upper_bound_if_needed(db_session):
     _assert_computed_at_after_reads(
         db_session,
         lambda: _rebuilt_batch(db_session, 123, "black", reason="cache_miss"),
+        operational_capture=True,
     )
 
 
@@ -1000,16 +1017,22 @@ def test_proven_fresh_false_on_registry_drift(db_session):
     assert is_fresh is False
 
 
-def test_proven_fresh_false_for_legacy_null_inputs_fingerprint(db_session):
-    # Batches written before raw-input fingerprinting have inputs_fingerprint=None;
-    # they can never be proven fresh and must read as stale.
+def test_proven_fresh_allows_omitted_optional_raw_fingerprint(db_session):
+    # The full raw fingerprint is an optional audit/release-capture field. The
+    # partitioned signal is the serving proof and remains sufficient on its own.
     _seed_black_opening_session(db_session)
-    recompute_opening_scores_if_needed(db_session, 123, "black")
+    recompute_opening_scores(db_session, 123, "black")
 
     batch = get_latest_opening_score_batch(db_session, 123, "black")
     batch.inputs_fingerprint = None
     db_session.commit()
 
+    _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert is_fresh is True
+
+    # A genuinely pre-signal/partial batch is still fail-closed.
+    batch.evidence_seq = None
+    db_session.commit()
     _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
     assert is_fresh is False
 
@@ -1681,6 +1704,81 @@ def test_if_needed_builds_overlay_on_cache_miss(db_session):
 
     assert batch is not None
     assert spy.called
+
+
+def test_if_needed_rebuild_skips_full_raw_snapshot_and_reuses_signal(db_session):
+    _seed_black_opening_session(db_session)
+
+    with patch(
+        "app.opening_cache.capture_freshness_snapshot",
+        side_effect=AssertionError("operational rebuild ran the full raw snapshot"),
+    ):
+        first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
+
+    assert first is not None
+    assert first.inputs_fingerprint is None
+    assert first.evidence_seq is not None
+    assert first.cache_epoch is not None
+    assert first.scoped_shared_digest is not None
+
+    second = _cached_batch(db_session, 123, "black")
+    assert second is not None
+    assert second.id == first.id
+
+
+@pytest.mark.parametrize("drift", ["counter", "scope_identity"])
+def test_if_needed_operational_capture_drift_falls_back_to_full_snapshot(
+    db_session, drift, caplog
+):
+    _seed_black_opening_session(db_session)
+    real_shared_snapshot = oc.shared_scope_snapshot
+    shared_calls = 0
+
+    def drifting_shared_snapshot(*args, **kwargs):
+        nonlocal shared_calls
+        shared_calls += 1
+        snapshot = real_shared_snapshot(*args, **kwargs)
+        if shared_calls != 1:
+            return snapshot
+        if drift == "counter":
+            oc.bump_evidence_seq(db_session, 123, "black")
+            db_session.commit()
+            return snapshot
+        return snapshot.__class__(
+            digest=snapshot.digest,
+            move_row_ids=(*snapshot.move_row_ids, 999_999),
+        )
+
+    with caplog.at_level("INFO", logger="app.opening_cache"):
+        with (
+            patch(
+                "app.opening_cache.shared_scope_snapshot",
+                side_effect=drifting_shared_snapshot,
+            ),
+            patch(
+                "app.opening_cache.capture_freshness_snapshot",
+                wraps=oc.capture_freshness_snapshot,
+            ) as full_snapshot,
+            patch(
+                "app.opening_cache.overlay_evidence",
+                wraps=_real_overlay_evidence,
+            ) as overlay,
+            patch("app.opening_cache.capture") as analytics,
+        ):
+            batch = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
+
+    assert batch is not None
+    assert batch.inputs_fingerprint is not None
+    assert full_snapshot.call_count == 1
+    assert overlay.call_count == 2
+    expected_capture = (
+        "fallback_counter" if drift == "counter" else "fallback_identity"
+    )
+    assert analytics.call_args.args[2]["freshness_capture"] == expected_capture
+    assert any(
+        f"freshness_capture={expected_capture}" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_if_needed_builds_overlay_on_real_change(db_session):

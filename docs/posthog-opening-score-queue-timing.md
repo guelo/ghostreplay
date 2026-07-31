@@ -28,15 +28,16 @@ queue decomposition in a ContextVar for the duration of the recompute;
 Fires **only for an actual rebuild** — never for a `cached` fast return or a
 `no_evidence` bail-out.
 
-### Pre-existing properties (unchanged)
+### Rebuild properties
 
 | Property | Meaning |
 |---|---|
-| `duration_ms` | the **narrow** actual-rebuild span measured inside `recompute_opening_scores_if_needed` (freshness snapshot → overlay → durable write) |
+| `duration_ms` | the **narrow** actual-rebuild span measured inside `recompute_opening_scores_if_needed` (freshness capture → overlay → durable write) |
 | `reason` | dominant trigger: `cache_miss` \| `registry_drift` \| `stale_branch_keys` \| `evidence_change` \| `decay_staleness` |
 | `cache_miss`, `registry_drift`, `stale_branch_keys`, `evidence_change`, `decay_staleness` | booleans behind `reason` |
 | `batch_size` | named-root row count in the new batch (`null` if the count query failed) |
 | `player_color` | `white` \| `black` |
+| `freshness_capture` | `operational` for the normal exact-scope/no-full-digest path; otherwise `fallback_null_epoch` \| `fallback_identity` \| `fallback_counter`. A fallback pays the full raw digest and identity/counter drift also discards the first overlay, so segment `duration_ms` by this field before attributing a regression to scoring or persistence. |
 
 `distinct_id` is the backend `user_id` as a string.
 

@@ -112,7 +112,10 @@ OPENING_EVIDENCE_INPUTS_VERSION = "raw-v7"
 # evidence_seq / cache_epoch — so already-stamped batches cannot be accepted
 # under a different contract. Folded into ``opening_score_inputs_fingerprint``
 # alongside OPENING_EVIDENCE_INPUTS_VERSION.
-FRESHNESS_CONTRACT_VERSION = "fresh-v1"
+# fresh-v2 (g-speed-score-run): operational whole-graph batches capture the
+# overlay's exact shared scope under counter/row-identity guards and intentionally
+# omit the now-optional full raw ``inputs_fingerprint``.
+FRESHNESS_CONTRACT_VERSION = "fresh-v2"
 
 # Session-eligibility predicate applied to EVERY session-scoped evidence
 # selection (aliased ``gs``). The overlay and the freshness digest must apply
@@ -236,10 +239,11 @@ class EvidenceOverlay:
     # Per-session horizon telemetry from the Lichess divider (calibration only).
     phase_samples: list[PhaseSample] = field(default_factory=list)
     # Exact shared-table dependency scope consumed by ``_apply_cache_fallbacks``.
-    # The terminal-delta scoped publisher hashes this narrow scope instead of the
-    # batch writer's deliberately-broad raw-digest scope.  Row ids are retained
-    # so the publisher can enforce that the move rows hashed after the build are
-    # exactly those whose viewer associations influenced this overlay.
+    # Both the terminal-delta publisher and fresh-v2 operational batch writer
+    # hash this narrow scope. Row ids let either publisher enforce that the move
+    # rows hashed after the build are exactly those whose viewer associations
+    # influenced this overlay. Explicit/full snapshots retain their separate
+    # deliberately broad scope.
     shared_scope: "OverlaySharedScope" = field(
         default_factory=lambda: OverlaySharedScope()
     )
@@ -395,10 +399,11 @@ def _sm_line(r) -> str:
     freshness-digest tests cover this side. Adding a column the overlay consumes
     means adding it in BOTH places.
 
-    The stored format is deliberately unchanged: it feeds
-    ``raw_evidence_inputs_digest``, which is persisted in ``inputs_fingerprint``,
-    so any edit here invalidates every stamped batch and forces a global
-    recompute.
+    The stored format is deliberately unchanged: it feeds the optional
+    ``inputs_fingerprint`` audit/release identity and raw-mutation tests.
+    Ordinary scheduler batches use the partitioned freshness signal instead, so
+    a semantic edit here must also follow the version/counter discipline
+    documented at ``OPENING_EVIDENCE_INPUTS_VERSION`` above.
     """
     return "SM|" + "|".join(
         (
@@ -1503,10 +1508,11 @@ def _shared_evidence_lines(
 ) -> list[str]:
     """Shared digest lines (``AC|``/``PA|``/``ACP|``) over a SUPPLIED FEN scope.
 
-    The single source of the shared-line SQL and formatting: the full digest
-    calls it with the freshly-derived candidate scope; the scoped freshness
-    re-check (``shared_scope_digest``) calls it with a batch's STORED scope, so
-    "scoped digest == full digest's shared slice" holds by construction.
+    The single source of the shared-line SQL and formatting. The full digest
+    calls it with its freshly-derived broad candidate scope; operational capture
+    and ``shared_scope_digest`` call it with the overlay's exact dependency
+    scope. For any supplied scope, build-time and re-check digests are identical
+    by construction.
 
     Tracks BOTH grains the cache fallback consumes (a trusted position best
     paired with a move-trusted played eval): the exact ``(fen_before, move_uci)``
@@ -1525,11 +1531,11 @@ def _shared_evidence_lines(
     its user could not read evidence they can now read.
 
     The FULL association set is hashed, not just the requesting user's membership:
-    this function must stay USER-INDEPENDENT — that is what makes "scoped digest ==
-    full digest's shared slice" hold by construction for ``shared_scope_digest``.
-    The cost is that one user's claim invalidates other users' batches at the same
-    positions; that is accepted, because association writes are rare next to
-    evidence writes and the alternative breaks the shared-slice invariant.
+    this function must stay USER-INDEPENDENT so a stored scope has one canonical
+    digest regardless of whose batch or publication carries it. The cost is that
+    one user's claim invalidates other users' batches at the same positions; that
+    is accepted, because association writes are rare next to evidence writes and
+    the alternative makes scoped re-checks viewer-dependent.
 
     ``PA|`` deliberately does NOT carry it: ``position_analysis`` is canonical-only
     storage that browser evidence is structurally excluded from, and canonical rows
@@ -1695,10 +1701,11 @@ def shared_scope_snapshot(
 ) -> SharedScopeSnapshot:
     """Hash a supplied shared scope and expose the move-row identity set.
 
-    The identity set is used only by the scoped terminal-delta build to enforce
-    that the ``analysis_cache`` rows hashed here are exactly those passed to
-    ``viewer_associated_ids`` while its overlay was built.  Ordinary batch
-    freshness checks consume :func:`shared_scope_digest` below.
+    The identity set is used by the scoped terminal-delta build and fresh-v2
+    operational whole-batch build to enforce that the ``analysis_cache`` rows
+    hashed here are exactly those passed to ``viewer_associated_ids`` while the
+    overlay was built. Later batch freshness checks consume
+    :func:`shared_scope_digest` below.
     """
     move_row_ids: set[int] = set()
     lines = _shared_evidence_lines(
@@ -1746,10 +1753,13 @@ def raw_evidence_inputs_snapshot(
     Scoping is INTENTIONALLY broad where it diverges from the overlay (e.g. all
     session moves are hashed, not just opening-interval premoves; the candidate
     set is every eligible-session player-color move lacking a primary eval, not
-    just opening premoves): a broader digest can only cause an unnecessary
-    (still-correct) rebuild, never a missed change. The persisted shared scope
-    MUST be this same broad set — a narrower scope would let the scoped freshness
-    re-check accept while the full digest changed at a non-opening candidate FEN.
+    just opening premoves). Explicit/direct snapshots and conservative fallbacks
+    persist this same broad scope, so their scoped re-check remains a slice of
+    their full digest. Fresh-v2 operational batches deliberately do not use this
+    scope: they persist the overlay's exact shared dependency set after
+    row-identity and counter-stability checks. A shared write at a broad-only FEN
+    can then change this full oracle digest while correctly leaving the
+    operational batch fresh because it cannot change that overlay or its scores.
     Semantic-only changes that leave every raw row unchanged are covered by
     ``OPENING_EVIDENCE_INPUTS_VERSION`` / ``FRESHNESS_CONTRACT_VERSION``, folded
     into the registry fingerprint (``opening_score_inputs_fingerprint``).
@@ -1786,8 +1796,11 @@ def raw_evidence_inputs_digest(
 ) -> str:
     """Full raw-input digest — see ``raw_evidence_inputs_snapshot``.
 
-    Retained as the slow-path oracle: the rebuild branch stores it (composed into
-    ``inputs_fingerprint``) and the differential tests compare the cheap signal
-    against it. It is no longer called on any warm freshness-verdict path.
+    Retained as the slow-path content identity: explicit/direct snapshots, release
+    calibration, and conservative operational fallbacks store it (composed into
+    ``inputs_fingerprint``), while tests use it to prove raw mutations are
+    non-vacuous and to pin the intentional broad-vs-exact-scope distinction.
+    Fresh-v2 acceptance is compared against derived overlay/score semantics, not
+    this broader digest. Ordinary scheduler rebuilds and warm verdicts skip it.
     """
     return raw_evidence_inputs_snapshot(db, user_id, player_color).digest
