@@ -53,7 +53,6 @@ from app.migration_guard import (
     MIGRATION_APP_NAME,
     MIGRATION_LOCK_CLASSID,
     MIGRATION_LOCK_OBJID,
-    MIGRATION_LOCK_TIMEOUT_S,
     MIGRATION_TEST_BARRIER_ENV,
     RUNNER_APP_NAME,
     ConcurrentMigrationError,

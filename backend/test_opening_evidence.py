@@ -7,7 +7,6 @@ import logging
 from collections import Counter
 import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +23,6 @@ from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
     EdgeEvidence,
     EvidenceOverlay,
-    NodeEvidence,
     observed_off_book_fens,
     overlay_evidence,
     raw_evidence_inputs_digest,

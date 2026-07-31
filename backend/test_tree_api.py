@@ -31,7 +31,7 @@ from app.models import (
 from app.opening_aggregate import CachedPositionScoreRow
 from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_densify import DensifiedEdges, RoutingView
-from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
+from app.opening_evidence import EdgeEvidence, EvidenceOverlay
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
 from app.tree_eval import MoveEval

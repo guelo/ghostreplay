@@ -118,6 +118,26 @@ run_gate \
   true \
   env NODE_OPTIONS="${NODE_OPTIONS//--throw-deprecation/} --disable-warning=DEP0205" npm run test:e2e:run
 
+if [ -x backend/.venv/bin/python ]; then
+  run_gate \
+    "Backend lint" \
+    "Backend Ruff lint" \
+    "$output_dir/backend-lint.out" \
+    false \
+    backend/.venv/bin/python -m ruff check --config backend/ruff.toml --no-cache backend
+else
+  backend_lint_log="$output_dir/backend-lint.out"
+  printf '$ %s\n\n' \
+    "backend/.venv/bin/python -m ruff check --config backend/ruff.toml --no-cache backend" \
+    >"$backend_lint_log"
+  {
+    printf '\nBackend virtualenv is missing: backend/.venv/bin/python\n'
+    printf 'Create it and install backend/requirements-dev.txt before pushing.\n'
+  } | tee -a "$backend_lint_log" >&2
+  record_result "Backend lint" "FAILED" "$backend_lint_log"
+  overall_status=1
+fi
+
 if [ ! -x backend/.venv/bin/python ]; then
   backend_log="$output_dir/backend-tests.out"
   printf '$ %s\n\n' \

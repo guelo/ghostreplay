@@ -22,7 +22,6 @@ from app.analysis_profiles import (
     JEFFML_PROFILE_ID,
 )
 from app.evidence_contracts import (
-    MINIMAL_BEST_EVAL,
     MINIMAL_PLAYED_EVAL,
     MOVE_COMPLETE,
     RESOLVER_COMPLETE,

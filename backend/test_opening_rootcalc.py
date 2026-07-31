@@ -1094,7 +1094,7 @@ def test_deep_gap_penalized_once_gate_vs_gate_x_cov_diverge():
     u1 = _positions(["e2e4", "e7e5"])[2]
     opp2 = _positions(["e2e4", "e7e5", "g1f3"])[3]
     covered = _positions(["e2e4", "e7e5", "g1f3", "b8c6"])[4]
-    gap = _positions(["e2e4", "e7e5", "g1f3", "d7d6"])[4]
+    _gap = _positions(["e2e4", "e7e5", "g1f3", "d7d6"])[4]
     graph = _graph(
         [["e2e4", "e7e5", "g1f3", "b8c6"], ["e2e4", "e7e5", "g1f3", "d7d6"]]
     )
@@ -1995,16 +1995,16 @@ def _shared_object_fixture():
     ever visited as a descendant and never reported. Named roots: ``R`` and ``C``.
     Returns ``(graph, overlay, roots, R, O, C, L)``.
     """
-    R, O = _positions(["e2e4"])
-    C = _positions(["e2e4", "e7e5"])[2]
-    L = _positions(["e2e4", "c7c5"])[2]
+    root_fen, opponent_fen = _positions(["e2e4"])
+    child_fen = _positions(["e2e4", "e7e5"])[2]
+    leaf_fen = _positions(["e2e4", "c7c5"])[2]
     graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
-    roots = _roots(_root(R, "Root"), _root(C, "Child"))
+    roots = _roots(_root(root_fen, "Root"), _root(child_fen, "Child"))
     overlay = EvidenceOverlay(1, "white")
-    _prepared(overlay, R, O, "e2e4")
-    overlay.nodes[R] = _quality(R, 2.0, count=2, at=FOLD_NOW)
-    overlay.nodes[C] = _quality(C, 4.0, count=4, at=FOLD_NOW)
-    return graph, overlay, roots, R, O, C, L
+    _prepared(overlay, root_fen, opponent_fen, "e2e4")
+    overlay.nodes[root_fen] = _quality(root_fen, 2.0, count=2, at=FOLD_NOW)
+    overlay.nodes[child_fen] = _quality(child_fen, 4.0, count=4, at=FOLD_NOW)
+    return graph, overlay, roots, root_fen, opponent_fen, child_fen, leaf_fen
 
 
 def test_report_debug_shared_object_across_roots_and_never_reported_stays_null():
@@ -2012,15 +2012,23 @@ def test_report_debug_shared_object_across_roots_and_never_reported_stays_null()
     # the descendant C, reported as its own row, is non-null in BOTH the root's
     # earlier snapshot and its own — the SAME mutable NodeDebug object, not a copy —
     # while L, visited only as a descendant and never reported, stays fully null.
-    graph, overlay, roots, R, O, C, L = _shared_object_fixture()
+    (
+        graph,
+        overlay,
+        roots,
+        root_fen,
+        _opponent_fen,
+        child_fen,
+        leaf_fen,
+    ) = _shared_object_fixture()
     scores, _, _ = compute_all_scores(
         "white", graph, overlay, roots, RootCalcConfig(), now=FOLD_NOW, debug=True
     )
-    assert set(scores) == {R, C}
+    assert set(scores) == {root_fen, child_fen}
 
-    r_score, c_score = scores[R], scores[C]
-    c_in_r = next(n for n in r_score.debug_nodes if n.fen == C)
-    c_in_c = next(n for n in c_score.debug_nodes if n.fen == C)
+    r_score, c_score = scores[root_fen], scores[child_fen]
+    c_in_r = next(n for n in r_score.debug_nodes if n.fen == child_fen)
+    c_in_c = next(n for n in c_score.debug_nodes if n.fen == child_fen)
     # One shared mutable object seen through two RootScore snapshots.
     assert c_in_r is c_in_c
     # C was reported, so its report-stage fields are non-null in BOTH views. A later
@@ -2035,7 +2043,7 @@ def test_report_debug_shared_object_across_roots_and_never_reported_stays_null()
     # L is visited during R's walk (opponent O's uncovered reply) but has no evidence
     # below, so neither a named-root row nor the position funnel ever reports it: all
     # four report-stage fields stay null even though its structural fields are filled.
-    l_node = next(n for n in r_score.debug_nodes if n.fen == L)
+    l_node = next(n for n in r_score.debug_nodes if n.fen == leaf_fen)
     assert l_node.pre_fold_quality is None
     assert l_node.reported_score is None
     assert l_node.report_fold_multiplier is None

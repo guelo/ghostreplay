@@ -714,8 +714,15 @@ class TestOverlayCommit:
         (repo / theirs).write_text("THEIR_WIP = broken(\n")  # a concurrent agent's, mid-edit
 
         sha = _overlay_commit(repo, [mine], tmp_path / "idx")
-        show = lambda p: subprocess.run(["git", "-C", str(repo), "show", f"{sha}:{p}"],
-                                        capture_output=True, text=True, check=True).stdout
+
+        def show(path):
+            return subprocess.run(
+                ["git", "-C", str(repo), "show", f"{sha}:{path}"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+
         assert show(mine) == "WORKING = 2\n"      # my edit is what gets tested
         assert show(theirs) == "COMMITTED = 1\n"  # theirs cannot break or join my run
 

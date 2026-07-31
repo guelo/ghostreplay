@@ -1,7 +1,7 @@
 """Tests for the opening-tree analysis_cache eval lookup helper (app/tree_eval.py)."""
 
 import pytest
-from sqlalchemy import create_engine, tuple_
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.analysis_cache_repo import write_analysis_cache_rows

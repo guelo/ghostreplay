@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import text
 
 from app.models import Blunder, Position

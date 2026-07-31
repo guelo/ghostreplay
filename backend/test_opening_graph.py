@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import pickle
 import tempfile
 from pathlib import Path
 from types import MappingProxyType
@@ -17,7 +16,6 @@ from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_graph import (
     OpeningGraph,
     OpeningGraphNode,
-    _build_from_scratch,
     _fen_from_board,
     _load_or_build,
     _resolve_default_opening_paths,

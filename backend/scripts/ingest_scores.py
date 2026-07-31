@@ -178,7 +178,7 @@ def main() -> None:
     parser.add_argument(
         "--scores-url",
         default=SCORES_URL,
-        help=f"URL to scores.json (default: pinned JeffML commit)",
+        help="URL to scores.json (default: pinned JeffML commit)",
     )
     parser.add_argument(
         "--scores-path",

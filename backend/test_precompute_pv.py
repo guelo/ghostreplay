@@ -5,7 +5,6 @@ UCI lines, so no real engine or full precompute run is required.
 """
 import importlib
 import json
-import os
 import stat
 import sys
 from pathlib import Path
@@ -82,7 +81,7 @@ def stub(tmp_path, monkeypatch):
 
 
 def _commands(log_path):
-    return [l for l in log_path.read_text().splitlines() if l]
+    return [line for line in log_path.read_text().splitlines() if line]
 
 
 def test_normal_position_pv_classification_and_ordering(stub):

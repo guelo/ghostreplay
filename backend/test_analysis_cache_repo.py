@@ -741,7 +741,9 @@ def test_pg_statement_count_overwrite_no_per_row_roundtrip(pg_db):
 
     batch = [_canonical_full(k) for k in keys]  # all LEGACY_REPLACED_BY_AUTH
     with _statement_counter(engine) as counts:
-        s = Factory(); results = write_analysis_cache_rows(s, batch); s.close()
+        s = Factory()
+        results = write_analysis_cache_rows(s, batch)
+        s.close()
 
     from app.analysis_cache_policy import Reason
     assert all(r is Reason.LEGACY_REPLACED_BY_AUTH for _, r in results)
@@ -1354,18 +1356,26 @@ def test_large_batch_chunks_insert_and_select(monkeypatch):
     rows = _distinct_passive_rows(37)  # forces multiple insert chunks
 
     with _statement_counter(engine) as counts:
-        s = F(); results = write_analysis_cache_rows(s, rows); s.close()  # all fresh
+        s = F()
+        results = write_analysis_cache_rows(s, rows)
+        s.close()  # all fresh
     assert all(r is Reason.NEW_KEY for _, r in results)
     assert counts["INSERT"] > 1, counts  # chunked, not one oversized INSERT
-    s2 = F(); assert s2.query(AnalysisCache).count() == 37; s2.close()
+    s2 = F()
+    assert s2.query(AnalysisCache).count() == 37
+    s2.close()
 
     # Re-upload: every key conflicts -> the conflict SELECT is chunked too.
     with _statement_counter(engine) as counts2:
-        s = F(); res2 = write_analysis_cache_rows(s, [dict(r) for r in rows]); s.close()
+        s = F()
+        res2 = write_analysis_cache_rows(s, [dict(r) for r in rows])
+        s.close()
     assert all(r is Reason.SAME_PROFILE_IDEMPOTENT for _, r in res2)
     assert counts2["SELECT"] > 1, counts2  # chunked conflict select
     assert counts2["UPDATE"] == 0, counts2
-    s3 = F(); assert s3.query(AnalysisCache).count() == 37; s3.close()
+    s3 = F()
+    assert s3.query(AnalysisCache).count() == 37
+    s3.close()
     engine.dispose()
 
 
@@ -1745,10 +1755,14 @@ def _assert_idempotent_constant(engine, Factory, n):
     one set-based query over the locked ids, so the property under test — a CONSTANT
     statement count independent of N, with no per-row round-trip — is unchanged."""
     rows = _distinct_passive_rows(n)
-    s = Factory(); write_analysis_cache_rows(s, rows); s.close()  # seed fresh
+    s = Factory()
+    write_analysis_cache_rows(s, rows)
+    s.close()  # seed fresh
 
     with _statement_counter(engine) as counts:
-        s = Factory(); write_analysis_cache_rows(s, [dict(r) for r in rows]); s.close()
+        s = Factory()
+        write_analysis_cache_rows(s, [dict(r) for r in rows])
+        s.close()
 
     assert counts["INSERT"] == 1, counts
     # one (FOR UPDATE) select over all conflicts + one association load
@@ -1767,10 +1781,14 @@ def test_canonical_conflicts_issue_no_association_query():
     Base.metadata.create_all(engine)
     Factory = sessionmaker(bind=engine)
     rows = [{**_canonical_full(FEN), "fen_before": f"canon-{i}"} for i in range(5)]
-    s = Factory(); write_analysis_cache_rows(s, rows); s.close()  # seed fresh
+    s = Factory()
+    write_analysis_cache_rows(s, rows)
+    s.close()  # seed fresh
 
     with _statement_counter(engine) as counts:
-        s = Factory(); write_analysis_cache_rows(s, [dict(r) for r in rows]); s.close()
+        s = Factory()
+        write_analysis_cache_rows(s, [dict(r) for r in rows])
+        s.close()
 
     assert counts["INSERT"] == 1, counts
     assert counts["SELECT"] == 1, counts  # conflict select only — no association load

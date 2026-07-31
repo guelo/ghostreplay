@@ -34,6 +34,7 @@ backend/.env
 __pycache__/
 *.py[cod]
 .venv/
+.ruff_cache/
 .test-results/
 
 # Models

@@ -179,7 +179,7 @@ class TestFamilyGrouping:
 class TestDAGStructure:
     def test_dag_is_acyclic(self, real_roots: OpeningRoots):
         """The full root DAG should have no cycles."""
-        WHITE, GRAY, BLACK = 0, 1, 2
+        GRAY, BLACK = 1, 2
         color: dict[str, int] = {}
 
         def has_cycle_from(key: str) -> bool:

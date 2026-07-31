@@ -24,6 +24,12 @@ from app.srs_math import (
     calculate_urgency,
     expected_interval_hours,
 )
+from app.srs_opportunity import (
+    P_REACH_FLOOR,
+    P_REACH_MIN_SAMPLE,
+    OpportunityCounters,
+    ghost_eligible,
+)
 
 # Import scoring components from the game module
 from app.api.game import (
@@ -597,14 +603,6 @@ class TestSeverityCeilingScheduling:
 # ---------------------------------------------------------------------------
 # _ghost_eligible — opportunity gate and low-p_reach backstop
 # ---------------------------------------------------------------------------
-
-from app.srs_opportunity import (
-    P_REACH_FLOOR,
-    P_REACH_MIN_SAMPLE,
-    OpportunityCounters,
-    ghost_eligible,
-)
-
 
 class TestGhostEligibleOpportunityGate:
     def _call(

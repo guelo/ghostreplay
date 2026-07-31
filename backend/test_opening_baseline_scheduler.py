@@ -39,7 +39,6 @@ from app.opening_cache import (
     SCORE_MODEL_VERSION,
     capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
-    opening_score_raw_inputs_fingerprint,
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots

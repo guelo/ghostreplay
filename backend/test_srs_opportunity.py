@@ -936,7 +936,7 @@ def test_fresh_upload_edge_visible_to_opportunity_bfs(db_session):
     player_fen = "6k1/8/8/8/8/8/8/K7 w - - 1 2"    # white to move (player), after ...Kg8
     blunder_fen = "6k1/8/8/8/8/8/8/1K6 b - - 2 2"  # downstream of player_fen, after Kb1
 
-    opp = _position(db_session, user_id=user_id, fen=opp_fen, active_color="black")
+    _opp = _position(db_session, user_id=user_id, fen=opp_fen, active_color="black")
     player = _position(db_session, user_id=user_id, fen=player_fen, active_color="white")
     blunder_pos = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="black")
     # Pre-existing player->blunder edge; the opponent->player edge is taught below.

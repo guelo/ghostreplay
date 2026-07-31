@@ -347,7 +347,7 @@ def test_record_blunder_duplicate_position(client, auth_headers, create_game_ses
     assert response1.status_code == 201
     data1 = response1.json()
     assert data1["is_new"] is True
-    positions_first = data1["positions_created"]
+    assert "positions_created" in data1
 
     # Second game - same position blunder
     session2 = create_game_session(user_id=123, player_color="white")

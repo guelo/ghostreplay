@@ -1,7 +1,6 @@
 import pytest
 
 from app.rating import (
-    DEFAULT_RATING,
     K_PROVISIONAL,
     K_STABLE,
     PROVISIONAL_THRESHOLD,

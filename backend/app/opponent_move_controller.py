@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import chess
 
-from app.maia3_client import Maia3Error, get_move as maia3_get_move
+from app.maia3_client import get_move as maia3_get_move
 
 logger = logging.getLogger(__name__)
 

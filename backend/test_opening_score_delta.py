@@ -39,7 +39,6 @@ from app.opening_cache import (
     current_cache_epoch,
     current_evidence_seq,
     opening_score_inputs_fingerprint,
-    opening_score_raw_inputs_fingerprint,
 )
 from app.opening_graph import (
     OpeningGraph,
@@ -684,7 +683,6 @@ def test_delta_does_not_call_refresh_now(db_session):
     # g-fix-end-latency: the end path must NEVER block on the scheduler. A warm
     # batch yields the delta WITHOUT a single refresh_now call (no 5s timeout
     # exposure on the terminal action).
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -706,7 +704,6 @@ def test_delta_does_not_call_refresh_now(db_session):
 def test_delta_enqueues_immediate_scoped_and_debounced_full_recompute(db_session):
     # The terminal helper submits the immediate scoped lane first, then preserves
     # the ordinary debounced whole-graph request for dashboard/tree convergence.
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -778,7 +775,6 @@ def test_delta_terminal_post_never_proves_freshness(db_session):
     # Patch the raw-input fingerprint to fail-if-called; the warm delta is still
     # built from list_cached_opening_scores (digest is OFF the terminal path).
     # compute swallows exceptions, so assert_not_called() is the load-bearing check.
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # seeds fingerprints BEFORE the patch
@@ -814,7 +810,6 @@ def test_delta_empty_when_cold_no_batch(db_session):
 def test_delta_logs_source_and_compute_ms(db_session, caplog):
     # Observability: source + compute_ms are in the message string (root formatter
     # prints %(message)s only), so production api_request duration can verify the fix.
-    import json
     import logging
 
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
@@ -971,7 +966,6 @@ def test_drill_start_does_not_block_on_scheduler(client, auth_headers, db_sessio
 # ---------------------------------------------------------------------------
 
 def test_delta_numeric_when_baseline_has_key(db_session):
-    import json
     session = _make_session(
         db_session,
         baseline=_baseline_json({RUY_KEY: 41.0, MORPHY_KEY: 75.0}),
@@ -1078,7 +1072,6 @@ def test_delta_never_raises_on_internal_failure(db_session):
 # ---------------------------------------------------------------------------
 
 def test_read_delta_fresh_returns_items_and_true(db_session):
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # fresh fingerprints
@@ -1096,7 +1089,6 @@ def test_read_delta_fresh_returns_items_and_true(db_session):
 
 def test_read_delta_stale_returns_items_and_false(db_session):
     # Items are served for ANY warm batch; is_fresh only drives the poll-stop signal.
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session, fresh=False)  # stale fingerprints
@@ -1567,7 +1559,6 @@ def test_read_delta_no_chain_returns_empty_and_true(db_session):
 
 
 def test_read_delta_never_touches_scheduler(db_session):
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -1591,7 +1582,6 @@ def test_read_delta_fresh_batch_ignores_recompute_scheduled(db_session):
     # g-delta-commit-decouple: scheduler state is observability, not freshness.
     # A provably-fresh batch remains fresh while another run is pending/in-flight;
     # the cheap signal still never calls the O(evidence) raw digest.
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -1621,7 +1611,6 @@ def test_read_delta_proves_freshness_cheaply_when_quiescent(db_session):
     # g-jact: that proof is now the cheap partitioned signal — the O(evidence)
     # raw digest/fingerprint must NOT run on the verdict path, yet is_fresh is
     # still asserted True for a genuinely current batch.
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)  # fresh fingerprints + signal
@@ -1682,7 +1671,6 @@ def test_game_start_populates_baseline(client, auth_headers, db_session):
 
 
 def test_game_end_returns_opening_score_changes(client, auth_headers, db_session):
-    import json
     start = client.post(
         "/api/game/start",
         json={"engine_elo": 1500, "player_color": "white"},
@@ -1769,7 +1757,6 @@ def test_drill_start_populates_baseline(client, auth_headers, db_session):
 
 
 def test_drill_natural_end_returns_opening_score_changes(client, auth_headers, db_session):
-    import json
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
@@ -1793,7 +1780,6 @@ def test_drill_natural_end_returns_opening_score_changes(client, auth_headers, d
 
 
 def test_drill_accuracy_fail_returns_opening_score_changes(client, auth_headers, db_session):
-    import json
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
@@ -1854,7 +1840,6 @@ def test_drill_offroute_route_check_omits_opening_score_changes(
     # Off-route fail no longer carries a delta: route-check is a speculative
     # per-move call that can't be upload-barriered, and going off-route means the
     # target opening was never reached. The response must not expose the field.
-    import json
     graph = _steering_graph()
     offroute_roots = _make_roots({
         E4_E5_FEN: {"name": "Open Game", "family": "Open Game", "depth": 2, "parents": []},
@@ -1925,7 +1910,6 @@ def test_route_check_on_route_omits_opening_score_changes(client, auth_headers, 
 # --- abandon gate (P3) ----------------------------------------------------
 
 def test_game_end_abandon_skips_opening_score_changes(client, auth_headers, db_session):
-    import json
     start = client.post(
         "/api/game/start",
         json={"engine_elo": 1500, "player_color": "white"},
@@ -1964,7 +1948,6 @@ def test_game_end_abandon_skips_opening_score_changes(client, auth_headers, db_s
 
 
 def test_game_end_does_not_block_on_scheduler(client, auth_headers, db_session):
-    import json
     start = client.post(
         "/api/game/start",
         json={"engine_elo": 1500, "player_color": "white"},
@@ -2002,7 +1985,6 @@ def test_game_end_never_proves_freshness(client, auth_headers, db_session):
     # while BOTH refresh_now AND the O(evidence) digest are fail-if-called — proving
     # the residual 9.95s freshness proof is OFF the terminal POST path. compute
     # swallows exceptions, so the assert_not_called() pair is the load-bearing check.
-    import json
     start = client.post(
         "/api/game/start",
         json={"engine_elo": 1500, "player_color": "white"},
@@ -2040,7 +2022,6 @@ def test_game_end_never_proves_freshness(client, auth_headers, db_session):
 
 
 def test_drill_natural_end_does_not_block_on_scheduler(client, auth_headers, db_session):
-    import json
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
@@ -2067,7 +2048,6 @@ def test_drill_natural_end_does_not_block_on_scheduler(client, auth_headers, db_
 
 
 def test_drill_accuracy_fail_does_not_block_on_scheduler(client, auth_headers, db_session):
-    import json
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
@@ -2097,7 +2077,6 @@ def test_drill_accuracy_fail_does_not_block_on_scheduler(client, auth_headers, d
 # --- GET /api/openings/score-delta/{session_id} reconcile-poll --------------
 
 def test_get_score_delta_returns_fresh_changes(client, auth_headers, db_session):
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)
@@ -2150,7 +2129,6 @@ def test_get_score_delta_wrong_owner_403(client, auth_headers, db_session):
 
 
 def test_get_score_delta_never_blocks_on_scheduler(client, auth_headers, db_session):
-    import json
     session = _make_session(db_session, baseline=_baseline_json({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
     batch_id = _make_batch(db_session)

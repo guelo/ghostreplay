@@ -58,8 +58,6 @@ from app.srs_math import (
     compute_p_reach,
 )
 from app.srs_opportunity import (
-    P_REACH_FLOOR,
-    P_REACH_MIN_SAMPLE,
     SEVERITY_NORMALIZER_CP,
     OpportunityCounters,
     detect_opening_family,

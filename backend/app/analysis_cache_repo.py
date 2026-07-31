@@ -39,7 +39,7 @@ from app.analysis_cache_policy import (
     keep_or_merge_claim_ok,
     project_cache_row,
 )
-from app.evidence_contracts import contract_satisfied, get_contract
+from app.evidence_contracts import contract_satisfied
 from app.fen import normalize_fen
 from app.models import AnalysisCache, AnalysisCacheSubmission
 

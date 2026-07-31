@@ -1,10 +1,8 @@
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import patch
 
 from sqlalchemy import text
 
-from app.models import GameSession
 from app.opening_roots import OpeningRoot, _normalize_opening_key
 
 

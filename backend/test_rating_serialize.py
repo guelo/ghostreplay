@@ -36,7 +36,7 @@ from app.models import GameSession, RatingHistory, User
 from app.opening_cache import bump_evidence_seq, current_evidence_seq
 from app.rating_scores import latest_rating_order
 from app.row_locks import for_no_key_update
-from conftest import engine, pg_required
+from conftest import pg_required
 from sql_capture import capture_statements, cursor_last_before_commit
 
 

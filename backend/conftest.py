@@ -785,7 +785,7 @@ def client(_db_override):
     # _sync_session_evidence / _no_op_baseline_enqueue shims handle endpoint behaviour.
     with patch("app.main.engine", engine), patch(
         "app.main.get_scheduler"
-    ) as get_scheduler, patch("app.main.get_delta_lane"), patch(
+    ), patch("app.main.get_delta_lane"), patch(
         "app.main.get_evidence_scheduler"
     ), patch(
         "app.main.get_baseline_scheduler"

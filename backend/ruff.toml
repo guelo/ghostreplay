@@ -1,0 +1,19 @@
+target-version = "py312"
+extend-exclude = [".tmp"]
+
+[lint]
+# Start with Ruff's established Pyflakes and pycodestyle error rules. Keep the
+# selection explicit so a Ruff upgrade cannot silently change the pre-push gate.
+select = ["E4", "E7", "E9", "F"]
+
+[lint.per-file-ignores]
+# These entry points intentionally prepare sys.path before importing the app.
+"**/scripts/backfill_glicko_ratings.py" = ["E402"]
+"**/scripts/backfill_opening_scores.py" = ["E402"]
+# This frozen scorer is content-hashed as a release input. Preserve its current
+# bytes until a scoring change deliberately rotates that digest.
+"**/scripts/calibrate_opening_scores_v2.py" = ["F401", "F402", "F541"]
+"**/scripts/ingest_scores.py" = ["E402"]
+"**/scripts/precompute_openings.py" = ["E402"]
+"**/scripts/repair_analysis_cache.py" = ["E402"]
+"**/scripts/seed_e2e_data.py" = ["E402"]

@@ -29,7 +29,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import chess
-import pytest
 from sqlalchemy import bindparam, text
 
 import app.opening_evidence as opening_evidence

@@ -21,12 +21,10 @@ from sqlalchemy.orm import sessionmaker
 import app.analysis_profiles as profiles
 from app.database_url import _normalize_postgres_scheme
 from app.analysis_profiles import (
-    CANONICAL_PROFILE_ID,
     IDENTITY_FIELDS,
     get_profile,
 )
 
-LINUX_PROFILE_ID = "canonical-sf18-depth24-linux-v1"
 from app.evidence_contracts import (
     MOVE_COMPLETE,
     POSITION_COMPLETE,
@@ -36,20 +34,19 @@ from app.evidence_contracts import (
 )
 from app.models import PositionAnalysisRow
 from app.position_analysis_policy import (
-    POSITION_FACT_FIELDS,
-    POSITION_METADATA_FIELDS,
     PositionDecision,
     PositionReason,
     PositionRow,
     decide_position_analysis_replacement,
     incoming_position_is_valid,
-    position_populated_fields_of,
 )
 import app.position_analysis_repo as position_analysis_repo
 from app.position_analysis_repo import (
     _project_position,
     write_position_analysis_row,
 )
+
+LINUX_PROFILE_ID = "canonical-sf18-depth24-linux-v1"
 
 # ---------------------------------------------------------------------------
 # Constants / fixtures shared across pure and DB tests

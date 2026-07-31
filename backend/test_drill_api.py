@@ -1790,10 +1790,20 @@ def _named_transposition_graph():
         return " ".join(b.fen().split()[:4])
 
     start = _node(chess.Board())
-    ba = chess.Board(); ba.push_uci("d2d4"); a = _node(ba)
-    bf = chess.Board(); bf.push_uci("g1f3"); f = _node(bf)
-    bc = chess.Board(); bc.push_uci("d2d4"); bc.push_uci("g8f6"); c = _node(bc)
-    bd = chess.Board(); bd.push_uci("g1f3"); bd.push_uci("g8f6"); d = _node(bd)
+    ba = chess.Board()
+    ba.push_uci("d2d4")
+    a = _node(ba)
+    bf = chess.Board()
+    bf.push_uci("g1f3")
+    f = _node(bf)
+    bc = chess.Board()
+    bc.push_uci("d2d4")
+    bc.push_uci("g8f6")
+    c = _node(bc)
+    bd = chess.Board()
+    bd.push_uci("g1f3")
+    bd.push_uci("g8f6")
+    d = _node(bd)
     bt = chess.Board()
     for uci in ("d2d4", "g8f6", "g1f3"):
         bt.push_uci(uci)
@@ -1814,12 +1824,18 @@ def _named_transposition_graph():
     }
     nodes[a].name = "Queen's Pawn Game"
     nodes[a].eco = "D00"
-    nodes[start].children["d2d4"] = a; nodes[a].parents.add((start, "d2d4"))
-    nodes[start].children["g1f3"] = f; nodes[f].parents.add((start, "g1f3"))
-    nodes[a].children["g8f6"] = c; nodes[c].parents.add((a, "g8f6"))
-    nodes[f].children["g8f6"] = d; nodes[d].parents.add((f, "g8f6"))
-    nodes[c].children["g1f3"] = t; nodes[t].parents.add((c, "g1f3"))
-    nodes[d].children["d2d4"] = t; nodes[t].parents.add((d, "d2d4"))
+    nodes[start].children["d2d4"] = a
+    nodes[a].parents.add((start, "d2d4"))
+    nodes[start].children["g1f3"] = f
+    nodes[f].parents.add((start, "g1f3"))
+    nodes[a].children["g8f6"] = c
+    nodes[c].parents.add((a, "g8f6"))
+    nodes[f].children["g8f6"] = d
+    nodes[d].parents.add((f, "g8f6"))
+    nodes[c].children["g1f3"] = t
+    nodes[t].parents.add((c, "g1f3"))
+    nodes[d].children["d2d4"] = t
+    nodes[t].parents.add((d, "d2d4"))
     graph = OpeningGraph(nodes, start)
     graph.freeze()
     return graph, {"start": start, "a": a, "f": f, "c": c, "d": d, "t": t}

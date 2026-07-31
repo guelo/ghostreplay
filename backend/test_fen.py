@@ -1,6 +1,5 @@
 """Tests for FEN normalization and hashing."""
 
-import pytest
 
 from app.fen import active_color, fen_hash, normalize_fen
 

@@ -198,7 +198,6 @@ def test_movement_every_attempt_exhausts_with_no_side_effects(capenv, monkeypatc
     # Fire on EVERY snapshot's first bundle: with 4 fence pairs + guard requery, the first
     # bundle recurs each attempt, so movement is injected on all three attempts.
     real = cal.capture_freshness_snapshot
-    seen_first = {"attempt_bundles": 0}
 
     def wrapper(db, uid, color):
         # bump before the snapshot's first pair each attempt
