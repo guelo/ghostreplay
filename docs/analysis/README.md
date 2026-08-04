@@ -26,6 +26,7 @@ Never quote Node timing as mobile evidence (§10.1).
 | `kill-gate-best30-android-pixel-7-pro-2026-07-30.jsonl` | **The mobile kill gate** — both arms, `best-30`, 4 repeats, on the declared Pixel 7 Pro. Verdict below |
 | `grade-corpus-current-*.jsonl` | Shipping depth-17 protocol over every checked-in corpus row; same records and file-level checks as the device harness |
 | `grade-corpus-references-*.json` | Primary root-26/restricted-27 and bias root-27/post-26 references, dual-reference adjudication, and the unadjudicable-rate gate |
+| `grade-corpus-reference-analysis-*.md` | Compact analysis of a reference capture's disagreements, threshold proximity, declines, regressions, and current-protocol baseline |
 
 Gate evidence (`plan.positionSetId === 'best-30'`) is registered in
 `KILL_GATE_EVIDENCE` (`src/bench/killGate.ts`) and held to the preconditions
@@ -34,6 +35,11 @@ directory.
 
 Mobile baselines are added here as they are captured; each file names its device
 in the `run` record's `device.label`.
+
+Reference artifacts are retained whether their gate passes or fails. The
+committed-results test requires a complete, clean, reproducible artifact and a
+verdict that matches its rows; it does not turn a negative experimental result
+into a build failure.
 
 ## Is a file evidence? Read three fields first
 

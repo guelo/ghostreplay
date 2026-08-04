@@ -169,7 +169,7 @@ describe('committed benchmark results', () => {
   describe('Node corpus references', () => {
     const files = referenceFiles()
 
-    it('keeps every committed reference artifact complete and reproducible', () => {
+    it('keeps every committed reference artifact complete, reproducible, and verdict-bearing', () => {
       const positions = loadCorpus().positions
       for (const file of files) {
         const artifact = JSON.parse(
@@ -180,7 +180,11 @@ describe('committed benchmark results', () => {
         expect(artifact.complete, file).toBe(true)
         expect(artifact.source.gitDirty, file).toBe(false)
         expect(artifact.source.corpusSha256, file).toBe(corpusSha256())
-        expect(artifact.summary.withinTenPercentGate, file).toBe(true)
+        // A failed gate is still evidence. Preserve its truthful verdict instead
+        // of making negative experiments impossible to commit.
+        expect(artifact.summary.withinTenPercentGate, file).toBe(
+          artifact.summary.unadjudicableRate <= 0.10,
+        )
       }
     })
   })
