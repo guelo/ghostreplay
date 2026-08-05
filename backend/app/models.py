@@ -444,6 +444,41 @@ class SessionMove(Base):
     browser_provenance: Mapped[str | None] = mapped_column(Text)
 
 
+class OpeningSessionReplayCache(Base):
+    """Durable L2 for the graph-independent per-session opening replay product.
+
+    One replaceable row per source session. The source-content hash and explicit
+    semantic/payload versions are validated before the JSON payload is decoded;
+    stale or malformed rows are ordinary misses and are repaired from
+    authoritative ``session_moves`` rows.
+    """
+
+    __tablename__ = "opening_session_replay_cache"
+    __table_args__ = (
+        CheckConstraint(
+            "move_count >= 0",
+            name="ck_opening_session_replay_cache_move_count",
+        ),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("game_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    content_hash: Mapped[str] = mapped_column(String(40), nullable=False)
+    divider_version: Mapped[str] = mapped_column(Text, nullable=False)
+    inputs_version: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    move_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=statement_timestamp(),
+        nullable=False,
+    )
+
+
 class SessionUploadReceipt(Base):
     """Durable, transactional receipt of a final full move-history upload (g-upload-observe).
 

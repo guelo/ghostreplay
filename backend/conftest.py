@@ -122,6 +122,21 @@ def _create_test_schema(conn) -> None:
         )
     """))
     conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opening_session_replay_cache (
+            session_id TEXT PRIMARY KEY,
+            content_hash VARCHAR(40) NOT NULL,
+            divider_version TEXT NOT NULL,
+            inputs_version TEXT NOT NULL,
+            payload_version SMALLINT NOT NULL,
+            move_count INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            CONSTRAINT ck_opening_session_replay_cache_move_count
+                CHECK (move_count >= 0),
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS positions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -560,6 +575,7 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_upload_receipt"))
+    conn.execute(text("DROP TABLE IF EXISTS opening_session_replay_cache"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))
     conn.execute(text("DROP TABLE IF EXISTS blunders"))

@@ -41,15 +41,33 @@ def test_run_passes_and_emits_the_structured_record(capsys):
     assert record["session_move_rows"] == 20 * 12
     assert record["overlay_nodes"] > 0
     assert record["overlay_edges"] > 0
-    assert record["min_cold_warm_ratio"] == bench.MIN_COLD_WARM_RATIO
+    assert (
+        record["min_cold_persisted_ratio"]
+        == bench.MIN_COLD_PERSISTED_RATIO
+    )
     # The claim of the bead, asserted on the record itself.
-    assert record["counters"]["cold"]["replays"] == 20
-    assert record["counters"]["warm"]["replays"] == 0
-    assert record["counters"]["warm"]["row_fetches"] == 0
+    assert record["counters"]["cold_empty"]["replays"] == 20
+    assert record["counters"]["cold_empty"]["divider_calls"] == 20
+    assert record["counters"]["restart_persisted"]["replays"] == 0
+    assert record["counters"]["restart_persisted"]["divider_calls"] == 0
+    assert record["counters"]["restart_persisted"]["row_fetches"] == 0
+    assert record["cache_stats"]["restart_persisted"]["l2_hits"] == 20
     assert record["counters"]["incremental"]["replays"] == 1
+    assert record["counters"]["incremental"]["divider_calls"] == 1
     assert record["counters"]["incremental"]["row_fetches"] == 1
-    for phase in ("cold", "warm", "incremental"):
+    for phase in (
+        "cold_empty",
+        "restart_persisted",
+        "warm_memory",
+        "incremental",
+    ):
         assert record["counters"][phase]["probe_queries"] == 1
+        assert set(record["phase_medians"][phase]) == {
+            "overlay_ms",
+            "reconstruction_ms",
+            "divider_ms",
+            "residual_ms",
+        }
 
 
 def test_broken_reuse_fails_before_timing(capsys, monkeypatch):
@@ -67,7 +85,7 @@ def test_broken_reuse_fails_before_timing(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "BENCH_RESULT" not in out
     assert "expected 0 replays" in out
-    assert "replay cache is not being reused" in out
+    assert "restart_persisted" in out
 
 
 def test_drifted_reuse_fails_equivalence_first(capsys, monkeypatch):
@@ -92,7 +110,20 @@ def test_drifted_reuse_fails_equivalence_first(capsys, monkeypatch):
 
 def test_run_fails_on_a_slow_ratio_but_still_records_the_medians(capsys):
     def slow(db, graph, session_ids, *, warmup, reps):
-        return {"cold": 10.0, "warm": 5.0, "incremental": 6.0}
+        def phase(overlay_ms):
+            return {
+                "overlay_ms": overlay_ms,
+                "reconstruction_ms": 1.0,
+                "divider_ms": 0.5,
+                "residual_ms": overlay_ms - 1.5,
+            }
+
+        return {
+            "cold_empty": phase(10.0),
+            "restart_persisted": phase(5.0),
+            "warm_memory": phase(4.0),
+            "incremental": phase(6.0),
+        }
 
     assert bench.run(SMALL, measure=slow) == 1
     out = capsys.readouterr().out
@@ -100,15 +131,18 @@ def test_run_fails_on_a_slow_ratio_but_still_records_the_medians(capsys):
     # The record is still the final line, so a failing run is still evidence.
     assert out.strip().splitlines()[-1].startswith("BENCH_RESULT ")
     record = json.loads(out.strip().splitlines()[-1][len("BENCH_RESULT "):])
-    assert record["ratio"] == pytest.approx(2.0)
-    assert record["cold_median_ms"] == 10.0
+    assert record["cold_persisted_ratio"] == pytest.approx(2.0)
+    assert record["cold_empty_median_ms"] == 10.0
+    assert record["restart_persisted_median_ms"] == 5.0
     assert record["incremental_median_ms"] == 6.0
 
 
 def test_run_restores_the_patched_replay_entry_point():
     before = opening_evidence.reconstruct_board_sequence
+    before_divide = opening_evidence.divide
     bench.run(SMALL)
     assert opening_evidence.reconstruct_board_sequence is before
+    assert opening_evidence.divide is before_divide
 
 
 # --------------------------------------------------------------------------- #
@@ -117,7 +151,7 @@ def test_run_restores_the_patched_replay_entry_point():
 @pytest.mark.parametrize(
     "cold_ms,warm_ms,expect_violation",
     [
-        (4.0, 1.0, False),  # exactly MIN_COLD_WARM_RATIO passes
+        (4.0, 1.0, False),  # exactly MIN_COLD_PERSISTED_RATIO passes
         (3.99, 1.0, True),
         (40.0, 1.0, False),
         (10.0, 0.0, True),  # undefined ratio
@@ -127,18 +161,34 @@ def test_ratio_boundary(cold_ms, warm_ms, expect_violation):
     assert bool(bench.ratio_violations(cold_ms, warm_ms)) is expect_violation
 
 
+def _counts(**overrides):
+    values = {
+        "replays": 0,
+        "reconstruction_ms": 0.0,
+        "divider_calls": 0,
+        "divider_ms": 0.0,
+        "probe_queries": 1,
+        "row_fetches": 0,
+        "l2_reads": 0,
+        "l2_writes": 0,
+    }
+    values.update(overrides)
+    return values
+
+
 @pytest.mark.parametrize(
     "phase,counts,needle",
     [
-        ("cold", {"replays": 3, "probe_queries": 1, "row_fetches": 1}, "expected 5 replays"),
-        ("cold", {"replays": 5, "probe_queries": 1, "row_fetches": 0}, "expected 1 row fetch"),
-        ("warm", {"replays": 1, "probe_queries": 1, "row_fetches": 0}, "expected 0 replays"),
-        ("warm", {"replays": 0, "probe_queries": 1, "row_fetches": 1}, "expected 0 row fetches"),
-        ("incremental", {"replays": 2, "probe_queries": 1, "row_fetches": 1}, "expected 1 replay"),
-        ("incremental", {"replays": 1, "probe_queries": 1, "row_fetches": 2}, "expected 1 row fetch"),
-        ("warm", {"replays": 0, "probe_queries": 2, "row_fetches": 0}, "expected exactly 1 digest probe"),
-        ("warm", {"replays": 0, "probe_queries": 0, "row_fetches": 0}, "expected exactly 1 digest probe"),
-        ("bogus", {"replays": 0, "probe_queries": 1, "row_fetches": 0}, "unknown phase"),
+        ("cold_empty", _counts(replays=3, divider_calls=5, row_fetches=1, l2_writes=1), "expected 5 replays"),
+        ("cold_empty", _counts(replays=5, divider_calls=5, row_fetches=0, l2_writes=1), "expected 1 row fetch"),
+        ("restart_persisted", _counts(replays=1, l2_reads=1), "expected 0 replays"),
+        ("restart_persisted", _counts(row_fetches=1, l2_reads=1), "expected 0 row fetches"),
+        ("warm_memory", _counts(l2_reads=1), "expected 0 l2_reads"),
+        ("incremental", _counts(replays=2, divider_calls=1, row_fetches=1, l2_reads=1, l2_writes=1), "expected 1 replay"),
+        ("incremental", _counts(replays=1, divider_calls=1, row_fetches=2, l2_reads=1, l2_writes=1), "expected 1 row fetch"),
+        ("warm_memory", _counts(probe_queries=2), "expected exactly 1 digest probe"),
+        ("warm_memory", _counts(probe_queries=0), "expected exactly 1 digest probe"),
+        ("bogus", _counts(), "unknown phase"),
     ],
 )
 def test_counter_violations(phase, counts, needle):
@@ -148,14 +198,52 @@ def test_counter_violations(phase, counts, needle):
 
 def test_counter_violations_clean_readings_pass():
     assert bench.counter_violations(
-        "cold", {"replays": 5, "probe_queries": 1, "row_fetches": 1}, games=5
+        "cold_empty",
+        _counts(replays=5, divider_calls=5, row_fetches=1, l2_reads=1, l2_writes=1),
+        games=5,
     ) == []
     assert bench.counter_violations(
-        "warm", {"replays": 0, "probe_queries": 1, "row_fetches": 0}, games=5
+        "restart_persisted", _counts(l2_reads=1), games=5
     ) == []
     assert bench.counter_violations(
-        "incremental", {"replays": 1, "probe_queries": 1, "row_fetches": 1}, games=5
+        "warm_memory", _counts(), games=5
     ) == []
+    assert bench.counter_violations(
+        "incremental",
+        _counts(replays=1, divider_calls=1, row_fetches=1, l2_reads=1, l2_writes=1),
+        games=5,
+    ) == []
+
+
+def test_restart_gate_requires_exact_chunked_l2_read_count():
+    games = opening_evidence._SESSION_REPLAY_READ_CHUNK_SIZE + 1
+    expected_reads = 2
+
+    assert bench.counter_violations(
+        "restart_persisted",
+        _counts(l2_reads=expected_reads),
+        games=games,
+    ) == []
+    violations = bench.counter_violations(
+        "restart_persisted",
+        _counts(l2_reads=expected_reads + 1),
+        games=games,
+    )
+    assert any("expected exactly 2 L2 reads" in item for item in violations)
+
+
+def test_phase_stats_contract_is_checked_separately():
+    clean = opening_evidence.ReplayCacheStats(
+        build_count=1,
+        probed_sessions=5,
+        l2_hits=5,
+    )
+    assert bench.stats_violations("restart_persisted", clean, games=5) == []
+    broken = dataclasses.replace(clean, raw_derivations=1)
+    assert any(
+        "raw_derivations" in item
+        for item in bench.stats_violations("restart_persisted", broken, games=5)
+    )
 
 
 def test_equivalence_violations_names_the_field_and_key():
@@ -209,11 +297,28 @@ def test_snapshot_covers_every_overlay_field():
         "shared_scope",
     }
     identity = {"user_id", "player_color"}
+    diagnostics = {"replay_cache_stats"}
     actual = {f.name for f in dataclasses.fields(EvidenceOverlay)}
-    assert actual == compared | identity, (
+    assert actual == compared | identity | diagnostics, (
         "EvidenceOverlay gained/lost a field — update bench.snapshot() and "
-        "bench.equivalence_violations() or the benchmark stops comparing it"
+        "bench.equivalence_violations(), or explicitly classify it as a "
+        "non-semantic diagnostic"
     )
+
+
+@pytest.mark.parametrize(
+    "statement,expected",
+    [
+        ("SELECT x FROM session_moves sm GROUP BY sm.session_id", "probe"),
+        ("SELECT x FROM session_moves sm WHERE sm.session_id IN (?, ?)", "raw_fetch"),
+        ("SELECT x FROM opening_session_replay_cache WHERE session_id IN (?)", "l2_read"),
+        ("INSERT INTO opening_session_replay_cache (session_id) VALUES (?)", "l2_write"),
+        ("DELETE FROM opening_session_replay_cache", None),
+        ("SELECT count(*) FROM session_moves", None),
+    ],
+)
+def test_sql_classifiers_are_mutually_exclusive(statement, expected):
+    assert bench.classify_sql(statement) == expected
 
 
 @pytest.mark.parametrize(
@@ -290,7 +395,15 @@ def test_defaults():
 
 
 def test_the_gate_constant_is_not_a_flag():
-    """MIN_COLD_WARM_RATIO must not be tunable from the command line, or a failing
-    run could be argued away instead of investigated."""
+    """The ratio floor must not be CLI-tunable around a failing run."""
     with pytest.raises(SystemExit):
-        bench.parse_args(["--min-cold-warm-ratio", "1.0"])
+        bench.parse_args(["--min-cold-persisted-ratio", "1.0"])
+
+
+def test_help_warns_that_extreme_fixtures_can_exceed_the_l1_budget(capsys):
+    with pytest.raises(SystemExit) as exc:
+        bench.parse_args(["--help"])
+    assert exc.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "120,000 cached-move L1 budget" in help_text
+    assert "--games 5000 --plies 200" in help_text

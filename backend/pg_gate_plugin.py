@@ -383,6 +383,8 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opening_evidence_digest_pg.py::test_null_evals_use_the_sentinel_not_an_empty_field",
     "test_opening_evidence_digest_pg.py::test_probe_ordering_is_collation_independent",
     "test_opening_evidence_digest_pg.py::test_probe_payload_is_fixed_size_per_session",
+    "test_opening_evidence_digest_pg.py::"
+    "test_real_recompute_persists_l2_across_caller_rollback",
     "test_opening_evidence_digest_pg.py::test_sql_and_python_digest_bodies_are_byte_equal",
     "test_opening_evidence_digest_pg.py::test_warm_rebuild_on_postgres_fetches_no_rows",
 })

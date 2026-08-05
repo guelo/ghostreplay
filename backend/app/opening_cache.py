@@ -37,6 +37,7 @@ from app.opening_evidence import (
     SESSION_EVIDENCE_ELIGIBLE_SQL,
     EdgeEvidence,
     EvidenceOverlay,
+    ReplayCacheStats,
     overlay_evidence,
     raw_evidence_inputs_digest,
     raw_evidence_inputs_snapshot,
@@ -599,15 +600,23 @@ def _capture_operational_rebuild_inputs(
 
     def full_fallback(
         capture_path: FreshnessCapturePath,
+        discarded_overlay: EvidenceOverlay | None = None,
     ) -> tuple[FreshnessSnapshot, EvidenceOverlay, FreshnessCapturePath]:
         logger.info(
             "opening rebuild freshness capture fallback freshness_capture=%s",
             capture_path,
         )
         freshness = capture_freshness_snapshot(db, user_id, player_color)
+        fallback_overlay = overlay_evidence(db, user_id, player_color, graph)
+        if discarded_overlay is not None:
+            fallback_overlay.replay_cache_stats = (
+                discarded_overlay.replay_cache_stats.merged(
+                    fallback_overlay.replay_cache_stats
+                )
+            )
         return (
             freshness,
-            overlay_evidence(db, user_id, player_color, graph),
+            fallback_overlay,
             capture_path,
         )
 
@@ -642,7 +651,8 @@ def _capture_operational_rebuild_inputs(
         )
 
     return full_fallback(
-        "fallback_identity" if not identity_matches else "fallback_counter"
+        "fallback_identity" if not identity_matches else "fallback_counter",
+        overlay,
     )
 
 
@@ -1700,6 +1710,7 @@ def _emit_opening_scores_recomputed(
     evidence_change: bool,
     decay_staleness: bool,
     freshness_capture: FreshnessCapturePath,
+    replay_cache_stats: ReplayCacheStats,
 ) -> None:
     """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
 
@@ -1758,6 +1769,14 @@ def _emit_opening_scores_recomputed(
         "player_color": player_color,
         "scheduler_timed": timing is not None,
         "freshness_capture": freshness_capture,
+        "replay_cache_builds": replay_cache_stats.build_count,
+        "replay_cache_probed_sessions": replay_cache_stats.probed_sessions,
+        "replay_cache_l1_hits": replay_cache_stats.l1_hits,
+        "replay_cache_l2_hits": replay_cache_stats.l2_hits,
+        "replay_cache_raw_derivations": replay_cache_stats.raw_derivations,
+        "replay_cache_persisted_upserts": replay_cache_stats.persisted_upserts,
+        "replay_cache_l2_read_failed": replay_cache_stats.l2_read_failed,
+        "replay_cache_l2_write_failed": replay_cache_stats.l2_write_failed,
     }
     if timing is not None:
         properties.update(timing)
@@ -1837,6 +1856,7 @@ def recompute_opening_scores_if_needed(
             evidence_change=False,
             decay_staleness=False,
             freshness_capture=freshness_capture,
+            replay_cache_stats=overlay.replay_cache_stats,
         )
         return OpeningScoreRecomputeResult(
             disposition=RecomputeDisposition.REBUILT,
@@ -1913,6 +1933,7 @@ def recompute_opening_scores_if_needed(
         evidence_change=evidence_change,
         decay_staleness=decay_staleness,
         freshness_capture=freshness_capture,
+        replay_cache_stats=overlay.replay_cache_stats,
     )
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,

@@ -16,6 +16,8 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import text
 
+import app.opening_cache as opening_cache
+import app.opening_evidence as opening_evidence
 from app.models import SessionMove
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
@@ -72,6 +74,66 @@ def test_cache_miss_emits_with_full_props(db_session, captured):
     assert props["freshness_capture"] == "operational"
     assert isinstance(props["duration_ms"], (int, float))
     assert props["batch_size"] is not None and props["batch_size"] >= 0
+    assert props["replay_cache_builds"] == 1
+    assert props["replay_cache_probed_sessions"] == 1
+    assert props["replay_cache_l1_hits"] == 0
+    assert props["replay_cache_l2_hits"] == 0
+    assert props["replay_cache_raw_derivations"] == 1
+    assert props["replay_cache_persisted_upserts"] == 1
+    assert props["replay_cache_l2_read_failed"] is False
+    assert props["replay_cache_l2_write_failed"] is False
+
+
+def test_persisted_bootstrap_emits_l2_restart_signature(db_session, captured):
+    _seed_black_opening_session(db_session)
+    opening_evidence.overlay_evidence(db_session, 123, "black", _make_graph())
+    db_session.commit()  # Direct SQLite build deliberately owns L2 durability.
+    opening_evidence.reset_session_evidence_cache()
+
+    result = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert result.disposition is RecomputeDisposition.REBUILT
+    props = _only_props(captured)
+    assert props["replay_cache_builds"] == 1
+    assert props["replay_cache_probed_sessions"] == 1
+    assert props["replay_cache_l1_hits"] == 0
+    assert props["replay_cache_l2_hits"] == 1
+    assert props["replay_cache_raw_derivations"] == 0
+    assert props["replay_cache_persisted_upserts"] == 0
+
+
+def test_fallback_event_merges_discarded_overlay_cache_work(
+    db_session, captured, monkeypatch
+):
+    _seed_black_opening_session(db_session)
+    opening_evidence.overlay_evidence(db_session, 123, "black", _make_graph())
+    db_session.commit()
+    opening_evidence.reset_session_evidence_cache()
+
+    real_shared_snapshot = opening_cache.shared_scope_snapshot
+    calls = {"n": 0}
+
+    def drift_counter(*args, **kwargs):
+        snapshot = real_shared_snapshot(*args, **kwargs)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            bump_evidence_seq(db_session, 123, "black")
+            db_session.commit()
+        return snapshot
+
+    monkeypatch.setattr(
+        opening_cache, "shared_scope_snapshot", drift_counter
+    )
+    result = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert result.disposition is RecomputeDisposition.REBUILT
+    props = _only_props(captured)
+    assert props["freshness_capture"] == "fallback_counter"
+    assert props["replay_cache_builds"] == 2
+    assert props["replay_cache_probed_sessions"] == 2
+    assert props["replay_cache_l1_hits"] == 1
+    assert props["replay_cache_l2_hits"] == 1
+    assert props["replay_cache_raw_derivations"] == 0
 
 
 def test_missing_epoch_emits_and_logs_null_epoch_fallback(

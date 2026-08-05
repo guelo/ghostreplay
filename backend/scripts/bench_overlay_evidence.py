@@ -1,10 +1,10 @@
-"""Opening-evidence overlay reuse benchmark (g-overlay-evidence-reuse).
+"""Opening-evidence two-tier replay-cache benchmark (g-overlay-cold-bootstrap).
 
-Proves, in one run and in this order, that rebuilding the whole-(user,color)
-evidence overlay on a warm replay cache is (1) semantically identical to a clean
-from-scratch build, (2) structurally free of BOTH the per-session board replay and
-the raw-row fetch, and only then (3) at least ``MIN_COLD_WARM_RATIO``x faster than
-the cold build.
+Proves, in one run and in this order, that a persisted-bootstrap rebuild is
+semantically identical to a clean build and structurally performs no raw-session
+fetch, board reconstruction, or phase division. It then distinguishes four
+phases: empty L1/L2, process restart with persisted L2, memory warm, and one
+session invalidated in both tiers.
 
 **Manual and non-CI.** CI runs only ``backend/test_bench_overlay_evidence.py``,
 which exercises every branch here on a small fixture with injected timings. The
@@ -16,17 +16,17 @@ run by hand:
     python -m scripts.bench_overlay_evidence --games 400 --plies 30 --warmup 1 --reps 5
 
 The final stdout line is ``BENCH_RESULT {json}`` — the structured record. Append it
-to the bead with ``bd update g-overlay-evidence-reuse --append-notes``.
+to the bead with ``bd update g-overlay-cold-bootstrap --append-notes``.
 
 Everything runs against this script's OWN in-memory SQLite engine and a seeded
 synthetic fixture; there is deliberately no database URL option, so it can never be
 pointed at a real database.
 
 WHAT THE GATES ACTUALLY PROVE, stated honestly. The structural counters are the
-load-bearing gate and they are hardware-independent: a warm rebuild must issue
-ZERO board replays and ZERO scoped row fetches, and an incremental rebuild after
-exactly one session changes must issue exactly one of each. Those two facts are
-the whole claim of this bead. The cold/warm RATIO is gated because it is
+load-bearing gate and they are hardware-independent: a persisted restart must
+issue ZERO raw fetches, ZERO board reconstructions, and ZERO divider calls; an
+incremental rebuild after exactly one session changes must issue exactly one of
+each. The cold/persisted RATIO is gated because it is
 same-run and therefore hardware-cancelling; the ABSOLUTE medians are recorded as
 evidence only and never gated, because they are hardware-sensitive and no
 calibration owner exists. Absolute acceptance figures for this bead
@@ -38,6 +38,12 @@ WHAT IT DOES NOT PROVE. Overlay CORRECTNESS is owned by
 ``backend/test_opening_evidence.py``; pass 1 here is a round-trip check that reuse
 does not drift from a clean build on a large fixture — exact equality, floats
 included, no tolerance — not an independent check of the evidence semantics.
+
+Keep the synthetic fixture within the application's 120,000 cached-move L1
+budget when interpreting ``warm_memory``. Extreme combinations such as
+``--games 5000 --plies 200`` can exceed that budget and intentionally produce L1
+churn, so the pure-memory warm gates will fail even though persisted hydration is
+working correctly.
 
 It also says nothing about the probe's WIRE payload. The server-side md5 fold
 that keeps that payload O(sessions) exists only on PostgreSQL; on SQLite the fold
@@ -55,6 +61,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -73,7 +80,7 @@ from app.opening_graph import _fen_from_board, build_opening_graph
 # user) because a synthetic SQLite fixture has a much cheaper cold path: SQLite is
 # in-process, so the cold build's row fetch costs a fraction of a real network
 # round trip, which compresses the ratio.
-MIN_COLD_WARM_RATIO = 4.0
+MIN_COLD_PERSISTED_RATIO = 4.0
 
 SEED = 20260729
 USER_ID = 1
@@ -84,29 +91,53 @@ COLOR = "white"
 # Structural counters
 # ---------------------------------------------------------------------------
 class Counters:
-    """Board replays plus the two statements ``_build_move_rows`` can issue."""
+    """Replay CPU plus mutually-exclusive SQL shapes in ``_build_move_rows``."""
 
     def __init__(self) -> None:
         self.reset()
 
     def reset(self) -> None:
         self.replays = 0
+        self.reconstruction_ms = 0.0
+        self.divider_calls = 0
+        self.divider_ms = 0.0
         self.probe_queries = 0
         self.row_fetches = 0
+        self.l2_reads = 0
+        self.l2_writes = 0
 
-    def snapshot(self) -> dict[str, int]:
+    def snapshot(self) -> dict[str, int | float]:
         return {
             "replays": self.replays,
+            "reconstruction_ms": self.reconstruction_ms,
+            "divider_calls": self.divider_calls,
+            "divider_ms": self.divider_ms,
             "probe_queries": self.probe_queries,
             "row_fetches": self.row_fetches,
+            "l2_reads": self.l2_reads,
+            "l2_writes": self.l2_writes,
         }
 
 
 COUNTERS = Counters()
 
 
+def classify_sql(statement: str) -> str | None:
+    """Classify the four measured SQL shapes; ignore setup/cleanup statements."""
+    operation = statement.lstrip().split(None, 1)[0].upper()
+    if "GROUP BY sm.session_id" in statement:
+        return "probe"
+    if "sm.session_id IN" in statement:
+        return "raw_fetch"
+    if operation == "SELECT" and "FROM opening_session_replay_cache" in statement:
+        return "l2_read"
+    if operation == "INSERT" and "INSERT INTO opening_session_replay_cache" in statement:
+        return "l2_write"
+    return None
+
+
 def install_counters(engine, monkeypatch_target=opening_evidence) -> None:
-    """Count board replays via the replay entry point and the two SQL shapes.
+    """Count board replay/division plus the four measured SQL shapes.
 
     The statements are matched on fragments unique to each — the probe is the only
     GROUP BY over session_moves and the scoped fetch is the only ``session_id IN``
@@ -114,19 +145,38 @@ def install_counters(engine, monkeypatch_target=opening_evidence) -> None:
     zeroing a gate.
     """
     real_replay = monkeypatch_target.reconstruct_board_sequence
+    real_divide = monkeypatch_target.divide
 
     def counting_replay(moves):
         COUNTERS.replays += 1
-        return real_replay(moves)
+        started = time.perf_counter()
+        try:
+            return real_replay(moves)
+        finally:
+            COUNTERS.reconstruction_ms += (time.perf_counter() - started) * 1000.0
+
+    def counting_divide(*args, **kwargs):
+        COUNTERS.divider_calls += 1
+        started = time.perf_counter()
+        try:
+            return real_divide(*args, **kwargs)
+        finally:
+            COUNTERS.divider_ms += (time.perf_counter() - started) * 1000.0
 
     monkeypatch_target.reconstruct_board_sequence = counting_replay
+    monkeypatch_target.divide = counting_divide
 
     @event.listens_for(engine, "before_cursor_execute")
     def _count(conn, cursor, statement, parameters, context, executemany):
-        if "GROUP BY sm.session_id" in statement:
+        classification = classify_sql(statement)
+        if classification == "probe":
             COUNTERS.probe_queries += 1
-        elif "sm.session_id IN" in statement:
+        elif classification == "raw_fetch":
             COUNTERS.row_fetches += 1
+        elif classification == "l2_read":
+            COUNTERS.l2_reads += 1
+        elif classification == "l2_write":
+            COUNTERS.l2_writes += 1
 
 
 # ---------------------------------------------------------------------------
@@ -346,37 +396,82 @@ def equivalence_violations(reused: dict, scratch: dict) -> list[str]:
 # ---------------------------------------------------------------------------
 # Pass 2: structural counters
 # ---------------------------------------------------------------------------
-def counter_violations(phase: str, counts: dict[str, int], *, games: int) -> list[str]:
+def counter_violations(
+    phase: str, counts: dict[str, int | float], *, games: int
+) -> list[str]:
     """The load-bearing, hardware-independent gate."""
     violations = []
-    if phase == "cold":
+    if phase == "cold_empty":
         if counts["replays"] != games:
             violations.append(
-                f"cold: expected {games} replays, got {counts['replays']}"
+                f"cold_empty: expected {games} replays, got {counts['replays']}"
+            )
+        if counts["divider_calls"] != games:
+            violations.append(
+                f"cold_empty: expected {games} divider calls, got "
+                f"{counts['divider_calls']}"
             )
         if counts["row_fetches"] != 1:
             violations.append(
-                f"cold: expected 1 row fetch, got {counts['row_fetches']}"
+                f"cold_empty: expected 1 row fetch, got {counts['row_fetches']}"
             )
-    elif phase == "warm":
+        if counts["l2_writes"] != 1:
+            violations.append(
+                f"cold_empty: expected 1 L2 write, got {counts['l2_writes']}"
+            )
+    elif phase == "restart_persisted":
         if counts["replays"] != 0:
             violations.append(
-                f"warm: expected 0 replays, got {counts['replays']} — the replay "
-                "cache is not being reused"
+                f"restart_persisted: expected 0 replays, got {counts['replays']}"
+            )
+        if counts["divider_calls"] != 0:
+            violations.append(
+                "restart_persisted: expected 0 divider calls, got "
+                f"{counts['divider_calls']}"
             )
         if counts["row_fetches"] != 0:
             violations.append(
-                f"warm: expected 0 row fetches, got {counts['row_fetches']} — the "
-                "digest probe is not preventing the whole-history fetch"
+                "restart_persisted: expected 0 row fetches, got "
+                f"{counts['row_fetches']}"
             )
+        expected_reads = (
+            games + opening_evidence._SESSION_REPLAY_READ_CHUNK_SIZE - 1
+        ) // opening_evidence._SESSION_REPLAY_READ_CHUNK_SIZE
+        if counts["l2_reads"] != expected_reads:
+            violations.append(
+                "restart_persisted: expected exactly "
+                f"{expected_reads} L2 reads, got {counts['l2_reads']}"
+            )
+        if counts["l2_writes"] != 0:
+            violations.append(
+                f"restart_persisted: expected 0 L2 writes, got {counts['l2_writes']}"
+            )
+    elif phase == "warm_memory":
+        for field in ("replays", "divider_calls", "row_fetches", "l2_reads", "l2_writes"):
+            if counts[field] != 0:
+                violations.append(
+                    f"warm_memory: expected 0 {field}, got {counts[field]}"
+                )
     elif phase == "incremental":
         if counts["replays"] != 1:
             violations.append(
                 f"incremental: expected 1 replay, got {counts['replays']}"
             )
+        if counts["divider_calls"] != 1:
+            violations.append(
+                f"incremental: expected 1 divider call, got {counts['divider_calls']}"
+            )
         if counts["row_fetches"] != 1:
             violations.append(
                 f"incremental: expected 1 row fetch, got {counts['row_fetches']}"
+            )
+        if counts["l2_reads"] != 1:
+            violations.append(
+                f"incremental: expected 1 L2 read, got {counts['l2_reads']}"
+            )
+        if counts["l2_writes"] != 1:
+            violations.append(
+                f"incremental: expected 1 L2 write, got {counts['l2_writes']}"
             )
     else:  # pragma: no cover - guarded by callers
         violations.append(f"unknown phase {phase!r}")
@@ -388,46 +483,102 @@ def counter_violations(phase: str, counts: dict[str, int], *, games: int) -> lis
     return violations
 
 
+def stats_violations(phase: str, stats, *, games: int) -> list[str]:
+    """Assert the application's own per-build diagnostics, independently."""
+    expected = {
+        "cold_empty": (0, 0, games, games),
+        "restart_persisted": (0, games, 0, 0),
+        "warm_memory": (games, 0, 0, 0),
+        "incremental": (games - 1, 0, 1, 1),
+    }
+    if phase not in expected:
+        return [f"unknown phase {phase!r}"]
+    l1_hits, l2_hits, raw_derivations, persisted_upserts = expected[phase]
+    violations = []
+    fields = {
+        "build_count": 1,
+        "probed_sessions": games,
+        "l1_hits": l1_hits,
+        "l2_hits": l2_hits,
+        "raw_derivations": raw_derivations,
+        "persisted_upserts": persisted_upserts,
+        "l2_read_failed": False,
+        "l2_write_failed": False,
+    }
+    for field, value in fields.items():
+        if getattr(stats, field) != value:
+            violations.append(
+                f"{phase}: expected stats.{field}={value!r}, got "
+                f"{getattr(stats, field)!r}"
+            )
+    return violations
+
+
 # ---------------------------------------------------------------------------
 # Pass 3: timing
 # ---------------------------------------------------------------------------
-def ratio_violations(cold_ms: float, warm_ms: float) -> list[str]:
-    """``>=`` MIN_COLD_WARM_RATIO, so exactly 4.0 passes."""
-    if warm_ms <= 0:
-        return [f"warm median {warm_ms} is not positive; ratio undefined"]
-    ratio = cold_ms / warm_ms
-    if ratio < MIN_COLD_WARM_RATIO:
-        return [f"ratio {ratio:.2f}x below the required {MIN_COLD_WARM_RATIO}x"]
+def ratio_violations(cold_ms: float, persisted_ms: float) -> list[str]:
+    """``>=`` MIN_COLD_PERSISTED_RATIO, so exactly 4.0 passes."""
+    if persisted_ms <= 0:
+        return [f"persisted median {persisted_ms} is not positive; ratio undefined"]
+    ratio = cold_ms / persisted_ms
+    if ratio < MIN_COLD_PERSISTED_RATIO:
+        return [
+            f"ratio {ratio:.2f}x below the required "
+            f"{MIN_COLD_PERSISTED_RATIO}x"
+        ]
     return []
 
 
 def default_measure(db, graph, session_ids, *, warmup: int, reps: int) -> dict:
-    """Discard ``warmup`` warmups, time ``reps`` repetitions, return median ms.
+    """Measure all four phases, including replay/divider/residual attribution."""
+    phases = ("cold_empty", "restart_persisted", "warm_memory", "incremental")
+    metrics = ("overlay_ms", "reconstruction_ms", "divider_ms", "residual_ms")
+    samples = {
+        phase: {metric: [] for metric in metrics}
+        for phase in phases
+    }
 
-    ``incremental`` evicts exactly one session's cache entry before each timed
-    build — the end-of-drill finalize shape this bead exists to make fast.
-    """
-    samples: dict[str, list[float]] = {"cold": [], "warm": [], "incremental": []}
+    def measure_phase(*, commit: bool) -> dict[str, float]:
+        COUNTERS.reset()
+        started = time.perf_counter()
+        overlay_evidence(db, USER_ID, COLOR, graph)
+        if commit:
+            db.commit()
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        counts = COUNTERS.snapshot()
+        reconstruction_ms = float(counts["reconstruction_ms"])
+        divider_ms = float(counts["divider_ms"])
+        return {
+            "overlay_ms": elapsed_ms,
+            "reconstruction_ms": reconstruction_ms,
+            "divider_ms": divider_ms,
+            "residual_ms": elapsed_ms - reconstruction_ms - divider_ms,
+        }
+
     for rep in range(warmup + reps):
         opening_evidence.reset_session_evidence_cache()
-        started = time.perf_counter()
-        overlay_evidence(db, USER_ID, COLOR, graph)
-        cold = (time.perf_counter() - started) * 1000.0
+        clear_persisted_cache(db)
+        readings = {"cold_empty": measure_phase(commit=True)}
 
-        started = time.perf_counter()
-        overlay_evidence(db, USER_ID, COLOR, graph)
-        warm = (time.perf_counter() - started) * 1000.0
+        opening_evidence.reset_session_evidence_cache()
+        readings["restart_persisted"] = measure_phase(commit=False)
+        readings["warm_memory"] = measure_phase(commit=False)
 
-        evict_one(session_ids[rep % len(session_ids)])
-        started = time.perf_counter()
-        overlay_evidence(db, USER_ID, COLOR, graph)
-        incremental = (time.perf_counter() - started) * 1000.0
+        invalidate_one(db, session_ids[rep % len(session_ids)])
+        readings["incremental"] = measure_phase(commit=True)
 
         if rep >= warmup:
-            samples["cold"].append(cold)
-            samples["warm"].append(warm)
-            samples["incremental"].append(incremental)
-    return {k: statistics.median(v) for k, v in samples.items()}
+            for phase in phases:
+                for metric in metrics:
+                    samples[phase][metric].append(readings[phase][metric])
+    return {
+        phase: {
+            metric: statistics.median(values)
+            for metric, values in phase_metrics.items()
+        }
+        for phase, phase_metrics in samples.items()
+    }
 
 
 def evict_one(session_id: str) -> None:
@@ -436,6 +587,21 @@ def evict_one(session_id: str) -> None:
         entry = opening_evidence._SESSION_EVIDENCE_CACHE.pop(session_id, None)
         if entry is not None:
             opening_evidence._session_cache_rows -= len(entry[1].moves)
+
+
+def clear_persisted_cache(db) -> None:
+    db.execute(text("DELETE FROM opening_session_replay_cache"))
+    db.commit()
+
+
+def invalidate_one(db, session_id: str) -> None:
+    """Remove one session from both tiers before the incremental phase."""
+    evict_one(session_id)
+    db.execute(
+        text("DELETE FROM opening_session_replay_cache WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -458,8 +624,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="bench_overlay_evidence",
         description=(
-            "Overlay-reuse benchmark: equivalence, then structural counters, then "
-            "the cold/warm ratio. Synthetic fixture only — no database URL option."
+            "Two-tier overlay replay benchmark: equivalence, four structural "
+            "phases, then cold/persisted timing. Synthetic fixture only — no "
+            "database URL option."
+        ),
+        epilog=(
+            "Keep the fixture below the 120,000 cached-move L1 budget when "
+            "interpreting warm_memory; --games 5000 --plies 200 can exceed it."
         ),
     )
     parser.add_argument(
@@ -495,6 +666,7 @@ def run(argv: list[str], measure=default_measure) -> int:
     Base.metadata.create_all(engine)
     db = sessionmaker(bind=engine)()
     real_replay = opening_evidence.reconstruct_board_sequence
+    real_divide = opening_evidence.divide
     try:
         rng = random.Random(SEED)
         lines = _book_lines(rng, args.openings, args.book_depth)
@@ -513,38 +685,61 @@ def run(argv: list[str], measure=default_measure) -> int:
         install_counters(engine)
         violations: list[str] = []
 
-        # --- Pass 1: equivalence, untimed, first. A reused build must not drift
-        # from a clean one; if it does, nothing downstream is worth measuring.
+        # --- Pass 1: equivalence, untimed, first. A persisted-bootstrap build
+        # must not drift from a genuinely empty L1/L2 build.
         opening_evidence.reset_session_evidence_cache()
-        overlay_evidence(db, USER_ID, COLOR, graph)  # cold, populates the cache
-        reused = snapshot(overlay_evidence(db, USER_ID, COLOR, graph))
+        clear_persisted_cache(db)
+        cold_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        db.commit()
+        scratch = snapshot(cold_overlay)
         opening_evidence.reset_session_evidence_cache()
-        scratch = snapshot(overlay_evidence(db, USER_ID, COLOR, graph))
+        persisted_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        reused = snapshot(persisted_overlay)
         violations += equivalence_violations(reused, scratch)
         if violations:
             _report(violations)
             return 1
 
-        # --- Pass 2: structural counters, untimed, second. Per phase: reset
-        # immediately before ONE build and read immediately after it.
-        counts: dict[str, dict[str, int]] = {}
+        # --- Pass 2: structural counters and application diagnostics, untimed.
+        counts: dict[str, dict[str, int | float]] = {}
+        phase_stats = {}
+        opening_evidence.reset_session_evidence_cache()
+        clear_persisted_cache(db)
+        COUNTERS.reset()
+        cold_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        db.commit()
+        counts["cold_empty"] = COUNTERS.snapshot()
+        phase_stats["cold_empty"] = cold_overlay.replay_cache_stats
+
         opening_evidence.reset_session_evidence_cache()
         COUNTERS.reset()
-        overlay_evidence(db, USER_ID, COLOR, graph)
-        counts["cold"] = COUNTERS.snapshot()
+        restart_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        counts["restart_persisted"] = COUNTERS.snapshot()
+        phase_stats["restart_persisted"] = restart_overlay.replay_cache_stats
 
         COUNTERS.reset()
-        overlay_evidence(db, USER_ID, COLOR, graph)
-        counts["warm"] = COUNTERS.snapshot()
+        warm_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        counts["warm_memory"] = COUNTERS.snapshot()
+        phase_stats["warm_memory"] = warm_overlay.replay_cache_stats
 
-        evict_one(session_ids[0])
+        invalidate_one(db, session_ids[0])
         COUNTERS.reset()
-        overlay_evidence(db, USER_ID, COLOR, graph)
+        incremental_overlay = overlay_evidence(db, USER_ID, COLOR, graph)
+        db.commit()
         counts["incremental"] = COUNTERS.snapshot()
+        phase_stats["incremental"] = incremental_overlay.replay_cache_stats
 
-        for phase in ("cold", "warm", "incremental"):
+        for phase in (
+            "cold_empty",
+            "restart_persisted",
+            "warm_memory",
+            "incremental",
+        ):
             violations += counter_violations(
                 phase, counts[phase], games=args.games
+            )
+            violations += stats_violations(
+                phase, phase_stats[phase], games=args.games
             )
         if violations:
             _report(violations)
@@ -554,11 +749,13 @@ def run(argv: list[str], measure=default_measure) -> int:
         medians = measure(
             db, graph, session_ids, warmup=args.warmup, reps=args.reps
         )
-        violations += ratio_violations(medians["cold"], medians["warm"])
+        cold_ms = medians["cold_empty"]["overlay_ms"]
+        persisted_ms = medians["restart_persisted"]["overlay_ms"]
+        violations += ratio_violations(cold_ms, persisted_ms)
         if violations:
             _report(violations)
 
-        ratio = medians["cold"] / medians["warm"] if medians["warm"] > 0 else None
+        ratio = cold_ms / persisted_ms if persisted_ms > 0 else None
         print(
             "BENCH_RESULT "
             + json.dumps(
@@ -572,12 +769,18 @@ def run(argv: list[str], measure=default_measure) -> int:
                     "session_move_rows": row_count,
                     "overlay_nodes": len(reused["nodes"]),
                     "overlay_edges": len(reused["edges"]),
-                    "cold_median_ms": medians["cold"],
-                    "warm_median_ms": medians["warm"],
-                    "incremental_median_ms": medians["incremental"],
-                    "ratio": ratio,
-                    "min_cold_warm_ratio": MIN_COLD_WARM_RATIO,
+                    "cold_empty_median_ms": cold_ms,
+                    "restart_persisted_median_ms": persisted_ms,
+                    "warm_memory_median_ms": medians["warm_memory"]["overlay_ms"],
+                    "incremental_median_ms": medians["incremental"]["overlay_ms"],
+                    "phase_medians": medians,
+                    "cold_persisted_ratio": ratio,
+                    "min_cold_persisted_ratio": MIN_COLD_PERSISTED_RATIO,
                     "counters": counts,
+                    "cache_stats": {
+                        phase: asdict(stats)
+                        for phase, stats in phase_stats.items()
+                    },
                 },
                 sort_keys=True,
             )
@@ -585,6 +788,7 @@ def run(argv: list[str], measure=default_measure) -> int:
         return 1 if violations else 0
     finally:
         opening_evidence.reconstruct_board_sequence = real_replay
+        opening_evidence.divide = real_divide
         db.close()
         engine.dispose()
 

@@ -1975,10 +1975,14 @@ class TestDifferentialParity:
 
         expected = quality_from_win_chance_loss(20, -30)
         ov1 = overlay_evidence(db_session, 1, "white", branching_graph)  # miss
-        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)  # hit
+        db_session.commit()
+        reset_session_evidence_cache()
+        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)  # L2 hit
         for ov in (ov1, ov2):
             assert ov.nodes[FEN_ROOT].quality_sum == pytest.approx(expected)
             assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+        assert ov2.replay_cache_stats.l2_hits == 1
+        assert ov2.replay_cache_stats.raw_derivations == 0
 
     def test_quality_recomputed_on_cache_hit(
         self, db_session, branching_graph, monkeypatch
@@ -2046,8 +2050,8 @@ class TestCacheMutationAliasing:
 class TestDegradedUnderBudget:
     def test_thrash_stays_correct(self, db_session, branching_graph, monkeypatch, caplog):
         """With the row budget below the working set, entries evict mid-build and
-        sessions re-replay — output stays correct, evictions are counted/warned,
-        and the 'replay only the new session' claim degrades (documented)."""
+        later hydrate from durable L2 — output stays correct and L1 evictions are
+        still counted/warned without falsely implying another board replay."""
         _insert_user(db_session)
         for _ in range(4):
             sid = _insert_session(db_session)
@@ -2068,8 +2072,10 @@ class TestDegradedUnderBudget:
         monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
         new_sid = _insert_session(db_session)
         _insert_line(db_session, new_sid, ["e2e4", "c7c5"])
-        overlay_evidence(db_session, 1, "white", branching_graph)
-        assert counter.count > 1  # more than just the appended session replayed
+        rebuilt = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1  # only the genuinely new session replays
+        assert rebuilt.replay_cache_stats.l2_hits > 0
+        assert rebuilt.replay_cache_stats.raw_derivations == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -2384,8 +2390,30 @@ class TestProbeFetchRace:
         assert counter.count == 0, "stored key did not match the replayed rows"
         _assert_overlay_equal(torn, after)
 
+        probe = db_session.execute(
+            text(opening_evidence._probe_sql("sqlite")),
+            {"user_id": 1, "player_color": "white"},
+        ).one()
+        expected_fetched_hash = opening_evidence._session_digest(
+            probe.row_count,
+            probe.body,
+            probe.session_ts,
+        )
+        persisted_hash = db_session.execute(
+            text(
+                "SELECT content_hash FROM opening_session_replay_cache "
+                "WHERE session_id = :sid"
+            ),
+            {"sid": sid},
+        ).scalar_one()
+        assert persisted_hash == expected_fetched_hash
+
+        counter.count = 0
         reset_session_evidence_cache()
-        _assert_overlay_equal(after, overlay_evidence(db_session, 1, "white", branching_graph))
+        restarted = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 0, "L2 replay key did not describe fetched rows"
+        assert restarted.replay_cache_stats.l2_hits == 1
+        _assert_overlay_equal(after, restarted)
 
     def test_probed_session_absent_from_fetch_is_skipped(
         self, db_session, branching_graph

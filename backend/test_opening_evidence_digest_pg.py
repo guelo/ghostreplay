@@ -25,11 +25,14 @@ provable on SQLite is already covered by ``TestReplayDigestColumnCoverage`` and
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import chess
+import pytest
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import IntegrityError
 
 import app.opening_evidence as opening_evidence
 from conftest import pg_required
@@ -300,4 +303,161 @@ def test_warm_rebuild_on_postgres_fetches_no_rows(pg_session_factory, monkeypatc
         assert replays["n"] == 0, "PostgreSQL warm rebuild re-replayed sessions"
         assert fetches["n"] == 0, "PostgreSQL warm rebuild re-fetched raw rows"
     finally:
+        db.close()
+
+
+@pg_required
+def test_real_recompute_persists_l2_across_caller_rollback(
+    pg_session_factory, monkeypatch
+):
+    """Production transaction shape: recompute rolls back its evidence Session
+    before CPU scoring, while the cache-only transaction must survive and hydrate
+    a fresh Session after a simulated process restart."""
+    import app.opening_cache as opening_cache
+    from app.opening_graph import get_opening_graph
+
+    db = pg_session_factory()
+    verify = None
+    try:
+        seeded_session_ids = _seed(db, sessions=2, plies=12)
+        db.execute(
+            text(
+                "DELETE FROM opening_session_replay_cache "
+                "WHERE session_id IN ("
+                "  SELECT id FROM game_sessions "
+                "  WHERE user_id = :user_id AND player_color = :color"
+                ")"
+            ),
+            {"user_id": USER_ID, "color": COLOR},
+        )
+        db.commit()
+        opening_evidence.reset_session_evidence_cache()
+
+        original_username = f"digest{USER_ID}"
+        uncommitted_username = f"uncommitted-{USER_ID}"
+        real_overlay_evidence = opening_cache.overlay_evidence
+
+        def overlay_with_uncommitted_sentinel(session, *args, **kwargs):
+            overlay = real_overlay_evidence(session, *args, **kwargs)
+            # This write happens after L2 population and immediately before
+            # recompute's documented rollback. Generation reservation commits
+            # earlier, so a sentinel installed before recompute would not test
+            # this boundary.
+            session.execute(
+                text("UPDATE users SET username = :username WHERE id = :user_id"),
+                {"username": uncommitted_username, "user_id": USER_ID},
+            )
+            assert (
+                session.execute(
+                    text("SELECT username FROM users WHERE id = :user_id"),
+                    {"user_id": USER_ID},
+                ).scalar_one()
+                == uncommitted_username
+            )
+            return overlay
+
+        monkeypatch.setattr(
+            opening_cache,
+            "overlay_evidence",
+            overlay_with_uncommitted_sentinel,
+        )
+        opening_cache.recompute_opening_scores(db, USER_ID, COLOR)
+
+        verify = pg_session_factory()
+        # Pin the caller rollback itself: if recompute ever commits before its
+        # CPU phase, this sentinel leaks and the L2-survival proof is vacuous.
+        assert (
+            verify.execute(
+                text("SELECT username FROM users WHERE id = :user_id"),
+                {"user_id": USER_ID},
+            ).scalar_one()
+            == original_username
+        )
+        persisted_rows = verify.execute(
+            text(
+                "SELECT CAST(cache.session_id AS TEXT) AS session_id, "
+                "       cache.content_hash, cache.divider_version, "
+                "       cache.inputs_version, cache.payload_version, "
+                "       cache.move_count, cache.payload, cache.updated_at "
+                "FROM opening_session_replay_cache cache "
+                "JOIN game_sessions gs ON gs.id = cache.session_id "
+                "WHERE gs.user_id = :user_id AND gs.player_color = :color"
+            ),
+            {"user_id": USER_ID, "color": COLOR},
+        ).all()
+        assert {row.session_id for row in persisted_rows} == set(
+            seeded_session_ids
+        )
+        for row in persisted_rows:
+            payload = json.loads(row.payload)
+            assert len(row.content_hash) == 40
+            assert row.divider_version == opening_evidence.game_phase.DIVIDER_VERSION
+            assert (
+                row.inputs_version
+                == opening_evidence.OPENING_EVIDENCE_INPUTS_VERSION
+            )
+            assert (
+                row.payload_version
+                == opening_evidence.SESSION_REPLAY_PAYLOAD_VERSION
+            )
+            assert len(payload["moves"]) == row.move_count
+            assert datetime.fromisoformat(payload["session_ts"]).tzinfo is not None
+            assert row.updated_at.tzinfo is not None
+
+        opening_evidence.reset_session_evidence_cache()
+
+        def fail_reconstruction(*_args, **_kwargs):
+            raise AssertionError("persisted bootstrap replayed raw boards")
+
+        monkeypatch.setattr(
+            opening_evidence,
+            "reconstruct_board_sequence",
+            fail_reconstruction,
+        )
+        overlay = opening_evidence.overlay_evidence(
+            verify, USER_ID, COLOR, get_opening_graph()
+        )
+        assert overlay.replay_cache_stats.l2_hits == len(persisted_rows)
+        assert overlay.replay_cache_stats.raw_derivations == 0
+
+        deleted_sid = seeded_session_ids[0]
+        verify.execute(
+            text("DELETE FROM game_sessions WHERE id = CAST(:sid AS UUID)"),
+            {"sid": deleted_sid},
+        )
+        verify.commit()
+        assert (
+            verify.execute(
+                text(
+                    "SELECT count(*) FROM opening_session_replay_cache "
+                    "WHERE session_id = CAST(:sid AS UUID)"
+                ),
+                {"sid": deleted_sid},
+            ).scalar_one()
+            == 0
+        )
+
+        remaining_sid = seeded_session_ids[1]
+        with pytest.raises(IntegrityError):
+            verify.execute(
+                text(
+                    "UPDATE opening_session_replay_cache SET move_count = -1 "
+                    "WHERE session_id = CAST(:sid AS UUID)"
+                ),
+                {"sid": remaining_sid},
+            )
+        verify.rollback()
+        assert (
+            verify.execute(
+                text(
+                    "SELECT move_count FROM opening_session_replay_cache "
+                    "WHERE session_id = CAST(:sid AS UUID)"
+                ),
+                {"sid": remaining_sid},
+            ).scalar_one()
+            >= 0
+        )
+    finally:
+        if verify is not None:
+            verify.close()
         db.close()

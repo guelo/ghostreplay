@@ -38,8 +38,46 @@ Fires **only for an actual rebuild** — never for a `cached` fast return or a
 | `batch_size` | named-root row count in the new batch (`null` if the count query failed) |
 | `player_color` | `white` \| `black` |
 | `freshness_capture` | `operational` for the normal exact-scope/no-full-digest path; otherwise `fallback_null_epoch` \| `fallback_identity` \| `fallback_counter`. A fallback pays the full raw digest and identity/counter drift also discards the first overlay, so segment `duration_ms` by this field before attributing a regression to scoring or persistence. |
+| `replay_cache_builds` | overlay builds included in this duration (`2` when identity/counter fallback discarded the first overlay, otherwise `1`) |
+| `replay_cache_probed_sessions` | total eligible sessions returned by the grouped digest probe across those builds |
+| `replay_cache_l1_hits` | sessions resolved from process memory |
+| `replay_cache_l2_hits` | sessions hydrated from `opening_session_replay_cache` |
+| `replay_cache_raw_derivations` | sessions that fetched authoritative move rows and ran board reconstruction/division |
+| `replay_cache_persisted_upserts` | replay products successfully submitted to the durable tier (SQLite tests count caller-transaction writes even when a later intentional rollback discards them) |
+| `replay_cache_l2_read_failed`, `replay_cache_l2_write_failed` | best-effort adapter failure flags; either means the rebuild degraded safely toward raw replay/L1 |
 
 `distinct_id` is the backend `user_id` as a string.
+
+The process-restart signature is `replay_cache_l1_hits = 0`,
+`replay_cache_l2_hits = replay_cache_probed_sessions`, and
+`replay_cache_raw_derivations = 0`. Counters are fixed, aggregate, and
+non-sensitive: session IDs, payload sizes/content, FENs, scores, and grades are
+never attached. On identity/counter fallback, the counters are the sum of the
+discarded and accepted overlays so `duration_ms` and replay work share the same
+boundary.
+
+### Replay-cache benchmark phases
+
+`backend/scripts/bench_overlay_evidence.py` measures cache behavior separately from
+the scheduler timing above. Its four phases are contractual:
+
+| Phase | Setup and expected work |
+|---|---|
+| `cold_empty` | clear L1 and L2; one digest probe, one raw-row fetch, all eligible sessions derived, and one batched L2 upsert |
+| `restart_persisted` | populate L2, clear only L1; all eligible sessions are L2 hits, with zero raw-row fetches, board reconstructions, divider calls, or upserts, and exactly `ceil(eligible sessions / 500)` chunked L2 reads |
+| `warm_memory` | retain L1; all eligible sessions are L1 hits and L2 is not queried |
+| `incremental` | invalidate one session in both tiers; exactly one session is fetched, reconstructed, divided, and upserted |
+
+The benchmark classifies the grouped `sm.session_id` digest probe, the
+`sm.session_id IN` raw fetch, the L2 `SELECT`, and the L2 `INSERT ... ON CONFLICT`
+with mutually exclusive SQL counters. It reports median overlay, reconstruction,
+divider, and residual time, but CI gates the structural counters and semantic
+equivalence rather than host-specific duration. Loopback PostgreSQL measurements are
+a CPU/storage baseline only: a production restart also transfers persisted premove
+payloads over the network, so the production event signature above is the rollout
+check. Keep synthetic fixtures within the 120,000 cached-move L1 budget when
+interpreting `warm_memory`; extreme `--games`/`--plies` combinations can
+intentionally exercise eviction instead of a pure L1 hit phase.
 
 ### Timing properties (g-score-queue-timing, timing version 1)
 

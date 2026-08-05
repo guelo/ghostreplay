@@ -21,6 +21,7 @@ For opening-score v2 this module also:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import threading
 from collections import Counter, OrderedDict, defaultdict
@@ -226,6 +227,38 @@ class PhaseSample:
     end_ply: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class ReplayCacheStats:
+    """Operational replay-cache work performed while building one overlay.
+
+    These counters deliberately describe storage/replay mechanics only. They are
+    not part of the semantic evidence product and must not be used by scoring.
+    ``build_count`` can exceed one when the operational freshness capture
+    discards an overlay and merges its work into the fallback overlay.
+    """
+
+    build_count: int = 0
+    probed_sessions: int = 0
+    l1_hits: int = 0
+    l2_hits: int = 0
+    raw_derivations: int = 0
+    persisted_upserts: int = 0
+    l2_read_failed: bool = False
+    l2_write_failed: bool = False
+
+    def merged(self, other: "ReplayCacheStats") -> "ReplayCacheStats":
+        return ReplayCacheStats(
+            build_count=self.build_count + other.build_count,
+            probed_sessions=self.probed_sessions + other.probed_sessions,
+            l1_hits=self.l1_hits + other.l1_hits,
+            l2_hits=self.l2_hits + other.l2_hits,
+            raw_derivations=self.raw_derivations + other.raw_derivations,
+            persisted_upserts=self.persisted_upserts + other.persisted_upserts,
+            l2_read_failed=self.l2_read_failed or other.l2_read_failed,
+            l2_write_failed=self.l2_write_failed or other.l2_write_failed,
+        )
+
+
 @dataclass
 class EvidenceOverlay:
     user_id: int
@@ -246,6 +279,11 @@ class EvidenceOverlay:
     # deliberately broad scope.
     shared_scope: "OverlaySharedScope" = field(
         default_factory=lambda: OverlaySharedScope()
+    )
+    # Process/storage diagnostics only; intentionally excluded from semantic
+    # overlay equivalence checks.
+    replay_cache_stats: ReplayCacheStats = field(
+        default_factory=ReplayCacheStats
     )
 
 
@@ -289,8 +327,8 @@ class _MoveRow:
 # it is graph-independent and analysis_cache-independent (those are consumed
 # later, in passes 2/3 and ``_apply_cache_fallbacks``, over the merged rows).
 # So we memoize ONLY the replay product per session_id in a bounded in-process
-# LRU; a rebuild then replays only new/changed/unseen sessions and loads the
-# rest (including previously-excluded broken sessions) from cache.
+# L1 and a durable database L2; a rebuild then replays only sessions missing or
+# invalid in both tiers. Previously-excluded broken sessions use the same path.
 #
 # NOT cached: move quality (recomputed cheaply on copy-out, so a
 # QUALITY_VERSION/TAU_WC/TAU_CP bump needs no invalidation) and the
@@ -359,6 +397,235 @@ class _CachedSession:
     exclusion_msg: str
 
 
+# Serialization changes have their own guard: changing the replay semantics uses
+# OPENING_EVIDENCE_INPUTS_VERSION, while changing only this JSON envelope bumps
+# this version and leaves score/cache freshness versions untouched.
+SESSION_REPLAY_PAYLOAD_VERSION = 1
+_SESSION_REPLAY_READ_CHUNK_SIZE = 500  # below SQLite's conservative bind limit
+
+_SESSION_PAYLOAD_KEYS = {
+    "excluded",
+    "exclusion_msg",
+    "moves",
+    "phase_sample",
+    "session_ts",
+}
+_PHASE_PAYLOAD_KEYS = {"opening_interval_len", "middle_ply", "end_ply"}
+_MOVE_PAYLOAD_KEYS = {
+    "move_number",
+    "color",
+    "norm_before",
+    "norm_after",
+    "fen_before_raw",
+    "move_san",
+    "uci",
+    "eval_delta",
+    "eval_cp",
+    "best_move_eval_cp",
+}
+
+
+def _require_exact_keys(value, expected: set[str], label: str) -> dict:
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be an object")
+    actual = set(value)
+    if actual != expected:
+        raise ValueError(
+            f"{label} keys differ: missing={sorted(expected - actual)!r} "
+            f"unknown={sorted(actual - expected)!r}"
+        )
+    return value
+
+
+def _require_int(value, label: str, *, minimum: int | None = None) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{label} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{label} must be >= {minimum}")
+    return value
+
+
+def _require_nullable_int(value, label: str, *, minimum: int | None = None) -> int | None:
+    if value is None:
+        return None
+    return _require_int(value, label, minimum=minimum)
+
+
+def _require_str(value, label: str, *, nonempty: bool = False) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{label} must be a string")
+    if nonempty and not value:
+        raise ValueError(f"{label} must not be empty")
+    return value
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _encode_cached_session(value: _CachedSession, session_ts) -> str:
+    """Serialize only the raw replay product as canonical, compact JSON."""
+    canonical_ts = _digest_ts(session_ts)
+    if not canonical_ts:
+        raise ValueError("cached session requires a valid session timestamp")
+    phase = None
+    if value.phase_sample is not None:
+        phase = {
+            "opening_interval_len": value.phase_sample.opening_interval_len,
+            "middle_ply": value.phase_sample.middle_ply,
+            "end_ply": value.phase_sample.end_ply,
+        }
+    payload = {
+        "excluded": value.excluded,
+        "exclusion_msg": value.exclusion_msg,
+        "moves": [
+            {
+                "move_number": move.move_number,
+                "color": move.color,
+                "norm_before": move.norm_before,
+                "norm_after": move.norm_after,
+                "fen_before_raw": move.fen_before_raw,
+                "move_san": move.move_san,
+                "uci": move.uci,
+                "eval_delta": move.eval_delta,
+                "eval_cp": move.eval_cp,
+                "best_move_eval_cp": move.best_move_eval_cp,
+            }
+            for move in value.moves
+        ],
+        "phase_sample": phase,
+        "session_ts": canonical_ts,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _decode_cached_session(
+    session_id: str,
+    payload: str,
+    move_count: int,
+) -> _CachedSession:
+    """Strictly hydrate an untrusted persisted replay payload.
+
+    No missing or unknown field receives a default. Any shape/type/invariant
+    failure makes the row a cache miss; authoritative raw rows remain the source
+    of truth.
+    """
+    _require_int(move_count, "move_count", minimum=0)
+    _require_str(payload, "payload")
+    try:
+        root = json.loads(payload, object_pairs_hook=_reject_duplicate_json_keys)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ValueError("payload is not strict JSON") from exc
+    root = _require_exact_keys(root, _SESSION_PAYLOAD_KEYS, "payload")
+
+    excluded = root["excluded"]
+    if type(excluded) is not bool:
+        raise ValueError("payload.excluded must be a boolean")
+    exclusion_msg = _require_str(root["exclusion_msg"], "payload.exclusion_msg")
+    session_ts_raw = _require_str(
+        root["session_ts"], "payload.session_ts", nonempty=True
+    )
+    session_ts = _parse_ts(session_ts_raw)
+    if session_ts is None or session_ts.isoformat() != session_ts_raw:
+        raise ValueError("payload.session_ts is not canonical ISO-8601")
+
+    phase_raw = root["phase_sample"]
+    phase_sample: PhaseSample | None
+    if phase_raw is None:
+        phase_sample = None
+    else:
+        phase_raw = _require_exact_keys(
+            phase_raw, _PHASE_PAYLOAD_KEYS, "payload.phase_sample"
+        )
+        phase_sample = PhaseSample(
+            opening_interval_len=_require_int(
+                phase_raw["opening_interval_len"],
+                "payload.phase_sample.opening_interval_len",
+                minimum=0,
+            ),
+            middle_ply=_require_nullable_int(
+                phase_raw["middle_ply"],
+                "payload.phase_sample.middle_ply",
+                minimum=0,
+            ),
+            end_ply=_require_nullable_int(
+                phase_raw["end_ply"],
+                "payload.phase_sample.end_ply",
+                minimum=0,
+            ),
+        )
+
+    moves_raw = root["moves"]
+    if type(moves_raw) is not list:
+        raise ValueError("payload.moves must be an array")
+    if len(moves_raw) != move_count:
+        raise ValueError("payload move count disagrees with stored move_count")
+    moves: list[_CachedMove] = []
+    for index, move_raw in enumerate(moves_raw):
+        label = f"payload.moves[{index}]"
+        move_raw = _require_exact_keys(move_raw, _MOVE_PAYLOAD_KEYS, label)
+        color = _require_str(move_raw["color"], f"{label}.color")
+        if color not in _COLOR_RANK:
+            raise ValueError(f"{label}.color is invalid")
+        moves.append(
+            _CachedMove(
+                session_id=session_id,
+                move_number=_require_int(
+                    move_raw["move_number"], f"{label}.move_number", minimum=1
+                ),
+                color=color,
+                norm_before=_require_str(
+                    move_raw["norm_before"], f"{label}.norm_before", nonempty=True
+                ),
+                norm_after=_require_str(
+                    move_raw["norm_after"], f"{label}.norm_after", nonempty=True
+                ),
+                fen_before_raw=_require_str(
+                    move_raw["fen_before_raw"],
+                    f"{label}.fen_before_raw",
+                    nonempty=True,
+                ),
+                move_san=_require_str(
+                    move_raw["move_san"], f"{label}.move_san", nonempty=True
+                ),
+                uci=_require_str(move_raw["uci"], f"{label}.uci", nonempty=True),
+                eval_delta=_require_nullable_int(
+                    move_raw["eval_delta"], f"{label}.eval_delta"
+                ),
+                eval_cp=_require_nullable_int(
+                    move_raw["eval_cp"], f"{label}.eval_cp"
+                ),
+                best_move_eval_cp=_require_nullable_int(
+                    move_raw["best_move_eval_cp"], f"{label}.best_move_eval_cp"
+                ),
+                session_ts=session_ts,
+            )
+        )
+
+    if excluded:
+        if moves or phase_sample is not None:
+            raise ValueError("excluded payload must have no moves or phase sample")
+        if not exclusion_msg:
+            raise ValueError("excluded payload must carry an exclusion message")
+    else:
+        if phase_sample is None:
+            raise ValueError("included payload must carry a phase sample")
+        if exclusion_msg:
+            raise ValueError("included payload must have an empty exclusion message")
+
+    return _CachedSession(
+        moves=tuple(moves),
+        phase_sample=phase_sample,
+        excluded=excluded,
+        exclusion_msg=exclusion_msg,
+    )
+
+
 # Bound PRIMARILY by total cached ``_CachedMove`` rows, not session count —
 # memory is driven by the FEN-ish string payload each row carries. Measured
 # per-row cost (frozen slots dataclass deep-walked with sys.getsizeof over its
@@ -367,9 +634,10 @@ class _CachedSession:
 # cached (a fraction of a session's plies), so a heavy user's whole working set
 # is a few thousand rows — comfortably (many ×) below this cap, which is the
 # CONTRACT the "replay only the new session" claim depends on: a per-user
-# working set larger than the budget evicts mid-build and re-replays wholesale
-# (still correct, only slower; evictions are logged and warned). A coarse
-# session-count backstop guards against pathological many-tiny-session sets.
+# working set larger than the budget evicts mid-build and repeatedly hydrates
+# from L2 (or replays raw rows when L2 is unavailable). This remains correct but
+# is slower; evictions are logged and warned. A coarse session-count backstop
+# guards against pathological many-tiny-session sets.
 _SESSION_CACHE_MAX_ROWS = 120_000
 _SESSION_CACHE_MAX_SESSIONS = 100_000
 _WARNED_EXCLUSIONS_MAX = 10_000
@@ -623,6 +891,201 @@ def _session_digest(row_count: int, body: str | None, session_ts) -> str:
     payload += f"\n\x00DIVIDER={game_phase.DIVIDER_VERSION}"
     payload += f"\n\x00INPUTS={OPENING_EVIDENCE_INPUTS_VERSION}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _session_replay_l2_select_sql(dialect: str) -> str:
+    """Return an L2 lookup that preserves each dialect's primary-key index.
+
+    PostgreSQL must cast the parameter array, never the UUID column: applying a
+    function to ``session_id`` prevents the UUID primary-key btree from serving
+    this lookup. SQLite stores the test-schema key as TEXT and retains the
+    expanding ``IN`` form.
+    """
+    predicate = (
+        "session_id = ANY(CAST(:sids AS UUID[]))"
+        if dialect == "postgresql"
+        else "CAST(session_id AS TEXT) IN :sids"
+    )
+    return f"""
+        SELECT CAST(session_id AS TEXT) AS session_id,
+               content_hash, divider_version, inputs_version, payload_version,
+               move_count, payload
+        FROM opening_session_replay_cache
+        WHERE {predicate}
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedSession:
+    session_id: str
+    content_hash: str
+    session_ts: datetime | str
+    value: _CachedSession
+
+
+def _independent_engine(db: Session):
+    """Return the caller bind's engine without importing the global SessionLocal."""
+    bind = db.get_bind()
+    return getattr(bind, "engine", bind)
+
+
+def _read_persisted_session_rows(
+    executor,
+    session_ids: list[str],
+    dialect: str,
+):
+    rows = []
+    statement = text(_session_replay_l2_select_sql(dialect))
+    if dialect != "postgresql":
+        statement = statement.bindparams(bindparam("sids", expanding=True))
+    for start in range(0, len(session_ids), _SESSION_REPLAY_READ_CHUNK_SIZE):
+        chunk = session_ids[start : start + _SESSION_REPLAY_READ_CHUNK_SIZE]
+        rows.extend(executor.execute(statement, {"sids": chunk}).fetchall())
+    return rows
+
+
+def _load_persisted_sessions(
+    db: Session,
+    expected_hashes: dict[str, str],
+) -> tuple[dict[str, _CachedSession], bool]:
+    """Best-effort L2 read for L1 misses.
+
+    PostgreSQL uses a short independent connection so the caller's authoritative
+    evidence transaction is never extended by cache I/O. SQLite uses the caller
+    transaction: the test suite's StaticPool represents one logical DBAPI
+    connection, where opening a second Session would not be independent and a
+    commit could accidentally commit/rollback caller state.
+    """
+    if not expected_hashes:
+        return {}, False
+    dialect = db.get_bind().dialect.name
+    try:
+        if dialect == "sqlite":
+            # Isolate a genuine adapter/statement error without rolling back the
+            # authoritative caller transaction. Using the caller connection
+            # retains StaticPool's one-DBAPI-connection contract, while the
+            # savepoint leaves later quality/shared-fallback reads usable.
+            connection = db.connection()
+            with connection.begin_nested():
+                rows = _read_persisted_session_rows(
+                    connection,
+                    list(expected_hashes),
+                    dialect,
+                )
+        else:
+            with _independent_engine(db).connect() as connection:
+                rows = _read_persisted_session_rows(
+                    connection,
+                    list(expected_hashes),
+                    dialect,
+                )
+    except Exception:
+        logger.debug("opening-session replay L2 read failed", exc_info=True)
+        return {}, True
+
+    hydrated: dict[str, _CachedSession] = {}
+    malformed = 0
+    for row in rows:
+        values = row._mapping
+        session_id = str(values["session_id"])
+        expected_hash = expected_hashes.get(session_id)
+        if expected_hash is None:
+            continue
+        if (
+            values["content_hash"] != expected_hash
+            or values["divider_version"] != game_phase.DIVIDER_VERSION
+            or values["inputs_version"] != OPENING_EVIDENCE_INPUTS_VERSION
+            or values["payload_version"] != SESSION_REPLAY_PAYLOAD_VERSION
+        ):
+            continue
+        try:
+            hydrated[session_id] = _decode_cached_session(
+                session_id,
+                values["payload"],
+                values["move_count"],
+            )
+        except Exception:
+            # Persisted bytes are untrusted cache input. Bound diagnostics to one
+            # aggregate warning per build instead of logging one historical UUID
+            # and payload error per row.
+            malformed += 1
+    if malformed:
+        logger.warning(
+            "ignored %d malformed opening-session replay cache row(s); "
+            "authoritative rows will repair them",
+            malformed,
+        )
+    return hydrated, False
+
+
+def _session_replay_l2_upsert_sql(dialect: str) -> str:
+    session_id_value = (
+        "CAST(:session_id AS UUID)" if dialect == "postgresql" else ":session_id"
+    )
+    statement_clock = (
+        "statement_timestamp()" if dialect == "postgresql" else "CURRENT_TIMESTAMP"
+    )
+    return f"""
+        INSERT INTO opening_session_replay_cache (
+            session_id, content_hash, divider_version, inputs_version,
+            payload_version, move_count, payload
+        ) VALUES (
+            {session_id_value}, :content_hash, :divider_version, :inputs_version,
+            :payload_version, :move_count, :payload
+        )
+        ON CONFLICT (session_id) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            divider_version = excluded.divider_version,
+            inputs_version = excluded.inputs_version,
+            payload_version = excluded.payload_version,
+            move_count = excluded.move_count,
+            payload = excluded.payload,
+            updated_at = {statement_clock}
+    """
+
+
+def _upsert_persisted_sessions(
+    db: Session,
+    sessions: list[_PersistedSession],
+) -> tuple[int, bool]:
+    """Best-effort batched L2 upsert; never changes the scoring verdict."""
+    if not sessions:
+        return 0, False
+    dialect = db.get_bind().dialect.name
+    try:
+        # PostgreSQL row locks are acquired in this order during ON CONFLICT.
+        # Sorting makes concurrent overlapping rebuilds use one deterministic
+        # lock order instead of inheriting an unspecified raw-row order.
+        sessions = sorted(sessions, key=lambda entry: entry.session_id)
+        params = [
+            {
+                "session_id": entry.session_id,
+                "content_hash": entry.content_hash,
+                "divider_version": game_phase.DIVIDER_VERSION,
+                "inputs_version": OPENING_EVIDENCE_INPUTS_VERSION,
+                "payload_version": SESSION_REPLAY_PAYLOAD_VERSION,
+                "move_count": len(entry.value.moves),
+                "payload": _encode_cached_session(entry.value, entry.session_ts),
+            }
+            for entry in sessions
+        ]
+        statement = text(_session_replay_l2_upsert_sql(dialect))
+        if dialect == "sqlite":
+            connection = db.connection()
+            with connection.begin_nested():
+                connection.execute(statement, params)
+        else:
+            # The independent transaction is the feature: recompute_opening_scores
+            # rolls back its evidence transaction before CPU scoring, so writing
+            # through that caller Session would discard every cache fill.
+            with _independent_engine(db).begin() as connection:
+                connection.execute(statement, params)
+        return len(sessions), False
+    except Exception:
+        # Includes pool timeout/connection acquisition and the session-delete FK
+        # race. L1 and the current overlay stay fully usable.
+        logger.debug("opening-session replay L2 write failed", exc_info=True)
+        return 0, True
 
 
 def _session_cache_get(session_id: str, content_hash: str) -> _CachedSession | None:
@@ -889,16 +1352,17 @@ def _build_move_rows(
 ) -> list[_MoveRow]:
     """Load session moves, phase-tag them, and attach continuous quality.
 
-    Four steps, so an unchanged session costs one grouped digest row and nothing
-    else (g-overlay-evidence-reuse):
+    Five steps, so an unchanged session is resolved from memory or durable replay
+    storage without fetching authoritative move rows:
 
     1. PROBE — one grouped statement returns a content digest per eligible
        session (``_probe_sql(dialect)``).
-    2. RESOLVE — hit the in-process replay cache on that digest. A fully warm
-       build stops here having transferred no raw rows at all.
-    3. FETCH + REPLAY — only for sessions that missed, keyed on a digest of the
+    2. L1 RESOLVE — hit the in-process replay cache on that digest. A fully warm
+       build stops here having transferred no replay payload or raw rows.
+    3. L2 RESOLVE — hydrate remaining sessions from strict persisted JSON.
+    4. FETCH + REPLAY — only for sessions that missed both tiers, keyed on a digest of the
        rows actually fetched (see the torn-read note inline).
-    4. COPY OUT — a fresh mutable ``_MoveRow`` per cached premove, in sorted
+    5. COPY OUT — a fresh mutable ``_MoveRow`` per cached premove, in sorted
        session order, with quality recomputed live so a QUALITY/TAU version bump
        honours automatically with no cache invalidation and
        ``_apply_cache_fallbacks`` can never poison the frozen cached value.
@@ -915,19 +1379,21 @@ def _build_move_rows(
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
     if not probe_rows:
+        overlay.replay_cache_stats = ReplayCacheStats(build_count=1)
         return []
 
-    # STEP 2 — resolve against the replay cache. Warm builds end here: every
-    # session hits and not one raw row is fetched.
+    # STEP 2 — resolve against the process-local L1. Warm builds end here: every
+    # session hits and not one persisted payload or raw row is fetched.
     derived: dict[str, _CachedSession] = {}
-    missed: list[str] = []
+    expected_hashes: dict[str, str] = {}
+    l1_missed: list[str] = []
     for pr in probe_rows:
         sid = str(pr.sid)
-        cached = _session_cache_get(
-            sid, _session_digest(pr.row_count, pr.body, pr.session_ts)
-        )
+        content_hash = _session_digest(pr.row_count, pr.body, pr.session_ts)
+        expected_hashes[sid] = content_hash
+        cached = _session_cache_get(sid, content_hash)
         if cached is None:
-            missed.append(sid)
+            l1_missed.append(sid)
         else:
             derived[sid] = cached
 
@@ -936,11 +1402,39 @@ def _build_move_rows(
     # would over/under-count and misattribute this user's warning.
     evicted_rows = 0
 
-    # STEP 3 — fetch and replay ONLY the missed sessions.
-    if missed:
+    # STEP 3 — hydrate L1 misses from the database-backed L2. Version/hash
+    # mismatches are ordinary misses; malformed rows and adapter failures can
+    # never alter the overlay and fall through to authoritative replay.
+    persisted, l2_read_failed = _load_persisted_sessions(
+        db,
+        {sid: expected_hashes[sid] for sid in l1_missed},
+    )
+    for sid in l1_missed:
+        cached = persisted.get(sid)
+        if cached is None:
+            continue
+        content_hash = expected_hashes[sid]
+        if cached.excluded and _mark_exclusion_warned_if_new(sid, content_hash):
+            logger.warning(
+                "excluding session %s from opening evidence: %s",
+                sid,
+                cached.exclusion_msg,
+            )
+        evicted_rows += _session_cache_put(sid, content_hash, cached)
+        derived[sid] = cached
+
+    raw_missed = [sid for sid in l1_missed if sid not in persisted]
+    to_persist: list[_PersistedSession] = []
+
+    # STEP 4 — fetch and replay ONLY the sessions that missed both tiers.
+    if raw_missed:
         rows = db.execute(
             text(_SESSION_ROWS_SQL).bindparams(bindparam("sids", expanding=True)),
-            {"user_id": user_id, "player_color": player_color, "sids": missed},
+            {
+                "user_id": user_id,
+                "player_color": player_color,
+                "sids": raw_missed,
+            },
         ).fetchall()
 
         by_session: dict[str, list] = defaultdict(list)
@@ -971,6 +1465,14 @@ def _build_move_rows(
                 )
             evicted_rows += _session_cache_put(sid, content_hash, cached)
             derived[sid] = cached
+            to_persist.append(
+                _PersistedSession(
+                    session_id=sid,
+                    content_hash=content_hash,
+                    session_ts=srows[0].session_ts,
+                    value=cached,
+                )
+            )
 
         # A session the probe saw but that this fetch did not return went
         # ineligible (or lost its rows) in the gap above. It is simply absent from
@@ -979,12 +1481,14 @@ def _build_move_rows(
         # discipline in opening_cache.py: the signal is sampled BEFORE this read,
         # so an at-or-newer overlay re-verifies on the next pass.
 
+    persisted_upserts, l2_write_failed = _upsert_persisted_sessions(db, to_persist)
+
     opening_moves: list[_MoveRow] = []
     # Candidates needing an analysis_cache lookup: index into opening_moves plus
     # the (fen_before_raw, uci, side_to_move) lookup key.
     cache_candidates: list[tuple[int, str, str, str]] = []
 
-    # STEP 4 — copy out in a DETERMINISTIC session order. Neither statement above
+    # STEP 5 — copy out in a DETERMINISTIC session order. Neither statement above
     # orders by session, so dict insertion order follows DB row order and is not
     # stable across runs. sorted() makes phase_samples order and cache_candidates
     # indices identical between an incremental and a from-scratch build.
@@ -1039,10 +1543,11 @@ def _build_move_rows(
             opening_moves.append(mr)
 
     if evicted_rows > 0:
-        # Silent thrash reads as "incremental working" while it re-replays
-        # everything; surface it so an undersized budget is diagnosable. The
-        # count is build-local (summed from each _session_cache_put), so it is
-        # precise for this user even under concurrent rebuilds on other threads.
+        # Silent thrash reads as "incremental working" while it repeatedly
+        # transfers entries from L2 (or replays on L2 failure); surface it so an
+        # undersized budget is diagnosable. The count is build-local (summed
+        # from each _session_cache_put), so it is precise for this user even
+        # under concurrent rebuilds on other threads.
         logger.warning(
             "session-evidence cache evicted %d rows during build for "
             "user=%s color=%s — _SESSION_CACHE_MAX_ROWS may be undersized",
@@ -1053,6 +1558,16 @@ def _build_move_rows(
 
     overlay.shared_scope = _apply_cache_fallbacks(
         db, user_id, opening_moves, cache_candidates
+    )
+    overlay.replay_cache_stats = ReplayCacheStats(
+        build_count=1,
+        probed_sessions=len(probe_rows),
+        l1_hits=len(probe_rows) - len(l1_missed),
+        l2_hits=len(persisted),
+        raw_derivations=len(to_persist),
+        persisted_upserts=persisted_upserts,
+        l2_read_failed=l2_read_failed,
+        l2_write_failed=l2_write_failed,
     )
     return opening_moves
 
