@@ -745,7 +745,7 @@ Migration placement and the health timeout do not relax the stall limit.
 
 ---
 
-## 5. Outstanding for `g-b-sizing-harness` (Phase 3), re-scoped
+## 5. Phase 3 scope for `g-b-sizing-harness` — re-scoped, then closed (2026-07-28)
 
 Phase 3 was written as the merge gate: "nothing merges to production on the
 strength of the Phase 1/2 run recorded here." That gate did not hold — §0 — so
@@ -759,37 +759,18 @@ brought to head does nothing and times nothing. It is a **shape**: real PGN
 lengths, real eval density, real ply distributions, at a relation size a
 from-scratch environment will approach as it fills.
 
-- [ ] Re-run Phase 1 on **PostgreSQL 18.x**, matching production's major version.
-      Everything below inherits this; a scan constant measured on 15 prices a
-      plan 18 may not choose (`g-b-size-pg18-major`).
-- [ ] Drive the populations by **synthesis**, and say so. A production restore
-      has `N_stale = 0` and `N_repair = 0`; the harness's `--synthesize-stale` /
-      `--synthesize-repair K` paths are now the *only* way to obtain either, and
-      §1's `--derive` refusals already reject an unsynthesized snapshot rather
-      than fabricating a per-row constant from it.
-- [ ] Size against the **largest** relation a from-scratch environment is
-      expected to reach, not against today's 4,184 sessions. The two backfill
-      terms are `O(G_sessions)` on an unindexed predicate and the sweep's page
-      count is `ceil(G_sessions / MAX_BATCH_SIZE) + 1`, so both are functions of
-      the relation the migration will meet, not of the one it met in July 2026.
-- [ ] Re-run the cancel probe at **both scopes** on production-like storage;
-      `TEARDOWN_ALLOWANCE_MS` and the two atomic-teardown constants are the ones
-      a laptop SSD most flatters, and §0 leaves them the constants still leaning
-      **up**. *(Still open: §10's 3c runs are on the same laptop storage. What
-      they add is coverage of the shipped revision at all three transaction
-      shapes — including the repair batch, the larger of the two per-batch ones —
-      not a different storage class.)*
+- [x] Re-derive the committed measurement set on **PostgreSQL 18.x**, matching
+      production's major version. **Done 2026-07-27 — §9.**
 - [x] Run the frozen shipped revision with its guards **armed** on fresh
-      restores — twice: once production-shaped, once seeded to force the
-      full-size batches a small population cannot produce. This is the only
-      remaining check that exercises the runtime envelope at all, since
-      production never did. **Done 2026-07-27 — §10** (3a and 3a′), plus three
-      cancellation runs covering both teardown scopes. Artifacts under
-      `docs/sizing/phase3/`. **3b is not done and is blocked**
-      (`g-b-fixture-moves-clone`), so full-size batches are evidenced and
-      *partial* ones are not.
-- [ ] Record the health-window verdict and the final
-      `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` for a from-scratch deploy.
+      restores. **Done 2026-07-27 — §10** (3a and 3a′), plus three cancellation
+      runs covering both teardown scopes. Artifacts remain under
+      `docs/sizing/phase3/`.
+- [x] Retire the remaining synthetic from-scratch qualification. **Done
+      2026-07-27.** Fresh databases have no historical sessions, recovery uses a
+      current backup, and there is no supported requirement to upgrade a
+      populated pre-`20260719_01` snapshot. Phase 3b session/move cloning,
+      recurring endpoint sizing, and the health-window verdict for that
+      hypothetical path are cancelled.
 - [x] **Commit every measurement `--derive` consumes**, and re-freeze the shipped
       constants from that committed set rather than from a table. **Done
       2026-07-27 — §9.** §8's ten committed artifacts were already one derivation
@@ -1462,13 +1443,14 @@ other kind. The sweep statement reads `game_sessions` alone, which is why it is
 measured exactly here. The clones are of *production's own* ended-visible
 sessions, so page width and predicate selectivity stay production's.
 
-#### The same claim, re-checked on whatever host runs the gate
+#### Historical endpoint probe
 
-The above is one pair of copies on one machine. The *shape* the model assumes — a
-per-page term that stays a per-page term as the page count grows — is a property
-of the host, so it is also checked at fixture scale on every gate run. 6,000
-cloned ended-visible rows, all stale, swept five times at each of eight batch
-sizes, maxima:
+This fixture-scale probe was run while qualifying the frozen model and remains
+recorded as provenance. It is no longer a recurring release gate: production
+already completed the migration, fresh databases have no historical sessions,
+and the project does not support upgrading a populated pre-`20260719_01`
+snapshot. The probe used 6,000 cloned ended-visible rows, all stale, swept five
+times at each of eight batch sizes:
 
 | Batch size | Pages | Max (ms) | Marginal µs/page vs the next row |
 |---|---|---|---|
@@ -1500,13 +1482,16 @@ would inflate the scan coefficient by a factor with no measurement behind it. A
 timing may only be normalized by the basis of the copy it ran on, and this copy's
 basis is not one the scan component can be stated against.
 
-It is carried as a **test** rather than as this table:
-`test_release_b_pg_runtime.py::test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count`
-grows the fixture the same way, sweeps the same eight batch sizes, and compares
-**this host against itself** — the slope of each segment *beyond* 1,647 pages
-against a reference slope measured *inside* it, with `MARGIN` as the tolerance.
-Nothing in that comparison is a frozen constant, which is the point: three earlier
-forms failed, and the first two failed by comparing this host to one.
+It was later carried as a recurring test —
+`test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count`, **deleted
+2026-07-28** and named here only so this section's history reads; it no longer
+exists in the tree. It grew the fixture the same way, swept the same
+eight batch sizes, and compared **this host against itself** — the slope of each
+segment *beyond* 1,647 pages against a reference slope measured *inside* it, with
+`MARGIN` as the tolerance. Nothing in that comparison was a frozen constant, which
+was the point: three earlier forms failed, and the first two failed by comparing
+this host to one. The table below is kept because those failure modes are what a
+future linearity check would have to avoid, not because one is scheduled.
 
 | Form | Why it fails as a linearity test |
 |---|---|
@@ -1516,7 +1501,7 @@ forms failed, and the first two failed by comparing this host to one.
 | segmented, but subtracting per-point **maxima** | Segmenting the interval does not make the arithmetic a slope. Each maximum came from an unrelated trial, so one slow reading at a segment's low end *suppresses* that segment, and one in the reference range *inflates* the budget — both errors point the same way, toward passing a real late nonlinearity. |
 | paired and median-reduced, but always swept in the **same order** | Position-in-round is then perfectly confounded with page count. Pairing and medians cannot remove it: it is the same bias in every round, not noise, so repeating the run — or the whole gate — does not average it away. |
 
-So the sweeps are **interleaved** — all eight batch sizes, one warm-up round
+The retired gate's sweeps were **interleaved** — all eight batch sizes, one warm-up round
 discarded, six rounds retained — and every slope subtracts two readings **from the
 same round**, then takes the **median** over rounds. Pairing makes each slope
 describe one machine state; the median makes it immune to a single outlier on
@@ -1536,7 +1521,7 @@ Under a fixed ascending order the in-domain reference measured 126–135 µs/pag
 the 3,001 → 6,001 segment 120–138; balanced, they read 117–122 and 107–116. The
 spread between segments narrowed from ~9% to ~4% of the reference.
 
-The beyond-domain side is then checked **segment by segment** (1,201 → 3,001 and
+The beyond-domain side was checked **segment by segment** (1,201 → 3,001 and
 3,001 → 6,001). The in-domain reference pools every in-domain pair at least 500
 pages wide, across all rounds, and takes the median of the pool — under the linear
 model each such pair estimates the same per-page cost, since the fixed per-sweep
@@ -1544,7 +1529,7 @@ overhead cancels in a difference, so pooling is more data for one quantity rathe
 than an average of several. Median rather than maximum, because a maximum over
 pairs is the inflated reference the row above describes.
 
-Absolute coverage is a **separate** assertion, against the frozen pair rather than
+Absolute coverage was a **separate** assertion, against the frozen pair rather than
 against this host, and it uses the **worst** round at 6,001 pages: coverage is a
 claim about the tail, a slope is not.
 
@@ -1564,20 +1549,15 @@ managed on the same machine — 163.7 / 177.1 µs/page against a 403 µs/page bu
 Pairing, the median and the balanced order removed noise and bias; they did not
 add slack. The headroom above is a property of the host, not of the sampling.
 
-**What this does not establish.** Linearity *on this host*, on a fixture of clones,
+**What this did not establish.** Linearity *on this host*, on a fixture of clones,
 and nothing more. Its timings are not evidence for the frozen pair and never enter
 the LP — the constants' docstrings, `SPEC.md` and the gate manifest all say so.
 `gr_p2_sweep6000` is where the endpoint became a measured claim about the shipped
-constants; this is where that claim keeps being re-checked on hosts nobody sized.
+constants.
 
-The test is pinned in `pg_gate_plugin.REQUIRED_PG_GATE_TESTS`, because a gate
-whose whole job is to run on unsized hosts is worth nothing if it can silently
-stop being collected, and so is
-`test_pg_synthesize_sessions_establishes_the_stale_population_it_promises` — the
-endpoint is only the endpoint if the population really is `SIZED_TOTAL_ROWS`
-stale rows, and `--synthesize-sessions` targets that population directly
-(cloning against the ended-visible predicate, not `count(*)`, and stamping
-originals as well as clones) rather than leaving it to a separate flag.
+The live-host endpoint test and its mandatory pre-push manifest entry were
+removed when this qualification scope was retired. Deterministic tests over the
+committed artifacts still protect the frozen constants.
 
 ### Full derived table, and why it is *not* frozen
 
@@ -2621,27 +2601,11 @@ family as §1's three.
    `user_request`. Without it a timed-out trial is indistinguishable from a
    qualified one after the fact.
 
-### What Phase 3 still owes
+### Retired Phase 3 work
 
-- **3b (max-batch synthetic) — BLOCKED**, `g-b-fixture-moves-clone`. It needs
-  `3 * MAX_BATCH_SIZE + 1` = 1,939 stale and `3 * REPAIR_BATCH_SIZE + 1` = 3,001
-  repair rows; the fixture caps at 1,646 ended-visible sessions and the harness can
-  only clone `game_sessions` rows *without* `session_moves`. So **no partial batch
-  has been demonstrated for either phase**, and `B_TESTED` / `R_TESTED` stay
-  fixture-bound (§9).
-- **Partial-batch behaviour, specifically.** The repair-batch cancel *does* now show
-  an earlier per-batch transaction's work surviving a later abort (`n_stale = 0`
-  durable while the migration transaction rolled back), so the cross-phase half of
-  "earlier batches stayed committed" is evidenced. What is still missing is a
-  cancelled batch with **committed siblings in its own phase** and a page that is
-  neither full nor empty — both need `N > MAX_BATCH_SIZE`, so both wait on 3b.
-- **Decision 2 (health window) and `T_boot`.** `T_window_prod` for the shape 3a
-  actually took is **~100 ms** (`elapsed_s=0.1`, the `S_scans_total = 2` path), so
-  under branch 2 the requirement `3 * T_window_prod + T_boot <= 0.5 *
-  healthcheckTimeout` is `0.3 + T_boot <= 15 s` at `healthcheckTimeout = 30`
-  (`railway.toml:15`). That leaves `T_boot <= 14.7 s`, and `T_boot` must be measured
-  **on the deployed image**, which cannot be done from here.
-- **The Railway restart-policy rehearsal** (branch 2): whether a healthcheck timeout
-  feeds `restartPolicyType = "on_failure"` / `restartPolicyMaxRetries = 3` is an
-  operational assumption, not a documented guarantee, and must be observed on a
-  disposable service before shipping branch 2.
+Phase 3b, partial-batch qualification at a synthetic `3n + 1` population, the
+Railway health-window verdict, and the disposable-service restart rehearsal are
+cancelled. They qualified only a hypothetical populated upgrade from before
+`20260719_01`, which is not a supported deployment or recovery path. The
+production outcome and completed Phase 3 artifacts above remain the historical
+record; no additional session or move cloning is planned.

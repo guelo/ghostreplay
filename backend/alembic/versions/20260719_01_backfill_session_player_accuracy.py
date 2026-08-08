@@ -533,11 +533,15 @@ MARGINED_MS_BACKFILL_SWEEP_SCAN = 71
 #: what the ceil() leaves over is 0.17% here against 5.6% at the retired basis.
 #: It is not headroom to spend.
 #:
-#: test_release_b_pg_runtime.py's endpoint gate is a separate, live-host claim and
-#: still earns its place: it re-runs the linearity check on WHATEVER host the gate
-#: runs on, comparing the per-page slope past 1,647 pages against the slope inside
-#: it ON THAT HOST. It cannot speak for these frozen numbers — its relation is a
-#: fixture of clones rather than a production-shaped copy — and no longer has to.
+#: test_release_b_pg_runtime.py once carried a live-host endpoint gate beside this
+#: pair — a per-host linearity check comparing the per-page slope past 1,647 pages
+#: against the slope inside it ON THAT HOST. It was RETIRED 2026-07-28 with the
+#: rest of the from-scratch sizing programme: the only workload that reaches those
+#: page counts is a populated pre-20260719_01 upgrade, which is not a supported
+#: path (runbook §5). It never spoke for these frozen numbers in any case — its
+#: relation was a fixture of clones rather than a production-shaped copy. What
+#: still runs against this pair is test_pg_frozen_sweep_model_covers_a_live_sweep,
+#: which asserts margined_model >= observed on the sweep a real upgrade takes.
 MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 491
 
 #: The per-statement cap for EVERY scan-bearing statement: the repair population

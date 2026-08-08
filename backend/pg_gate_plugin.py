@@ -226,25 +226,13 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_runtime.py::test_pg_one_scan_per_pass_not_one_per_batch",
     "test_release_b_pg_runtime.py::"
     "test_pg_backfill_issues_one_selection_sweep_and_one_convergence_count_per_pass",
-    # The sweep model (g-b-sweep-batch-cost). The page formula against the runner's
-    # ACTUAL paging, the frozen pair against a real sweep, and — the one that has to
-    # be here rather than merely exist — the ENDPOINT GATE. The sizing artifacts
-    # measure the domain out to the 6,001 pages the import-time budget evaluates
-    # (g-b-sweep-endpoint-measure), but that is one pair of copies on one machine,
-    # and the SHAPE the model assumes — a per-page term that stays one as the page
-    # count grows — is a property of the host. That test executes the endpoint on
-    # whatever host runs it and compares that host's upper-range per-page slope
-    # against its own lower-range one. Its own timings are NOT evidence for the
-    # frozen constants and never enter the LP: the fixture is a small relation of
-    # clones, neither production-width nor production-sized. A gate whose whole job
-    # is to run on hosts nobody sized is worth nothing if it can silently stop
-    # being collected, which is why it is pinned here rather than merely existing.
+    # The sweep model (g-b-sweep-batch-cost): the page formula against the
+    # runner's actual paging, the frozen pair against a real fixture-scale sweep,
+    # and the stale-population postcondition of the row-cloning helper.
     "test_release_b_pg_runtime.py::test_pg_sweep_page_count_matches_the_model",
     "test_release_b_pg_runtime.py::test_pg_frozen_sweep_model_covers_a_live_sweep",
     "test_release_b_pg_runtime.py::"
     "test_pg_synthesize_sessions_establishes_the_stale_population_it_promises",
-    "test_release_b_pg_runtime.py::"
-    "test_pg_frozen_sweep_model_covers_the_import_worst_case_page_count",
     # The materialization's transaction contract is MODE-SPLIT, and the one
     # invariant both modes share is that it takes no row lock of its own.
     "test_release_b_pg_runtime.py::"
