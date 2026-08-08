@@ -113,9 +113,6 @@
         margin-bottom: 4px;
         font-size: 0.85rem;
       }
-      .arms { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
-      .arms label { display: flex; align-items: center; gap: 6px; margin: 0; }
-      .arms input { width: auto; }
       .check { display: flex; align-items: center; gap: 8px; }
       .check input { width: auto; }
       textarea#jsonl { min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
@@ -198,24 +195,6 @@
         </label>
       </fieldset>
 
-      <fieldset>
-        <legend>Arms</legend>
-        <div class="arms">
-          <label><input type="checkbox" name="arm" value="current" checked /> current (shipping protocol)</label>
-          <label><input type="checkbox" name="arm" value="variantA" /> variantA</label>
-          <label><input type="checkbox" name="arm" value="variantB" /> variantB</label>
-        </div>
-        <p class="muted" style="margin: 0">
-          Select two arms to compare protocols in one run: they alternate in a
-          counterbalanced order, which needs the repeat count to be a multiple of
-          the number of arms. Every repeat and every arm is a block, and only the
-          first block starts on a cooled device — so keep the cooldown, whether you
-          are comparing arms or just repeating one. A candidate arm runs only if
-          this worker build advertises it in the bench handshake — variantB lands
-          in g-grade-variant-b, and until then the runner refuses it rather than
-          mislabelling a current-protocol run.
-        </p>
-      </fieldset>
     </form>
 
     <div class="actions">

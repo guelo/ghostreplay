@@ -1949,16 +1949,15 @@ describe('analysisWorker', () => {
         .filter((file) => !file.startsWith('bench/'))
         .sort()
 
-      // Only the module that DEFINES it. Candidate arms (§12 step 3) will be its
-      // first callers and production takes it over at §12 step 9, not before —
-      // extending this list is a deliberate act, never an accident.
+      // Only the module that defines it. After rejection, snapshots remain
+      // instrumentation and production keeps the legacy accumulators.
       expect(referencing).toEqual(['workers/pvSnapshots.ts'])
     })
   })
 
-  // --- §15.1 candidate isolation (g-grade-kill-gate) ---------------------------
+  // --- legacy protocol identity and eligibility (§15.2) ------------------------
 
-  describe('candidate dispatch (g-two-search-grade §15.1)', () => {
+  describe('legacy protocol contract after candidate removal', () => {
     const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
     const boot = async () => {
@@ -1971,12 +1970,6 @@ describe('analysisWorker', () => {
     const post = (data: unknown) => {
       messageHandler?.(new MessageEvent('message', { data }) as MessageEvent<AnalysisWorkerRequest>)
     }
-
-    /** Every `go depth …` this test has seen, in order. */
-    const goCommands = () =>
-      engineWorkerPostMessageMock.mock.calls
-        .map(([command]) => command as string)
-        .filter((command) => command.startsWith('go depth'))
 
     const awaitCommand = async (fragment: string) => {
       await vi.waitFor(() => {
@@ -1993,20 +1986,13 @@ describe('analysisWorker', () => {
         return call![0] as Record<string, unknown>
       })
 
-    const awaitScopedError = async (id: string) =>
-      await vi.waitFor(() => {
-        const call = postMessageMock.mock.calls.find(([m]) => m?.type === 'error' && m.id === id)
-        expect(call).toBeDefined()
-        return call![0] as { error: string }
-      })
-
     /**
      * One full CURRENT-protocol analyze-move (played != best, so all three
      * searches run), returning the response and the exact UCI stream it drove.
      */
-    const runCurrent = async (id: string, extra: Record<string, unknown> = {}) => {
+    const runCurrent = async (id: string) => {
       engineWorkerPostMessageMock.mockClear()
-      post({ type: 'analyze-move', id, fen: START_FEN, move: 'e2e3', playerColor: 'white', ...extra })
+      post({ type: 'analyze-move', id, fen: START_FEN, move: 'e2e3', playerColor: 'white' })
 
       const phases = [
         { marker: 'position fen rnbqkbnr', best: 'e2e4' },
@@ -2026,33 +2012,11 @@ describe('analysisWorker', () => {
       return { payload, commands }
     }
 
-    it('is inert without BOTH keys, and identically so in all four cases (C1)', async () => {
+    it('preserves the default UCI stream and legacy response contract', async () => {
       await boot()
 
-      // 1. Neither key — production, exactly as it ships.
-      const neither = await runCurrent('inert-neither')
-      // 2. Arm without bench mode: the selector is never even read.
-      const armOnly = await runCurrent('inert-arm-only', { arm: 'variantA' })
-      // 3. A malformed bench-init (no `bench: true`) must change nothing and go
-      //    unanswered — a half-formed opt-in is not an opt-in.
-      post({ type: 'bench-init' })
-      const malformed = await runCurrent('inert-malformed-init', { arm: 'variantA' })
-      expect(postMessageMock.mock.calls.filter(([m]) => m?.type === 'bench-ready')).toHaveLength(0)
-      // 4. Bench mode without a selector: the current protocol still runs.
-      post({ type: 'bench-init', bench: true })
-      const initOnly = await runCurrent('inert-init-only')
-
-      for (const inert of [armOnly, malformed, initOnly]) {
-        // Identical to ONE ANOTHER, additions included: the response is not
-        // byte-identical to the pre-C8 one (`evidenceEligible` and `protocol`
-        // are deliberate), but no key combination short of both may move a
-        // single field.
-        expect(inert.payload).toEqual(neither.payload)
-        expect(inert.commands).toEqual(neither.commands)
-      }
-
-      // Pinned, so the identity above cannot be satisfied by all four breaking.
-      expect(neither.payload).toMatchObject({
+      const current = await runCurrent('current')
+      expect(current.payload).toMatchObject({
         move: 'e2e3',
         bestMove: 'e2e4',
         canonical: true,
@@ -2060,157 +2024,12 @@ describe('analysisWorker', () => {
         protocol: 'legacy',
         evidenceEligible: true,
       })
-      expect(neither.commands.filter((c) => c.startsWith('go depth'))).toEqual([
+      expect(current.commands.filter((c) => c.startsWith('go depth'))).toEqual([
         'go depth 17',
         'go depth 17',
         'go depth 17',
       ])
-      expect(neither.commands.some((c) => c.startsWith('setoption'))).toBe(false)
-    })
-
-    it('advertises exactly the arms it can dispatch (C7 key 1)', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-
-      expect(postMessageMock).toHaveBeenCalledWith({ type: 'bench-ready', arms: ['variantA'] })
-    })
-
-    it('refuses a known-but-unavailable arm, scoped to the request (C7)', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      engineWorkerPostMessageMock.mockClear()
-
-      post({ type: 'analyze-move', id: 'no-b', fen: START_FEN, move: 'e2e4', playerColor: 'white', arm: 'variantB' })
-
-      expect((await awaitScopedError('no-b')).error).toMatch(/variantB.*not available/)
-      // Refused BEFORE anything ran: a mislabelled measurement is worse than none.
-      expect(goCommands()).toEqual([])
-      expect(postMessageMock).not.toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'analysis-started', id: 'no-b' }),
-      )
-    })
-
-    it('refuses an unknown arm string, scoped to the request (C7)', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-
-      post({ type: 'analyze-move', id: 'nonsense', fen: START_FEN, move: 'e2e4', playerColor: 'white', arm: 'variantZ' })
-
-      expect((await awaitScopedError('nonsense')).error).toMatch(/unknown candidate arm/)
-    })
-
-    it('keeps serving requests after refusing one', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      post({ type: 'analyze-move', id: 'bad', fen: START_FEN, move: 'e2e4', playerColor: 'white', arm: 'variantZ' })
-      await awaitScopedError('bad')
-
-      // The refusal must not wedge `analysisInFlight`.
-      const { payload } = await runCurrent('after-refusal')
-      expect(payload).toMatchObject({ bestMove: 'e2e4' })
-    })
-
-    it('runs root N+1 then post-played N, and no third search, when P !== B', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      engineWorkerPostMessageMock.mockClear()
-
-      post({ type: 'analyze-move', id: 'a-differs', fen: START_FEN, move: 'e2e3', playerColor: 'white', arm: 'variantA' })
-
-      await awaitCommand('go depth 18')
-      engineMessageHandler?.('info depth 18 multipv 1 score cp 30 nodes 900 time 9 pv e2e4 e7e5')
-      engineMessageHandler?.('bestmove e2e4')
-
-      await awaitCommand('moves e2e3')
-      engineMessageHandler?.('info depth 17 multipv 1 score cp -12 nodes 800 time 8 pv e7e5 g1f3')
-      engineMessageHandler?.('bestmove e7e5')
-
-      const payload = await awaitAnalysis('a-differs')
-
-      expect(goCommands()).toEqual(['go depth 18', 'go depth 17'])
-      expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
-        expect.stringContaining('moves e2e4'),
-      )
-      expect(payload).toMatchObject({
-        bestMove: 'e2e4',
-        protocol: 'variantA',
-        evidenceEligible: false,
-        // Minimal A declines to grade this split: §5 normalization lands in
-        // g-grade-variant-b.
-        canonical: false,
-      })
-    })
-
-    it('keeps the post-played search when P === B and reuses it as post-best', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      engineWorkerPostMessageMock.mockClear()
-
-      post({ type: 'analyze-move', id: 'a-equals', fen: START_FEN, move: 'e2e4', playerColor: 'white', arm: 'variantA' })
-
-      await awaitCommand('go depth 18')
-      engineMessageHandler?.('info depth 18 multipv 1 score cp 30 nodes 900 time 9 pv e2e4 e7e5')
-      engineMessageHandler?.('bestmove e2e4')
-
-      // §3.1: it supplies the resulting-position eval and the streaming updates.
-      await awaitCommand('moves e2e4')
-      engineMessageHandler?.('info depth 17 multipv 1 score cp -20 nodes 800 time 8 pv e7e5 g1f3')
-      engineMessageHandler?.('bestmove e7e5')
-
-      const payload = await awaitAnalysis('a-equals')
-
-      expect(goCommands()).toEqual(['go depth 18', 'go depth 17'])
-      expect(payload).toMatchObject({
-        bestMove: 'e2e4',
-        protocol: 'variantA',
-        evidenceEligible: false,
-        // Same position, same search: the row grades canonically.
-        canonical: true,
-        delta: 0,
-      })
-      expect(postMessageMock).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'analysis-streaming', id: 'a-equals' }),
-      )
-    })
-
-    it('runs no post-played search for a terminal played move', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      engineWorkerPostMessageMock.mockClear()
-
-      post({
-        type: 'analyze-move',
-        id: 'a-terminal',
-        fen: '6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1',
-        move: 'a1a8',
-        playerColor: 'white',
-        arm: 'variantA',
-      })
-
-      await awaitCommand('go depth 18')
-      engineMessageHandler?.('info depth 18 multipv 1 score mate 1 nodes 500 time 5 pv a1a8')
-      engineMessageHandler?.('bestmove a1a8')
-
-      const payload = await awaitAnalysis('a-terminal')
-
-      expect(goCommands()).toEqual(['go depth 18'])
-      expect(payload).toMatchObject({ bestMove: 'a1a8', protocol: 'variantA', evidenceEligible: false })
-    })
-
-    it('marks a candidate ineligible on the (none) path too (C8)', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-
-      post({ type: 'analyze-move', id: 'a-none', fen: START_FEN, move: 'e2e4', playerColor: 'white', arm: 'variantA' })
-      await awaitCommand('go depth 18')
-      engineMessageHandler?.('bestmove (none)')
-
-      expect(await awaitAnalysis('a-none')).toMatchObject({
-        bestMove: '(none)',
-        protocol: 'variantA',
-        evidenceEligible: false,
-        canonical: false,
-      })
+      expect(current.commands.some((c) => c.startsWith('setoption'))).toBe(false)
     })
 
     it('marks the legacy (none) path ineligible as well', async () => {
@@ -2254,31 +2073,11 @@ describe('analysisWorker', () => {
       })
     })
 
-    it('refuses a request whose N+1 would break §2’s depth invariant', async () => {
-      await boot()
-      post({ type: 'bench-init', bench: true })
-      engineWorkerPostMessageMock.mockClear()
-
-      post({
-        type: 'analyze-move',
-        id: 'too-deep',
-        fen: START_FEN,
-        move: 'e2e4',
-        playerColor: 'white',
-        depth: 20,
-        arm: 'variantA',
-      })
-
-      expect((await awaitScopedError('too-deep')).error).toMatch(/depth invariant/)
-      // The invariant is that analyze-move `go depth` stays below 21, so nothing
-      // may have been searched at 21.
-      expect(goCommands()).toEqual([])
-    })
   })
 
-  // --- C5 / C6: restricted searches and MultiPV restoration --------------------
+  // --- direct-search UCI identity ----------------------------------------------
 
-  describe('runSearch options and MultiPV restoration (§15.1 C5/C6)', () => {
+  describe('runSearch', () => {
     const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
 
     const boot = async () => {
@@ -2291,7 +2090,7 @@ describe('analysisWorker', () => {
 
     const commands = () => engineWorkerPostMessageMock.mock.calls.map(([c]) => c as string)
 
-    it('emits today’s exact commands when the options are omitted (C5)', async () => {
+    it('emits today’s exact commands', async () => {
       const worker = await boot()
 
       const search = worker.__runSearchForTests(FEN, [])
@@ -2301,150 +2100,13 @@ describe('analysisWorker', () => {
       engineMessageHandler?.('bestmove e2e4')
       await search
 
-      // No `setoption` anywhere: the neutral extension is what makes C1's
-      // byte-identical stream possible at all.
+      // The rejected candidate parameters are gone; the legacy search remains
+      // exactly one position command followed by one depth command.
       expect(commands()).toEqual([`position fen ${FEN}`, 'go depth 17'])
-    })
-
-    it('emits MultiPV immediately before position/go, and searchmoves on the go (C5, §8)', async () => {
-      const worker = await boot()
-
-      const search = worker.__runSearchForTests(FEN, [], {
-        depth: 18,
-        multipv: 2,
-        searchmoves: ['e2e4', 'd2d4'],
-      })
-      await vi.waitFor(() => {
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
-          expect.stringContaining('searchmoves'),
-        )
-      })
-
-      expect(commands()).toEqual([
-        'setoption name MultiPV value 2',
-        `position fen ${FEN}`,
-        'go depth 18 searchmoves e2e4 d2d4',
-      ])
-
-      engineMessageHandler?.('bestmove e2e4')
-      await search
-      // C6: restoration is the worker's, in a `finally`, not the caller's.
-      expect(commands().at(-1)).toBe('setoption name MultiPV value 1')
-    })
-
-    it('restores MultiPV after a deadline stop', async () => {
-      const worker = await boot()
-
-      const search = worker.__runSearchForTests(FEN, [], {
-        multipv: 3,
-        // Already expired: the cap arms at 0 and stops immediately, which is the
-        // deadline path a late search takes.
-        budget: { deadlineAt: Date.now() - 1, graceExpiresAt: null },
-      })
-      await vi.waitFor(() => {
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('stop')
-      })
-      engineMessageHandler?.('bestmove e2e4')
-      const result = await search
-
-      expect(result.capFired).toBe(true)
-      expect(commands().at(-1)).toBe('setoption name MultiPV value 1')
-    })
-
-    it('restores MultiPV after a cancel, so the next request starts at 1', async () => {
-      const worker = await boot()
-
-      // Bound to a request id so the REAL cancel path is reachable:
-      // `cancelAnalysis` keys on `activeAnalysisId`, and a test that merely feeds
-      // a truncated `bestmove` takes the ordinary success path under a
-      // cancellation-shaped name.
-      const search = worker.__runSearchForTests(FEN, [], { multipv: 2 }, 'cancel-me')
-      await vi.waitFor(() => {
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
-      })
-
-      messageHandler?.(
-        new MessageEvent('message', {
-          data: { type: 'cancel-analysis', id: 'cancel-me' } satisfies AnalysisWorkerRequest,
-        }),
-      )
-      // The cancel asks the engine to stop rather than waiting the search out —
-      // this is the assertion the old version of this test was missing.
-      expect(commands()).toContain('stop')
-
-      // The engine answers the stop with a truncated bestmove; the search settles
-      // and the restoration rides the same `finally`.
-      engineMessageHandler?.('bestmove e2e4')
-      await search
-      expect(commands().at(-1)).toBe('setoption name MultiPV value 1')
-
-      // …and the next request begins AFTER it, so it never searches at the width
-      // the canceled one raised. `ucinewgame` is its first engine command, and
-      // `__runSearchForTests` never sends one, so the ordering is unambiguous.
-      messageHandler?.(
-        new MessageEvent('message', {
-          data: {
-            type: 'analyze-move',
-            id: 'after-cancel',
-            fen: FEN,
-            move: 'e2e4',
-            playerColor: 'white',
-          } satisfies AnalysisWorkerRequest,
-        }),
-      )
-      await vi.waitFor(() => {
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('ucinewgame')
-      })
-      const all = commands()
-      expect(all.indexOf('ucinewgame')).toBeGreaterThan(
-        all.indexOf('setoption name MultiPV value 1'),
-      )
-    })
-
-    it('posts no MultiPV into an engine that was torn down mid-search', async () => {
-      vi.useFakeTimers()
-      try {
-        const worker = await import('./analysisWorker')
-        engineMessageHandler?.('uciok')
-        engineMessageHandler?.('readyok')
-        engineWorkerPostMessageMock.mockClear()
-
-        const search = worker.__runSearchForTests(FEN, [], {
-          multipv: 2,
-          budget: { deadlineAt: Date.now() + 10, graceExpiresAt: null },
-        })
-        const settled = search.catch((error: Error) => error)
-
-        await vi.advanceTimersByTimeAsync(11)
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('stop')
-        // The engine never answers the stop: the grace expires and the engine is
-        // destroyed and replaced.
-        await vi.advanceTimersByTimeAsync(2100)
-        expect(await settled).toBeInstanceOf(Error)
-
-        // The replacement is a different instance, so identity fails and the
-        // finally posts nothing into it.
-        expect(terminateMock).toHaveBeenCalled()
-        const afterTeardown = engineWorkerPostMessageMock.mock.calls
-          .map(([c]) => c as string)
-          .slice(engineWorkerPostMessageMock.mock.calls.findIndex(([c]) => c === 'uci'))
-        expect(afterTeardown).toEqual(['uci'])
-
-        // What DOES hold is the assertable invariant: a newly constructed engine
-        // sets MultiPV 1 at `uciok`, before its first `go` — which is why the
-        // guarded finally can safely decline.
-        engineWorkerPostMessageMock.mockClear()
-        engineMessageHandler?.('uciok')
-        const rebuilt = engineWorkerPostMessageMock.mock.calls.map(([c]) => c as string)
-        expect(rebuilt).toContain('setoption name MultiPV value 1')
-        expect(rebuilt.some((command) => command.startsWith('go '))).toBe(false)
-      } finally {
-        vi.useRealTimers()
-      }
     })
   })
 
-  // --- fatal engine error settlement (prerequisite for C6) --------------------
+  // --- fatal engine error settlement ------------------------------------------
 
   describe('a fatal engine error settles the in-flight search', () => {
     const FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
@@ -2599,27 +2261,5 @@ describe('analysisWorker', () => {
       }
     })
 
-    it('posts no MultiPV restoration into the failed engine', async () => {
-      const worker = await import('./analysisWorker')
-      engineMessageHandler?.('uciok')
-      engineMessageHandler?.('readyok')
-
-      const search = worker.__runSearchForTests(FEN, [], { multipv: 2 })
-      const settled = search.catch((error: Error) => error)
-      await vi.waitFor(() => {
-        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
-      })
-      engineWorkerPostMessageMock.mockClear()
-
-      engineErrorHandler?.(new ErrorEvent('error', { message: 'engine exploded' }))
-      expect(await settled).toBeInstanceOf(Error)
-
-      // The failed engine is STILL the current engine — nothing terminates it
-      // here — so an identity-only guard would have fired a `setoption` into it.
-      // Readiness is the condition that makes the guard reachable.
-      expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
-        'setoption name MultiPV value 1',
-      )
-    })
   })
 })

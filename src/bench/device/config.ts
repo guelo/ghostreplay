@@ -15,8 +15,7 @@
  * measuring for forty minutes before discovering that is the expensive failure.
  */
 
-import type { BenchArm, BenchSourceStamp } from '../benchRecord'
-import { BENCH_ARMS } from '../benchRecord'
+import type { BenchSourceStamp } from '../benchRecord'
 import type { BenchMode } from './schedule'
 import type { BenchPositionSetId } from './positions'
 import { MAX_THERMAL_PLIES } from './positions'
@@ -28,7 +27,6 @@ export type BenchRunConfig = {
   positionSetId: BenchPositionSetId
   thermalPlies?: number
   repeats: number
-  arms: BenchArm[]
   /**
    * Prepend a priming measurement to each sequence block so every position in the
    * set gets a warm row (see `schedule.ts`). Required for the warm half of a
@@ -40,9 +38,8 @@ export type BenchRunConfig = {
    *
    * Every block after the first otherwise starts on the heat the previous one
    * deposited, and the summary pools them — so this matters to a single-arm run
-   * repeated three times just as much as to an arm comparison. §10.4
-   * counterbalances the arm ORDER, which removes the bias of one arm always
-   * running second, but averaging heat across arms is not the same as shedding it.
+   * repeated three times: only the first block starts cooled, and averaging heat
+   * across repeats is not the same as shedding it.
    * `method.MIN_BLOCK_COOLDOWN_MS` is the point below which a gap is not a
    * cooldown at all.
    */
@@ -51,8 +48,6 @@ export type BenchRunConfig = {
   depth?: number
   moveTimeoutMs?: number
   readyTimeoutMs?: number
-  /** How long to wait for the §15.1 C7 `bench-ready` acknowledgement. */
-  benchHandshakeTimeoutMs?: number
   /** Driver-supplied build provenance, merged over the build-time stamp. */
   source?: Partial<BenchSourceStamp>
 }
@@ -173,21 +168,6 @@ export const configProblems = (config: BenchRunConfig): string[] => {
     )
   }
 
-  if (!Array.isArray(config.arms) || config.arms.length === 0) {
-    problems.push('at least one arm must be selected: there is nothing to measure')
-  } else {
-    for (const arm of config.arms) {
-      if (!BENCH_ARMS.includes(arm)) {
-        problems.push(`unknown arm ${JSON.stringify(arm)} (known: ${BENCH_ARMS.join(', ')})`)
-      }
-    }
-    if (new Set(config.arms).size !== config.arms.length) {
-      // A repeated arm doubles that arm's blocks and breaks the counterbalanced
-      // rotation, while `armOrderBalanced` still reports the order as balanced.
-      problems.push(`arms must be unique, got ${config.arms.join(', ')}`)
-    }
-  }
-
   if (config.mode === 'cold' && config.warmup) {
     // `planBlocks` gives every cold measurement its own worker, so a priming row
     // would defeat the mode and it correctly ignores the flag — but the run header
@@ -216,9 +196,5 @@ export const configProblems = (config: BenchRunConfig): string[] => {
   if (config.readyTimeoutMs !== undefined) {
     push(intProblem('readyTimeoutMs', config.readyTimeoutMs, { min: 1, max: 3_600_000 }))
   }
-  if (config.benchHandshakeTimeoutMs !== undefined) {
-    push(intProblem('benchHandshakeTimeoutMs', config.benchHandshakeTimeoutMs, { min: 1, max: 600_000 }))
-  }
-
   return problems
 }

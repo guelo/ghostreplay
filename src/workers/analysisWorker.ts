@@ -4,21 +4,12 @@ import { Chess } from "chess.js";
 import stockfishEngineUrl from "stockfish/bin/stockfish-18-lite-single.js?url";
 import stockfishWasmUrl from "stockfish/bin/stockfish-18-lite-single.wasm?url";
 import type {
-  AnalysisProtocol,
   AnalysisStopReason,
   AnalysisWorkerRequest,
   AnalysisWorkerResponse,
   AnalyzeMoveMessage,
 } from "./analysisMessages";
 import type { EngineScore } from "./stockfishMessages";
-import { CANDIDATE_PROTOCOLS, availableCandidateArms } from "./candidates";
-import type {
-  BenchAnalyzeMoveMessage,
-  BenchInitMessage,
-  BenchReadyMessage,
-} from "./candidates/benchMessages";
-import { isCandidateArm } from "./candidates/benchMessages";
-import type { CandidateContext, CandidateOutcome, CandidateProtocol } from "./candidates/contract";
 import { parseUciInfoLine } from "./parseInfo";
 import {
   admitInfoLine,
@@ -68,18 +59,6 @@ type EngineListeners = {
   error: (event: ErrorEvent) => void;
 };
 let engineListeners: EngineListeners | null = null;
-
-/**
- * §15.1 C7's FIRST key: benchmark mode, set once at worker init by `bench-init`
- * and answered with `bench-ready`.
- *
- * A module-level flag rather than a per-message one, so BOTH keys are required
- * and neither is enough alone: without this, a stray `arm` on an analyze-move is
- * never even read; with it but no `arm`, the current protocol still runs. A
- * production build has no way to send `bench-init` — it is not on
- * `AnalysisWorkerRequest` — and §15.2 deletes it with `candidates/`.
- */
-let benchMode = false;
 
 /**
  * Total wall-clock budget for ONE analyze-move — reset + all three searches, not
@@ -349,20 +328,7 @@ const clearWaiterTimer = (waiter: ResetWaiter) => {
 };
 const resetAckQueue: ResetWaiter[] = [];
 
-/**
- * What this worker ACCEPTS: the production union, with the analyze-move widened
- * by C7's optional selector, plus the bench handshake.
- *
- * Declared here rather than by widening `AnalysisWorkerRequest`, so production
- * callers still cannot express either key (C7) and §15.2's deletion of
- * `candidates/` takes both shapes with it.
- */
-type AnalysisWorkerIncoming =
-  | Exclude<AnalysisWorkerRequest, AnalyzeMoveMessage>
-  | BenchAnalyzeMoveMessage
-  | BenchInitMessage;
-
-const pendingAnalyses: BenchAnalyzeMoveMessage[] = [];
+const pendingAnalyses: AnalyzeMoveMessage[] = [];
 let analysisInFlight = false;
 
 // Stockfish's browser worker bootstrap reads the wasm asset from location.hash.
@@ -560,19 +526,9 @@ const ensureEngine = async () => {
 // with 21 (g-cache-stronger-evals); in-game callers omit depth and stay at 17.
 const DEFAULT_SEARCH_DEPTH = 17;
 
-/**
- * §15.1 C5's NEUTRAL extension: every field is optional, and omitting all of
- * them emits today's exact `position` / `go` pair with no `setoption` before it.
- * That identity is what C1 is proved on, so nothing here may acquire a default
- * that changes a command.
- */
 type RunSearchOptions = {
   onInfo?: (score: EngineScore, depth: number) => void;
   depth?: number;
-  /** Restrict the search to these root moves (§3.2's restricted resolution). */
-  searchmoves?: string[];
-  /** Requested MultiPV. `1` and omission are the same thing: emit nothing. */
-  multipv?: number;
   budget?: AnalysisBudget;
 };
 
@@ -581,9 +537,7 @@ const runSearch = async (
   moves: string[],
   options: RunSearchOptions = {},
 ) => {
-  const pendingEngine = await ensureEngine();
-
-  if (!pendingEngine) {
+  if (!(await ensureEngine())) {
     throw new Error("Stockfish engine unavailable");
   }
 
@@ -591,17 +545,11 @@ const runSearch = async (
     sendEngineCommand("stop");
   }
 
-  const { onInfo, searchmoves } = options;
+  const { onInfo } = options;
   const budget = options.budget ?? dormantBudget();
   const requestedDepth = options.depth ?? DEFAULT_SEARCH_DEPTH;
-  const multipv = options.multipv ?? 1;
-  // Only a RAISE needs undoing, and only the raiser may undo it: restoring
-  // unconditionally would post a `setoption` around every ordinary search and
-  // break the byte-identical UCI stream C1 is proved on.
-  const raisedMultiPv = multipv !== 1;
 
-  try {
-    return await new Promise<SearchResult>(
+  return new Promise<SearchResult>(
     (resolve, reject) => {
       const search = {
         resolve,
@@ -617,9 +565,8 @@ const runSearch = async (
         endsGame: makeEndsGame(fen, moves),
         canceled: false,
         // Fresh per search: `seq` is a per-search emission counter and batches
-        // never cross a search boundary. K is whatever MultiPV this search asked
-        // for, so a restricted search's batch needs all of its slots.
-        snapshots: createSnapshotAssembler(multipv),
+        // never cross a search boundary. The legacy protocol is single-PV.
+        snapshots: createSnapshotAssembler(1),
       };
       activeSearch = search;
       // Arm the wall-clock heartbeat for THIS search so a single long iteration
@@ -665,53 +612,21 @@ const runSearch = async (
           }, Math.max(0, graceExpiresAt - Date.now()));
         }, Math.max(0, budget.deadlineAt - Date.now()));
       }
-      // §8: a phase sets its OWN MultiPV immediately before `position`/`go` and
-      // never inherits the previous phase's value. Omission (K === 1) emits
-      // nothing at all — the engine is already at 1, set at `uciok` and restored
-      // by the `finally` below.
-      if (raisedMultiPv) {
-        sendEngineCommand(`setoption name MultiPV value ${multipv}`);
-      }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
-      const searchmovesSegment =
-        searchmoves && searchmoves.length > 0
-          ? ` searchmoves ${searchmoves.join(" ")}`
-          : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
-      sendEngineCommand(`go depth ${requestedDepth}${searchmovesSegment}`);
+      sendEngineCommand(`go depth ${requestedDepth}`);
     },
   );
-  } finally {
-    // C6: restoration is the WORKER's, not the candidate's, and it covers every
-    // exit — bestmove, cancel, deadline, rejection.
-    //
-    // Guarded on identity AND readiness. Identity alone is not enough: a fatal
-    // engine error does not terminate the engine, so the failed instance is
-    // still `engine` and an identity-only guard would post a `setoption` into
-    // it. `handleEngineError` clears `engineReady` BEFORE settling this promise,
-    // which is what makes the second condition reachable rather than a restated
-    // form of the first. A destroyed/rebuilt engine fails identity, and a fresh
-    // engine sets MultiPV 1 at `uciok` before its first `go` anyway.
-    if (raisedMultiPv && engine === pendingEngine && engineReady) {
-      sendEngineCommand("setoption name MultiPV value 1");
-    }
-  }
 };
 
 /**
- * Test-only: drive ONE search with the C5 options.
- *
- * The minimal Variant A uses neither `searchmoves` nor `multipv` — §3.2's
- * restricted resolution lands in g-grade-variant-b — so without this hook the
- * emission and the C6 restoration would ship with no coverage at all until then,
- * which is the wrong order for a `setoption` that outlives its own search.
- * Unreachable from any message.
+ * Test-only: drive one search directly. Unreachable from any message.
  *
  * `analysisId` binds the search to a cancelable request. `cancelAnalysis` keys on
  * `activeAnalysisId`, which only `drainQueue` sets — so without this a test can
  * imitate a cancel's OBSERVABLE ending (a truncated `bestmove`) but never take
  * the real path through `stop`, `ActiveSearch.canceled` and the canceled-search
- * tally. That path is the one C6's restoration has to survive.
+ * tally.
  */
 export const __runSearchForTests = (
   fen: string,
@@ -1017,7 +932,7 @@ const handleEngineLine = (source: Worker, line: string) => {
   }
 };
 
-const enqueueAnalysis = (message: BenchAnalyzeMoveMessage) => {
+const enqueueAnalysis = (message: AnalyzeMoveMessage) => {
   pendingAnalyses.push(message);
   drainQueue();
 };
@@ -1054,18 +969,18 @@ const drainQueue = () => {
     return;
   }
 
-  let next: BenchAnalyzeMoveMessage | undefined;
+  let next: AnalyzeMoveMessage | undefined;
   while (!next && pendingAnalyses.length > 0) {
-    const candidate = pendingAnalyses.shift();
-    if (!candidate) {
+    const queued = pendingAnalyses.shift();
+    if (!queued) {
       continue;
     }
     // `delete()` returns true only when a cancel tombstone existed, and also
     // consumes it so future request-id reuse would not be poisoned.
-    if (canceledAnalyses.delete(candidate.id)) {
+    if (canceledAnalyses.delete(queued.id)) {
       continue;
     }
-    next = candidate;
+    next = queued;
   }
 
   if (!next) {
@@ -1113,20 +1028,14 @@ const drainQueue = () => {
 };
 
 /**
- * Today's three-search protocol, verbatim — the other branch of the ONE dispatch
- * point below.
- *
- * Extracted rather than left inline so both arms hand the same
- * `CandidateOutcome` to the same tail: everything from the `(none)` early return
- * through `computeAnalysisResult`, the mate fields, the classification,
- * `buildBestLine` and the `postMessage` lives below the dispatch and is shared
- * (§15.1 C3). Nothing about the search sequence changed in the move.
+ * Today's three-search protocol. Kept separate from response assembly so the
+ * search sequence and the persisted grading contract stay independently clear.
  */
 const runCurrentProtocol = async (
   request: AnalyzeMoveMessage,
   sideToMove: "w" | "b",
   budget: AnalysisBudget,
-): Promise<CandidateOutcome> => {
+) => {
   // Any constituent search truncated by the deadline poisons the whole move's
   // provenance: the tuple no longer describes a search that reached its limit.
   let capFired = false;
@@ -1221,86 +1130,8 @@ const runCurrentProtocol = async (
   };
 };
 
-/**
- * Everything a candidate arm is allowed to touch (§15.1 C4), built per request.
- *
- * `search` closes over the ONE shared budget, so an arm cannot construct or
- * extend one; every other field is a pure helper. There is no engine handle, no
- * `activeSearch`, no heartbeat, no waiter queue, no `canceledAnalyses`, and no
- * `ctx.postMessage`.
- */
-const candidateContext = (
-  request: AnalyzeMoveMessage,
-  sideToMove: "w" | "b",
-  budget: AnalysisBudget,
-): CandidateContext => {
-  const opponentToMove = sideToMove === "w" ? "b" : "w";
-  return {
-    fen: request.fen,
-    playedMove: request.move,
-    playerColor: request.playerColor,
-    sideToMove,
-    requestedDepth: request.depth ?? DEFAULT_SEARCH_DEPTH,
-    // `budget` last, so the shared deadline is not something an arm can pass.
-    search: (moves, options) =>
-      runSearch(request.fen, moves, { ...options, budget }),
-    checkCanceled: () => throwIfCanceled(request.id),
-    terminalScoreAfterMove: (move) => terminalScoreAfterMove(request.fen, move),
-    streamPlayed: (score, depth) => {
-      if (canceledAnalyses.has(request.id)) {
-        return;
-      }
-      const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
-      if (cp !== null) {
-        ctx.postMessage({
-          type: "analysis-streaming",
-          id: request.id,
-          cp,
-          depth,
-        } satisfies AnalysisWorkerResponse);
-      }
-    },
-  };
-};
-
-/**
- * §15.1 C7's SECOND key, read only while the first one is held.
- *
- * Returns the arm to dispatch, or null for the current protocol. Either key
- * alone is inert: no `bench-init` means the selector is never read, and no
- * selector means the current protocol runs even in bench mode. A named arm this
- * build cannot dispatch THROWS, so the failure is scoped to the request rather
- * than silently measuring the current protocol under a candidate's label.
- */
-const selectCandidate = (
-  request: BenchAnalyzeMoveMessage,
-): CandidateProtocol | null => {
-  if (!benchMode || request.arm === undefined) {
-    return null;
-  }
-  const available = availableCandidateArms();
-  if (!isCandidateArm(request.arm)) {
-    throw new Error(
-      `unknown candidate arm ${JSON.stringify(request.arm)} ` +
-        `(this build dispatches: ${available.join(", ") || "none"})`,
-    );
-  }
-  const protocol = CANDIDATE_PROTOCOLS[request.arm];
-  if (!protocol) {
-    throw new Error(
-      `candidate arm "${request.arm}" is not available in this worker build ` +
-        `(this build dispatches: ${available.join(", ") || "none"})`,
-    );
-  }
-  return protocol;
-};
-
-const analyzeMove = async (request: BenchAnalyzeMoveMessage) => {
+const analyzeMove = async (request: AnalyzeMoveMessage) => {
   throwIfCanceled(request.id);
-
-  // Before `analysis-started`: a request labelled with an arm this build cannot
-  // run has not started, and must not look like it did.
-  const candidate = selectCandidate(request);
 
   ctx.postMessage({
     type: "analysis-started",
@@ -1336,21 +1167,15 @@ const analyzeMove = async (request: BenchAnalyzeMoveMessage) => {
   await awaitRequestReady(budget.deadlineAt);
   throwIfCanceled(request.id);
 
-  // ---- the ONE dispatch point (§15.1 C3) ------------------------------------
-  const outcome = candidate
-    ? await candidate.run(candidateContext(request, sideToMove, budget))
-    : await runCurrentProtocol(request, sideToMove, budget);
-
-  // ---- the ONE join, shared by both arms ------------------------------------
-  const protocol: AnalysisProtocol = candidate ? candidate.arm : "legacy";
+  const outcome = await runCurrentProtocol(request, sideToMove, budget);
+  const protocol = "legacy" as const;
   /**
    * §9.1's discriminator. The legacy arm is `!capFired && canonical` — NOT
    * `!capFired` alone, because a completed search whose grading fell back to the
-   * delta-band `classifyMove` is equally unfit to carry a depth claim. Candidate
-   * arms are `false` unconditionally (C8), on every path.
+   * delta-band `classifyMove` is equally unfit to carry a depth claim.
    */
   const evidenceEligible = (canonical: boolean) =>
-    candidate === null && !outcome.capFired && canonical;
+    !outcome.capFired && canonical;
 
   const capFired = outcome.capFired;
   const bestMove = outcome.bestMove;
@@ -1421,8 +1246,7 @@ const analyzeMove = async (request: BenchAnalyzeMoveMessage) => {
     canonical = true;
   } else {
     // Legacy delta-band fallback: a non-canonical result (one of the post-move
-    // scores is missing). Surface it for diagnostics; not persisted. An arm that
-    // DECLINES to grade a row lands here too, by returning a null post-best.
+    // scores is missing). Surface it for diagnostics; not persisted.
     classification = classifyMove(delta);
     postLog(
       `[analysisWorker] non-canonical classification (delta-band fallback) for move ${request.move}`,
@@ -1460,7 +1284,7 @@ ensureEngine();
 
 ctx.addEventListener(
   "message",
-  (event: MessageEvent<AnalysisWorkerIncoming>) => {
+  (event: MessageEvent<AnalysisWorkerRequest>) => {
     const message = event.data;
 
     switch (message.type) {
@@ -1471,20 +1295,6 @@ ctx.addEventListener(
         }
 
         enqueueAnalysis(message);
-        break;
-      }
-      case "bench-init": {
-        // Malformed (`bench` not literally true) is IGNORED, not answered: a
-        // half-formed opt-in must leave the worker exactly as it was, and an
-        // unanswered handshake is already the runner's "no arms" outcome.
-        if (message.bench !== true) {
-          break;
-        }
-        benchMode = true;
-        ctx.postMessage({
-          type: "bench-ready",
-          arms: availableCandidateArms(),
-        } satisfies BenchReadyMessage);
         break;
       }
       case "cancel-analysis": {

@@ -203,7 +203,6 @@ const singlePositionConfig = {
   positionSetId: 'thermal-40' as const,
   thermalPlies: 1,
   repeats: 1,
-  arms: ['current' as const],
   depth: 3,
   moveTimeoutMs: 200,
   readyTimeoutMs: 200,
@@ -213,7 +212,7 @@ const moveRows = (records: readonly BenchRecord[]): BenchMoveRecord[] =>
   records.filter((record): record is BenchMoveRecord => record.kind === 'move')
 
 describe('runBench message contract', () => {
-  it('posts exactly the production analyze-move shape for the default arm', async () => {
+  it('posts exactly the production analyze-move shape', async () => {
     const fake = createFakeWorker()
     const { promise } = runBench(singlePositionConfig, { createWorker: () => fake.worker })
     await promise
@@ -223,19 +222,6 @@ describe('runBench message contract', () => {
     expect(Object.keys(analyze[0]).sort()).toEqual(
       ['depth', 'fen', 'id', 'move', 'playerColor', 'type'].sort(),
     )
-    // C7: the default arm never opts into bench mode, so the worker's message
-    // stream is what production would produce.
-    expect(fake.posted.some((message) => message.type === 'bench-init')).toBe(false)
-  })
-
-  it('refuses a candidate arm the worker never acknowledged', async () => {
-    const fake = createFakeWorker()
-    const { promise } = runBench(
-      { ...singlePositionConfig, arms: ['variantA'], benchHandshakeTimeoutMs: 20 },
-      { createWorker: () => fake.worker },
-    )
-
-    await expect(promise).rejects.toThrow(/not available in this worker build/)
   })
 })
 
@@ -560,23 +546,6 @@ describe('runBench method reporting', () => {
     expect(summary.methodWarnings).toEqual(expect.arrayContaining(header.methodWarnings))
   })
 
-  it('warns that an unbalanced two-arm order confounds protocol with run order', async () => {
-    // 3 repeats over 2 arms gives AB, BA, AB. §10.4 asks for both ≥3 repeats and a
-    // counterbalanced order, which this cannot satisfy at once — so the header says
-    // so. Collected via onRecord because the run then refuses the unacknowledged
-    // candidate arm and rejects.
-    const emitted: BenchRecord[] = []
-    await runBench(
-      { ...singlePositionConfig, arms: ['current', 'variantA'], repeats: 3, benchHandshakeTimeoutMs: 5 },
-      { createWorker: () => createFakeWorker().worker, onRecord: (record) => emitted.push(record) },
-    ).promise.catch(() => undefined)
-    const header = emitted[0] as BenchRunRecord
-
-    expect(header.plan.armOrderBalanced).toBe(false)
-    expect(header.methodWarnings.join(' ')).toMatch(/not counterbalanced/)
-    expect(header.methodWarnings.join(' ')).toMatch(/no cooldown between blocks/)
-  })
-
   it('warns that back-to-back repeats measure accumulated heat, on one arm too', async () => {
     // Three repeats of one arm are three blocks, of which only the first begins
     // cooled — and the by-move-index curve pools all three.
@@ -604,7 +573,7 @@ describe('runBench method reporting', () => {
 })
 
 describe('runBench cooldown', () => {
-  it('idles between blocks so a later arm is not measured on the previous heat', async () => {
+  it('idles between blocks so a later repeat is not measured on the previous heat', async () => {
     const slept: number[] = []
     const { promise } = runBench(
       { ...singlePositionConfig, repeats: 3, blockCooldownMs: 60_000 },
@@ -645,15 +614,6 @@ describe('runBench warm-up', () => {
 })
 
 describe('runBench configuration guard', () => {
-  it('refuses to run with no arms', async () => {
-    const { promise } = runBench(
-      { ...singlePositionConfig, arms: [] },
-      { createWorker: () => createFakeWorker().worker },
-    )
-
-    await expect(promise).rejects.toThrow(/at least one arm/)
-  })
-
   it('refuses a cooldown it could not apply, instead of running without one', async () => {
     // `NaN > 0` is false everywhere, so this used to run every block back-to-back
     // AND report no cooldown warning, then serialize the plan field as `null`.

@@ -18,7 +18,7 @@ import { latencySeriesByMoveIndex } from '../summarize'
 import { renderLatencyChart } from './chart'
 import type { BenchRunConfig } from './config'
 import { configProblems } from './config'
-import { VALUE_CONTROL_IDS, benchFormControls, readConfig, selectedArms } from './form'
+import { VALUE_CONTROL_IDS, benchFormControls, readConfig } from './form'
 import type { BenchRunHandle } from './runner'
 import { runBench } from './runner'
 import { createAnalysisWorker } from './workerFactory'
@@ -45,7 +45,6 @@ const persistConfig = () => {
       CONFIG_STORAGE_KEY,
       JSON.stringify({
         ...Object.fromEntries(VALUE_CONTROL_IDS.map((id) => [id, controls[id].value])),
-        arms: selectedArms(controls),
         warmup: controls.warmup.checked,
       }),
     )
@@ -61,9 +60,6 @@ const restoreConfig = () => {
     const values = JSON.parse(stored) as Record<string, unknown>
     for (const id of VALUE_CONTROL_IDS) {
       if (typeof values[id] === 'string') controls[id].value = values[id] as string
-    }
-    if (Array.isArray(values.arms)) {
-      for (const box of controls.armBoxes) box.checked = values.arms.includes(box.value)
     }
     if (typeof values.warmup === 'boolean') controls.warmup.checked = values.warmup
   } catch {

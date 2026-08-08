@@ -14,8 +14,6 @@
  * page and get the same mapping the page itself uses.
  */
 
-import type { BenchArm } from '../benchRecord'
-import { BENCH_ARMS } from '../benchRecord'
 import type { BenchPositionSetId } from './positions'
 import type { BenchRunConfig } from './config'
 import { typedNumberField } from './config'
@@ -44,14 +42,6 @@ export type BenchFormControls = {
   depth: HTMLInputElement
   blockCooldownMs: HTMLInputElement
   warmup: HTMLInputElement
-  /**
-   * Checkboxes, not a `<select>`: §10.4's counterbalanced protocol order is a
-   * property of ONE run measuring both arms, alternating between them. A control
-   * that can only name a single arm makes the comparison unavailable to the
-   * operator running the phone by hand — which is the only way the mobile
-   * numbers can be captured at all.
-   */
-  armBoxes: HTMLInputElement[]
 }
 
 const required = <T extends Element>(root: ParentNode, selector: string): T => {
@@ -74,16 +64,7 @@ export const benchFormControls = (root: ParentNode): BenchFormControls => ({
   depth: required(root, '#depth'),
   blockCooldownMs: required(root, '#blockCooldownMs'),
   warmup: required(root, '#warmup'),
-  armBoxes: [...root.querySelectorAll<HTMLInputElement>('input[name="arm"]')],
 })
-
-/**
- * Fixed order, independent of click order, so `arms[0]` is not an accident — and
- * taken from the schema's own list, so a checkbox whose value is not a real arm
- * cannot reach the runner.
- */
-export const selectedArms = (controls: BenchFormControls): BenchArm[] =>
-  BENCH_ARMS.filter((arm) => controls.armBoxes.some((box) => box.value === arm && box.checked))
 
 /**
  * The selected set, AS SELECTED — never narrowed to a known id here.
@@ -117,7 +98,6 @@ export const readConfig = (controls: BenchFormControls): BenchRunConfig => ({
   // `?? NaN` rather than `?? 1`: a cleared field is a mistake to report, not a
   // silent one-repeat run that §10.4 would then merely warn about.
   repeats: typedNumberField(controls.repeats) ?? NaN,
-  arms: selectedArms(controls),
   warmup: controls.warmup.checked,
   blockCooldownMs: typedNumberField(controls.blockCooldownMs),
   depth: typedNumberField(controls.depth),

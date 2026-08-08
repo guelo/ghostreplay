@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { benchFormControls, readConfig, selectedArms } from './form'
+import { benchFormControls, readConfig } from './form'
 import { configProblems, typedNumberField } from './config'
 
 /**
@@ -26,8 +26,7 @@ describe('the bench page form', () => {
   it('has every control the shell binds', () => {
     // `benchFormControls` throws by name, so a control renamed in the markup
     // fails here rather than as a TypeError on the phone that was about to run.
-    const controls = benchFormControls(parsePage())
-    expect(controls.armBoxes.map((box) => box.value)).toEqual(['current', 'variantA', 'variantB'])
+    expect(() => benchFormControls(parsePage())).not.toThrow()
   })
 
   it('keeps what was typed into a numeric control, however unreadable', () => {
@@ -58,7 +57,7 @@ describe('the bench page form', () => {
     }
   })
 
-  it('reads the shipped defaults as a valid single-arm control run', () => {
+  it('reads the shipped defaults as a valid control run', () => {
     const controls = benchFormControls(parsePage())
     controls.deviceLabel.value = 'MacBook Pro M1, macOS 15, Chromium'
 
@@ -75,7 +74,6 @@ describe('the bench page form', () => {
       depth: undefined,
       warmup: false,
     })
-    expect(selectedArms(controls)).toEqual(['current'])
     expect(configProblems(config)).toEqual([])
   })
 
@@ -124,11 +122,4 @@ describe('the bench page form', () => {
     expect(configProblems(readConfig(controls)).join(' ')).toMatch(/positionSetId must be one of/)
   })
 
-  it('refuses a run with no arm selected', () => {
-    const controls = benchFormControls(parsePage())
-    controls.deviceLabel.value = 'MacBook Pro M1, macOS 15, Chromium'
-    for (const box of controls.armBoxes) box.checked = false
-
-    expect(configProblems(readConfig(controls)).join(' ')).toMatch(/at least one arm/)
-  })
 })

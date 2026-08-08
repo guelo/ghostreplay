@@ -12,6 +12,7 @@
  */
 
 import type {
+  BenchArm,
   BenchCohort,
   BenchMoveRecord,
   BenchRecord,
@@ -23,14 +24,7 @@ import {
   zeroedDivergences,
   zeroedRejections,
 } from '../benchRecord'
-import { armOrderBalanced, planWarnings } from '../method'
-import {
-  DEFAULT_ARM,
-  armUnavailableReason,
-  buildAnalyzeMessage,
-  enableBenchMode,
-} from '../benchProtocol'
-import type { BenchWorkerLike } from '../benchProtocol'
+import { planWarnings } from '../method'
 import {
   createTranscriptCollector,
   feedLog,
@@ -57,7 +51,12 @@ import { describeEnvironment, detectBuildMode } from './environment'
 import { describeSource } from './source'
 
 /** A worker as this runner uses it. The real `Worker` satisfies it. */
-export type RunnerWorker = BenchWorkerLike & { terminate: () => void }
+export type RunnerWorker = {
+  postMessage: (message: unknown) => void
+  addEventListener: (type: 'message', listener: (event: MessageEvent) => void) => void
+  removeEventListener: (type: 'message', listener: (event: MessageEvent) => void) => void
+  terminate: () => void
+}
 
 export type { BenchRunConfig } from './config'
 
@@ -208,12 +207,13 @@ export const runBench = (config: BenchRunConfig, deps: BenchRunDeps): BenchRunHa
     }
     const requestedDepth = config.depth ?? sessionAnalysisDepth()
     const sessionDepth = sessionAnalysisDepth()
+    const arms: BenchArm[] = ['current']
     const positionSet = buildPositionSet(
       config.positionSetId,
       config.thermalPlies ?? DEFAULT_THERMAL_PLIES,
     )
     const blocks = planBlocks({
-      arms: config.arms,
+      arms,
       repeats: config.repeats,
       positions: positionSet.positions,
       mode: config.mode,
@@ -222,10 +222,10 @@ export const runBench = (config: BenchRunConfig, deps: BenchRunDeps): BenchRunHa
     const build = detectBuildMode()
     const source: BenchSourceStamp = { ...describeSource(), ...config.source }
     const plannedItems = plannedMeasurements(blocks)
-    const balanced = armOrderBalanced(config.arms.length, Math.max(1, Math.floor(config.repeats)))
+    const balanced = true
     const methodWarnings = planWarnings({
       repeats: config.repeats,
-      armCount: config.arms.length,
+      armCount: arms.length,
       blockCount: blocks.length,
       armOrderBalanced: balanced,
       blockCooldownMs,
@@ -268,7 +268,7 @@ export const runBench = (config: BenchRunConfig, deps: BenchRunDeps): BenchRunHa
       device: { label: config.deviceLabel, notes: config.notes },
       plan: {
         mode: config.mode,
-        arms: config.arms,
+        arms,
         repeats: config.repeats,
         positionSetId: positionSet.id,
         positionCount: positionSet.positions.length,
@@ -311,8 +311,8 @@ export const runBench = (config: BenchRunConfig, deps: BenchRunDeps): BenchRunHa
         if (stopped) throw new BenchStoppedError()
 
         if (blockCooldownMs > 0 && block.blockIndex > 0) {
-          // Let the device shed the previous block's heat, so the next arm is not
-          // measured on the temperature the last one left behind.
+          // Let the device shed the previous block's heat, so the next repeat is
+          // not measured on the temperature the last one left behind.
           report(block, '', 'cooling', null, blockCooldownMs)
           await sleep(blockCooldownMs)
           if (stopped) throw new BenchStoppedError()
@@ -359,18 +359,6 @@ export const runBench = (config: BenchRunConfig, deps: BenchRunDeps): BenchRunHa
           // Installed only now, so the boot handshake's own `ready` is already
           // consumed and any LATER one can only mean an internal engine rebuild.
           readyWatchRef.current = watchWorkerReady(next, now)
-          // Key 1 of the §15.1 C7 two-key opt-in, and only for a candidate arm:
-          // the default arm must post exactly what production posts, so it never
-          // sends `bench-init`. A build without the worker-side half never
-          // answers, which resolves to no arms — and the candidate is then
-          // refused here instead of being silently measured as `current`.
-          if (block.arm !== DEFAULT_ARM) {
-            const arms = await enableBenchMode(next, config.benchHandshakeTimeoutMs)
-            const unavailable = armUnavailableReason(block.arm, arms)
-            if (unavailable) {
-              throw new Error(unavailable)
-            }
-          }
         }
 
         try {
@@ -599,8 +587,8 @@ const emptyMoveRecord = (args: {
  * snapshot assembly and (for a short PV) a chess.js legality replay, all on the
  * main thread, and the `analysis` response queues behind every log message the
  * search emitted — so analysing in the handler would add the observer's own cost
- * to the endpoint it is timing, and add more of it to whichever arm emits more
- * info lines. On a two-core phone it also competes with Stockfish itself.
+ * to the endpoint it is timing. On a two-core phone it also competes with
+ * Stockfish itself.
  */
 const measureItem = async (args: MeasureArgs): Promise<ItemOutcome> => {
   const { worker, item, block, now } = args
@@ -675,7 +663,7 @@ const measureItem = async (args: MeasureArgs): Promise<ItemOutcome> => {
   })
 
   const startMs = now()
-  worker.postMessage(buildAnalyzeMessage(request, block.arm))
+  worker.postMessage(request)
   const outcome = await settled
   // One reading, used for both the latency and the open-phase wall clock, so the
   // replay below cannot leak into either.

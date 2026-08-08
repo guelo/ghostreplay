@@ -10,7 +10,6 @@ const valid: BenchRunConfig = {
   mode: 'sequence',
   positionSetId: 'thermal-40',
   repeats: 3,
-  arms: ['current'],
   blockCooldownMs: 60_000,
 }
 
@@ -76,18 +75,6 @@ describe('configProblems', () => {
     }
   })
 
-  it('refuses unknown, missing, or repeated arms', () => {
-    expect(configProblems({ ...valid, arms: [] }).join(' ')).toMatch(/at least one arm/)
-    expect(
-      configProblems({ ...valid, arms: ['variantC' as BenchRunConfig['arms'][number]] }).join(' '),
-    ).toMatch(/unknown arm/)
-    // A repeat doubles that arm's blocks while `armOrderBalanced` still calls the
-    // rotation balanced.
-    expect(configProblems({ ...valid, arms: ['current', 'current'] }).join(' ')).toMatch(
-      /arms must be unique/,
-    )
-  })
-
   it('refuses more thermal plies than the stored game has, instead of capping silently', () => {
     // `buildThermalPositions` caps at the game's length, so `--plies 500` would
     // measure 60 and the file would say nothing about the substitution.
@@ -118,7 +105,7 @@ describe('configProblems', () => {
   })
 
   it('reports every problem at once, not one per attempt', () => {
-    expect(configProblems({ ...valid, repeats: NaN, depth: 0, arms: [] })).toHaveLength(3)
+    expect(configProblems({ ...valid, repeats: NaN, depth: 0 })).toHaveLength(2)
   })
 
   it('names an unreadable number instead of calling it null', () => {
