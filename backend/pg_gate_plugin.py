@@ -625,11 +625,6 @@ def _pg_pool_leak_guard():
         )
 
 
-@pytest.fixture
-def pg_session_factory(pg_engine):
-    return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
-
-
 def _other_backends(engine) -> str:
     """Every OTHER backend on this database, as a diagnostic block.
 
@@ -677,9 +672,24 @@ def _truncate_all(engine, table_names: str) -> None:
         ) from exc
 
 
+def _make_isolated_pg_session_factory(pg_engine):
+    """Reset the shared schema before constructing one test's Session factory."""
+    from app.models import Base
+
+    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
+    _truncate_all(pg_engine, table_names)
+    return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
+
+
+@pytest.fixture
+def pg_session_factory(pg_engine):
+    """Session factory backed by a clean migrated schema for every test."""
+    return _make_isolated_pg_session_factory(pg_engine)
+
+
 @pytest.fixture
 def pg_client(pg_engine, pg_session_factory):
-    """TestClient backed by Postgres, with per-test truncation for isolation.
+    """TestClient backed by the isolated PostgreSQL Session factory.
 
     Overrides get_db AFTER the autouse SQLite ``_db_override`` so Postgres wins.
     Each request gets its own session, so concurrent requests can contend for
@@ -691,10 +701,6 @@ def pg_client(pg_engine, pg_session_factory):
 
     from app.db import get_db
     from app.main import app
-    from app.models import Base
-
-    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
-    _truncate_all(pg_engine, table_names)
 
     def _override_pg_db():
         db = pg_session_factory()

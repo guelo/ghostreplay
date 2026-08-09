@@ -431,6 +431,51 @@ def test_plugin_imports_and_manifests_are_populated():
         assert case.split("[", 1)[0] in mod.REQUIRED_PG_GATE_TESTS, case
 
 
+def test_bare_pg_session_factory_resets_before_each_construction(monkeypatch):
+    """Direct Session users get the same per-test isolation as pg_client users."""
+    from app.models import Base
+
+    engines = (object(), object())
+    expected_factories = [object(), object()]
+    factories = iter(expected_factories)
+    events = []
+
+    def fake_truncate(engine, table_names):
+        events.append(("reset", engine, table_names))
+
+    def fake_sessionmaker(**kwargs):
+        factory = next(factories)
+        events.append(("construct", kwargs, factory))
+        return factory
+
+    monkeypatch.setattr(pg_gate_plugin, "_truncate_all", fake_truncate)
+    monkeypatch.setattr(pg_gate_plugin, "sessionmaker", fake_sessionmaker)
+
+    built = [
+        pg_gate_plugin._make_isolated_pg_session_factory(engine)
+        for engine in engines
+    ]
+
+    expected_tables = ", ".join(
+        table.name for table in reversed(Base.metadata.sorted_tables)
+    )
+    assert built == expected_factories
+    assert events == [
+        ("reset", engines[0], expected_tables),
+        (
+            "construct",
+            {"autocommit": False, "autoflush": False, "bind": engines[0]},
+            built[0],
+        ),
+        ("reset", engines[1], expected_tables),
+        (
+            "construct",
+            {"autocommit": False, "autoflush": False, "bind": engines[1]},
+            built[1],
+        ),
+    ]
+
+
 def test_manifest_matches_real_pg_gate_collection():
     """Drift guard: the shipped manifest must equal the actual ``@pg_gate``
     decorations. Because the required-mode collection guard is dormant in the
