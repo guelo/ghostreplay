@@ -1592,13 +1592,73 @@ def test_sm_v2_4_zero_coverage_user_turn_hard_zeros_positive_quality():
     )
 
 
+def test_report_fold_clamps_ulp_coverage_overshoot_from_accumulation():
+    # Four fully covered child branches exercise the production failure shape. Their
+    # normalized weights accumulate to 1.0000000000000002 even though the exact
+    # coverage is 1.0; the report fold must treat that representational overshoot as
+    # full coverage instead of aborting the whole score rebuild.
+    root = _positions([])[0]
+    moves = ("e2e4", "d2d4", "c2c4", "g1f3")
+    children_by_move = {move: _positions([move])[1] for move in moves}
+    graph = _graph([[move] for move in moves])
+    roots = _roots(_root(root, "Fully covered root"))
+    overlay = EvidenceOverlay(1, "white")
+
+    # In sorted-child order the weight bases are [1, 3, 12, 6]. The first child is
+    # prepared by ghost-target status (zero attempts + rho=1); the others are
+    # prepared by 2/11/5 live attempts. _get_weights' renormalization produces the
+    # observed one-ULP overshoot when _calc accumulates the four coverage terms.
+    moves_by_child = {child: move for move, child in children_by_move.items()}
+    ordered_children = sorted(children_by_move.values())
+    overlay.nodes[ordered_children[0]] = NodeEvidence(
+        ordered_children[0], is_ghost_target=True
+    )
+    for child, attempts in zip(ordered_children[1:], (2, 11, 5), strict=True):
+        _prepared(overlay, root, child, moves_by_child[child], attempts=attempts)
+
+    historical = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
+    weights = historical._get_weights(root)
+    assert sum(weights.values()) == 1.0000000000000002
+    assert historical._calc(root, False)[2] == 1.0000000000000002
+    unfolded = historical._direct_metrics(root)
+
+    active = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    assert active._calc(root, False)[2] == 1.0000000000000002
+    assert active._direct_metrics(root) == unfolded
+
+
+@pytest.mark.parametrize(
+    ("near_boundary", "expected_score"),
+    [(1.0 + 5e-10, 60.0), (-5e-10, 0.0)],
+)
+def test_report_fold_clamps_both_tolerated_coverage_boundaries(
+    near_boundary, expected_score
+):
+    # The epsilon policy is symmetric even though positive accumulation drift is the
+    # production case. Clamp only the exponent operand: the displayed coverage stays
+    # raw to preserve the report fold's non-score-channel identity contract.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    key = _normalized(root)
+    active = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    active._metrics[(key, False)] = (0.6, 0.0, near_boundary, 0.5)
+    active._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
+
+    assert active._direct_metrics(root) == (
+        expected_score,
+        0.0,
+        100.0 * near_boundary,
+        0.5,
+    )
+
+
 def test_report_fold_invalid_active_coverage_fails_closed():
-    # An active, in-scope row with a coverage fraction outside [0, 1] raises rather
-    # than returning a complex/NaN score. The FEN and the offending value are named.
+    # An active, in-scope row materially outside the tolerated [0, 1] float boundary
+    # still raises rather than returning a complex/NaN score. The FEN and offending
+    # value are named.
     graph, overlay, roots, root, opp, covered = _fold_fixture()
     key = _normalized(root)
 
-    for bad in (1.0 + 1e-9, 1.5, -0.1):
+    for bad in (1.0 + 1e-8, 1.5, -1e-8, -0.1):
         active = _fold_calc(
             graph,
             overlay,

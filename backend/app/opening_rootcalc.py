@@ -42,6 +42,12 @@ COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 REPORT_FOLD_SCOPES = frozenset({"all", "user"})
 REPORT_SELF_TERM_MODES = frozenset({"keep", "drop_user"})
 
+# Weighted coverage is mathematically bounded to [0, 1], but repeated float
+# normalization/accumulation can land a fully covered row a few ULP outside that
+# interval. Accept only representational drift at the report-fold boundary; values
+# beyond this tolerance still fail closed before a fractional power is evaluated.
+_REPORT_FOLD_COVERAGE_EPSILON = 1e-9
+
 # Effective report-time self-term actually applied to a REPORTED row, distinct
 # from the RootCalcConfig.report_self_term *request* vocabulary (the two-value
 # REPORT_SELF_TERM_MODES above). It is the truthful debug/API observation of which
@@ -269,8 +275,9 @@ class NodeDebug:
     #     keep/drop_user/keep_fallback, BEFORE the coverage fold.
     #   - reported_score: pre_fold_quality * report_fold_multiplier — the final
     #     opening_score returned for the row.
-    #   - report_fold_multiplier: coverage_fraction ** report_fold_p for an active,
-    #     in-scope row; 1.0 for a dormant fold or an out-of-scope row.
+    #   - report_fold_multiplier: bounded_coverage_fraction ** report_fold_p for an
+    #     active, in-scope row, after an epsilon-tolerant bounds check and [0, 1]
+    #     clamp; 1.0 for a dormant fold or an out-of-scope row.
     #   - report_self_term_effective: which self-term arm scored the row (see
     #     :data:`ReportSelfTermEffective`).
     pre_fold_quality: float | None = None
@@ -993,12 +1000,14 @@ class _SharedCalculator:
         Report-time coverage fold (Option A, g-report-fold-score): when
         ``report_fold_p`` is active and the row is in scope, the selected pre-fold
         quality is multiplied by ``coverage_fraction ** report_fold_p`` exactly once.
-        The fold touches ONLY ``opening_score`` — confidence, displayed coverage, and
-        weighted_depth stay byte-identical to the pre-fold scorer, and ``_calc``'s
-        coverage channel is untouched. Scope ``"all"`` folds both turns; scope
-        ``"user"`` folds only user-turn rows. Rows that are out of scope, or that
-        run at ``report_fold_p == 0``, take an effective multiplier of 1.0 and never
-        evaluate the power or validate coverage.
+        For that power only, the raw fraction passes an epsilon-tolerant bounds check
+        and its exponent operand is clamped to ``[0, 1]``. The fold touches ONLY
+        ``opening_score`` — confidence, displayed coverage, and weighted_depth stay
+        byte-identical to the pre-fold scorer, and ``_calc``'s coverage channel is
+        untouched. Scope ``"all"`` folds both turns; scope ``"user"`` folds only
+        user-turn rows. Rows that are out of scope, or that run at
+        ``report_fold_p == 0``, take an effective multiplier of 1.0 and never evaluate
+        the power or validate coverage.
         """
         key = _normalized(fen)
         score, confidence, coverage, depth = self._calc(key, False)
@@ -1015,15 +1024,22 @@ class _SharedCalculator:
         if p != 0.0 and (
             self.config.report_fold_scope == "all" or self._is_user_turn(key)
         ):
-            # Active, in-scope row: fail closed on an out-of-range coverage fraction
-            # rather than returning a complex/NaN opening_score. The multiplier uses
-            # the RAW fraction from _calc, never the displayed percent (100 * cov).
-            if not 0.0 <= coverage <= 1.0:
+            # Active, in-scope row: tolerate only float accumulation drift around the
+            # mathematical [0, 1] bounds, then clamp the exponent operand. Materially
+            # out-of-range (including NaN) values still fail closed rather than
+            # returning a complex/NaN opening_score. Keep ``coverage`` itself raw so
+            # the displayed channel remains byte-identical to the dormant scorer.
+            if not (
+                -_REPORT_FOLD_COVERAGE_EPSILON
+                <= coverage
+                <= 1.0 + _REPORT_FOLD_COVERAGE_EPSILON
+            ):
                 raise ValueError(
                     "report-fold coverage fraction out of range for "
                     f"{key!r}: {coverage!r}"
                 )
-            multiplier = coverage**p
+            bounded_coverage = min(1.0, max(0.0, coverage))
+            multiplier = bounded_coverage**p
             opening_score *= multiplier
 
         if self.debug:
