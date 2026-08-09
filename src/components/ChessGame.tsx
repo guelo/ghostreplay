@@ -12,6 +12,7 @@ import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useBoardNotice } from "../hooks/useBoardNotice";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
+import { useSessionUploadCommitRevision } from "../hooks/useSessionUploadCommitRevision";
 import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
@@ -483,26 +484,30 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [reviewFailModal, blunderAlert, drillFailInfo]);
 
   // Live opening-lineage hierarchy (broadest -> deepest), driven from the active
-  // session. Refetches as moves accumulate; a bounded per-move lag re-poll (not
-  // a fixed interval) converges the analysis+upload lag for plies that land
-  // server-side after the local move event. Expand-only: no board-jump, no
-  // Start Drill.
+  // session. Local moves fetch immediately, then each fulfilled incremental
+  // upload changes a coordinator-owned revision so enrichment is causally
+  // ordered after durability instead of guessed with timers. The terminal flag
+  // remains independent because final_full uploads do not use that channel.
+  const uploadCommitRevision = useSessionUploadCommitRevision(
+    coordinator,
+    sessionId,
+  );
+  const openingLineageRefetchKey = JSON.stringify([
+    moveHistory.length,
+    Boolean(openingScoreChanges),
+    uploadCommitRevision,
+  ]);
   const {
     lineage: openingLineageFromServer,
     playerColor: openingLineagePlayerColor,
     startPly: openingLineageServerStartPly,
     scoreStatus: openingScoreStatus,
   } = useSessionOpenings(sessionId, {
-      // Force one extra refetch at a terminal event (g-3gmc): a resign/fast-stop
-      // sets openingScoreChanges WITHOUT adding a move and with polling already
-      // off, so the lineage can still be empty when the deltas land. During play
-      // openingScoreChanges is null (flag 0); at terminal it flips non-null
-      // (flag +1) while moveHistory is frozen, so the key strictly increases ->
-      // exactly one refetch that loads the cards the badges attach to.
-      refetchKey: moveHistory.length + (openingScoreChanges ? 1 : 0),
-      lagRepollMs: 1500,
-      active: isGameActive,
-    });
+    // A tuple-shaped primitive keeps independent invalidators collision-free:
+    // a revert can shrink move count while an upload revision rises, and those
+    // opposite changes must not cancel as they could under arithmetic addition.
+    refetchKey: openingLineageRefetchKey,
+  });
 
   // Display lineage: derived from LOCAL move history so a card renders on the
   // same tick as the move that crossed its root, with the server response

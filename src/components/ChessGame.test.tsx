@@ -194,6 +194,16 @@ const benignResult = (moveIndex: number, uci: string): AnalysisResult => ({
 
 const mockAnalyzeMove = vi.fn();
 let capturedOutcomeListener: ((o: unknown) => void) | null = null;
+let mockUploadCommitSessionId: string | null = null;
+let mockUploadCommitRevision = 0;
+const mockUploadCommitListeners = new Set<() => void>();
+
+const emitUploadCommit = (sessionId: string) => {
+  if (sessionId === mockUploadCommitSessionId) {
+    mockUploadCommitRevision += 1;
+  }
+  for (const listener of mockUploadCommitListeners) listener();
+};
 
 const mockCoordinator = {
   analyzeMove: mockAnalyzeMove,
@@ -211,19 +221,36 @@ const mockCoordinator = {
   clearAnalysis: vi.fn(),
   // Session changes drive the owner's full reset (in production via emitReset);
   // the mock routes them directly so blunderReserved/frontier reset between games.
-  startSession: vi.fn(() =>
-    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null }),
-  ),
-  clearSession: vi.fn(() =>
-    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null }),
-  ),
+  startSession: vi.fn((sessionId: string) => {
+    mockUploadCommitSessionId = sessionId;
+    mockUploadCommitRevision = 0;
+    for (const listener of mockUploadCommitListeners) listener();
+    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null });
+  }),
+  clearSession: vi.fn(() => {
+    mockUploadCommitSessionId = null;
+    mockUploadCommitRevision = 0;
+    for (const listener of mockUploadCommitListeners) listener();
+    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null });
+  }),
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
   stopSessionUploads: vi.fn(),
   settleWithin: vi.fn().mockResolvedValue(undefined),
   armLateEvaluationRepair: vi.fn().mockReturnValue(false),
   releaseLateEvaluationRepair: vi.fn(),
   cancelLateEvaluationRepair: vi.fn(),
-  sessionId: null,
+  get sessionId() {
+    return mockUploadCommitSessionId;
+  },
+  getUploadCommitRevision: vi.fn((sessionId: string | null) =>
+    sessionId !== null && sessionId === mockUploadCommitSessionId
+      ? mockUploadCommitRevision
+      : 0,
+  ),
+  addUploadCommitListener: vi.fn((listener: () => void) => {
+    mockUploadCommitListeners.add(listener);
+    return () => mockUploadCommitListeners.delete(listener);
+  }),
   store: gameAnalysisStore,
   markSkipped: vi.fn(),
   pruneFromMoveIndex: vi.fn((k: number) =>
@@ -347,6 +374,11 @@ beforeEach(() => {
   mockNavigate.mockReset();
   useDrillAnalysisStore.getState().clear();
   useGameStore.setState(initialGameStoreState, true);
+  mockUploadCommitSessionId = null;
+  mockUploadCommitRevision = 0;
+  mockUploadCommitListeners.clear();
+  mockCoordinator.getUploadCommitRevision.mockClear();
+  mockCoordinator.addUploadCommitListener.mockClear();
   // Isolate persisted drill prefs between tests — a successful drill start
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
   // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
@@ -4731,6 +4763,76 @@ describe("ChessGame opening lineage", () => {
       start_ply: 1,
     };
   }
+
+  it("hydrates a locally visible card after the current session upload commits", async () => {
+    const openingKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
+    getOpeningRootsMock.mockResolvedValue({
+      families: [
+        {
+          family_name: "King's Pawn",
+          roots: [
+            {
+              opening_key: openingKey,
+              opening_name: "King's Pawn Game",
+              opening_family: "King's Pawn",
+              eco: "C20",
+              depth: 0,
+            },
+          ],
+        },
+      ],
+    });
+    __resetOpeningRootIndexCache();
+    fetchSessionOpeningsMock
+      .mockResolvedValueOnce({
+        player_color: "white",
+        lineage: [],
+        start_ply: 1,
+        score_status: "ready",
+      })
+      .mockResolvedValueOnce({
+        player_color: "white",
+        lineage: [
+          {
+            ...lineageCard(openingKey, "King's Pawn Game", ["e4"]),
+            score: 73,
+          },
+        ],
+        start_ply: 1,
+        score_status: "ready",
+      });
+    useGameStore.setState({
+      sessionId: "session-upload-commit",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+      liveFen: LINEAGE_FEN_E4,
+    });
+
+    render(<ChessGame />);
+    const region = await screen.findByRole("region", {
+      name: "Openings played",
+    });
+    await waitFor(() =>
+      expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1),
+    );
+    expect(within(region).queryByText("73")).not.toBeInTheDocument();
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+
+    act(() => emitUploadCommit("session-upload-commit"));
+
+    await waitFor(() =>
+      expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2),
+    );
+    expect(await within(region).findByText("73")).toBeInTheDocument();
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+
+    // A notification that does not belong to the source's current session is
+    // observable by the hook but leaves its snapshot (and fetch key) unchanged.
+    act(() => emitUploadCommit("session-old"));
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
+  });
 
   it("during active play, selecting a card reviews the opening position but offers no Start Drill", async () => {
     fetchSessionOpeningsMock.mockResolvedValue(lineageResponse(LINEAGE_FEN_E4));

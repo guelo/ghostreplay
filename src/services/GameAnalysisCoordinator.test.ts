@@ -258,6 +258,215 @@ describe('GameAnalysisCoordinator', () => {
     })
   })
 
+  describe('incremental upload commit revision', () => {
+    type TestUploadState = {
+      dirtyIndices: Set<number>
+    }
+
+    const uploadState = (): TestUploadState =>
+      (coordinator as unknown as { uploadState: TestUploadState }).uploadState
+
+    const seedResolvedHistory = (count: number) => {
+      useGameStore.setState({ moveHistory: makeMoveHistory(count) })
+      for (let index = 0; index < count; index += 1) {
+        coordinator.store.getState().resolveAnalysis(index, {
+          id: `analysis-${index}`,
+          move: `uci-${index}`,
+          bestMove: `uci-${index}`,
+          bestEval: 10,
+          playedEval: 10,
+          currentPositionEval: 10,
+          playedEvalMate: null,
+          currentPositionEvalMate: null,
+          moveIndex: index,
+          delta: 0,
+          classification: 'best',
+          blunder: false,
+          recordable: false,
+        })
+      }
+    }
+
+    const flushIndices = (...indices: number[]) => {
+      for (const index of indices) uploadState().dirtyIndices.add(index)
+      return coordinator.flushPendingUploads()
+    }
+
+    it('publishes once after a current idempotent batch fulfills and resets for a new session', async () => {
+      coordinator.startSession('session-commit')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      let resolveUpload!: (value: { moves_inserted: number }) => void
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise((resolve) => {
+        resolveUpload = resolve
+      }))
+
+      await flushIndices(0)
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      expect(coordinator.getUploadCommitRevision('session-commit')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+
+      // moves_inserted=0 is still a fulfilled durable upsert request.
+      resolveUpload({ moves_inserted: 0 })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.getUploadCommitRevision('session-commit')).toBe(1)
+      expect(listener).toHaveBeenCalledTimes(1)
+
+      coordinator.startSession('session-next')
+      expect(coordinator.getUploadCommitRevision('session-commit')).toBe(0)
+      expect(coordinator.getUploadCommitRevision('session-next')).toBe(0)
+    })
+
+    it('publishes only on the eventual success of a failed frozen-payload retry', async () => {
+      coordinator.startSession('session-retry')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      uploadSessionMovesMock
+        .mockRejectedValueOnce(new Error('network'))
+        .mockResolvedValueOnce({ moves_inserted: 1 })
+
+      await flushIndices(0)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.getUploadCommitRevision('session-retry')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
+      expect(coordinator.getUploadCommitRevision('session-retry')).toBe(1)
+      expect(listener).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not publish a request that fulfills after uploads stop', async () => {
+      coordinator.startSession('session-stopped')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      let resolveUpload!: (value: { moves_inserted: number }) => void
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise((resolve) => {
+        resolveUpload = resolve
+      }))
+
+      await flushIndices(0)
+      coordinator.stopSessionUploads()
+      resolveUpload({ moves_inserted: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getUploadCommitRevision('session-stopped')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    })
+
+    it('does not publish an aborted request', async () => {
+      coordinator.startSession('session-aborted')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      uploadSessionMovesMock.mockImplementationOnce(
+        (_sessionId: string, _payload: unknown, options: { signal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'))
+            })
+          }),
+      )
+
+      await flushIndices(0)
+      coordinator.stopSessionUploads()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getUploadCommitRevision('session-aborted')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    })
+
+    it('does not publish when dirty indices build no payload', async () => {
+      coordinator.startSession('session-empty')
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+
+      await flushIndices(0)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled()
+      expect(coordinator.getUploadCommitRevision('session-empty')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    })
+
+    it('advances monotonically for consecutive batches drained after an in-flight success', async () => {
+      coordinator.startSession('session-drain-current')
+      seedResolvedHistory(5)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      let resolveFirst!: (value: { moves_inserted: number }) => void
+      uploadSessionMovesMock
+        .mockReturnValueOnce(new Promise((resolve) => {
+          resolveFirst = resolve
+        }))
+        .mockResolvedValueOnce({ moves_inserted: 4 })
+
+      await flushIndices(0)
+      // Four new dirty rows reach the threshold while batch one is in flight.
+      for (const index of [1, 2, 3, 4]) uploadState().dirtyIndices.add(index)
+      resolveFirst({ moves_inserted: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
+      expect(coordinator.getUploadCommitRevision('session-drain-current')).toBe(2)
+      expect(listener).toHaveBeenCalledTimes(2)
+    })
+
+    it('ignores a late completion from a replaced different-id upload state', async () => {
+      coordinator.startSession('session-old')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      let resolveUpload!: (value: { moves_inserted: number }) => void
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise((resolve) => {
+        resolveUpload = resolve
+      }))
+
+      await flushIndices(0)
+      coordinator.startSession('session-new')
+      listener.mockClear() // Ignore lifecycle snapshot installation notices.
+      resolveUpload({ moves_inserted: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getUploadCommitRevision('session-old')).toBe(0)
+      expect(coordinator.getUploadCommitRevision('session-new')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    })
+
+    it('ignores a late completion from a replaced same-id upload state', async () => {
+      coordinator.startSession('session-same')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addUploadCommitListener(listener)
+      let resolveUpload!: (value: { moves_inserted: number }) => void
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise((resolve) => {
+        resolveUpload = resolve
+      }))
+
+      await flushIndices(0)
+      coordinator.startSession('session-same')
+      listener.mockClear()
+      resolveUpload({ moves_inserted: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getUploadCommitRevision('session-same')).toBe(0)
+      expect(listener).not.toHaveBeenCalled()
+    })
+
+    it('removes an unsubscribed callback', () => {
+      coordinator.startSession('session-unsubscribe')
+      const listener = vi.fn()
+      const unsubscribe = coordinator.addUploadCommitListener(listener)
+      unsubscribe()
+
+      coordinator.startSession('session-replacement')
+      expect(listener).not.toHaveBeenCalled()
+    })
+  })
+
   describe('drill upload response handling', () => {
     it('does not mutate drill state from upload response failure metadata', async () => {
       coordinator.startSession('session-drill')
@@ -1610,6 +1819,8 @@ describe('GameAnalysisCoordinator', () => {
   describe('detached upload state drains remaining dirty indices', () => {
     it('flushes leftover dirty indices on success even below threshold', async () => {
       coordinator.startSession('session-drain')
+      const commitListener = vi.fn()
+      coordinator.addUploadCommitListener(commitListener)
       useGameStore.setState({ moveHistory: makeMoveHistory(4) })
 
       // Resolve two analyses via cache to mark indices 0 and 1 dirty
@@ -1674,6 +1885,7 @@ describe('GameAnalysisCoordinator', () => {
       // NOW switch sessions while upload is still in flight.
       // Index 2 is dirty with only 1 index — below the threshold of 4.
       coordinator.startSession('session-new')
+      commitListener.mockClear()
 
       // Resolve the old in-flight upload
       uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
@@ -1684,6 +1896,8 @@ describe('GameAnalysisCoordinator', () => {
       // even though dirtyIndices.size (1) < INCREMENTAL_UPLOAD_BATCH_THRESHOLD (4)
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
       expect(uploadSessionMovesMock.mock.calls[1][0]).toBe('session-drain')
+      expect(coordinator.getUploadCommitRevision('session-new')).toBe(0)
+      expect(commitListener).not.toHaveBeenCalled()
     })
   })
 

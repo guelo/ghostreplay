@@ -145,14 +145,14 @@ describe("useSessionOpenings", () => {
 
   it("refetches when refetchKey changes", async () => {
     const { rerender } = renderHook(
-      ({ key }: { key: number }) =>
+      ({ key }: { key: string }) =>
         useSessionOpenings("a", { refetchKey: key }),
-      { initialProps: { key: 1 } },
+      { initialProps: { key: '[1,false,0]' } },
     );
     await resolveFetch(0, response(["k1"]));
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
 
-    rerender({ key: 2 });
+    rerender({ key: '[1,false,1]' });
     await flush();
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
   });
@@ -178,97 +178,17 @@ describe("useSessionOpenings", () => {
     ]);
   });
 
-  it("re-polls a bounded number of times while active, then goes quiet", async () => {
-    const { result } = renderHook(() =>
-      useSessionOpenings("a", {
-        refetchKey: 1,
-        lagRepollMs: 1500,
-        active: true,
-      }),
-    );
-    // First (shallow) response from the immediate fetch.
-    await resolveFetch(0, response(["k1"]));
-    expect(result.current.lineage.map((i) => i.opening_key)).toEqual(["k1"]);
-
-    // Re-poll tick 1 fires a new request; the deeper lineage is now available.
-    // The next tick is armed only in this fetch's .finally(), so each poll
-    // fetch must settle before advancing to the next tick.
-    await advance(1500);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
-    await resolveFetch(1, response(["k1", "k2"]));
-    expect(result.current.lineage.map((i) => i.opening_key)).toEqual([
-      "k1",
-      "k2",
-    ]);
-
-    // Re-poll tick 2 — the last of the bounded chain.
-    await advance(1500);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
-    await resolveFetch(2, response(["k1", "k2"]));
-
-    // Chain exhausted: no further requests no matter how long we wait.
-    await advance(30000);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
-  });
-
-  it("re-arms the bounded re-poll when refetchKey changes", async () => {
-    const { rerender } = renderHook(
-      ({ key }: { key: number }) =>
-        useSessionOpenings("a", {
-          refetchKey: key,
-          lagRepollMs: 1500,
-          active: true,
-        }),
-      { initialProps: { key: 1 } },
-    );
-    // Exhaust the first arm: immediate fetch + 2 re-poll ticks.
-    await resolveFetch(0, response(["k1"]));
-    await advance(1500);
-    await resolveFetch(1, response(["k1"]));
-    await advance(1500);
-    await resolveFetch(2, response(["k1"]));
-    await advance(30000);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
-
-    // A key bump (new move) re-arms: another immediate fetch + 2 more ticks.
-    rerender({ key: 2 });
-    await flush();
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(4);
-    await resolveFetch(3, response(["k1", "k2"]));
-    await advance(1500);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(5);
-    await resolveFetch(4, response(["k1", "k2"]));
-    await advance(1500);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(6);
-    await resolveFetch(5, response(["k1", "k2"]));
-
-    // Second chain exhausted too.
-    await advance(30000);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(6);
-  });
-
-  it("stops re-polling when active flips false without firing a new fetch", async () => {
-    const { rerender } = renderHook(
-      ({ active }: { active: boolean }) =>
-        useSessionOpenings("a", {
-          refetchKey: 1,
-          lagRepollMs: 4000,
-          active,
-        }),
-      { initialProps: { active: true } },
+  it("does not schedule delayed upload-lag fetches after a ready response", async () => {
+    renderHook(() =>
+      useSessionOpenings("a", { refetchKey: '[1,false,0]' }),
     );
     await resolveFetch(0, response(["k1"]));
-    await advance(4000);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
-    await resolveFetch(1, response(["k1"]));
 
-    // Flipping active false must NOT fire a fetch (finding C) and must tear down
-    // the timer so no further ticks happen.
-    rerender({ active: false });
-    await flush();
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
-    await advance(20000);
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
+    // The former upload-lag window fetched at 1.5s and 3.0s. A ready score may
+    // keep bounded request-free score-watch ticks alive, but it must issue no
+    // network traffic without a causal refetchKey change.
+    await advance(12000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
   });
 
   it("yields [] immediately on a session change and ignores a late old-session response", async () => {
@@ -396,9 +316,9 @@ describe("useSessionOpenings", () => {
     expect(result.current.scoreStatus).toBe("ready");
   });
 
-  it("re-polls a pending status with NO active flag and NO lagRepollMs", async () => {
-    // History and the post-game board pass neither option; reconciliation must
-    // still run there, or a cold cache never resolves its scores.
+  it("re-polls a pending status without a live-game gate", async () => {
+    // History and the post-game board share this reconciliation; a cold cache
+    // must resolve independently of the live upload-commit signal.
     const { result } = renderHook(() =>
       useSessionOpenings("a", { refetchKey: 1 }),
     );
@@ -526,24 +446,4 @@ describe("useSessionOpenings", () => {
     expect(fetchSessionOpeningsMock.mock.calls.length).toBe(callsAfterSwitch + 1);
   });
 
-  it("never fetches synchronously when only `active` toggles", async () => {
-    // Finding C, re-asserted for the reconciliation effect: a pending status
-    // must not turn an `active` flip into a data fetch.
-    const { rerender } = renderHook(
-      ({ isActive }: { isActive: boolean }) =>
-        useSessionOpenings("a", {
-          refetchKey: 1,
-          lagRepollMs: 1500,
-          active: isActive,
-        }),
-      { initialProps: { isActive: false } },
-    );
-    await resolveFetch(0, pendingResponse(["k1"]));
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
-
-    rerender({ isActive: true });
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
-    rerender({ isActive: false });
-    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
-  });
 });

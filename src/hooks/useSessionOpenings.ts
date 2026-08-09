@@ -7,14 +7,8 @@ import {
 } from "../utils/api";
 
 interface UseSessionOpeningsOptions {
-  /** Bump to force a refetch (live move count, or analysis move count). */
-  refetchKey: number;
-  /** When set together with `active`, schedule a bounded series of delayed
-   *  re-fetches (up to LAG_REPOLL_MAX_TICKS) after each `refetchKey` change to
-   *  converge the upload->display lag. Omit (or `active=false`) to disable. */
-  lagRepollMs?: number;
-  /** Gate the lag re-poll — only re-poll while the game is active. */
-  active?: boolean;
+  /** Change to force a refetch (live composite key, or analysis move count). */
+  refetchKey: string | number;
 }
 
 interface SessionOpeningsState {
@@ -28,11 +22,6 @@ interface SessionOpeningsState {
 // Stable empty reference so a session change / disabled hook does not churn
 // renders via a fresh array each time.
 const EMPTY_LINEAGE: OpeningLineageItem[] = [];
-
-// How many delayed re-fetches follow each refetchKey change while active. Two
-// ticks cover a ply whose server-side upload/analysis lands after the local
-// move event; when the position is stable there is no further traffic.
-const LAG_REPOLL_MAX_TICKS = 2;
 
 // Score reconciliation (g-a5v3): a cold score cache answers immediately with
 // `score_status: "pending"` instead of blocking, so the client must come back
@@ -63,12 +52,9 @@ const PENDING_REPOLL_IDLE_TICKS = 3;
  *    of the previous game's stack — held until the new session's fetch commits.
  *  - Same-session refetches keep the prior lineage on screen until the new result
  *    resolves (no empty flash between ticks).
- *  - With `lagRepollMs` + `active`, a bounded sequential re-poll (at most
- *    LAG_REPOLL_MAX_TICKS delayed re-fetches per refetchKey change; never
- *    setInterval, never a synchronous fetch) converges the lag for plies that
- *    upload after their local move event, then goes quiet — no fixed-interval
- *    traffic while idle at a position. The re-poll effect cannot fetch — only
- *    re-arm — so toggling `active` never triggers a data fetch (finding C).
+ *  - Live upload convergence is causal: the caller includes the coordinator's
+ *    fulfilled-upload revision in `refetchKey`, so there is no timer-based
+ *    guessing about whether a move has become durable.
  *  - Out-of-order safety: a monotonic sequence number ensures a slow OLDER
  *    response can never overwrite a newer/deeper lineage for the same session.
  *
@@ -80,7 +66,7 @@ const PENDING_REPOLL_IDLE_TICKS = 3;
  */
 export function useSessionOpenings(
   sessionId: string | null,
-  { refetchKey, lagRepollMs, active = false }: UseSessionOpeningsOptions,
+  { refetchKey }: UseSessionOpeningsOptions,
 ): {
   lineage: OpeningLineageItem[];
   playerColor: OpeningPlayerColor;
@@ -97,7 +83,8 @@ export function useSessionOpenings(
     startPly: 1,
     scoreStatus: "ready",
   });
-  // Which reconciliation WINDOW ran out of attempts, as `sessionId::refetchKey`.
+  // Which reconciliation WINDOW ran out of attempts, encoded without delimiter
+  // ambiguity from the session id and the caller's string-or-number key.
   //
   // Keyed by the window rather than a boolean (or the session alone) so it is
   // DERIVED as cleared whenever a new budget arms — no reset effect, no
@@ -106,7 +93,7 @@ export function useSessionOpenings(
   // alone would leave a session permanently "ready" after one exhausted window,
   // and later moves in that game could never show the loading affordance again.
   const [exhaustedWindow, setExhaustedWindow] = useState<string | null>(null);
-  const reconcileWindow = `${sessionId ?? ""}::${refetchKey}`;
+  const reconcileWindow = JSON.stringify([sessionId, refetchKey]);
 
   // Monotonic across ALL fetches (data-change + poll) so only the latest issued
   // request may commit; a slower OLDER response is dropped.
@@ -160,45 +147,15 @@ export function useSessionOpenings(
       });
   }, []);
 
-  // Fetch whenever the session or refetchKey changes (and on mount). Does NOT
-  // depend on `active`, so toggling active never triggers a fetch (finding C).
+  // Fetch whenever the session or refetchKey changes (and on mount).
   useEffect(() => {
     if (sessionId == null) return;
     void doFetch(sessionId);
   }, [sessionId, refetchKey, doFetch]);
 
-  // Bounded lag re-poll while active: each (sessionId, refetchKey, active) arm
-  // schedules at most LAG_REPOLL_MAX_TICKS delayed re-fetches, then goes quiet.
-  // Fires ONLY on a timer tick (never synchronously), re-arming after each
-  // request settles so requests never overlap. Tearing down (active false /
-  // dep change / unmount) cancels the cycle so no further ticks.
-  useEffect(() => {
-    if (sessionId == null || !active || !lagRepollMs) return;
-    const sid = sessionId;
-    let cancelled = false;
-    let ticksLeft = LAG_REPOLL_MAX_TICKS;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = () => {
-      if (cancelled) return;
-      ticksLeft -= 1;
-      void doFetch(sid).finally(() => {
-        if (cancelled || ticksLeft <= 0) return;
-        timer = setTimeout(tick, lagRepollMs);
-      });
-    };
-    timer = setTimeout(tick, lagRepollMs);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [sessionId, refetchKey, active, lagRepollMs, doFetch]);
-
   // Score reconciliation for a cold cache (g-a5v3). Deliberately gated ONLY on
-  // the pending status — NOT on `active` or `lagRepollMs`:
-  //   - HistoryPage passes neither, and would otherwise never reconcile.
-  //   - ChessGame passes `active: isGameActive`, which goes false at exactly
-  //     the terminal moment the score badges need their numbers.
-  // The re-poll for upload lag above stays as-is; these are separate concerns.
+  // the pending status. History and post-game surfaces use the same mechanism;
+  // it is separate from the upload-commit revision that changes refetchKey.
   //
   // `scoreStatus` is read through a ref and kept OUT of the dep array (finding
   // C): a status flip must not re-arm the cycle, and this effect — like the lag
@@ -235,7 +192,7 @@ export function useSessionOpenings(
       }
       if (attemptsLeft <= 0) {
         // Bounded give-up: surface it so consumers stop showing a spinner.
-        setExhaustedWindow(`${sid}::${refetchKey}`);
+        setExhaustedWindow(JSON.stringify([sid, refetchKey]));
         return;
       }
       attemptsLeft -= 1;
@@ -252,7 +209,7 @@ export function useSessionOpenings(
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-    // Re-arms on refetchKey (like the lag re-poll) so each new move opens a
+    // Re-arms on refetchKey so each new move or durable upload commit opens a
     // fresh reconciliation window. NOT on scoreStatus — that is read through a
     // ref precisely so a status flip cannot re-arm the effect (finding C).
   }, [sessionId, refetchKey, doFetch]);

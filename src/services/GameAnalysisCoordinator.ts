@@ -215,6 +215,13 @@ export interface AnalysisOutcomeSource {
   addAnalysisResetListener(cb: (info: AnalysisResetInfo) => void): () => void
 }
 
+/** Narrow external-store surface React uses to observe durable incremental
+ *  upload commits without depending on the coordinator's mutable upload state. */
+export interface UploadCommitSource {
+  getUploadCommitRevision(sessionId: string | null): number
+  addUploadCommitListener(listener: () => void): () => void
+}
+
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
 // Callers pass the MOVER's color (the side that played the analyzed move), so
@@ -302,6 +309,9 @@ const fromReusableAnalysis = (
 
 type UploadState = {
   sessionId: string
+  /** Monotonic within this exact upload epoch. Advances once per fulfilled,
+   *  still-enabled incremental batch owned by the current coordinator state. */
+  commitRevision: number
   uploadedIndices: Set<number>
   dirtyIndices: Set<number>
   uploadInFlight: boolean
@@ -382,6 +392,7 @@ export class GameAnalysisCoordinator {
   // Outcome channel (g-hpw4) — the single fan-out for recording/SRS/alert.
   private analysisOutcomeListeners = new Set<(o: AnalysisOutcome) => void>()
   private analysisResetListeners = new Set<(info: AnalysisResetInfo) => void>()
+  private uploadCommitListeners = new Set<() => void>()
   private outcomeSeq = 0
   /** Single source of `previousRequestId` for supersession/retry lineage (L3).
    *  Preserved across same-generation failed cleanup; cleared on reset/prune. */
@@ -464,6 +475,25 @@ export class GameAnalysisCoordinator {
     this.analysisResetListeners.add(cb)
     return () => {
       this.analysisResetListeners.delete(cb)
+    }
+  }
+
+  getUploadCommitRevision(sessionId: string | null): number {
+    return sessionId !== null && this.uploadState?.sessionId === sessionId
+      ? this.uploadState.commitRevision
+      : 0
+  }
+
+  addUploadCommitListener(listener: () => void): () => void {
+    this.uploadCommitListeners.add(listener)
+    return () => {
+      this.uploadCommitListeners.delete(listener)
+    }
+  }
+
+  private emitUploadCommitChange() {
+    for (const listener of this.uploadCommitListeners) {
+      listener()
     }
   }
 
@@ -920,6 +950,7 @@ export class GameAnalysisCoordinator {
 
     this.uploadState = {
       sessionId,
+      commitRevision: 0,
       uploadedIndices: new Set(),
       dirtyIndices: new Set(),
       uploadInFlight: false,
@@ -929,6 +960,7 @@ export class GameAnalysisCoordinator {
       detached: false,
       uploadsEnabled: true,
     }
+    this.emitUploadCommitChange()
 
     this.startIncrementalUploadTimer()
     this.ensureWorker()
@@ -967,6 +999,7 @@ export class GameAnalysisCoordinator {
       if (!this.uploadState.uploadsEnabled) {
         this.cancelUploadState(this.uploadState)
         this.uploadState = null
+        this.emitUploadCommitChange()
         return
       }
 
@@ -984,6 +1017,7 @@ export class GameAnalysisCoordinator {
       // Do NOT cancel the retry timer — let it complete with frozen payload.
       // Detach from coordinator so the retry closure is self-contained.
       this.uploadState = null
+      this.emitUploadCommitChange()
     }
   }
 
@@ -2087,6 +2121,15 @@ export class GameAnalysisCoordinator {
           return
         }
 
+        // Object identity is the upload-epoch guard. A session-id comparison
+        // cannot distinguish a defensive same-id restart, and detached old
+        // sessions are intentionally allowed to finish draining without
+        // publishing commits into the current React snapshot.
+        if (state === this.uploadState) {
+          state.commitRevision += 1
+          this.emitUploadCommitChange()
+        }
+
         // If more dirty indices accumulated during upload, flush again.
         // When detached (session finalized), drain unconditionally since
         // the interval timer is no longer running.
@@ -2262,6 +2305,7 @@ export class GameAnalysisCoordinator {
     this._decisionOwner.dispose()
     this.analysisOutcomeListeners.clear()
     this.analysisResetListeners.clear()
+    this.uploadCommitListeners.clear()
     this.uploadState = null
     this.activeSessionId = null
   }
