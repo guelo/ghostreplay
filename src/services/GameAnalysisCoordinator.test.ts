@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { Chess } from 'chess.js'
 import { useGameStore } from '../stores/useGameStore'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { MoveRecord } from '../components/chess-game/domain/movePresentation'
@@ -40,6 +41,19 @@ const makeMoveHistory = (count: number): MoveRecord[] =>
     fen: `fen-${i}`,
     uci: `uci-${i}`,
   }))
+
+const makeLegalMoveHistory = (sans: string[]): MoveRecord[] => {
+  const chess = new Chess()
+  return sans.map((san) => {
+    const move = chess.move(san)
+    if (!move) throw new Error(`Illegal test move: ${san}`)
+    return {
+      san: move.san,
+      fen: chess.fen(),
+      uci: `${move.from}${move.to}${move.promotion ?? ''}`,
+    }
+  })
+}
 
 let coordinator: InstanceType<typeof GameAnalysisCoordinator>
 
@@ -255,6 +269,113 @@ describe('GameAnalysisCoordinator', () => {
           recomputeOpportunity: false,
         }),
       )
+    })
+  })
+
+  describe('rewind replacement uploads', () => {
+    it('re-uploads the kept moves at coordinates previously used by a discarded line (g-discard-branch-rows)', async () => {
+      coordinator.startSession('session-rewind')
+      uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 2 })
+
+      const discardedHistory = makeLegalMoveHistory(['e4', 'e5', 'Nf3', 'Nc6'])
+      useGameStore.setState({ moveHistory: discardedHistory })
+
+      const settleWorkerMove = (
+        requestId: string | undefined,
+        move: string,
+      ) => {
+        expect(requestId).toBeTruthy()
+        ;(coordinator as any).handleWorkerMessage({
+          data: {
+            type: 'analysis',
+            id: requestId,
+            move,
+            bestMove: move,
+            bestLine: null,
+            bestEval: 10,
+            playedEval: 10,
+            playedEvalMate: null,
+            delta: 0,
+            classification: 'best',
+          },
+        })
+      }
+
+      const discardedWhiteId = coordinator.analyzeMove(
+        discardedHistory[1].fen,
+        discardedHistory[2].uci,
+        'white',
+        2,
+        20,
+      )
+      const discardedBlackId = coordinator.analyzeMove(
+        discardedHistory[2].fen,
+        discardedHistory[3].uci,
+        'black',
+        3,
+        20,
+      )
+      await vi.advanceTimersByTimeAsync(200)
+      settleWorkerMove(discardedWhiteId, discardedHistory[2].uci)
+      settleWorkerMove(discardedBlackId, discardedHistory[3].uci)
+
+      await coordinator.flushPendingUploads()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(uploadSessionMovesMock.mock.calls[0][1]).toEqual([
+        expect.objectContaining({
+          move_number: 2,
+          color: 'white',
+          move_san: 'Nf3',
+        }),
+        expect.objectContaining({
+          move_number: 2,
+          color: 'black',
+          move_san: 'Nc6',
+        }),
+      ])
+
+      coordinator.pruneFromMoveIndex(2)
+      const keptHistory = makeLegalMoveHistory(['e4', 'e5', 'Bc4', 'Nf6'])
+      useGameStore.setState({ moveHistory: keptHistory })
+
+      const keptWhiteId = coordinator.analyzeMove(
+        keptHistory[1].fen,
+        keptHistory[2].uci,
+        'white',
+        2,
+        20,
+      )
+      const keptBlackId = coordinator.analyzeMove(
+        keptHistory[2].fen,
+        keptHistory[3].uci,
+        'black',
+        3,
+        20,
+      )
+      await vi.advanceTimersByTimeAsync(200)
+      settleWorkerMove(keptWhiteId, keptHistory[2].uci)
+      settleWorkerMove(keptBlackId, keptHistory[3].uci)
+
+      await coordinator.flushPendingUploads()
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
+      expect(uploadSessionMovesMock.mock.calls[1][1]).toEqual([
+        expect.objectContaining({
+          move_number: 2,
+          color: 'white',
+          move_san: 'Bc4',
+          fen_before: keptHistory[1].fen,
+          fen_after: keptHistory[2].fen,
+        }),
+        expect.objectContaining({
+          move_number: 2,
+          color: 'black',
+          move_san: 'Nf6',
+          fen_before: keptHistory[2].fen,
+          fen_after: keptHistory[3].fen,
+        }),
+      ])
     })
   })
 
