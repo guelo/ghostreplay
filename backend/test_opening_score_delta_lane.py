@@ -76,6 +76,14 @@ class _RecordingPublish:
                     "publish": 6.0,
                 },
                 "total_ms": 21.0,
+                "replay_cache_builds": 1,
+                "replay_cache_probed_sessions": 4,
+                "replay_cache_l1_hits": 1,
+                "replay_cache_l2_hits": 2,
+                "replay_cache_raw_derivations": 1,
+                "replay_cache_persisted_upserts": 1,
+                "replay_cache_l2_read_failed": False,
+                "replay_cache_l2_write_failed": True,
             }
         )
         return len(requests)
@@ -498,6 +506,14 @@ def test_completion_log_carries_queue_phase_and_publication_timings(caplog):
     assert "candidate_count=1" in caplog.text
     assert "overlay_ms=3.0" in caplog.text
     assert "published_count=1" in caplog.text
+    assert "replay_cache_builds=1" in caplog.text
+    assert "replay_cache_probed_sessions=4" in caplog.text
+    assert "replay_cache_l1_hits=1" in caplog.text
+    assert "replay_cache_l2_hits=2" in caplog.text
+    assert "replay_cache_raw_derivations=1" in caplog.text
+    assert "replay_cache_persisted_upserts=1" in caplog.text
+    assert "replay_cache_l2_read_failed=False" in caplog.text
+    assert "replay_cache_l2_write_failed=True" in caplog.text
 
 
 def test_facade_swallows_unexpected_enqueue_failure(monkeypatch, caplog):

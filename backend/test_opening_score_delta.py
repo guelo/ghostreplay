@@ -16,6 +16,7 @@ import chess
 import pytest
 from sqlalchemy import text
 
+import app.opening_evidence as opening_evidence
 from conftest import TestingSessionLocal
 
 from app.models import (
@@ -1134,6 +1135,116 @@ def test_batch_cold_scoped_publication_returns_fresh_after_scores(db_session):
     assert all(item.is_new for item in items)
 
 
+_REPLAY_CACHE_FIELDS = (
+    "replay_cache_builds",
+    "replay_cache_probed_sessions",
+    "replay_cache_l1_hits",
+    "replay_cache_l2_hits",
+    "replay_cache_raw_derivations",
+    "replay_cache_persisted_upserts",
+    "replay_cache_l2_read_failed",
+    "replay_cache_l2_write_failed",
+)
+
+
+def _publish_scoped_report(db_session, session_id) -> dict[str, object]:
+    reports: list[dict[str, object]] = []
+    request = reserve_scoped_delta_generation(session_id)
+    assert publish_scoped_opening_score_deltas(
+        db_session,
+        123,
+        "white",
+        (request,),
+        on_complete=reports.append,
+    ) == 1
+    assert len(reports) == 1
+    return reports[0]
+
+
+def _replay_cache_report(report: dict[str, object]) -> dict[str, object]:
+    return {field: report[field] for field in _REPLAY_CACHE_FIELDS}
+
+
+def test_scoped_completion_reports_cold_process_l2_hydration(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+
+    with _patched_delta_registry(graph, roots):
+        opening_evidence.overlay_evidence(db_session, 123, "white", graph)
+        db_session.commit()  # SQLite L2 is durable with the caller transaction.
+        opening_evidence.reset_session_evidence_cache()
+        report = _publish_scoped_report(db_session, session.id)
+
+    assert _replay_cache_report(report) == {
+        "replay_cache_builds": 1,
+        "replay_cache_probed_sessions": 1,
+        "replay_cache_l1_hits": 0,
+        "replay_cache_l2_hits": 1,
+        "replay_cache_raw_derivations": 0,
+        "replay_cache_persisted_upserts": 0,
+        "replay_cache_l2_read_failed": False,
+        "replay_cache_l2_write_failed": False,
+    }
+
+
+def test_scoped_completion_reports_incremental_raw_fallback(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    changed = _make_session(db_session, baseline=_baseline_json({}))
+    unchanged = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, changed.id)
+    _insert_scoped_evidence(db_session, unchanged.id)
+
+    with _patched_delta_registry(graph, roots):
+        opening_evidence.overlay_evidence(db_session, 123, "white", graph)
+        db_session.commit()
+        move = (
+            db_session.query(SessionMove)
+            .filter(SessionMove.session_id == changed.id)
+            .order_by(SessionMove.move_number, SessionMove.color)
+            .first()
+        )
+        assert move is not None
+        move.eval_delta = 99
+        db_session.commit()
+        report = _publish_scoped_report(db_session, changed.id)
+
+    assert _replay_cache_report(report) == {
+        "replay_cache_builds": 1,
+        "replay_cache_probed_sessions": 2,
+        "replay_cache_l1_hits": 1,
+        "replay_cache_l2_hits": 0,
+        "replay_cache_raw_derivations": 1,
+        "replay_cache_persisted_upserts": 1,
+        "replay_cache_l2_read_failed": False,
+        "replay_cache_l2_write_failed": False,
+    }
+
+
+def test_scoped_completion_reports_l2_adapter_failures(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(db_session, baseline=_baseline_json({}))
+    _insert_scoped_evidence(db_session, session.id)
+    db_session.execute(text("DROP TABLE opening_session_replay_cache"))
+
+    with _patched_delta_registry(graph, roots):
+        report = _publish_scoped_report(db_session, session.id)
+
+    assert _replay_cache_report(report) == {
+        "replay_cache_builds": 1,
+        "replay_cache_probed_sessions": 1,
+        "replay_cache_l1_hits": 0,
+        "replay_cache_l2_hits": 0,
+        "replay_cache_raw_derivations": 1,
+        "replay_cache_persisted_upserts": 0,
+        "replay_cache_l2_read_failed": True,
+        "replay_cache_l2_write_failed": True,
+    }
+
+
 @pytest.mark.parametrize(
     ("session_mode", "status", "drill_state", "drill_terminal_reason"),
     [
@@ -1463,6 +1574,7 @@ def test_scoped_build_discards_counter_drift_and_avoids_full_snapshot(db_session
     session = _make_session(db_session, baseline=_baseline_json({}))
     session_id = session.id
     _insert_scoped_evidence(db_session, session.id)
+    reports: list[dict[str, object]] = []
 
     with (
         _patched_delta_registry(graph, roots),
@@ -1481,11 +1593,26 @@ def test_scoped_build_discards_counter_drift_and_avoids_full_snapshot(db_session
     ):
         request = reserve_scoped_delta_generation(session.id)
         assert publish_scoped_opening_score_deltas(
-            db_session, 123, "white", (request,)
+            db_session,
+            123,
+            "white",
+            (request,),
+            on_complete=reports.append,
         ) == 0
 
     assert db_session.in_transaction() is False
     assert _current_scoped_delta(session_id) is None
+    assert reports[0]["outcome"] == "counter_drift"
+    assert _replay_cache_report(reports[0]) == {
+        "replay_cache_builds": 1,
+        "replay_cache_probed_sessions": 1,
+        "replay_cache_l1_hits": 0,
+        "replay_cache_l2_hits": 0,
+        "replay_cache_raw_derivations": 1,
+        "replay_cache_persisted_upserts": 1,
+        "replay_cache_l2_read_failed": False,
+        "replay_cache_l2_write_failed": False,
+    }
     full_snapshot.assert_not_called()
     raw_snapshot.assert_not_called()
 

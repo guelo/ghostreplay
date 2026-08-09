@@ -428,7 +428,13 @@ class OpeningScoreDeltaLane:
             "retry_overflow=%s retry_cancelled=%s phase_outcome=%s "
             "published_count=%s "
             "session_load_ms=%s counter_ms=%s overlay_ms=%s digest_ms=%s "
-            "score_ms=%s publish_ms=%s total_ms=%s",
+            "score_ms=%s publish_ms=%s total_ms=%s "
+            "replay_cache_builds=%s replay_cache_probed_sessions=%s "
+            "replay_cache_l1_hits=%s replay_cache_l2_hits=%s "
+            "replay_cache_raw_derivations=%s "
+            "replay_cache_persisted_upserts=%s "
+            "replay_cache_l2_read_failed=%s "
+            "replay_cache_l2_write_failed=%s",
             outcome,
             user_id,
             player_color,
@@ -450,6 +456,14 @@ class OpeningScoreDeltaLane:
             stage_ms.get("score"),
             stage_ms.get("publish"),
             phase.get("total_ms"),
+            phase.get("replay_cache_builds", 0),
+            phase.get("replay_cache_probed_sessions", 0),
+            phase.get("replay_cache_l1_hits", 0),
+            phase.get("replay_cache_l2_hits", 0),
+            phase.get("replay_cache_raw_derivations", 0),
+            phase.get("replay_cache_persisted_upserts", 0),
+            phase.get("replay_cache_l2_read_failed", False),
+            phase.get("replay_cache_l2_write_failed", False),
         )
 
     def _requeue_failed_locked(

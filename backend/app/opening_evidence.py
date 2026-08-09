@@ -259,6 +259,28 @@ class ReplayCacheStats:
         )
 
 
+def replay_cache_telemetry(
+    stats: ReplayCacheStats,
+) -> dict[str, int | bool]:
+    """Return the fixed, non-sensitive production telemetry projection.
+
+    Keep the whole-graph recompute event and immediate delta-lane completion
+    records on one vocabulary.  The caller owns the measurement boundary: when
+    multiple overlay builds belong to one operation it must pass their merged
+    ``ReplayCacheStats`` here.
+    """
+    return {
+        "replay_cache_builds": stats.build_count,
+        "replay_cache_probed_sessions": stats.probed_sessions,
+        "replay_cache_l1_hits": stats.l1_hits,
+        "replay_cache_l2_hits": stats.l2_hits,
+        "replay_cache_raw_derivations": stats.raw_derivations,
+        "replay_cache_persisted_upserts": stats.persisted_upserts,
+        "replay_cache_l2_read_failed": stats.l2_read_failed,
+        "replay_cache_l2_write_failed": stats.l2_write_failed,
+    }
+
+
 @dataclass
 class EvidenceOverlay:
     user_id: int

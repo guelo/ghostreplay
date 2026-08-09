@@ -56,6 +56,21 @@ never attached. On identity/counter fallback, the counters are the sum of the
 discarded and accepted overlays so `duration_ms` and replay work share the same
 boundary.
 
+Normal game/drill completion has an ordering caveat: the immediate score-delta
+lane can build the shared overlay before the debounced whole-graph scheduler.
+That first build populates process L1, so the later `opening_scores_recomputed`
+event will truthfully report L1 hits and cannot, by itself, verify restart-time
+L2 hydration. The `opening_score_delta_lane_run` completion log therefore emits
+the same eight `replay_cache_*` fields for the delta lane's own overlay boundary.
+
+For a cold-process terminal-flow verification, read the records in execution
+order for the same user/color. Apply the restart signature to the delta-lane
+completion when it precedes the whole-graph run; the subsequent recompute is
+expected to report those sessions as L1 hits. If no delta overlay ran first, use
+the `opening_scores_recomputed` event directly. Either surface must have both L2
+failure flags false before treating the counters as persisted-tier evidence.
+Never infer a tier from `overlay_ms`, `duration_ms`, or `worker_compute_ms` alone.
+
 ### Replay-cache benchmark phases
 
 `backend/scripts/bench_overlay_evidence.py` measures cache behavior separately from

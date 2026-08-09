@@ -64,7 +64,9 @@ from app.opening_cache import (
     opening_score_inputs_fingerprint,
 )
 from app.opening_evidence import (
+    ReplayCacheStats,
     overlay_evidence,
+    replay_cache_telemetry,
     session_is_evidence_eligible,
     shared_scope_digest,
     shared_scope_snapshot,
@@ -615,6 +617,7 @@ def publish_scoped_opening_score_deltas(
     started = time.perf_counter()
     stage_ms: dict[str, float] = {}
     sessions: list[_ScopedDeltaCandidate] = []
+    replay_cache_stats = ReplayCacheStats()
 
     def finish(outcome: str, published: int = 0) -> int:
         # Every exit leaves the lane-owned Session in the same clean state.
@@ -632,6 +635,7 @@ def publish_scoped_opening_score_deltas(
             "stage_ms": dict(stage_ms),
             "total_ms": total_ms,
         }
+        report.update(replay_cache_telemetry(replay_cache_stats))
         if on_complete is not None:
             try:
                 on_complete(report)
@@ -640,7 +644,13 @@ def publish_scoped_opening_score_deltas(
         logger.info(
             "scoped_opening_delta outcome=%s request_count=%s candidate_count=%s "
             "published_count=%s session_load_ms=%s counter_ms=%s overlay_ms=%s "
-            "digest_ms=%s score_ms=%s publish_ms=%s total_ms=%.3f",
+            "digest_ms=%s score_ms=%s publish_ms=%s total_ms=%.3f "
+            "replay_cache_builds=%s replay_cache_probed_sessions=%s "
+            "replay_cache_l1_hits=%s replay_cache_l2_hits=%s "
+            "replay_cache_raw_derivations=%s "
+            "replay_cache_persisted_upserts=%s "
+            "replay_cache_l2_read_failed=%s "
+            "replay_cache_l2_write_failed=%s",
             outcome,
             len(requests),
             len(sessions),
@@ -652,6 +662,14 @@ def publish_scoped_opening_score_deltas(
             stage_ms.get("score"),
             stage_ms.get("publish"),
             total_ms,
+            replay_cache_stats.build_count,
+            replay_cache_stats.probed_sessions,
+            replay_cache_stats.l1_hits,
+            replay_cache_stats.l2_hits,
+            replay_cache_stats.raw_derivations,
+            replay_cache_stats.persisted_upserts,
+            replay_cache_stats.l2_read_failed,
+            replay_cache_stats.l2_write_failed,
         )
         return published
 
@@ -707,6 +725,7 @@ def publish_scoped_opening_score_deltas(
 
     stage_started = time.perf_counter()
     overlay = overlay_evidence(db, user_id, player_color, graph)
+    replay_cache_stats = overlay.replay_cache_stats
     stage_ms["overlay"] = round(
         (time.perf_counter() - stage_started) * 1000.0, 3
     )

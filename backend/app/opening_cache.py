@@ -41,6 +41,7 @@ from app.opening_evidence import (
     overlay_evidence,
     raw_evidence_inputs_digest,
     raw_evidence_inputs_snapshot,
+    replay_cache_telemetry,
     shared_scope_digest,
     shared_scope_snapshot,
 )
@@ -1769,15 +1770,8 @@ def _emit_opening_scores_recomputed(
         "player_color": player_color,
         "scheduler_timed": timing is not None,
         "freshness_capture": freshness_capture,
-        "replay_cache_builds": replay_cache_stats.build_count,
-        "replay_cache_probed_sessions": replay_cache_stats.probed_sessions,
-        "replay_cache_l1_hits": replay_cache_stats.l1_hits,
-        "replay_cache_l2_hits": replay_cache_stats.l2_hits,
-        "replay_cache_raw_derivations": replay_cache_stats.raw_derivations,
-        "replay_cache_persisted_upserts": replay_cache_stats.persisted_upserts,
-        "replay_cache_l2_read_failed": replay_cache_stats.l2_read_failed,
-        "replay_cache_l2_write_failed": replay_cache_stats.l2_write_failed,
     }
+    properties.update(replay_cache_telemetry(replay_cache_stats))
     if timing is not None:
         properties.update(timing)
     capture(str(user_id), "opening_scores_recomputed", properties)
