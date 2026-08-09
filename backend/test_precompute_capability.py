@@ -32,14 +32,16 @@ def test_every_replacement_verdict_a_canonical_write_can_earn_is_accepted():
     """A successful shared-writer replacement must not be counted as a failure.
 
     `_ACCEPTED_REASONS` is the run's success allowlist: anything outside it lands in
-    `write_failures` and exits the run unsuccessfully. Two entries are latent for this
-    producer today but must be pinned anyway, because in both cases the miscount would
-    be the script's own doing: `strength_replace` (D4 steps 4-5) — the two canonical
+    `write_failures` and exits the run unsuccessfully. Three entries are latent for
+    this producer today but must be pinned anyway, because in every case the miscount
+    would be the script's own doing: `strength_replace` (D4 steps 4-5) — the two canonical
     manifests compare EQUAL, so no canonical pair ranks, but a future deeper canonical
-    profile with no explicit edge would; and `cross_grain_authority_replace` (Rules
+    profile with no explicit edge would; `cross_grain_authority_replace` (Rules
     4b/5b) — this script targets resolver-complete-v2, which is not a grain-split
     contract, but the canonical writer migration (g-v2-deprecation.2) switches it to
-    move-complete-v1, at which point every relocated browser-v2 row earns that verdict.
+    move-complete-v1, at which point every relocated browser-v2 row earns that verdict;
+    and `same_profile_grain_transition_replace`, which the same cutover earns when a
+    revisited canonical v2 key converges after its position winner is durable.
     """
     from app.analysis_cache_policy import Reason
 
@@ -50,6 +52,7 @@ def test_every_replacement_verdict_a_canonical_write_can_earn_is_accepted():
         Reason.LEGACY_REPLACED_BY_AUTH,
         Reason.STRENGTH_REPLACE,
         Reason.CROSS_GRAIN_AUTHORITY_REPLACE,
+        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE,
     }
     assert earnable <= mod._ACCEPTED_REASONS
     # PROTOCOL_CORRECTED_REPLACE is deliberately excluded: this producer is

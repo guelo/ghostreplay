@@ -2,6 +2,8 @@
 
 import dataclasses
 
+import pytest
+
 from app.analysis_cache_policy import (
     CROSS_GRAIN_DERIVED_FIELDS,
     EVIDENCE_FIELDS,
@@ -566,6 +568,219 @@ def test_canonical_move_complete_does_not_reclaim_an_uncontracted_legacy_row():
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
+
+
+# --- Rule 2b: same-profile canonical v2 -> move-grain transition -----------
+
+
+def test_same_profile_canonical_v2_transitions_to_move_complete():
+    """A revisited canonical v2 key can converge after its position row is durable.
+
+    Relocated position fields, the cross-grain delta snapshot, and optional mate
+    annotations are intentionally outside the retained move-fact agreement gate.
+    """
+    existing_values = _agree(
+        _V2_WITH_MATE,
+        {
+            "played_eval": 10,
+            "classification": "good",
+            "eval_delta": 20,
+        },
+    )
+    incoming_fields = _MOVE_CORE | {"eval_delta"}
+    incoming_values = _agree(
+        incoming_fields,
+        {
+            "played_eval": 10,
+            "classification": "good",
+            "eval_delta": 999,
+        },
+    )
+    existing = _canonical(
+        _V2_WITH_MATE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=existing_values,
+    )
+    incoming = _canonical(
+        incoming_fields,
+        contract=MOVE_COMPLETE,
+        values=incoming_values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.REPLACE
+    assert reason is Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE
+
+
+def test_same_profile_move_complete_never_transitions_back_to_v2():
+    values = _agree(_V2_CORE)
+    existing = _canonical(_MOVE_CORE, contract=MOVE_COMPLETE, values=values)
+    incoming = _canonical(
+        _V2_CORE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+def test_same_profile_non_authoritative_v2_cannot_transition_grains():
+    values = _agree(_V2_CORE)
+    existing = _browser_analysis_multipv(
+        _V2_CORE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=values,
+    )
+    incoming = _browser_analysis_multipv(
+        _MOVE_CORE,
+        contract=MOVE_COMPLETE,
+        values=values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+@pytest.mark.parametrize(
+    ("existing_contract", "incoming_contract"),
+    [
+        (RESOLVER_COMPLETE, MOVE_COMPLETE),
+        (MINIMAL_PLAYED_EVAL, MOVE_COMPLETE),
+        (None, MOVE_COMPLETE),
+        (RESOLVER_COMPLETE_V2, MINIMAL_PLAYED_EVAL),
+    ],
+)
+def test_same_profile_grain_transition_requires_exact_contract_pair(
+    existing_contract, incoming_contract
+):
+    existing_fields = (
+        _V2_CORE
+        if existing_contract in {RESOLVER_COMPLETE, RESOLVER_COMPLETE_V2}
+        else {"played_eval"}
+    )
+    incoming_fields = (
+        _MOVE_CORE if incoming_contract == MOVE_COMPLETE else {"played_eval"}
+    )
+    values = _agree(_V2_CORE)
+    existing = _canonical(
+        existing_fields,
+        contract=existing_contract,
+        values=values,
+    )
+    incoming = _canonical(
+        incoming_fields,
+        contract=incoming_contract,
+        values=values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+def test_same_profile_grain_transition_refuses_retained_move_field_loss():
+    values = _agree(_V2_WITH_MATE)
+    existing = _canonical(
+        _V2_WITH_MATE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=values,
+    )
+    incoming = _canonical(
+        {"played_eval_mate", "classification"},
+        contract=MOVE_COMPLETE,
+        values=values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+@pytest.mark.parametrize("position_field", sorted(POSITION_GRAIN_FIELDS))
+def test_same_profile_grain_transition_refuses_incoming_position_grain_fields(
+    position_field,
+):
+    """A move contract label cannot smuggle relocated columns through REPLACE."""
+    existing_values = _agree(_V2_WITH_MATE)
+    incoming_fields = _MOVE_CORE | {position_field}
+    incoming_values = _agree(incoming_fields)
+    existing = _canonical(
+        _V2_WITH_MATE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=existing_values,
+    )
+    incoming = _canonical(
+        incoming_fields,
+        contract=MOVE_COMPLETE,
+        values=incoming_values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+@pytest.mark.parametrize(
+    ("field", "incoming_value"),
+    [("played_eval", 11), ("classification", "excellent")],
+)
+def test_same_profile_grain_transition_refuses_retained_move_disagreement(
+    field, incoming_value
+):
+    existing_values = _agree(
+        _V2_CORE,
+        {"played_eval": 10, "classification": "good"},
+    )
+    incoming_values = _agree(
+        _MOVE_CORE,
+        {"played_eval": 10, "classification": "good", field: incoming_value},
+    )
+    existing = _canonical(
+        _V2_CORE,
+        contract=RESOLVER_COMPLETE_V2,
+        values=existing_values,
+    )
+    incoming = _canonical(
+        _MOVE_CORE,
+        contract=MOVE_COMPLETE,
+        values=incoming_values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+def test_same_profile_grain_transition_can_heal_invalid_combined_v2_row():
+    values = _agree(_V2_CORE)
+    existing = dataclasses.replace(
+        _canonical(
+            _V2_CORE,
+            contract=RESOLVER_COMPLETE_V2,
+            values=values,
+        ),
+        contract_satisfied=False,
+    )
+    incoming = _canonical(
+        _MOVE_CORE,
+        contract=MOVE_COMPLETE,
+        values=values,
+    )
+
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+
+    assert decision is Decision.REPLACE
+    assert reason is Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE
 
 
 def test_grain_field_sets_partition_the_evidence_fields():

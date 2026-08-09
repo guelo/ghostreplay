@@ -10,7 +10,8 @@ The decision separates three axes:
     (:mod:`app.evidence_contracts`)
   * evidence GRAIN — which half of a position a contract describes. Completeness is
     only comparable WITHIN a grain, so a narrower post-split contract is judged by
-    :func:`cross_grain_authority_replaces` instead (g-6xc3)
+    :func:`cross_grain_authority_replaces` or the exact same-profile migration
+    predicate instead (g-6xc3, g-move-grain-same-prof)
 
 Ordering signals are authority + explicit ``dominates`` edges + completeness
 masks only — never raw numeric depth.
@@ -30,6 +31,8 @@ from app.analysis_profiles import (
     stamp_dynamic_profile,
 )
 from app.evidence_contracts import (
+    MOVE_COMPLETE,
+    RESOLVER_COMPLETE_V2,
     Grain,
     contract_grains,
     contract_satisfied,
@@ -131,6 +134,13 @@ class Reason(str, Enum):
     # ``dominates_replace`` because the ordinary completeness gate did NOT pass and
     # could not: the two contracts describe different grains on purpose.
     CROSS_GRAIN_AUTHORITY_REPLACE = "cross_grain_authority_replace"
+    # A post-split AUTHORITATIVE move row replaced the SAME canonical profile's
+    # legacy combined v2 row after that run durably committed the position grain.
+    # This is a storage-grain transition, not evidence-contract supersession: a
+    # move-only row still is not a semantic superset of resolver-complete-v2.
+    SAME_PROFILE_GRAIN_TRANSITION_REPLACE = (
+        "same_profile_grain_transition_replace"
+    )
     SAME_PROFILE_IDEMPOTENT = "same_profile_idempotent"
     SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
     SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
@@ -377,6 +387,76 @@ def cross_grain_authority_replaces(existing: CacheRow, incoming: CacheRow) -> bo
     )
 
 
+def same_profile_grain_transition_replaces(
+    existing: CacheRow, incoming: CacheRow
+) -> bool:
+    """May canonical v2 transition in place to its same-profile move row?
+
+    This is the narrow Rule 2 migration path for the canonical grain-split writer.
+    ``move-complete-v1`` cannot generally supersede ``resolver-complete-v2``: it
+    intentionally omits the relocated position grain and v2's cross-grain delta
+    invariant.  But keeping a same-profile v2 row forever also prevents a canonical
+    writer from converging a revisited key to the new storage contract.
+
+    The caller must durably commit and verify the matching ``position_analysis``
+    winner *before* attempting this move-row write.  The pure comparator cannot
+    query that table, so the producer's position-first order is a required safety
+    precondition, not something this predicate can prove.
+
+    The transition is deliberately exact and fail-closed:
+
+    * both rows resolve to the same active authoritative profile;
+    * only a declared legacy ``resolver-complete-v2`` row may become a declared
+      grain-split ``move-complete-v1`` row;
+    * the contract transition relocates exactly the POSITION grain; and
+    * the incoming row carries no fields from that relocated grain; and
+    * every populated non-optional move fact is retained and agrees.  Optional
+      mate annotations may appear, disappear, or change.  Position facts and
+      ``eval_delta`` are outside this agreement gate because the former have a new
+      owner and the latter is a cross-grain canonical-run snapshot.
+
+    The stored v2 row need not satisfy its whole combined contract.  A valid
+    incoming move row may heal malformed position/delta evidence, but never a
+    disagreement or loss in the move grain that ``analysis_cache`` still owns.
+    """
+    existing_eff = existing.effective_profile_id()
+    incoming_eff = incoming.effective_profile_id()
+    if existing_eff is None or existing_eff != incoming_eff:
+        return False
+    if not (
+        existing.is_effectively_authoritative()
+        and incoming.is_effectively_authoritative()
+    ):
+        return False
+    if existing.evidence_contract_id != RESOLVER_COMPLETE_V2:
+        return False
+    if incoming.evidence_contract_id != MOVE_COMPLETE:
+        return False
+    if not is_grain_split_contract(incoming.evidence_contract_id):
+        return False
+
+    existing_grains = contract_grains(existing.evidence_contract_id)
+    incoming_grains = contract_grains(incoming.evidence_contract_id)
+    dropped = existing_grains - incoming_grains
+    if dropped != RELOCATABLE_GRAINS or Grain.MOVE not in incoming_grains:
+        return False
+    # Contract satisfaction proves that required move fields are present; it does
+    # not forbid extra evidence.  A full-row REPLACE would persist any extra
+    # position fields instead of clearing the relocated columns, so fail closed
+    # unless the incoming row is physically grain-clean as well as contract-labelled.
+    if incoming.populated_fields & _fields_for_grains(dropped):
+        return False
+
+    retained = _fields_for_grains(incoming_grains) - OPTIONAL_MATE_FIELDS
+    existing_retained = existing.populated_fields & retained
+    if not (incoming.populated_fields & retained) >= existing_retained:
+        return False
+    return all(
+        incoming.values.get(field) == existing.values.get(field)
+        for field in existing_retained
+    )
+
+
 def merge_owner_ok(
     existing: CacheRow,
     existing_submitters: frozenset[int],
@@ -487,6 +567,16 @@ def decide_analysis_cache_replacement(
         strength_decision = _same_profile_strength_decision(existing, incoming)
         if strength_decision is not None:
             return strength_decision
+        # Rule 2b (g-move-grain-same-prof): once the canonical producer has
+        # durably committed the matching position winner, let its move-grain row
+        # transition this exact profile's legacy combined v2 row in place.  This
+        # precedes the ordinary contract-superset path because MOVE_COMPLETE is
+        # intentionally not registered as a semantic successor of v2.
+        if same_profile_grain_transition_replaces(existing, incoming):
+            return (
+                Decision.REPLACE,
+                Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE,
+            )
         # Only replacement-eligible profiles may MERGE; others are idempotent (first
         # wins). Canonical stays eligible (defaulted from authoritative); browser-
         # analysis is now eligible and merges; browser-game stays first-wins.

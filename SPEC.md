@@ -733,10 +733,27 @@ performs for arrows/lines. Key points:
   the MOVE grain — `analysis_cache` *is* that table); and it sheds nothing within the
   grain it retains (mate fields stripped symmetrically, as in Rule 5). Verdict:
   `cross_grain_authority_replace`. An unknown/absent contract on either side has no
-  grain and fails the rule closed. Rule 2 (same effective profile) is untouched: a
-  canonical `move-complete-v1` write over a stored canonical `resolver-complete-v2`
-  row is still `same_profile_idempotent` — both rows are authoritative, so there is no
-  asymmetry to key on, and the stored v2 row still projects into both grains.
+  grain and fails the rule closed. Rule 2 (same effective profile) has a separate,
+  narrow migration branch for the canonical v2-to-move case. An active authoritative
+  `move-complete-v1` row may replace the same profile's
+  active authoritative row only when the stored contract is exactly
+  `resolver-complete-v2`, the transition relocates only the `POSITION` grain, and all
+  populated non-optional move-grain facts are retained and agree (`played_eval` and
+  `classification`; mate annotations remain optional). The incoming row must populate no
+  `POSITION`-grain fields: contract satisfaction requires move fields but does not reject
+  out-of-contract extras, and a full-row replacement would otherwise restore duplicated
+  position columns. Stored position facts are not compared because their durable owner is
+  now `position_analysis`; `eval_delta` is likewise not an agreement gate because it is a
+  cross-grain canonical-run snapshot. The stored v2 row need not satisfy its combined
+  invariant, so an agreeing valid move row can heal a malformed position/delta half.
+  Verdict: `same_profile_grain_transition_replace`.
+  This is a storage transition, not contract supersession, and has a required producer
+  precondition: commit and verify the position winner first, then replace the move row,
+  then verify both grains. The comparator cannot query `position_analysis`, so callers
+  must enforce that order. The reverse (`move-complete-v1` stored, v2 incoming), a
+  different profile, a non-authoritative pair, any other contract pair, retained move
+  loss, or retained move disagreement remains refused; in particular, a stale combined
+  writer can never restore duplicated position columns after cutover.
 - **Not read-trusted.** Browser-analysis rows are never `/lookup` trusted hits or
   frontend trusted publications; read-time trust for stronger browser rows is the
   follow-up `g-v21l`.
@@ -3510,10 +3527,15 @@ storage is normalized-FEN-keyed, the wire map is full-FEN-keyed, and a storage r
 never returned as the session map directly.
 
 **Migration.** `resolver-complete-v2` stays a legacy read/projection contract so existing
-canonical rows keep conferring trust; new writes use the grain-specific contracts, and
-full v2 deprecation is deferred to a follow-up after cutover is verified. The duplicated
-best-move columns still on `analysis_cache` remain (backfill source + v2 projection) but
-are no longer authoritative; dropping them is deferred to the same follow-up.
+canonical rows keep conferring trust, while new canonical writes use the grain-specific
+contracts. When the canonical writer revisits an authoritative v2 move row, it first
+commits and verifies the native `position_analysis` winner, then transitions the
+agreeing move row in place to `move-complete-v1`, and finally verifies both grains.
+Rows that normal precompute does not revisit are converted by the later exhaustive,
+idempotent `g-v2-deprecation.3` sweep. Legacy v2 projection therefore remains read-
+compatible until that deprecation phase completes. The duplicated best-move columns
+still on `analysis_cache` remain as a backfill/projection source but are no longer
+authoritative; dropping them is deferred to the same follow-up.
 
 ---
 

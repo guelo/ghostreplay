@@ -408,6 +408,154 @@ def test_canonical_move_grain_write_relocates_a_browser_v2_row(file_db):
     s2.close()
 
 
+def test_same_profile_canonical_v2_transitions_after_position_winner_is_durable(
+    file_db,
+):
+    """The real writer performs the narrow Rule 2 grain transition in place.
+
+    The canonical producer's required order is represented explicitly: commit the
+    native position winner first, then replace the legacy combined cache row with
+    its agreeing move-grain row.  The cache replacement must not touch position
+    truth, change the cache key/id, or strand duplicated position columns.
+    """
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import stamp_profile_full
+    from app.evidence_contracts import MOVE_COMPLETE, POSITION_COMPLETE
+    from app.fen import normalize_fen
+    from app.models import PositionAnalysisRow
+    from app.position_analysis_repo import write_position_analysis_row
+
+    _, Factory = file_db
+    profile_stamp = stamp_profile_full(CANONICAL_PROFILE_ID)
+    normalized_fen = normalize_fen(FEN)
+    position = {
+        "normalized_fen": normalized_fen,
+        "fen": FEN,
+        "source": "precomputed",
+        "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": POSITION_COMPLETE,
+        "best_move_uci": "e2e4",
+        "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5",
+        "best_eval": 30,
+        "best_eval_mate": None,
+        **profile_stamp,
+    }
+    canonical_v2 = _full_evidence_profile_row(CANONICAL_PROFILE_ID)
+
+    seed = Factory()
+    write_position_analysis_row(seed, position)
+    seed.add(AnalysisCache(**canonical_v2))
+    seed.commit()  # position-first durability is the transition's precondition
+    stored_before = seed.query(AnalysisCache).one()
+    cache_id = stored_before.id
+    position_before = seed.query(PositionAnalysisRow).one()
+    position_id = position_before.id
+    position_truth = (
+        position_before.best_move_uci,
+        position_before.best_move_san,
+        position_before.best_line_uci,
+        position_before.best_eval,
+        position_before.best_eval_mate,
+        position_before.analysis_profile_id,
+        position_before.evidence_contract_id,
+        position_before.source_cache_id,
+    )
+    seed.close()
+
+    canonical_move = {
+        "fen_before": FEN,
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "source": "precomputed",
+        "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": MOVE_COMPLETE,
+        "played_eval": 30,
+        "classification": "best",
+        # A move-row snapshot need not equal the legacy combined row's delta.
+        "eval_delta": 7,
+        **profile_stamp,
+    }
+    writer = Factory()
+    results = write_analysis_cache_rows(writer, [canonical_move])
+    writer.close()
+    assert len(results) == 1
+    assert all(
+        reason is Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE
+        for _, reason in results
+    )
+
+    verify = Factory()
+    assert verify.query(AnalysisCache).count() == 1
+    stored = verify.query(AnalysisCache).one()
+    assert stored.id == cache_id
+    assert stored.evidence_contract_id == MOVE_COMPLETE
+    assert (stored.played_eval, stored.classification, stored.eval_delta) == (
+        30,
+        "best",
+        7,
+    )
+    assert (
+        stored.best_move_uci,
+        stored.best_move_san,
+        stored.best_line_uci,
+        stored.best_eval,
+        stored.best_eval_mate,
+    ) == (None, None, None, None, None)
+
+    assert verify.query(PositionAnalysisRow).count() == 1
+    position_after = verify.query(PositionAnalysisRow).one()
+    assert position_after.id == position_id
+    assert (
+        position_after.best_move_uci,
+        position_after.best_move_san,
+        position_after.best_line_uci,
+        position_after.best_eval,
+        position_after.best_eval_mate,
+        position_after.analysis_profile_id,
+        position_after.evidence_contract_id,
+        position_after.source_cache_id,
+    ) == position_truth
+    verify.close()
+
+
+def test_same_profile_move_contract_with_position_fields_cannot_replace_v2(file_db):
+    """The real writer keeps v2 when an incoming move row is not grain-clean."""
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import stamp_profile_full
+    from app.evidence_contracts import MOVE_COMPLETE, RESOLVER_COMPLETE_V2
+
+    _, Factory = file_db
+    _seed(Factory, _full_evidence_profile_row(CANONICAL_PROFILE_ID))
+
+    incoming = {
+        "fen_before": FEN,
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "source": "precomputed",
+        "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": MOVE_COMPLETE,
+        "played_eval": 30,
+        "classification": "best",
+        # Contract satisfaction does not reject this out-of-grain extra field.
+        "best_move_uci": "e2e4",
+        **stamp_profile_full(CANONICAL_PROFILE_ID),
+    }
+    writer = Factory()
+    results = write_analysis_cache_rows(writer, [incoming])
+    writer.close()
+
+    assert len(results) == 1
+    assert results[0][1] is Reason.SAME_PROFILE_IDEMPOTENT
+
+    verify = Factory()
+    stored = verify.query(AnalysisCache).one()
+    assert stored.evidence_contract_id == RESOLVER_COMPLETE_V2
+    assert stored.best_move_uci == "e2e4"
+    assert stored.best_line_uci == "e2e4 e7e5"
+    verify.close()
+
+
 def test_replace_does_not_inherit_the_replaced_rows_mate_count(file_db):
     """A REPLACE stores the incoming row's evidence, never a union with the old row's.
 

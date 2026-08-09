@@ -117,6 +117,10 @@ _ACCEPTED_REASONS = frozenset(
         # row it relocates earns this verdict, and without this entry a whole run of
         # correct replacements would land in `write_failures` (g-6xc3).
         Reason.CROSS_GRAIN_AUTHORITY_REPLACE,
+        # The same canonical profile's legacy combined v2 row may transition in
+        # place after this producer has durably committed its position winner.
+        # This is a successful REPLACE during the g-v2-deprecation.2 cutover.
+        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE,
         # PROTOCOL_CORRECTED_REPLACE stays out: this producer is authoritative, and
         # the authority barrier resolves canonical-vs-browser before explicit edges,
         # so a canonical write can never earn a protocol-correction verdict.

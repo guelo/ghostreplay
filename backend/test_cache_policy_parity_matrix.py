@@ -10,8 +10,9 @@ The refactors under test are ``g-reuse-d21-search`` (comparator reroute,
 ``declared_profile_inactive`` gate, ``browser-analysis-v1`` retirement,
 ``browser-analysis-multipv-v2``), ``g-mk1d`` (``CacheRow.metadata``, Rule 2a
 measured strength, comparator steps 4-5), ``g-bgv1-cutover`` (``browser-game-v1``
-retirement), and ``g-6xc3`` (the cross-grain authority rule). TWO behavior changes
-were announced across them:
+retirement), ``g-6xc3`` (the cross-grain authority rule), and
+``g-move-grain-same-prof`` (the canonical v2-to-move transition). THREE behavior
+changes were announced across them:
 
   * RETIREMENT — one change applied to two profiles: a valid incoming row on a
     RETIRED profile (``browser-analysis-v1``, then ``browser-game-v1``) is refused
@@ -20,6 +21,10 @@ were announced across them:
     REPLACES a NON-authoritative row whose contract also spanned the position
     grain (``replace`` / ``cross_grain_authority_replace``), which the completeness
     gate had been vetoing.
+  * SAME-PROFILE GRAIN TRANSITION — an AUTHORITATIVE canonical
+    ``move-complete-v1`` write now REPLACES the same profile's stored
+    ``resolver-complete-v2`` row when every retained move fact agrees
+    (``replace`` / ``same_profile_grain_transition_replace``).
 
 Every other baseline cell must be byte-identical, and the differing set must equal
 the union of the announced predicates exactly — an EXTRA delta is a finding, not a
@@ -140,7 +145,12 @@ PRE_REFACTOR_IDS = (
 # and unverified_canonical. (At HEAD the same predicate also moves 9 cells against
 # the multipv / browser-game-v2 archetypes, which have no baseline counterpart and so
 # are outside this count.)
-ANNOUNCED_DELTA_COUNT = 106
+#
+# SAME-PROFILE GRAIN TRANSITION (4): canonical move-complete against the four
+# canonical v2 archetypes whose retained move facts agree — core, mate, no-SAN,
+# and invalid-combined. The conflict archetype disagrees on played_eval and stays
+# idempotent.
+ANNOUNCED_DELTA_COUNT = 110
 
 # Profiles retired from WRITES. Their rows stay readable and keep their dominance
 # edges; only an INCOMING row on one of them is refused storage.
@@ -216,20 +226,67 @@ def _is_announced_cross_grain_delta(existing_id: str, incoming_id: str) -> bool:
     return not _is_authoritative(existing)
 
 
+def _is_announced_same_profile_grain_transition_delta(
+    existing_id: str, incoming_id: str
+) -> bool:
+    """The g-move-grain-same-prof delta: canonical v2 converges to move grain.
+
+    This is distinct from cross-grain AUTHORITY: both rows are authoritative and
+    resolve to the same profile.  It is exact to v2 -> move-complete and requires
+    every populated non-optional move fact retained by analysis_cache to agree.
+    """
+    by_id = _archetypes_by_id()
+    existing = by_id.get(existing_id)
+    if existing is None:
+        return False
+    incoming = by_id[incoming_id]
+    if not (_is_authoritative(existing) and _is_authoritative(incoming)):
+        return False
+    if existing.profile_id != incoming.profile_id:
+        return False
+    if existing.data.get("evidence_contract_id") != "resolver-complete-v2":
+        return False
+    if incoming.data.get("evidence_contract_id") != MOVE_GRAIN_CONTRACT:
+        return False
+
+    retained_move_fields = frozenset({"played_eval", "classification"})
+    existing_retained = {
+        field
+        for field in retained_move_fields
+        if existing.data.get(field) is not None
+    }
+    incoming_retained = {
+        field
+        for field in retained_move_fields
+        if incoming.data.get(field) is not None
+    }
+    return incoming_retained >= existing_retained and all(
+        incoming.data.get(field) == existing.data.get(field)
+        for field in existing_retained
+    )
+
+
 def _announced_delta(existing_id: str, incoming_id: str) -> list[str] | None:
     """The cell an announced change moves this pair TO, or ``None`` if unannounced.
 
-    Returning the expected VALUE rather than a bool keeps the two predicates from
-    silently overlapping: a pair claimed by both changes would have to agree on one
-    outcome, and they cannot (one keeps, one replaces).
+    Returning the expected VALUE rather than a bool keeps the predicates from
+    silently overlapping: a pair claimed by multiple changes would have to agree on
+    one outcome, and they need not.
     """
     retirement = _is_announced_retirement_delta(existing_id, incoming_id)
     cross_grain = _is_announced_cross_grain_delta(existing_id, incoming_id)
-    assert not (retirement and cross_grain), f"{existing_id}|{incoming_id}"
+    same_profile_grain = _is_announced_same_profile_grain_transition_delta(
+        existing_id, incoming_id
+    )
+    assert sum((retirement, cross_grain, same_profile_grain)) <= 1, (
+        f"{existing_id}|{incoming_id}"
+    )
     if retirement:
         return ["keep", "inactive_profile_keep"]
     if cross_grain:
         return ["replace", "cross_grain_authority_replace"]
+    if same_profile_grain:
+        return ["replace", "same_profile_grain_transition_replace"]
     return None
 
 
@@ -337,9 +394,17 @@ def test_each_announced_predicate_claims_cells_of_its_own():
     pre = _load(_PRE_FIXTURE)
     retirement = {k for k in pre if _is_announced_retirement_delta(*_split(k))}
     cross_grain = {k for k in pre if _is_announced_cross_grain_delta(*_split(k))}
+    same_profile_grain = {
+        k
+        for k in pre
+        if _is_announced_same_profile_grain_transition_delta(*_split(k))
+    }
     assert len(retirement) == 100
     assert len(cross_grain) == 6
+    assert len(same_profile_grain) == 4
     assert not retirement & cross_grain
+    assert not retirement & same_profile_grain
+    assert not cross_grain & same_profile_grain
 
 
 # --- the announced behaviors, in readable form -----------------------------------
@@ -423,6 +488,33 @@ def test_announced_dynamic_strength_cells(existing, incoming, expected):
     ],
 )
 def test_announced_cross_grain_cells(existing, incoming, expected):
+    assert _load(_CURRENT_FIXTURE)[f"{existing}|{incoming}"] == expected
+
+
+@pytest.mark.parametrize(
+    "existing,incoming,expected",
+    [
+        ("canonical_core_v2", "canonical_move_complete",
+         ["replace", "same_profile_grain_transition_replace"]),
+        ("canonical_core_v2_mate", "canonical_move_complete",
+         ["replace", "same_profile_grain_transition_replace"]),
+        ("canonical_no_san_v2", "canonical_move_complete",
+         ["replace", "same_profile_grain_transition_replace"]),
+        # The existing row may fail its combined/cross-grain invariant; retained
+        # agreeing move facts are sufficient for the valid move row to heal it.
+        ("canonical_invalid", "canonical_move_complete",
+         ["replace", "same_profile_grain_transition_replace"]),
+        # A retained move-fact disagreement refuses the transition.
+        ("canonical_conflict_v2", "canonical_move_complete",
+         ["keep", "same_profile_idempotent"]),
+        # Exact contract pair and direction only.
+        ("canonical_core_v1", "canonical_move_complete",
+         ["keep", "same_profile_idempotent"]),
+        ("canonical_move_complete", "canonical_core_v2",
+         ["keep", "same_profile_idempotent"]),
+    ],
+)
+def test_announced_same_profile_grain_transition_cells(existing, incoming, expected):
     assert _load(_CURRENT_FIXTURE)[f"{existing}|{incoming}"] == expected
 
 

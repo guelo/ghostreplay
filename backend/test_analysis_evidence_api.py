@@ -934,11 +934,15 @@ def test_every_replacement_verdict_a_browser_row_can_earn_emits_an_upgrade():
         Reason.STRENGTH_REPLACE,
     }
     assert {r.value for r in earnable} <= _EVIDENCE_ACCEPTED_REASONS
-    # ...but the two AUTHORITY-gated replacements are NOT earnable by a
-    # non-authoritative profile, so accepting either would mask a writer regression
+    # ...but the AUTHORITY-gated replacements are NOT earnable by a
+    # non-authoritative profile, so accepting any would mask a writer regression
     # rather than catch one.
     assert Reason.LEGACY_REPLACED_BY_AUTH.value not in _EVIDENCE_ACCEPTED_REASONS
     assert Reason.CROSS_GRAIN_AUTHORITY_REPLACE.value not in _EVIDENCE_ACCEPTED_REASONS
+    assert (
+        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE.value
+        not in _EVIDENCE_ACCEPTED_REASONS
+    )
 
 
 # --------------------------------------------------------------------------- #

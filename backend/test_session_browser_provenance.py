@@ -685,6 +685,14 @@ def test_identical_v2_reupload_is_submitted_but_writes_nothing(
     assert _written(_cache_write_line(caplog)) == ("1", "0")
 
 
+def test_same_profile_grain_transition_is_counted_as_a_row_mutation():
+    """The Rule 2 grain transition mutates storage, though browsers cannot earn it."""
+    from app.analysis_cache_policy import Reason
+    from app.api.session import _ROW_MUTATING_REASONS
+
+    assert Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE.value in _ROW_MUTATING_REASONS
+
+
 def test_fully_filtered_batch_reports_zero_over_zero(
     client, auth_headers, create_game_session, caplog
 ):

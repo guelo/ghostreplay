@@ -882,6 +882,7 @@ _ROW_MUTATING_REASONS = frozenset(
         # included because the set is defined by DECISION, not by today's callers.
         Reason.LEGACY_REPLACED_BY_AUTH.value,
         Reason.CROSS_GRAIN_AUTHORITY_REPLACE.value,
+        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE.value,
         Reason.SAME_PROFILE_SUPERSET_MERGE.value,  # MERGE
         Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,  # MERGE
     }
@@ -1972,9 +1973,10 @@ _EVIDENCE_PRODUCER_PROFILE = {
 # so the endpoint emits a MoveUpgrade for the open MoveList (g-xox0 Part B). Every
 # other verdict — the `*_keep` families, `duplicate_conflict`, `recovery_aborted_keep`,
 # and the endpoint pre-writer reasons — leaves the stored row unchanged / unwritten,
-# so it yields no upgrade. `legacy_replaced_by_auth` and `cross_grain_authority_replace`
-# cannot occur for a non-authoritative profile and are therefore not accepted here —
-# accepting an unearnable verdict would mask a writer regression rather than catch one.
+# so it yields no upgrade. `legacy_replaced_by_auth`, `cross_grain_authority_replace`,
+# and `same_profile_grain_transition_replace` cannot occur for a non-authoritative
+# profile and are therefore not accepted here — accepting an unearnable verdict would
+# mask a writer regression rather than catch one.
 #
 # NOT the same question as ``_ROW_MUTATING_REASONS`` (which counts DB writes), and
 # the difference is deliberate: `same_profile_idempotent` belongs HERE, because the
