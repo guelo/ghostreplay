@@ -21,16 +21,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "blunders",
-        sa.Column(
-            "source_session_id",
-            UUID(as_uuid=True),
-            sa.ForeignKey("game_sessions.id"),
-            nullable=True,
-        ),
-    )
+    with op.batch_alter_table("blunders") as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "source_session_id",
+                UUID(as_uuid=True),
+                sa.ForeignKey(
+                    "game_sessions.id",
+                    name="blunders_source_session_id_fkey",
+                ),
+                nullable=True,
+            )
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("blunders", "source_session_id")
+    with op.batch_alter_table("blunders") as batch_op:
+        batch_op.drop_column("source_session_id")

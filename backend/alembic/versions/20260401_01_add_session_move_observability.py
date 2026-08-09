@@ -17,24 +17,32 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("session_moves", sa.Column("decision_source", sa.String(length=20), nullable=True))
-    op.add_column("session_moves", sa.Column("target_blunder_id", sa.BigInteger(), nullable=True))
-    op.create_foreign_key(
-        "fk_session_moves_target_blunder_id_blunders",
-        "session_moves",
-        "blunders",
-        ["target_blunder_id"],
-        ["id"],
-    )
-    op.create_check_constraint(
-        "ck_session_moves_decision_source",
-        "session_moves",
-        "decision_source is null or decision_source in ('ghost_path','backend_engine','local_fallback')",
-    )
+    with op.batch_alter_table("session_moves") as batch_op:
+        batch_op.add_column(
+            sa.Column("decision_source", sa.String(length=20), nullable=True)
+        )
+        batch_op.add_column(
+            sa.Column("target_blunder_id", sa.BigInteger(), nullable=True)
+        )
+        batch_op.create_foreign_key(
+            "fk_session_moves_target_blunder_id_blunders",
+            "blunders",
+            ["target_blunder_id"],
+            ["id"],
+        )
+        batch_op.create_check_constraint(
+            "ck_session_moves_decision_source",
+            "decision_source is null or decision_source in ('ghost_path','backend_engine','local_fallback')",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_session_moves_decision_source", "session_moves", type_="check")
-    op.drop_constraint("fk_session_moves_target_blunder_id_blunders", "session_moves", type_="foreignkey")
-    op.drop_column("session_moves", "target_blunder_id")
-    op.drop_column("session_moves", "decision_source")
+    with op.batch_alter_table("session_moves") as batch_op:
+        batch_op.drop_constraint(
+            "ck_session_moves_decision_source", type_="check"
+        )
+        batch_op.drop_constraint(
+            "fk_session_moves_target_blunder_id_blunders", type_="foreignkey"
+        )
+        batch_op.drop_column("target_blunder_id")
+        batch_op.drop_column("decision_source")

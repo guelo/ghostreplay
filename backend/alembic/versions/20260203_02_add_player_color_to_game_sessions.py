@@ -21,13 +21,14 @@ def upgrade() -> None:
         sa.Column("player_color", sa.String(length=5), nullable=False, server_default="white"),
     )
     op.execute("UPDATE game_sessions SET player_color = 'white' WHERE player_color IS NULL")
-    op.create_check_constraint(
-        "ck_game_sessions_player_color",
-        "game_sessions",
-        "player_color in ('white','black')",
-    )
+    with op.batch_alter_table("game_sessions") as batch_op:
+        batch_op.create_check_constraint(
+            "ck_game_sessions_player_color",
+            "player_color in ('white','black')",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_game_sessions_player_color", "game_sessions", type_="check")
-    op.drop_column("game_sessions", "player_color")
+    with op.batch_alter_table("game_sessions") as batch_op:
+        batch_op.drop_constraint("ck_game_sessions_player_color", type_="check")
+        batch_op.drop_column("player_color")
