@@ -2658,6 +2658,48 @@
     font-size: 0.8rem;
 }
 
+.copy-position-toast {
+    position: absolute;
+    bottom: 0.75rem;
+    left: 0.75rem;
+    z-index: 8;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 700;
+    pointer-events: none;
+    animation: blunder-toast-in 250ms ease-out;
+}
+
+.copy-position-toast__icon {
+    font-size: 1rem;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.copy-position-toast--success {
+    border-color: var(--success);
+}
+
+.copy-position-toast--success .copy-position-toast__icon {
+    color: var(--success);
+}
+
+.copy-position-toast--error {
+    border-color: var(--error);
+}
+
+.copy-position-toast--error .copy-position-toast__icon {
+    color: var(--error);
+}
+
 /* Last-drill opening-score notification (g-f3m4). Its own slot, top-right, so
    it never competes with the single-slot board notice (top-left) or the streak
    toast (bottom-right). Interactive (dismissable), so unlike its siblings it

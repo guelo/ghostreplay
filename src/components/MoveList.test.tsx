@@ -168,6 +168,25 @@ function renderAndGetHeaderEval(
   return header?.textContent ?? ''
 }
 
+describe('MoveList position actions', () => {
+  it('renders the copy action in move-list-actions and fires it', () => {
+    const onCopyPosition = vi.fn()
+    const { getByRole } = render(
+      <MoveList
+        moves={[]}
+        currentIndex={null}
+        onNavigate={noop}
+        onCopyPosition={onCopyPosition}
+      />,
+    )
+
+    const copyButton = getByRole('button', { name: 'Copy position FEN' })
+    expect(copyButton.closest('.move-list-actions')).not.toBeNull()
+    fireEvent.click(copyButton)
+    expect(onCopyPosition).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('MoveList move evals', () => {
   it('shows the resulting eval for each move', () => {
     const evals = renderAndGetEvals([

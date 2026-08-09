@@ -307,6 +307,30 @@ describe("BoardStage", () => {
     expect(screen.getByText("⭐ Perfect streak")).toBeInTheDocument();
   });
 
+  it("announces a successful position copy", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        copyPositionNotice={{ kind: "success", nonce: 1 }}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("FEN copied");
+  });
+
+  it("alerts when a position cannot be copied", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        copyPositionNotice={{ kind: "error", nonce: 2 }}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't copy FEN");
+  });
+
   it("renders a review-warning board notice with an alert role", () => {
     const props = makeProps();
     const { container } = render(

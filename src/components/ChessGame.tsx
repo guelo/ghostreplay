@@ -57,7 +57,11 @@ import {
   STARTING_FEN,
 } from "./chess-game/config";
 import { sampleDrillEloBin } from "./chess-game/elo";
-import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
+import type {
+  CopyPositionNotice,
+  OpenHistoryOptions,
+  ResolvedReview,
+} from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import type { StartDrillDraft } from "./chess-game/ui/StartPanel";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
@@ -255,6 +259,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const ghostInfoAnchorRef = useRef<HTMLSpanElement>(null);
   const [, setShowPassToast] = useState(false);
   const [showRehookToast, setShowRehookToast] = useState(false);
+  const [copyPositionNotice, setCopyPositionNotice] =
+    useState<CopyPositionNotice | null>(null);
+  const copyPositionNoticeNonceRef = useRef(0);
+  const showCopyPositionNotice = useCallback(
+    (kind: CopyPositionNotice["kind"]) => {
+      copyPositionNoticeNonceRef.current += 1;
+      setCopyPositionNotice({
+        kind,
+        nonce: copyPositionNoticeNonceRef.current,
+      });
+    },
+    [],
+  );
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(
     null,
   );
@@ -422,6 +439,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
     return moveHistory[viewIndex]?.fen ?? fen;
   }, [viewIndex, fen, moveHistory]);
+  const handleCopyPosition = useCallback(() => {
+    const clipboard = navigator.clipboard;
+    if (!clipboard) {
+      console.error("[Clipboard] Clipboard API is unavailable");
+      showCopyPositionNotice("error");
+      return;
+    }
+    void (async () => {
+      try {
+        await clipboard.writeText(displayedFen);
+        showCopyPositionNotice("success");
+      } catch (error) {
+        console.error("[Clipboard] Failed to copy position FEN:", error);
+        showCopyPositionNotice("error");
+      }
+    })();
+  }, [displayedFen, showCopyPositionNotice]);
   const displayedIndex = useMemo(() => {
     if (viewIndex === null) {
       return moveHistory.length - 1;
@@ -1905,6 +1939,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [showRehookToast]);
 
   useEffect(() => {
+    if (!copyPositionNotice) return;
+    const noticeNonce = copyPositionNotice.nonce;
+    const timer = window.setTimeout(() => {
+      setCopyPositionNotice((current) =>
+        current?.nonce === noticeNonce ? null : current,
+      );
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [copyPositionNotice]);
+
+  useEffect(() => {
     if (!streakToast) return;
     const timer = setTimeout(() => setStreakToast(null), 2400);
     return () => clearTimeout(timer);
@@ -2455,6 +2500,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 lastDrillDeltaToast={lastDrillDeltaToast}
                 onDismissLastDrillDelta={dismissLastDrillDelta}
                 boardNotice={boardNotice}
+                copyPositionNotice={copyPositionNotice}
                 isDrillMode={isDrillMode}
                 onSwitchToPlayMode={handleSwitchToPlayMode}
                 onSwitchToDrillMode={handleSwitchToDrillMode}
@@ -2553,6 +2599,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               onRevert={handleRevertClick}
               isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
               onFlipBoard={flipBoard}
+              onCopyPosition={handleCopyPosition}
               onReset={handleReset}
               isGameActive={isGameActive}
               isInteractionDisabled={isRevertPending}

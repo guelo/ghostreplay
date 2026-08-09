@@ -2,11 +2,13 @@ import React from "react";
 import MaterialDisplay from "./MaterialDisplay";
 
 export type ControlsRowProps = {
+  className?: string;
   onResign?: () => void;
   isResignDisabled?: boolean;
   onRevert?: () => void;
   isRevertDisabled?: boolean;
   onFlipBoard?: () => void;
+  onCopyPosition?: () => void;
   onReset?: () => void;
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
@@ -15,21 +17,24 @@ export type ControlsRowProps = {
   onAddSelectedMove?: (index: number) => void;
   /** Index used when the add button is clicked (effective selected move). */
   effectiveIndex?: number;
-  /** When supplied, render a MaterialDisplay at the trailing edge of the row
-   *  (mobile-portrait relocation of the moves-column bottom material). */
+  /** When supplied, render a MaterialDisplay at the trailing edge of the row.
+   *  The responsive reveal CSS assumes the default `.controls-row` class;
+   *  custom-class callers must provide equivalent styling. */
   materialFen?: string;
   materialPerspective?: "white" | "black";
 };
 
-/** Row of game-control icon buttons (resign / flip / add / revert / reset).
- *  Extracted from MoveList's `.move-list-actions` block so the horizontal move
- *  list can render the same controls above the strip. */
+/** Shared row of game-control icon buttons.
+ *  MoveList supplies its desktop class; the horizontal list uses the default
+ *  mobile controls-row class. */
 const ControlsRow = ({
+  className = "controls-row",
   onResign,
   isResignDisabled = false,
   onRevert,
   isRevertDisabled = false,
   onFlipBoard,
+  onCopyPosition,
   onReset,
   isGameActive = false,
   isInteractionDisabled = false,
@@ -41,18 +46,27 @@ const ControlsRow = ({
   materialPerspective,
 }: ControlsRowProps) => {
   const hasAddButton = Boolean(onAddSelectedMove);
+  // Both list callers derive -1 for empty history, so this is also the shared
+  // non-empty-history guard that the former desktop action block expressed.
   const isAddEnabled = hasAddButton && effectiveIndex >= 0 && canAddSelectedMove;
   const hasMaterial = Boolean(materialFen && materialPerspective);
 
   if (
-    !(onResign || onFlipBoard || onReset || onRevert || hasAddButton) &&
+    !(
+      onResign ||
+      onFlipBoard ||
+      onCopyPosition ||
+      onReset ||
+      onRevert ||
+      hasAddButton
+    ) &&
     !hasMaterial
   ) {
     return null;
   }
 
   return (
-    <div className="controls-row">
+    <div className={className}>
       {onResign && (
         <button
           className="move-action-button danger"
@@ -79,6 +93,29 @@ const ControlsRow = ({
             <path d="M3 11V9a4 4 0 0 1 4-4h14" />
             <path d="M7 23l-4-4 4-4" />
             <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+          </svg>
+        </button>
+      )}
+      {onCopyPosition && (
+        <button
+          className="move-action-button"
+          type="button"
+          onClick={onCopyPosition}
+          title="Copy position FEN"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
           </svg>
         </button>
       )}

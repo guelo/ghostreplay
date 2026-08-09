@@ -17,6 +17,11 @@ export type BoardNotice =
   | { kind: "review-result"; result: "pass" | "fail"; nonce: number }
   | { kind: "rehook"; nonce: number };
 
+export type CopyPositionNotice = {
+  kind: "success" | "error";
+  nonce: number;
+};
+
 export type OpenHistoryOptions = {
   select: "latest";
   source: "post_game_view_analysis";

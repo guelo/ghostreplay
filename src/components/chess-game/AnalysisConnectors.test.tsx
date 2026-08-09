@@ -544,6 +544,7 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
 
   it("forwards materialFen + playerColor-derived perspective to the list", () => {
     useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "black" });
+    const onCopyPosition = vi.fn();
     render(
       <AnalysisStoreProvider value={store}>
         <ConnectedMoveList
@@ -552,11 +553,13 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
           onRevealSrsFail={vi.fn()}
           revealedSrsFailIndex={null}
           materialFen={NORMAL_FEN}
+          onCopyPosition={onCopyPosition}
         />
       </AnalysisStoreProvider>,
     );
     expect(capturedMoveListProps.materialFen).toBe(NORMAL_FEN);
     expect(capturedMoveListProps.materialPerspective).toBe("black");
+    expect(capturedMoveListProps.onCopyPosition).toBe(onCopyPosition);
   });
 
   it("renders the vertical MoveList above the game's mobile breakpoint", () => {

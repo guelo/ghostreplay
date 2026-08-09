@@ -208,6 +208,7 @@ type ConnectedMoveListProps = {
   onRevert?: () => void;
   isRevertDisabled?: boolean;
   onFlipBoard?: () => void;
+  onCopyPosition?: () => void;
   onReset?: () => void;
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
@@ -226,6 +227,7 @@ export const ConnectedMoveList = memo(
     onRevert,
     isRevertDisabled,
     onFlipBoard,
+    onCopyPosition,
     onReset,
     isGameActive,
     isInteractionDisabled,
@@ -384,6 +386,7 @@ export const ConnectedMoveList = memo(
         onRevert={onRevert}
         isRevertDisabled={isRevertDisabled}
         onFlipBoard={onFlipBoard}
+        onCopyPosition={onCopyPosition}
         onReset={onReset}
         isGameActive={isGameActive}
         isInteractionDisabled={isInteractionDisabled}

@@ -8,18 +8,26 @@ describe("ControlsRow", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("fires onResign / onFlipBoard / onReset callbacks", () => {
+  it("fires onResign / onFlipBoard / onCopyPosition / onReset callbacks", () => {
     const onResign = vi.fn();
     const onFlipBoard = vi.fn();
+    const onCopyPosition = vi.fn();
     const onReset = vi.fn();
     const { getByTitle } = render(
-      <ControlsRow onResign={onResign} onFlipBoard={onFlipBoard} onReset={onReset} />,
+      <ControlsRow
+        onResign={onResign}
+        onFlipBoard={onFlipBoard}
+        onCopyPosition={onCopyPosition}
+        onReset={onReset}
+      />,
     );
     fireEvent.click(getByTitle("Resign"));
     fireEvent.click(getByTitle("Flip board"));
+    fireEvent.click(getByTitle("Copy position FEN"));
     fireEvent.click(getByTitle("Reset game"));
     expect(onResign).toHaveBeenCalled();
     expect(onFlipBoard).toHaveBeenCalled();
+    expect(onCopyPosition).toHaveBeenCalled();
     expect(onReset).toHaveBeenCalled();
   });
 

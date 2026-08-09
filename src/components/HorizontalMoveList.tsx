@@ -29,6 +29,7 @@ const HorizontalMoveList = ({
   onRevert,
   isRevertDisabled = false,
   onFlipBoard,
+  onCopyPosition,
   onReset,
   isGameActive = false,
   isInteractionDisabled = false,
@@ -252,6 +253,7 @@ const HorizontalMoveList = ({
         onRevert={onRevert}
         isRevertDisabled={isRevertDisabled}
         onFlipBoard={onFlipBoard}
+        onCopyPosition={onCopyPosition}
         onReset={onReset}
         isGameActive={isGameActive}
         isInteractionDisabled={isInteractionDisabled}

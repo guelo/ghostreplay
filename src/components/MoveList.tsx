@@ -6,6 +6,7 @@ import MoveRow from "./MoveRow";
 import { formatWhiteEval } from "./MoveRow.helpers";
 import type { MoveMessage, SrsFailDetail } from "./MoveRow";
 import VariationLine from "./VariationLine";
+import ControlsRow from "./ControlsRow";
 
 // Re-export types that other modules import from MoveList
 export type { SrsFailDetail, SrsStats, MoveMessage } from "./MoveRow";
@@ -47,6 +48,7 @@ export type MoveListProps = {
   onRevert?: () => void;
   isRevertDisabled?: boolean;
   onFlipBoard?: () => void;
+  onCopyPosition?: () => void;
   onReset?: () => void;
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
@@ -146,6 +148,7 @@ const MoveList = ({
   onRevert,
   isRevertDisabled = false,
   onFlipBoard,
+  onCopyPosition,
   onReset,
   isGameActive = false,
   isInteractionDisabled = false,
@@ -433,13 +436,6 @@ const MoveList = ({
     !isVariationActive &&
     currentIndex !== null &&
     currentIndex < moves.length - 1;
-  const hasAddButton = Boolean(onAddSelectedMove);
-  const isAddEnabled =
-    hasAddButton &&
-    moves.length > 0 &&
-    effectiveIndex >= 0 &&
-    canAddSelectedMove;
-
   // Header eval: use override when variation active, otherwise main-line eval
   const headerEval = isVariationActive
     ? (headerEvalOverride ?? "")
@@ -566,85 +562,22 @@ const MoveList = ({
         </button>
       </div>
 
-      {(onResign || onFlipBoard || onReset || onRevert || hasAddButton) && (
-        <div className="move-list-actions">
-          {onResign && (
-            <button
-              className="move-action-button danger"
-              type="button"
-              onClick={onResign}
-              disabled={isInteractionDisabled || isResignDisabled}
-              title="Resign"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M5 3v18h2v-7h4.5l.5 1h5V5h-5l-.5-1H7V3H5Zm4 2h3.5l.5 1h3v6h-3l-.5-1H7V5h2Z" />
-              </svg>
-            </button>
-          )}
-          {onFlipBoard && (
-            <button
-              className="move-action-button"
-              type="button"
-              onClick={onFlipBoard}
-              disabled={isInteractionDisabled}
-              title="Flip board"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M17 1l4 4-4 4" />
-                <path d="M3 11V9a4 4 0 0 1 4-4h14" />
-                <path d="M7 23l-4-4 4-4" />
-                <path d="M21 13v2a4 4 0 0 1-4 4H3" />
-              </svg>
-            </button>
-          )}
-          {hasAddButton && (
-            <button
-              className="move-action-button"
-              type="button"
-              onClick={() => {
-                if (onAddSelectedMove && effectiveIndex >= 0) {
-                  onAddSelectedMove(effectiveIndex);
-                }
-              }}
-              disabled={isInteractionDisabled || !isAddEnabled || isAddingSelectedMove}
-              title="Add selected move to ghost library"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-            </button>
-          )}
-          {isGameActive && onRevert && (
-            <button
-              className="move-action-button"
-              type="button"
-              onClick={onRevert}
-              disabled={isInteractionDisabled || isRevertDisabled}
-              title="Revert last move"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M3 10h10a5 5 0 0 1 0 10H11" />
-                <polyline points="7 6 3 10 7 14" />
-              </svg>
-            </button>
-          )}
-          {onReset && (
-            <button
-              className="move-action-button"
-              type="button"
-              onClick={onReset}
-              disabled={isInteractionDisabled}
-              title="Reset game"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <polyline points="1 4 1 10 7 10" />
-                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-              </svg>
-            </button>
-          )}
-        </div>
-      )}
+      <ControlsRow
+        className="move-list-actions"
+        onResign={onResign}
+        isResignDisabled={isResignDisabled}
+        onRevert={onRevert}
+        isRevertDisabled={isRevertDisabled}
+        onFlipBoard={onFlipBoard}
+        onCopyPosition={onCopyPosition}
+        onReset={onReset}
+        isGameActive={isGameActive}
+        isInteractionDisabled={isInteractionDisabled}
+        canAddSelectedMove={canAddSelectedMove}
+        isAddingSelectedMove={isAddingSelectedMove}
+        onAddSelectedMove={onAddSelectedMove}
+        effectiveIndex={effectiveIndex}
+      />
     </div>
   );
 };

@@ -3148,6 +3148,202 @@ describe("ChessGame eval bar behavior", () => {
   });
 });
 
+describe("ChessGame clipboard copy", () => {
+  const originalClipboardDescriptor = Object.getOwnPropertyDescriptor(
+    navigator,
+    "clipboard",
+  );
+
+  const setClipboard = (clipboard: Pick<Clipboard, "writeText"> | undefined) => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: clipboard,
+    });
+  };
+
+  const gameplaySnapshot = () => {
+    const { liveFen, moveHistory, viewIndex, isGameActive, gameResult } =
+      useGameStore.getState();
+    return {
+      liveFen,
+      moveHistory: moveHistory.map((move) => ({ ...move })),
+      viewIndex,
+      isGameActive,
+      gameResult,
+    };
+  };
+
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    startGameMock.mockReset();
+    endGameMock.mockReset();
+    uploadSessionMovesMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    recordBlunderMock.mockReset();
+    recordManualBlunderMock.mockReset();
+    reviewSrsBlunderMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    getOpeningRootsMock.mockReset();
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
+    gameAnalysisStore.getState().clearAll();
+    capturedPieceDrop = null;
+
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+    setClipboard(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalClipboardDescriptor) {
+      Object.defineProperty(
+        navigator,
+        "clipboard",
+        originalClipboardDescriptor,
+      );
+    } else {
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+    vi.restoreAllMocks();
+  });
+
+  const startGameAsWhite = async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-clipboard",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+  };
+
+  it("copies the FEN displayed for a historical position and confirms success", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^e4$/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId("chessboard")).toHaveAttribute(
+        "data-position",
+        E4_FEN,
+      );
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy position FEN" }),
+    );
+
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(E4_FEN);
+      expect(screen.getByText("FEN copied")).toBeInTheDocument();
+    });
+  });
+
+  it("auto-dismisses each success notice after its own full lifetime", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    await startGameAsWhite();
+    const copyButton = screen.getByRole("button", {
+      name: "Copy position FEN",
+    });
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(copyButton);
+    });
+    expect(screen.getByText("FEN copied")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1_799));
+    expect(screen.getByText("FEN copied")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByText("FEN copied")).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(copyButton);
+    });
+    act(() => vi.advanceTimersByTime(1_000));
+
+    await act(async () => {
+      fireEvent.click(copyButton);
+    });
+    act(() => vi.advanceTimersByTime(800));
+    expect(screen.getByText("FEN copied")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(999));
+    expect(screen.getByText("FEN copied")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByText("FEN copied")).not.toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports an unavailable Clipboard API without changing gameplay state", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    await startGameAsWhite();
+    const beforeCopy = gameplaySnapshot();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy position FEN" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't copy FEN")).toBeInTheDocument();
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      "[Clipboard] Clipboard API is unavailable",
+    );
+    expect(gameplaySnapshot()).toEqual(beforeCopy);
+  });
+
+  it("handles a rejected clipboard write without changing gameplay state", async () => {
+    const rejection = new DOMException("Document is not focused", "NotAllowedError");
+    const writeText = vi.fn().mockRejectedValue(rejection);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    setClipboard({ writeText });
+    await startGameAsWhite();
+    const beforeCopy = gameplaySnapshot();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy position FEN" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't copy FEN")).toBeInTheDocument();
+    });
+    expect(writeText).toHaveBeenCalledWith(STARTING_FEN);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[Clipboard] Failed to copy position FEN:",
+      rejection,
+    );
+    expect(gameplaySnapshot()).toEqual(beforeCopy);
+  });
+});
+
 describe("ChessGame blunder recording", () => {
   beforeEach(() => {
     // jsdom doesn't implement scrollIntoView

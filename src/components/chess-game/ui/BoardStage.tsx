@@ -7,7 +7,7 @@ import StartPanel, { type StartDrillDraft } from "./StartPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
 import ReturnToLiveButton from "./ReturnToLiveButton";
-import type { BoardNotice } from "../types";
+import type { BoardNotice, CopyPositionNotice } from "../types";
 import type { LastDrillDeltaToast } from "../../../hooks/useLastDrillDeltaToast";
 
 type BoardOrientation = "white" | "black";
@@ -73,6 +73,9 @@ type BoardStageProps = {
   onDismissLastDrillDelta?: () => void;
   // Single board-anchored notice (review warning / result / rehook), top-left.
   boardNotice: BoardNotice | null;
+  // Clipboard result lives in its own bottom-left slot so it cannot displace
+  // gameplay notices from the single-slot boardNotice arbiter.
+  copyPositionNotice?: CopyPositionNotice | null;
   // Drill mode props
   isDrillMode?: boolean;
   onSwitchToPlayMode?: () => void;
@@ -154,6 +157,7 @@ const BoardStage = ({
   lastDrillDeltaToast = null,
   onDismissLastDrillDelta,
   boardNotice,
+  copyPositionNotice = null,
   isDrillMode = false,
   onSwitchToPlayMode,
   onSwitchToDrillMode,
@@ -267,6 +271,23 @@ const BoardStage = ({
                   : `${streakToast.streak} best moves`}
               </span>
               <span className="streak-toast__detail">⭐ Perfect streak</span>
+            </div>
+          )}
+          {copyPositionNotice && (
+            <div
+              key={copyPositionNotice.nonce}
+              className={`copy-position-toast copy-position-toast--${copyPositionNotice.kind}`}
+              role={copyPositionNotice.kind === "error" ? "alert" : "status"}
+              aria-live={copyPositionNotice.kind === "error" ? "assertive" : "polite"}
+            >
+              <span className="copy-position-toast__icon" aria-hidden="true">
+                {copyPositionNotice.kind === "success" ? "✓" : "!"}
+              </span>
+              <span>
+                {copyPositionNotice.kind === "success"
+                  ? "FEN copied"
+                  : "Couldn't copy FEN"}
+              </span>
             </div>
           )}
           {boardNotice && (
