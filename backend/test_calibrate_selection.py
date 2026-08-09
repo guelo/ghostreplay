@@ -811,7 +811,7 @@ class TestArmDescriptors:
     def test_release_arms(self):
         assert [a.role for a in cal.RELEASE_ARMS] == ["arm1", "arm2"]
         assert cal.ARM1.fold_symmetry_check_count == 7
-        assert cal.ARM2.fold_symmetry_check_count == 4
+        assert cal.ARM2.fold_symmetry_check_count == 5
 
     def test_scope_cell_mismatch_raises(self):
         with pytest.raises(ValueError):
@@ -1459,10 +1459,11 @@ class TestFoldSymmetryOnRealOperands:
         assert dcr.synth_root_coverage_fraction != dcr.synth_opp_root_coverage_fraction
 
     @pytest.mark.parametrize("cell", cal.ARM2.cells, ids=lambda c: f"p={c.report_fold_p}")
-    def test_arm2_fold_gate_unchanged_and_passing(self, cell):
+    def test_arm2_fold_gate_passes_on_the_real_user14_operands(self, cell):
         outcome = cal._fold_symmetry(self._real_dcr(cell), cal.ARM2, cell.report_fold_p)
         assert [c.name for c in outcome.checks] == [
             "fold_identity_user", "fold_identity_opp",
+            "fold_multiplier_user_cov",
             "fold_user_multiplier_lt_1", "fold_opp_multiplier_eq_1",
         ]
         assert outcome.passed
@@ -1498,6 +1499,23 @@ class TestFoldSymmetryOnRealOperands:
             synth_black_root_score=real.synth_user_turn_pre_fold_quality * bad_multiplier,
         )
         outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
+        assert [c.name for c in outcome.checks if not c.passed] == [
+            "fold_multiplier_user_cov"
+        ]
+
+    def test_arm2_fold_gate_catches_multiplier_inconsistent_with_its_own_coverage(self):
+        cell = cal.ARM2.cells[0]
+        real = self._real_dcr(cell)
+        # Keep the multiplier below 1 and restate the score from it, so both pre-existing
+        # ARM-2 checks still pass. Only the multiplier-vs-own-coverage contract is broken.
+        bad_multiplier = real.synth_user_turn_multiplier * 1.01
+        dcr = dataclasses.replace(
+            real,
+            synth_user_turn_multiplier=bad_multiplier,
+            synth_black_root_score=real.synth_user_turn_pre_fold_quality * bad_multiplier,
+        )
+        outcome = cal._fold_symmetry(dcr, cal.ARM2, cell.report_fold_p)
+        assert _fold_check(outcome, "fold_user_multiplier_lt_1").passed
         assert [c.name for c in outcome.checks if not c.passed] == [
             "fold_multiplier_user_cov"
         ]

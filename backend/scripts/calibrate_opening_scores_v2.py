@@ -6006,8 +6006,9 @@ CUTOFF_SUFFICIENCY_CRITERIA_VERSION: int = 0
 MIN_CUTOFF_SUFFICIENCY_CRITERIA_VERSION: int = 1
 # Per-role fold_symmetry_i check count: ARM-1 (two report-stage identities + each User-14
 # multiplier against ITS OWN coverage + the mirror's two pinned coverages + the mirror
-# multiplier equality) = 7; ARM-2 (two identities + user-mult<1 + opp-mult==1.0) = 4.
-_ARM_FOLD_CHECK_COUNT: dict[str, int] = {"arm1": 7, "arm2": 4}
+# multiplier equality) = 7; ARM-2 (two identities + user-mult against its own coverage +
+# user-mult<1 + opp-mult==1.0) = 5.
+_ARM_FOLD_CHECK_COUNT: dict[str, int] = {"arm1": 7, "arm2": 5}
 _VALID_CANDIDATE_ROLES: tuple[str, ...] = ("arm1", "arm2")
 _OP_SYMBOLS: frozenset[str] = frozenset({"<", "<=", ">=", "==", "in"})
 
@@ -6217,7 +6218,7 @@ class Arm:
 
 
 ARM1 = Arm(role="arm1", scope="all", cells=arm1_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=7)
-ARM2 = Arm(role="arm2", scope="user", cells=arm2_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=4)
+ARM2 = Arm(role="arm2", scope="user", cells=arm2_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=5)
 # The pinned release policy. NOT caller-controlled: the arm sequence sets BOTH the
 # enumeration order (ARM-1 preferred; ARM-2 the lazy fallback) AND the required-cell set.
 RELEASE_ARMS: tuple[Arm, ...] = (ARM1, ARM2)
@@ -7109,34 +7110,37 @@ def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm, p: float) -> GateOutcome
     g-fold-sym-gate defect: the User-14 mirror carries UNEQUAL coverage (user 1/12,
     opponent 0), so "um == om" there demanded (1/12)**p == 0 and could never pass.
 
-      * per-side fold identity, on the User-14 operands: each multiplier is ITS OWN
-        coverage**p. Satisfiable at unequal coverage, and it is what catches "the fold
-        never reached the opponent report" — that would read om == 1.0, not 0.0.
+      * fold identity in coverage, on the User-14 operands: every report the configured
+        scope folds has a multiplier equal to that side's OWN coverage**p. ARM-1 folds both
+        reports; ARM-2 folds only the user report and pins the opponent multiplier at 1.0.
+        The coverage check is satisfiable at unequal coverage and catches a multiplier that
+        is folded, but by an amount inconsistent with the coverage this result reports.
       * turn symmetry, on the _fold_mirror_scenario operands: at equal, nonzero, sub-1
         coverage the two multipliers are BIT-IDENTICAL.
 
-    Checks 3/4 need a tolerance because the recorded coverage operand is
+    Multiplier-vs-coverage checks need a tolerance because the recorded coverage operand is
     ``RootScore.coverage / 100.0`` — a x100/÷100 round trip off the float the multiplier was
-    computed from (1 ulp at p=1.0). Checks 5-7 stay EXACT: the mirror's two coverages are
-    bit-identical by construction, so a tolerance there would hide precisely the asymmetry
-    the gate exists to catch."""
+    computed from (1 ulp at p=1.0). ARM-1 checks 5-7 stay EXACT: the mirror's two
+    coverages are bit-identical by construction, so a tolerance there would hide precisely
+    the asymmetry the gate exists to catch."""
     id_user = abs(dcr.synth_black_root_score - dcr.synth_user_turn_pre_fold_quality * dcr.synth_user_turn_multiplier)
     id_opp = abs(dcr.synth_opp_turn_score - dcr.synth_opp_turn_pre_fold_quality * dcr.synth_opp_turn_multiplier)
     checks = [
         GateCheck("fold_identity_user", id_user, FOLD_IDENTITY_TOL, "<=", id_user <= FOLD_IDENTITY_TOL),
         GateCheck("fold_identity_opp", id_opp, FOLD_IDENTITY_TOL, "<=", id_opp <= FOLD_IDENTITY_TOL),
     ]
+    um = dcr.synth_user_turn_multiplier
+    res_user = abs(um - dcr.synth_root_coverage_fraction ** p)
+    checks.append(GateCheck(
+        "fold_multiplier_user_cov", res_user, FOLD_IDENTITY_TOL, "<=", res_user <= FOLD_IDENTITY_TOL
+    ))
     if arm.role == "arm1":
         # ARM-1 is scope="all": the fold reaches BOTH reports, so each side's multiplier is
         # that side's own coverage**p.
-        res_user = abs(dcr.synth_user_turn_multiplier - dcr.synth_root_coverage_fraction ** p)
         res_opp = abs(dcr.synth_opp_turn_multiplier - dcr.synth_opp_root_coverage_fraction ** p)
         mirror_user_cov = dcr.fold_mirror_user_coverage_fraction
         mirror_opp_cov = dcr.fold_mirror_opp_coverage_fraction
         mum, mom = dcr.fold_mirror_user_multiplier, dcr.fold_mirror_opp_multiplier
-        checks.append(GateCheck(
-            "fold_multiplier_user_cov", res_user, FOLD_IDENTITY_TOL, "<=", res_user <= FOLD_IDENTITY_TOL
-        ))
         checks.append(GateCheck(
             "fold_multiplier_opp_cov", res_opp, FOLD_IDENTITY_TOL, "<=", res_opp <= FOLD_IDENTITY_TOL
         ))
@@ -7152,7 +7156,6 @@ def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm, p: float) -> GateOutcome
         ))
         checks.append(GateCheck("fold_multiplier_equal", mum, mom, "==", mum == mom))
     else:
-        um = dcr.synth_user_turn_multiplier
         om = dcr.synth_opp_turn_multiplier
         checks.append(GateCheck("fold_user_multiplier_lt_1", um, 1.0, "<", um < 1.0))
         checks.append(GateCheck("fold_opp_multiplier_eq_1", om, 1.0, "==", om == 1.0))
