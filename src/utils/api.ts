@@ -987,8 +987,8 @@ export const checkDrillRoute = async (
     current_fen: string
     previous_fen?: string
     played_uci?: string
-    /** Plies played to reach current_fen. At the root this is a boundary claim. */
-    current_ply?: number
+    /** Required route metadata. At the root this is a boundary claim. */
+    current_ply: number
     /** The served decision whose move was applied. Confirms an OPPONENT arrival. */
     decision_id?: string
   },

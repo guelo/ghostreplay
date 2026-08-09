@@ -333,7 +333,12 @@ def test_route_check_off_route_emits_drill_failed(client, auth_headers, captured
         session_id = start.json()["session_id"]
         r = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": d4_fen, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            json={
+                "current_fen": d4_fen,
+                "previous_fen": START_FEN,
+                "played_uci": "d2d4",
+                "current_ply": 1,
+            },
             headers=auth_headers(user_id=77),
         )
     assert r.status_code == 200

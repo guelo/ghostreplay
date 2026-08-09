@@ -1996,7 +1996,7 @@ def test_drill_offroute_route_check_omits_opening_score_changes(
             resp = client.post(
                 f"/api/drills/{session_id}/route-check",
                 json={"current_fen": D4_FEN, "previous_fen": START_FEN,
-                      "played_uci": "d2d4"},
+                      "played_uci": "d2d4", "current_ply": 1},
                 headers=auth_headers(user_id=123),
             )
 
@@ -2026,7 +2026,8 @@ def test_route_check_on_route_omits_opening_score_changes(client, auth_headers, 
         # Playing the on-route first move (1. e4) stays on route.
         resp = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": E4_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={"current_fen": E4_FEN, "previous_fen": START_FEN,
+                  "played_uci": "e2e4", "current_ply": 1},
             headers=auth_headers(user_id=123),
         )
     assert resp.status_code == 200

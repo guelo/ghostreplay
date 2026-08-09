@@ -89,12 +89,9 @@ class DrillRouteCheckRequest(BaseModel):
     current_fen: str = Field(..., min_length=1)
     previous_fen: str | None = Field(None, min_length=1)
     played_uci: str | None = Field(None, min_length=4, max_length=5)
-    # Plies played to reach current_fen. The live client now sends it on every check,
-    # but it stays OPTIONAL through the deploy window: a tab loaded before the deploy
-    # posts without it, and requiring it would 422 every drill move for that tab.
-    # Absent = no boundary claim, which is exactly the legacy behaviour.
-    # Tighten to required once the window closes (g-route-check-ply-required).
-    current_ply: int | None = Field(None, ge=0)
+    # Plies played to reach current_fen. Required on every check; at the root it is a
+    # boundary claim, while away from the root it is ordinary route metadata.
+    current_ply: int = Field(..., ge=0)
     # The opponent_decisions row whose served move the client just applied. Required to
     # confirm a root the OPPONENT moved into, rejected on one the player moved into —
     # which of the two applies is derived from the target, never from this field.
@@ -256,8 +253,6 @@ def _confirmed_root_ply(
     by omitting ``decision_id``.
     """
     current_ply = request.current_ply
-    if current_ply is None:  # pragma: no cover — the caller gates on this
-        return None
     if current_ply < 1:
         raise HTTPException(
             status_code=422, detail="current_ply does not match the drill's move order"
@@ -713,11 +708,6 @@ def check_drill_route(
         raise HTTPException(status_code=400, detail="Drill route cannot be checked from its current state")
     if (request.previous_fen is None) != (request.played_uci is None):
         raise HTTPException(status_code=400, detail="previous_fen and played_uci must be provided together")
-    if request.decision_id is not None and request.current_ply is None:
-        raise HTTPException(
-            status_code=422, detail="current_ply is required with decision_id"
-        )
-
     routing = routing_view(get_opening_graph())
     route_map = route_map_for_target(
         routing, session.drill_opening_key, decode_uci_line(session.drill_line)
@@ -747,7 +737,7 @@ def check_drill_route(
     # snapshot branch into a locking one.
     confirmed_ply = (
         _confirmed_root_ply(db, session, request, route_map, current_fen, previous_fen)
-        if at_root and request.current_ply is not None
+        if at_root
         else None
     )
 

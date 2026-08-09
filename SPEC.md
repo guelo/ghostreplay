@@ -4017,7 +4017,7 @@ The same `route_map_for_target` selector drives opponent steering (`/api/game/ne
 serves: `on_route`, or `root_pending` when applying that move would land on the root.
 `root_pending` transitions nothing — it tells the client it must confirm (§17.4.1).
 
-#### 17.4.1 Root confirmation and the evidence boundary (g-root-confirm-api, g-root-confirm-cutover)
+#### 17.4.1 Root confirmation and the evidence boundary (g-root-confirm-api, g-root-confirm-cutover, g-route-check-ply-required)
 
 `drill_state='root_reached'` records that the drill *is* at its opening root.
 `game_sessions.drill_root_reached_ply` records **which ply that happened on** — the
@@ -4080,14 +4080,9 @@ matches after play has moved past it, which is precisely what a *second* attempt
 same move produces when it finishes first. Both attempts otherwise pass every field and
 each goes on to request and apply an opponent reply through its own `Chess` instance,
 appending twice to the one shared history; ownership discards the loser whole.
-
-*Accepted rollout cost (no compatibility shim):* a tab loaded before the cutover ignores
-`root_pending`, plays on, and fails its drill `off_route` on the next player move. Only
-opponent-reached roots are affected; player-reached roots go through route-check either
-way. Pinned by `test_legacy_client_fails_its_drill_after_a_root_pending_serve`.
-- `NULL` means "no confirmed root" and is a real, expected residue — legacy sessions and
-  drills abandoned mid-route. A NULL-boundary session contributes no reach evidence, while
-  its targeted attempts survive independently in the `opponent_decisions` log (§8.3).
+`NULL` means "no confirmed root" and is a real, expected residue — legacy sessions and
+drills abandoned mid-route. A NULL-boundary session contributes no reach evidence, while
+its targeted attempts survive independently in the `opponent_decisions` log (§8.3).
 
 **Which proof is owed is derived, never inferred from the request.** A FEN's active-colour
 field fixes who made the last move into it, so the route target alone decides whether the
@@ -4142,11 +4137,9 @@ outcome the NULL case already handles correctly. A `decision_id` sent for a posi
 **not** the root is likewise a `422` and never an off-route failure — the server served that
 move, so the confirmation fails, not the drill.
 
-`current_ply` is optional and, away from the root, is ordinary metadata rather than a
-boundary claim: a route-check without it behaves exactly as it did before confirmation
-existed. The live client now sends it on every check; it stays optional only for the length
-of the deploy window, since requiring it would `422` every drill move for an already-open
-tab (g-route-check-ply-required).
+`current_ply` is required on every route-check. At the root it participates in the proof
+above; away from the root it is ordinary metadata rather than a boundary claim. Omitting it
+is a request-validation `422` and cannot mutate drill state.
 
 #### 17.4.2 Boundary-scoped broad opportunity accounting (g-boundary-event-scope)
 

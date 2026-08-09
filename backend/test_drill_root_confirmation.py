@@ -273,8 +273,8 @@ def test_player_root_at_ply_one_stamps_state_and_boundary_together(
     updates = _gs_updates(stmts)
     assert len(updates) == 1
     # When both are written they are written together: one statement, both columns.
-    # (The converse does not hold — root_reached without a boundary is a real, permanent
-    # shape; see test_route_check_without_current_ply_keeps_todays_behaviour.)
+    # The converse does not hold: legacy rows and soft-declined proofs can leave a
+    # permanent root_reached-without-boundary shape.
     assert "drill_state" in updates[0]
     assert "drill_root_reached_ply" in updates[0]
 
@@ -625,20 +625,6 @@ def test_confirmation_off_route_fails_the_confirmation_not_the_drill(
     assert session.drill_terminal_reason is None
 
 
-def test_decision_id_requires_current_ply(client, auth_headers):
-    session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
-
-    response = _route_check(
-        client,
-        auth_headers,
-        session_id,
-        current_fen=E4_FEN,
-        decision_id=str(uuid.uuid4()),
-    )
-
-    assert response.status_code == 422, response.text
-
-
 # ---------------------------------------------------------------------------
 # ply_before provenance: the recorded ply is only evidence once its history replays
 # ---------------------------------------------------------------------------
@@ -853,7 +839,7 @@ def test_reaches_drill_root_is_false_for_an_on_route_serve(
 
 
 # ---------------------------------------------------------------------------
-# Idempotency and backwards compatibility
+# Idempotency and request contract
 # ---------------------------------------------------------------------------
 
 
@@ -876,11 +862,10 @@ def test_duplicate_confirmation_returns_the_boundary_without_restamping(
     assert _session(db_session, session_id).drill_root_reached_ply == 1
 
 
-def test_route_check_without_current_ply_keeps_todays_behaviour(
+def test_route_check_requires_current_ply(
     client, auth_headers, db_session
 ):
-    """The live client posts no current_ply. It must still reach root — and must NOT
-    acquire a boundary it never claimed."""
+    """The compatibility window is closed: omitted ply fails before any transition."""
     session_id = _drill(client, auth_headers, target=E4_FEN, player_color="white")
 
     response = _route_check(
@@ -892,11 +877,12 @@ def test_route_check_without_current_ply_keeps_todays_behaviour(
         played_uci="e2e4",
     )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "root_reached"
-    assert response.json()["drill_root_reached_ply"] is None
+    assert response.status_code == 422, response.text
+    assert ["body", "current_ply"] in [
+        error["loc"] for error in response.json()["error"]["details"]
+    ]
     session = _session(db_session, session_id)
-    assert session.drill_state == "root_reached"
+    assert session.drill_state == "active"
     assert session.drill_root_reached_ply is None
 
 
@@ -989,44 +975,6 @@ def test_observed_root_fallback_stamps_the_boundary_write_once(
     assert late.json()["drill_root_reached_ply"] == 1
     assert _gs_updates(stmts) == []
     assert _session(db_session, session_id).drill_root_reached_ply == 1
-
-
-def test_legacy_client_fails_its_drill_after_a_root_pending_serve(
-    client, auth_headers, db_session
-):
-    """PINS THE ACCEPTED ROLLOUT COST — this is not a regression.
-
-    A tab loaded before the cutover does not recognise ``root_pending``. It leaves the
-    drill "active", plays on, and its next route-check posts a position one ply PAST the
-    root with no current_ply and no decision_id. That position is neither the target nor
-    on route, so the drill fails off_route. Only OPPONENT-reached roots are affected,
-    and only for the length of the deploy window; player-reached roots go through
-    route-check either way. Deleting this test means the cost has been paid down —
-    check that deliberately, do not just re-align the assertion.
-    """
-    session_id = _drill(client, auth_headers, target=E4_FEN, player_color="black")
-
-    served = _opponent_move(client, auth_headers, session_id, START_FEN, [])
-    assert served.status_code == 200, served.text
-    assert served.json()["drill_route"]["status"] == "root_pending"
-    assert _session(db_session, session_id).drill_state == "active"
-
-    # The legacy shape: no current_ply, no decision_id, and a FEN past the root.
-    response = _route_check(
-        client,
-        auth_headers,
-        session_id,
-        current_fen=E4_E5_FEN,
-        previous_fen=E4_FEN,
-        played_uci="e7e5",
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "failed"
-    assert response.json()["failure"]["reason"] == "off_route"
-    session = _session(db_session, session_id)
-    assert session.drill_state == "failed"
-    assert session.drill_root_reached_ply is None
 
 
 # ---------------------------------------------------------------------------

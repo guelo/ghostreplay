@@ -1284,15 +1284,14 @@ describe('checkDrillRoute', () => {
     drill_root_reached_ply: 3,
   }
 
-  it('omits current_ply and decision_id when not supplied', async () => {
-    // Absent current_ply is the legacy shape and means "no boundary claim". It
-    // must not be serialized as null, which the backend would reject.
+  it('serializes required current_ply without an optional decision_id', async () => {
     mockResponse(routePayload)
 
     await checkDrillRoute('s1', {
       current_fen: 'after',
       previous_fen: 'before',
       played_uci: 'e2e4',
+      current_ply: 1,
     })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
@@ -1300,6 +1299,7 @@ describe('checkDrillRoute', () => {
       current_fen: 'after',
       previous_fen: 'before',
       played_uci: 'e2e4',
+      current_ply: 1,
     })
   })
 

@@ -164,6 +164,7 @@ def test_route_check_marks_root_reached_by_user_move(client, auth_headers, db_se
                 "current_fen": ROOT_FEN,
                 "previous_fen": START_FEN,
                 "played_uci": "e2e4",
+                "current_ply": 1,
             },
             headers=auth_headers(),
         )
@@ -200,6 +201,7 @@ def test_route_check_fails_only_when_no_path_remains(client, auth_headers, db_se
                 "current_fen": d4_fen,
                 "previous_fen": START_FEN,
                 "played_uci": "d2d4",
+                "current_ply": 1,
             },
             headers=auth_headers(),
         )
@@ -865,7 +867,12 @@ def test_route_check_ignores_accuracy_before_root(client, auth_headers, db_sessi
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -976,7 +983,12 @@ def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, 
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1000,7 +1012,12 @@ def test_route_check_cache_miss_best_effort_pass(client, auth_headers, db_sessio
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1034,7 +1051,12 @@ def test_route_check_tier_fallback_strict_does_not_fail_preroot(client, auth_hea
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1058,7 +1080,12 @@ def test_route_check_onthefly_eval_both_evals_present_does_not_fail_preroot(clie
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1081,7 +1108,12 @@ def test_route_check_onthefly_eval_null_fallthrough_both_null(client, auth_heade
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1103,7 +1135,12 @@ def test_route_check_onthefly_eval_null_fallthrough_asymmetric(client, auth_head
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1125,7 +1162,12 @@ def test_route_check_suggestion_filtering_threshold_keeps_passing_move(client, a
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            json={
+                "current_fen": D4_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "d2d4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1150,7 +1192,12 @@ def test_route_check_suggestion_filtering_all_exceed_returns_unfiltered(client, 
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            json={
+                "current_fen": D4_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "d2d4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1173,7 +1220,12 @@ def test_route_check_preroot_accuracy_does_not_populate_failure(client, auth_hea
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            json={
+                "current_fen": ROOT_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "e2e4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1195,7 +1247,12 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
 
         response = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            json={
+                "current_fen": D4_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "d2d4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
 
@@ -1379,7 +1436,7 @@ def test_transposition_into_target_root_is_on_route_and_reaches_root(
         # "canonical" order.
         on_route = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": _NF3_D5_FEN},
+            json={"current_fen": _NF3_D5_FEN, "current_ply": 2},
             headers=auth_headers(),
         )
         assert on_route.status_code == 200
@@ -1394,6 +1451,7 @@ def test_transposition_into_target_root_is_on_route_and_reaches_root(
                 "current_fen": TRANSPOSE_TARGET_FEN,
                 "previous_fen": _NF3_D5_FEN,
                 "played_uci": "d2d4",
+                "current_ply": 3,
             },
             headers=auth_headers(),
         )
@@ -1489,6 +1547,7 @@ def test_transposed_order_is_off_route_without_the_overlay(
                 "current_fen": _NF3_D5_FEN,
                 "previous_fen": _NF3_FEN,
                 "played_uci": "d7d5",
+                "current_ply": 2,
             },
             headers=auth_headers(),
         )
@@ -1524,7 +1583,7 @@ def test_overlay_supplies_the_missing_edge_and_routes_the_transposed_order(
 
         on_route = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": _NF3_D5_FEN},
+            json={"current_fen": _NF3_D5_FEN, "current_ply": 2},
             headers=auth_headers(),
         )
         assert on_route.status_code == 200
@@ -1539,6 +1598,7 @@ def test_overlay_supplies_the_missing_edge_and_routes_the_transposed_order(
                 "current_fen": TRANSPOSE_TARGET_FEN,
                 "previous_fen": _NF3_D5_FEN,
                 "played_uci": "d2d4",
+                "current_ply": 3,
             },
             headers=auth_headers(),
         )
@@ -1711,6 +1771,7 @@ def test_densification_never_routes_a_move_that_would_close_a_cycle(
                 "current_fen": ng1,
                 "previous_fen": nf3_nf6,
                 "played_uci": "f3g1",
+                "current_ply": 3,
             },
             headers=auth_headers(),
         )
@@ -1880,6 +1941,7 @@ def test_adhoc_inbook_drill_keeps_transposition_tolerant_routing(client, auth_he
                 "current_fen": pos["f"],
                 "previous_fen": pos["start"],
                 "played_uci": "g1f3",
+                "current_ply": 1,
             },
             headers=auth_headers(),
         )
@@ -1925,6 +1987,7 @@ def test_adhoc_offbook_drill_reaches_root_by_line(client, auth_headers, db_sessi
                 "current_fen": target,
                 "previous_fen": _replay_norm(line[:-1]),
                 "played_uci": line[-1],
+                "current_ply": len(line),
             },
             headers=auth_headers(),
         )
@@ -1967,6 +2030,7 @@ def test_adhoc_offbook_offline_move_fails_with_line_suggestion(client, auth_head
                 "current_fen": _replay_norm(["d2d4"]),
                 "previous_fen": START_FEN,
                 "played_uci": "d2d4",
+                "current_ply": 1,
             },
             headers=auth_headers(),
         )
@@ -2482,7 +2546,12 @@ def test_abandon_preserves_off_route_failed_outcome_and_bumps_cursor(
         session_id = start.json()["session_id"]
         route = client.post(
             f"/api/drills/{session_id}/route-check",
-            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            json={
+                "current_fen": D4_FEN,
+                "previous_fen": START_FEN,
+                "played_uci": "d2d4",
+                "current_ply": 1,
+            },
             headers=auth_headers(),
         )
         assert route.json()["status"] == "failed"

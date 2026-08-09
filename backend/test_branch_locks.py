@@ -79,6 +79,7 @@ def _make_drill(
     user_id: int = 123,
     player_color: str = "white",
     opening_key: str = ROOT_FEN,
+    drill_root_reached_ply: int | None = None,
 ) -> uuid.UUID:
     now = datetime.now(timezone.utc)
     kwargs = dict(
@@ -91,6 +92,7 @@ def _make_drill(
         session_mode="drill",
         drill_state=drill_state,
         drill_opening_key=opening_key,
+        drill_root_reached_ply=drill_root_reached_ply,
         drill_strictness="standard",
         is_rated=False,
     )
@@ -139,13 +141,20 @@ def _gs_selects(stmts: list[str]) -> list[str]:
 def test_route_check_root_reached_snapshot_writes_nothing(client, auth_headers, db_session):
     """The entry root-reached response is a pure snapshot: one unlocked read, no
     locked re-read, no write."""
-    session_id = _make_drill(db_session, drill_state="root_reached")
+    session_id = _make_drill(
+        db_session, drill_state="root_reached", drill_root_reached_ply=1
+    )
     headers = auth_headers()
     with patch("app.api.drills.get_opening_graph", return_value=_steering_graph()):
         with _capture(engine) as stmts:
             resp = client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": ROOT_FEN},
+                json={
+                    "current_fen": ROOT_FEN,
+                    "previous_fen": START_FEN,
+                    "played_uci": "e2e4",
+                    "current_ply": 1,
+                },
                 headers=headers,
             )
     assert resp.status_code == 200, resp.text
@@ -162,7 +171,8 @@ def test_route_check_on_route_snapshot_writes_nothing(client, auth_headers, db_s
         with _capture(engine) as stmts:
             resp = client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": START_FEN},  # on route to ROOT_FEN, not the target
+                # On route to ROOT_FEN, not the target.
+                json={"current_fen": START_FEN, "current_ply": 0},
                 headers=headers,
             )
     assert resp.status_code == 200, resp.text
@@ -180,7 +190,12 @@ def test_route_check_target_reached_locks_and_writes(client, auth_headers, db_se
         with _capture(engine) as stmts:
             resp = client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": ROOT_FEN},  # the target
+                json={
+                    "current_fen": ROOT_FEN,  # the target
+                    "previous_fen": START_FEN,
+                    "played_uci": "e2e4",
+                    "current_ply": 1,
+                },
                 headers=headers,
             )
     assert resp.status_code == 200, resp.text
@@ -199,7 +214,12 @@ def test_route_check_off_route_locks_and_writes(client, auth_headers, db_session
         with _capture(engine) as stmts:
             resp = client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+                json={
+                    "current_fen": D4_FEN,
+                    "previous_fen": START_FEN,
+                    "played_uci": "d2d4",
+                    "current_ply": 1,
+                },
                 headers=headers,
             )
     assert resp.status_code == 200, resp.text
@@ -313,7 +333,12 @@ def test_route_check_off_route_yields_to_concurrent_root_reached(
         with patch("app.api.drills.get_opening_graph", return_value=_steering_graph()):
             resp = pg_client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+                json={
+                    "current_fen": D4_FEN,
+                    "previous_fen": START_FEN,
+                    "played_uci": "d2d4",
+                    "current_ply": 1,
+                },
                 headers=auth_headers(user_id=user_id),
             )
         result["elapsed"] = time.perf_counter() - started
@@ -358,7 +383,12 @@ def test_route_check_target_reached_yields_to_concurrent_failure(
         with patch("app.api.drills.get_opening_graph", return_value=_steering_graph()):
             resp = pg_client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": ROOT_FEN},  # the target
+                json={
+                    "current_fen": ROOT_FEN,  # the target
+                    "previous_fen": START_FEN,
+                    "played_uci": "e2e4",
+                    "current_ply": 1,
+                },
                 headers=auth_headers(user_id=user_id),
             )
         result["elapsed"] = time.perf_counter() - started
@@ -393,7 +423,11 @@ def test_route_check_root_reached_snapshot_preserves_concurrent_failure(
     user_id = 7103
     _seed_pg_user(pg_session_factory, user_id)
     session_id = _seed_pg_drill(
-        pg_session_factory, user_id=user_id, drill_state="root_reached", opening_key=ROOT_FEN
+        pg_session_factory,
+        user_id=user_id,
+        drill_state="root_reached",
+        opening_key=ROOT_FEN,
+        drill_root_reached_ply=1,
     )
     locked = threading.Event()
     result: dict = {}
@@ -404,7 +438,12 @@ def test_route_check_root_reached_snapshot_preserves_concurrent_failure(
         with patch("app.api.drills.get_opening_graph", return_value=_steering_graph()):
             result["resp"] = pg_client.post(
                 f"/api/drills/{session_id}/route-check",
-                json={"current_fen": ROOT_FEN},
+                json={
+                    "current_fen": ROOT_FEN,
+                    "previous_fen": START_FEN,
+                    "played_uci": "e2e4",
+                    "current_ply": 1,
+                },
                 headers=auth_headers(user_id=user_id),
             )
 
