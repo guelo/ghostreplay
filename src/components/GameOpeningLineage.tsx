@@ -214,9 +214,9 @@ function GameOpeningLineage({
             : change.is_new
               ? null
               : change.before ?? item.score;
-          // The terminal pin wins over the pending shimmer: once `change` is
+          // The terminal pin wins over the pending spinner: once `change` is
           // present the card shows the pinned pre-game number beside the diff
-          // badge, and swapping that number for a shimmer mid-pin would make
+          // badge, and swapping that number for a spinner mid-pin would make
           // the badge reference a value that is no longer on screen.
           const scorePending = scoreStatus === "pending" && !change;
           const view = toNodeView(item, startPly, cardScore);

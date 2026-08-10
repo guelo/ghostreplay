@@ -108,13 +108,13 @@ interface OpeningTreeNodeCardProps {
 /**
  * Placeholder occupying the score + grade slot while scores load (g-a5v3).
  * Reserves the slot's width so hydrating a score does not reflow the card, and
- * exposes an accessible loading label — a bare visual shimmer would leave the
+ * exposes an accessible loading label — a bare visual spinner would leave the
  * state unannounced to assistive tech.
  */
 function ScorePlaceholder() {
   return (
     <span className="tree-node-card__score-loading" aria-busy="true">
-      <span className="tree-node-card__score-shimmer" aria-hidden="true" />
+      <span className="tree-node-card__score-spinner" aria-hidden="true" />
       <span className="tree-node-card__score-loading-label">Score loading</span>
     </span>
   );

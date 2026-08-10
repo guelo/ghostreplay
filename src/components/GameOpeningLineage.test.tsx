@@ -510,11 +510,11 @@ describe("GameOpeningLineage", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Score-loading affordance for a cold score cache (g-a5v3)
+  // Score-loading spinner for a cold score cache (g-a5v3, g-nclr)
   // -------------------------------------------------------------------------
 
   describe("pending scores", () => {
-    it("shows a loading affordance instead of a score when pending", () => {
+    it("shows a loading spinner instead of a score when pending", () => {
       renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null })], {
         scoreStatus: "pending",
       });
@@ -546,7 +546,7 @@ describe("GameOpeningLineage", () => {
     });
 
     it("keeps the pinned pre-game number when a delta badge is present", () => {
-      // The terminal pin wins over the shimmer: the badge quotes a diff against
+      // The terminal pin wins over the spinner: the badge quotes a diff against
       // this number, so replacing it with a placeholder would leave the badge
       // referring to a value that is no longer on screen.
       renderLineage(
@@ -562,7 +562,7 @@ describe("GameOpeningLineage", () => {
       expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
     });
 
-    it("shows the loading affordance in the expanded card too", async () => {
+    it("shows the loading spinner in the expanded card too", async () => {
       const user = userEvent.setup();
       renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null })], {
         scoreStatus: "pending",
