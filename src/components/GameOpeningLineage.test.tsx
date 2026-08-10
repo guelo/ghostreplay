@@ -52,6 +52,7 @@ function renderLineage(
     scoreChanges?: OpeningScoreDeltaItem[] | null;
     startPly?: number;
     scoreStatus?: OpeningScoreStatus;
+    pendingScoreIndices?: ReadonlySet<number>;
     activeMoveIndex?: number | null;
   } = {},
 ) {
@@ -65,6 +66,7 @@ function renderLineage(
         startPly={handlers.startPly ?? 1}
         scoreChanges={handlers.scoreChanges}
         scoreStatus={handlers.scoreStatus}
+        pendingScoreIndices={handlers.pendingScoreIndices}
         activeMoveIndex={handlers.activeMoveIndex}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
@@ -80,6 +82,7 @@ function renderLineage(
           startPly={handlers.startPly ?? 1}
           scoreChanges={handlers.scoreChanges}
           scoreStatus={handlers.scoreStatus}
+          pendingScoreIndices={handlers.pendingScoreIndices}
           activeMoveIndex={activeMoveIndex}
           onSelectRoot={onSelectRoot}
           onStartDrill={onStartDrill}
@@ -537,6 +540,24 @@ describe("GameOpeningLineage", () => {
       expect(within(card).getAllByText("\u2014")).toHaveLength(2);
     });
 
+    it("shows loading only for the unmatched live card occurrence", () => {
+      renderLineage(
+        [
+          makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null }),
+          makeItem({ opening_key: "k2", opening_name: "Italian Game", score: null }),
+        ],
+        { scoreStatus: "ready", pendingScoreIndices: new Set([0]) },
+      );
+
+      const loadingCard = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(loadingCard).getByText(/score loading/i)).toBeInTheDocument();
+      expect(within(loadingCard).queryByText("\u2014")).not.toBeInTheDocument();
+
+      const resolvedCard = screen.getByRole("button", { name: /Italian Game/ });
+      expect(within(resolvedCard).queryByText(/score loading/i)).not.toBeInTheDocument();
+      expect(within(resolvedCard).getAllByText("\u2014")).toHaveLength(2);
+    });
+
     it("defaults to ready when scoreStatus is omitted", () => {
       renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 72 })]);
 
@@ -545,7 +566,7 @@ describe("GameOpeningLineage", () => {
       expect(within(card).getByText("72")).toBeInTheDocument();
     });
 
-    it("keeps the pinned pre-game number when a delta badge is present", () => {
+    it("keeps the pinned pre-game number when cache status is pending", () => {
       // The terminal pin wins over the spinner: the badge quotes a diff against
       // this number, so replacing it with a placeholder would leave the badge
       // referring to a value that is no longer on screen.
@@ -553,6 +574,21 @@ describe("GameOpeningLineage", () => {
         [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 44 })],
         {
           scoreStatus: "pending",
+          scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+        },
+      );
+
+      const card = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(card).getByText("41")).toBeInTheDocument();
+      expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
+    });
+
+    it("keeps the pinned pre-game number when the live occurrence is pending", () => {
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 44 })],
+        {
+          scoreStatus: "ready",
+          pendingScoreIndices: new Set([0]),
           scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
         },
       );

@@ -516,7 +516,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const {
     lineage: openingLineage,
     startPly: openingLineageLocalStartPly,
-  } = useLiveOpeningLineage(moveHistory, openingLineageFromServer);
+    pendingScoreIndices: openingLineagePendingScoreIndices,
+  } = useLiveOpeningLineage(
+    moveHistory,
+    openingLineageFromServer,
+    sessionId,
+  );
 
   // Prefer the server's authoritative start ply once it has answered; the local
   // derivation covers the window before that (and matches it in every case we
@@ -2434,6 +2439,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     startPly={openingLineageStartPly}
                     scoreChanges={openingScoreChanges}
                     scoreStatus={openingScoreStatus}
+                    pendingScoreIndices={openingLineagePendingScoreIndices}
                     // Keep the expanded card in sync with the board (g-m1xc).
                     // displayedIndex — not viewIndex — is the board's move
                     // cursor: it normalizes "live/latest" to the last ply and

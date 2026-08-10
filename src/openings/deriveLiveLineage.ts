@@ -114,6 +114,28 @@ export function deriveLiveOpeningLineage(
 const mergeKey = (openingKey: string, crossingIndex: number): string =>
   `${openingKey}@${crossingIndex}`;
 
+function indexServerLineage(
+  server: readonly OpeningLineageItem[] | null | undefined,
+): Map<string, OpeningLineageItem> {
+  const scoresByKey = new Map<string, OpeningLineageItem>();
+  for (const item of server ?? []) {
+    scoresByKey.set(mergeKey(item.opening_key, item.moves.length - 1), item);
+  }
+  return scoresByKey;
+}
+
+export interface PendingScoreOccurrence {
+  index: number;
+  occurrenceKey: string;
+}
+
+export interface MergedServerLineageState {
+  lineage: LiveOpeningLineageItem[];
+  /** Locally-derived occurrences that have no authoritative server row yet.
+   *  A matching `score: null` row is settled/unscored, not pending. */
+  pendingScoreOccurrences: readonly PendingScoreOccurrence[];
+}
+
 /**
  * Hydrate locally-derived cards with server-supplied scores.
  *
@@ -127,21 +149,20 @@ const mergeKey = (openingKey: string, crossingIndex: number): string =>
  * `moves.length - 1`. This holds only when both sides walk the same move list,
  * which is exactly what the parity test pins down.
  */
-export function mergeServerLineage(
+export function mergeServerLineageState(
   local: LiveOpeningLineageItem[],
   server: readonly OpeningLineageItem[] | null | undefined,
-): LiveOpeningLineageItem[] {
-  if (!server || server.length === 0) return local;
-
-  const scoresByKey = new Map<string, OpeningLineageItem>();
-  for (const item of server) {
-    scoresByKey.set(mergeKey(item.opening_key, item.moves.length - 1), item);
-  }
-
+): MergedServerLineageState {
+  const scoresByKey = indexServerLineage(server);
   let changed = false;
-  const merged = local.map((item) => {
-    const match = scoresByKey.get(mergeKey(item.opening_key, item.crossingIndex));
-    if (!match) return item;
+  const pendingScoreOccurrences: PendingScoreOccurrence[] = [];
+  const merged = local.map((item, index) => {
+    const occurrenceKey = mergeKey(item.opening_key, item.crossingIndex);
+    const match = scoresByKey.get(occurrenceKey);
+    if (!match) {
+      pendingScoreOccurrences.push({ index, occurrenceKey });
+      return item;
+    }
     changed = true;
     return {
       ...item,
@@ -155,5 +176,16 @@ export function mergeServerLineage(
 
   // Preserve referential identity when nothing hydrated, so consumers memoizing
   // on the lineage array do not re-render on every poll that changes nothing.
-  return changed ? merged : local;
+  return {
+    lineage: changed ? merged : local,
+    pendingScoreOccurrences,
+  };
+}
+
+/** Compatibility projection for consumers that only need hydrated rows. */
+export function mergeServerLineage(
+  local: LiveOpeningLineageItem[],
+  server: readonly OpeningLineageItem[] | null | undefined,
+): LiveOpeningLineageItem[] {
+  return mergeServerLineageState(local, server).lineage;
 }

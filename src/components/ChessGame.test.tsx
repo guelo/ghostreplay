@@ -4818,6 +4818,7 @@ describe("ChessGame opening lineage", () => {
       expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1),
     );
     expect(within(region).queryByText("73")).not.toBeInTheDocument();
+    expect(within(region).getByText(/score loading/i)).toBeInTheDocument();
     expect(useGameStore.getState().moveHistory).toHaveLength(1);
 
     act(() => emitUploadCommit("session-upload-commit"));
@@ -4826,6 +4827,7 @@ describe("ChessGame opening lineage", () => {
       expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2),
     );
     expect(await within(region).findByText("73")).toBeInTheDocument();
+    expect(within(region).queryByText(/score loading/i)).not.toBeInTheDocument();
     expect(useGameStore.getState().moveHistory).toHaveLength(1);
 
     // A notification that does not belong to the source's current session is

@@ -4,6 +4,7 @@ import {
   useLiveOpeningLineage,
   deriveStartPly,
   __resetOpeningRootIndexCache,
+  LOCAL_SCORE_PENDING_TIMEOUT_MS,
 } from "./useLiveOpeningLineage";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
 import fixture from "../openings/__fixtures__/openingChainParity.json";
@@ -35,7 +36,7 @@ const moveHistory = linearCase.sans.map((san, i) => ({
 function serverItem(
   openingKey: string,
   moves: string[],
-  score: number,
+  score: number | null,
 ): OpeningLineageItem {
   return {
     opening_key: openingKey,
@@ -73,6 +74,9 @@ describe("useLiveOpeningLineage", () => {
     );
     // ...and they are unscored until the server answers.
     expect(result.current.lineage.every((i) => i.score === null)).toBe(true);
+    expect([...result.current.pendingScoreIndices]).toEqual(
+      result.current.lineage.map((_, index) => index),
+    );
   });
 
   it("hydrates scores from the server without changing the cards", async () => {
@@ -83,6 +87,12 @@ describe("useLiveOpeningLineage", () => {
     );
     await waitFor(() => expect(result.current.lineage.length).toBeGreaterThan(0));
     const before = result.current.lineage;
+    const pendingBefore = result.current.pendingScoreIndices;
+
+    // An equivalent response array does not change membership, so consumers
+    // keep the same Set reference instead of rerendering for allocation alone.
+    rerender({ server: [] });
+    expect(result.current.pendingScoreIndices).toBe(pendingBefore);
 
     const target = before[1];
     rerender({ server: [serverItem(target.opening_key, target.moves, 64)] });
@@ -94,6 +104,114 @@ describe("useLiveOpeningLineage", () => {
     expect(result.current.lineage.map((i) => i.moves)).toEqual(
       before.map((i) => i.moves),
     );
+    expect(result.current.pendingScoreIndices.has(1)).toBe(false);
+    expect(result.current.pendingScoreIndices.has(0)).toBe(true);
+  });
+
+  it("treats a matching null score as loaded rather than pending", async () => {
+    const first = linearCase.expected[0];
+    const server = [serverItem(first.opening_key, first.moves, null)];
+    const { result } = renderHook(() =>
+      useLiveOpeningLineage(moveHistory, server),
+    );
+
+    await waitFor(() =>
+      expect(result.current.lineage.length).toBeGreaterThan(server.length),
+    );
+    expect(result.current.lineage[0].score).toBeNull();
+    expect(result.current.pendingScoreIndices.has(0)).toBe(false);
+    expect(result.current.pendingScoreIndices.has(1)).toBe(true);
+  });
+
+  it("expires each unmatched occurrence on its own bounded clock", async () => {
+    vi.useFakeTimers();
+    const firstCrossingMoves = moveHistory.slice(
+      0,
+      linearCase.expected[0].moves.length,
+    );
+    const hook = renderHook(
+      ({ moves, scope }: { moves: typeof moveHistory; scope: string }) =>
+        useLiveOpeningLineage(moves, [], scope),
+      { initialProps: { moves: firstCrossingMoves, scope: "session-a" } },
+    );
+
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect([...hook.result.current.pendingScoreIndices]).toEqual([0]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      hook.rerender({ moves: moveHistory, scope: "session-a" });
+      expect(hook.result.current.pendingScoreIndices.has(1)).toBe(true);
+
+      // The first card has waited 30s and falls back to the unscored state;
+      // later cards still own the remainder of their independent budgets.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(
+          LOCAL_SCORE_PENDING_TIMEOUT_MS - 10_000,
+        );
+      });
+      expect(hook.result.current.pendingScoreIndices.has(0)).toBe(false);
+      expect(hook.result.current.pendingScoreIndices.has(1)).toBe(true);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(hook.result.current.pendingScoreIndices.size).toBe(0);
+
+      // A new session scopes the same occurrence to a fresh loading window.
+      hook.rerender({ moves: firstCrossingMoves, scope: "session-b" });
+      expect([...hook.result.current.pendingScoreIndices]).toEqual([0]);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LOCAL_SCORE_PENDING_TIMEOUT_MS);
+      });
+      expect(hook.result.current.pendingScoreIndices.size).toBe(0);
+
+      // Reverting removes the old appearance's expiry marker, so reaching the
+      // same occurrence again in this session also gets a fresh window.
+      hook.rerender({ moves: [], scope: "session-b" });
+      hook.rerender({ moves: firstCrossingMoves, scope: "session-b" });
+      expect([...hook.result.current.pendingScoreIndices]).toEqual([0]);
+    } finally {
+      hook.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still hydrates a score after its local loading timeout expires", async () => {
+    vi.useFakeTimers();
+    const first = linearCase.expected[0];
+    const firstCrossingMoves = moveHistory.slice(0, first.moves.length);
+    const hook = renderHook(
+      ({ server }: { server: OpeningLineageItem[] }) =>
+        useLiveOpeningLineage(firstCrossingMoves, server, "session-a"),
+      { initialProps: { server: [] as OpeningLineageItem[] } },
+    );
+
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LOCAL_SCORE_PENDING_TIMEOUT_MS);
+      });
+      expect(hook.result.current.pendingScoreIndices.size).toBe(0);
+
+      hook.rerender({
+        server: [serverItem(first.opening_key, first.moves, 73)],
+      });
+      expect(hook.result.current.lineage[0].score).toBe(73);
+      expect(hook.result.current.pendingScoreIndices.size).toBe(0);
+    } finally {
+      hook.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it("a shorter server lineage cannot remove a locally visible card", async () => {
@@ -115,6 +233,7 @@ describe("useLiveOpeningLineage", () => {
 
     // Degrades to the pre-g-a5v3 behavior rather than showing nothing.
     expect(result.current.lineage).toEqual(server);
+    expect(result.current.pendingScoreIndices.size).toBe(0);
   });
 
   it("fetches the root registry once and shares it across mounts", async () => {

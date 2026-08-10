@@ -36,6 +36,10 @@ interface GameOpeningLineageProps {
    *  score, so a cold cache reads as "loading" rather than "unscored".
    *  Defaults to "ready" — callers that never see a cold cache can omit it. */
   scoreStatus?: OpeningScoreStatus;
+  /** Indices of live, locally-derived card occurrences that have not received
+   *  a matching server lineage row yet. Kept separate from scoreStatus because
+   *  a warm score cache can be ready while the current move is still uploading. */
+  pendingScoreIndices?: ReadonlySet<number>;
   /** Index of the move the main board is displaying (g-m1xc), used to keep the
    *  expanded card in sync with the board. `-1` is the starting position;
    *  `null` means the board is off the played main line (an analysis
@@ -138,6 +142,7 @@ function GameOpeningLineage({
   onSelectRoot,
   onStartDrill,
   scoreStatus = "ready",
+  pendingScoreIndices,
   activeMoveIndex,
 }: GameOpeningLineageProps) {
   // A manual expand/collapse, stamped with the synchronization state it was made
@@ -218,7 +223,9 @@ function GameOpeningLineage({
           // present the card shows the pinned pre-game number beside the diff
           // badge, and swapping that number for a spinner mid-pin would make
           // the badge reference a value that is no longer on screen.
-          const scorePending = scoreStatus === "pending" && !change;
+          const scorePending =
+            !change &&
+            (scoreStatus === "pending" || pendingScoreIndices?.has(index) === true);
           const view = toNodeView(item, startPly, cardScore);
 
           return (

@@ -3,6 +3,7 @@ import {
   buildRootIndex,
   deriveLiveOpeningLineage,
   mergeServerLineage,
+  mergeServerLineageState,
   type LiveOpeningLineageItem,
 } from "./deriveLiveLineage";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
@@ -35,7 +36,7 @@ function localFor(name: string): LiveOpeningLineageItem[] {
 function serverItem(
   openingKey: string,
   moves: string[],
-  score: number,
+  score: number | null,
 ): OpeningLineageItem {
   return {
     opening_key: openingKey,
@@ -135,5 +136,54 @@ describe("mergeServerLineage", () => {
     expect(mergeServerLineage(local, [serverItem("unknown-key", [], 10)])).toBe(
       local,
     );
+  });
+});
+
+describe("mergeServerLineageState pending occurrences", () => {
+  it("marks every local occurrence pending before the server lineage arrives", () => {
+    const local = localFor("linear walk through nested roots");
+
+    const state = mergeServerLineageState(local, []);
+    expect(state.lineage).toBe(local);
+    expect(state.pendingScoreOccurrences.map(({ index }) => index)).toEqual(
+      local.map((_, index) => index),
+    );
+  });
+
+  it("leaves only unmatched occurrences pending, including when a match has a null score", () => {
+    const local = localFor("linear walk through nested roots");
+    const matched = local[0];
+
+    const state = mergeServerLineageState(local, [
+      serverItem(matched.opening_key, matched.moves, null),
+    ]);
+    const pending = new Set(
+      state.pendingScoreOccurrences.map(({ index }) => index),
+    );
+
+    expect(pending.has(0)).toBe(false);
+    expect([...pending]).toEqual(
+      local.slice(1).map((_, index) => index + 1),
+    );
+    expect(state.lineage[0].score).toBeNull();
+  });
+
+  it("resolves repeated opening keys by occurrence rather than by key alone", () => {
+    const local = localFor("non-consecutive repeated root retains both crossings");
+    const repeatedIndices = local.flatMap((item, index) =>
+      item.opening_key === local[0].opening_key ? [index] : [],
+    );
+    expect(repeatedIndices).toHaveLength(2);
+    const later = local[repeatedIndices[1]];
+
+    const state = mergeServerLineageState(local, [
+      serverItem(later.opening_key, later.moves, 88),
+    ]);
+    const pending = new Set(
+      state.pendingScoreOccurrences.map(({ index }) => index),
+    );
+
+    expect(pending.has(repeatedIndices[0])).toBe(true);
+    expect(pending.has(repeatedIndices[1])).toBe(false);
   });
 });
