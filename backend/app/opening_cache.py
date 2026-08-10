@@ -1230,9 +1230,11 @@ def lookup_observed_edges_for_parent(
 ) -> list[EdgeEvidence]:
     """Observed edges out of ``parent_fen`` for one batch, as ``EdgeEvidence``.
 
-    Reads via the ``idx_opening_position_edges_batch_parent`` index: ``parent_fen``
-    is the normalized 4-field key the edges were stored under, matching the builder's
-    ``norm_fen``, so no renormalization.
+    Reads via the unique index backing
+    ``uq_opening_position_edges_batch_parent_child``: its ``(batch_id, parent_fen)``
+    left prefix matches this lookup, and ``parent_fen`` is the normalized 4-field key
+    the edges were stored under, matching the builder's ``norm_fen``, so no
+    renormalization.
     """
     rows = (
         db.query(OpeningPositionEdge)
@@ -1279,8 +1281,9 @@ def lookup_observed_edges_for_parents(
     Bounded by the visible node set (line ∪ frontier) the tree builder will actually
     visit, so it fetches ~tens of rows instead of the whole batch (g-0qe6 Option B,
     superseding the whole-batch eager load that pulled a high-history user's ENTIRE
-    edge history across the remote-DB RTT). Reads via the
-    ``idx_opening_position_edges_batch_parent`` index using ``parent_fen IN (...)``.
+    edge history across the remote-DB RTT). Reads via the ``(batch_id, parent_fen)``
+    left prefix of the unique index backing
+    ``uq_opening_position_edges_batch_parent_child``, using ``parent_fen IN (...)``.
 
     Keys are the persisted ``parent_fen`` (normalized 4-field, matching the builder's
     ``norm_fen``). A requested parent with no observed edges is simply absent from the

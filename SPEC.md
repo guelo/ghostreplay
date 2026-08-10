@@ -1180,10 +1180,9 @@ CREATE TABLE opening_position_scores (
     computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
     CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    UNIQUE (batch_id, normalized_fen)
+    CONSTRAINT uq_opening_position_scores_batch_fen UNIQUE (batch_id, normalized_fen)
 );
 
-CREATE INDEX idx_opening_position_scores_batch_fen ON opening_position_scores(batch_id, normalized_fen);
 CREATE INDEX idx_opening_position_scores_user_color ON opening_position_scores(user_id, player_color);
 ```
 
@@ -1193,6 +1192,7 @@ CREATE INDEX idx_opening_position_scores_user_color ON opening_position_scores(u
 - **No-data gating.** A row exists for a connected observed off-book node even without evidence so the API can tell a navigable observed off-book node from an arbitrary unknown FEN, but its four metric columns are NULL and its counts are zero. Visibility is gated purely by evidence at/below the FEN regardless of side to move: a no-evidence user-turn row never surfaces the alpha/beta prior, and a no-evidence opponent-turn leaf never surfaces `_calc`'s perfect-looking `(1.0, 1.0, 1.0, 0.0)` result.
 - **Observed off-book domain.** Off-book positions enter the scorer only by reachable observed `overlay.edges` (book-boundary exit → observed continuation), matching the tree's navigable data; disconnected off-book blunders/reviews are not seeded. `opening_evidence.observed_off_book_fens()` is the explicit contract for the candidate off-book endpoints.
 - **Transposition-safe identity.** The key is the normalized 4-field FEN, so transposed routes reached through different UCI lines share one row. `opening_cache.lookup_position_scores()` **normalizes every incoming (possibly raw, clock-bearing) FEN before lookup**, so halfmove/fullmove differences and transpositions hit the same row instead of silently missing.
+- **No duplicate identity index.** The unique index backing `uq_opening_position_scores_batch_fen` already has the exact `(batch_id, normalized_fen)` lookup shape, so no separate non-unique index is declared for those columns.
 - **Distinct game count.** `game_count` is the number of distinct sessions reaching the scored subtree (union of per-node `session_ids`), never `sample_size` (move-observations) relabeled.
 - **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `user_opening_scores`, so `prune_old_opening_score_batches` removes direct rows through the same generation-retention path (keep=2) — no unbounded leak across recomputes. Rows are written in the same transaction as the named rows of the batch.
 
@@ -1216,15 +1216,14 @@ CREATE TABLE opening_position_edges (
     computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
     CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    UNIQUE (batch_id, parent_fen, child_fen)
+    CONSTRAINT uq_opening_position_edges_batch_parent_child UNIQUE (batch_id, parent_fen, child_fen)
 );
 
-CREATE INDEX idx_opening_position_edges_batch_parent ON opening_position_edges(batch_id, parent_fen);
 CREATE INDEX idx_opening_position_edges_user_color ON opening_position_edges(user_id, player_color);
 ```
 
 **Read-model contract:**
-- **Bounded per-parent reads.** The tree builder loads observed edges lazily via `opening_cache.lookup_observed_edges_for_parent(db, batch_id, parent_fen)` — one indexed point query per parent it actually visits (the visible line positions ∪ their rendered frontier children), so a warm read is proportional to rendered nodes, not to total session history. The reconstructed `EdgeEvidence` carries `quality_sum=0.0, quality_count=0` because the tree never reads quality.
+- **Bounded batched reads.** During `build()`, the tree builder prefetches observed edges through `opening_cache.lookup_observed_edges_for_parents(db, batch_id, parent_fens)` in two bounded waves: the visible line positions first, then their rendered column children/frontier. Each wave is normally one `parent_fen IN (...)` query (an oversized wave is chunked at the parameter cap), so warm reads fetch only the visible subset rather than total session history. The singular `lookup_observed_edges_for_parent` helper is a correctness fallback for an unexpected prefetched-cache straggler. The unique index backing `uq_opening_position_edges_batch_parent_child` supplies the required `(batch_id, parent_fen)` left prefix for both lookup shapes; no separate non-unique prefix index is declared. The reconstructed `EdgeEvidence` carries `quality_sum=0.0, quality_count=0` because the tree never reads quality.
 - **Quality columns omitted.** `quality_sum` / `quality_count` are deliberately not persisted: the tree never reads them, and the scorer builds its own in-memory overlay during recompute. If the scorer is ever changed to read scores from this table, the two quality columns must be added.
 - **Same write transaction.** One `OpeningPositionEdge` per `overlay.edges` value is written in the same transaction as the named and direct position rows of the batch.
 - **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `opening_position_scores`, so `prune_old_opening_score_batches` removes edge rows through the same keep=2 generation-retention path.

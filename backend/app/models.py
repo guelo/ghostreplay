@@ -1467,9 +1467,6 @@ class OpeningPositionScore(Base):
             "batch_id", "normalized_fen", name="uq_opening_position_scores_batch_fen"
         ),
         Index(
-            "idx_opening_position_scores_batch_fen", "batch_id", "normalized_fen"
-        ),
-        Index(
             "idx_opening_position_scores_user_color", "user_id", "player_color"
         ),
     )
@@ -1539,9 +1536,6 @@ class OpeningPositionEdge(Base):
         UniqueConstraint(
             "batch_id", "parent_fen", "child_fen",
             name="uq_opening_position_edges_batch_parent_child",
-        ),
-        Index(
-            "idx_opening_position_edges_batch_parent", "batch_id", "parent_fen"
         ),
         Index(
             "idx_opening_position_edges_user_color", "user_id", "player_color"
