@@ -3340,7 +3340,7 @@
 
 .game-status-badge--win {
     background: var(--success-bg);
-    color: var(--success-dark);
+    color: var(--success);
     border: 1px solid var(--success-border);
 }
 
@@ -7429,7 +7429,7 @@
 
 .blunder-detail__result-chip--pass {
     background: var(--success-bg);
-    color: var(--success-dark);
+    color: var(--success);
 }
 
 .blunder-detail__result-chip--fail {
