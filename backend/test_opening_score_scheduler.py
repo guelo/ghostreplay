@@ -1094,24 +1094,87 @@ def test_forced_dispatch_marking_spares_already_due_entries():
     assert sched._pending[(2, "white")].forced_dispatch is True
 
 
-def test_shutdown_drain_marks_pending_entries_forced():
-    # The worker's shutdown branch and flush_pending call the SAME predicate, so this
-    # asserts the branch wiring; flush_pending above covers the end-to-end run. (An
-    # end-to-end shutdown assertion would need a long quiet window, and the worker's
-    # cond-wait for that window is not synchronised with shutdown's notify — a
-    # pre-existing race unrelated to this instrumentation.)
-    clock = _FakeClock()
+def test_shutdown_drain_does_not_lose_notify_between_worker_iterations(monkeypatch):
+    import time
+
     recompute = _TimingRecompute()
-    sched, _ = _make_scheduler(clock, recompute, quiet_window=30.0)
+    sched, _ = _make_scheduler(
+        time.monotonic,
+        recompute,
+        quiet_window=0.0,
+        max_wait=60.0,
+        auto_start=True,
+    )
+
+    real_run_due = OpeningScoreScheduler.run_due
+    worker_between_iterations = threading.Event()
+    release_worker = threading.Event()
+    gate_first_run = True
+
+    def gated_run_due(self, now=None):
+        nonlocal gate_first_run
+        if self is sched and gate_first_run:
+            gate_first_run = False
+            worker_between_iterations.set()
+            assert release_worker.wait(timeout=5.0)
+        return real_run_due(self, now)
+
+    # Patch the class, not the scheduler instance: instance monkeypatch undo can
+    # leave a bound-method attribute behind on long-lived scheduler objects.
+    monkeypatch.setattr(OpeningScoreScheduler, "run_due", gated_run_due)
+
+    # The first key is immediately due and carries the worker out of its condition
+    # wait. Gate it before run_due so shutdown's notification is guaranteed to land
+    # while the worker is between loop iterations rather than inside Condition.wait.
     sched.request_recompute(1, "white", source=_TRIGGER)
+    assert worker_between_iterations.wait(timeout=5.0)
 
+    # Add a second, far-future entry while the worker is gated. The first run_due
+    # call will execute key 1 only; the next iteration must observe shutdown and
+    # drain key 2 without sleeping for this new quiet window.
+    sched.quiet_window = 30.0
+    sched.request_recompute(2, "white", source=_TRIGGER)
+
+    shutdown_errors: list[BaseException] = []
+
+    def shut_down():
+        try:
+            sched.shutdown(drain=True, timeout=0.5)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+
+    shutdown_thread = threading.Thread(target=shut_down)
+    shutdown_thread.start()
+
+    # Waiting on the same condition proves shutdown has set its latch and sent its
+    # notification before the worker is released from the deliberately exposed gap.
     with sched._cond:
-        sched._shutdown = True
+        deadline = time.monotonic() + 5.0
+        while not sched._shutdown:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0
+            sched._cond.wait(timeout=remaining)
 
-    # The drain runs it regardless of the unreached deadline, and marks it forced.
-    sched.run_due(now=float("inf"))
+    release_worker.set()
+    shutdown_thread.join(timeout=2.0)
+
+    # If the regression returns, wake the daemon so this failing test does not leave
+    # a 30-second sleeper behind in the rest of the suite.
+    if sched._thread is not None and sched._thread.is_alive():
+        with sched._cond:
+            for entry in sched._pending.values():
+                entry.deadline = sched.clock()
+            sched._cond.notify_all()
+        sched._thread.join(timeout=2.0)
+        sched.shutdown(drain=True, timeout=2.0)
+
+    assert not shutdown_thread.is_alive()
+    assert shutdown_errors == []
     assert sched._pending == {}
-    assert recompute.timings[0]["forced_dispatch"] is True
+    assert sched._inflight == set()
+    assert sched._thread is None
+    assert recompute.calls == [(1, "white"), (2, "white")]
+    assert [timing["forced_dispatch"] for timing in recompute.timings] == [False, True]
 
 
 def test_followup_enqueued_during_a_drain_is_also_marked_forced():

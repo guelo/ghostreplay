@@ -576,19 +576,24 @@ class OpeningScoreScheduler:
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
-                now = self.clock()
-                due_deadlines = [
-                    entry.deadline
-                    for key, entry in self._pending.items()
-                    if key not in self._inflight
-                ]
-                if due_deadlines:
-                    wait_for = max(0.0, min(due_deadlines) - now)
-                else:
-                    wait_for = None
-                if wait_for is None or wait_for > 0:
-                    self._cond.wait(timeout=wait_for)
+                # A shutdown notification can land while run_due executes outside
+                # this lock. Once the latch is visible, never begin another deadline
+                # wait before draining the remaining entries.
                 shutting_down = self._shutdown
+                if not shutting_down:
+                    now = self.clock()
+                    due_deadlines = [
+                        entry.deadline
+                        for key, entry in self._pending.items()
+                        if key not in self._inflight
+                    ]
+                    if due_deadlines:
+                        wait_for = max(0.0, min(due_deadlines) - now)
+                    else:
+                        wait_for = None
+                    if wait_for is None or wait_for > 0:
+                        self._cond.wait(timeout=wait_for)
+                    shutting_down = self._shutdown
             # ``inf`` drains every pending entry regardless of deadline; run_due marks
             # the ones it pulls in early as forced dispatches.
             self.run_due(now=float("inf") if shutting_down else None)
