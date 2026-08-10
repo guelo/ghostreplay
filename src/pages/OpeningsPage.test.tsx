@@ -323,6 +323,15 @@ function Nav({ to, label }: { to: string; label: string }) {
   );
 }
 
+function HistoryBackButton() {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(-1)}>
+      Back
+    </button>
+  );
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -404,6 +413,136 @@ beforeEach(() => {
 // ---- tests -----------------------------------------------------------------
 
 describe("OpeningsPage tree", () => {
+  it("gates a bare route without mounting or loading the explorer", () => {
+    renderAt("/openings");
+
+    expect(
+      screen.getByRole("heading", {
+        name: "Choose a side to load your opening tree",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "White" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.queryByTestId("opening-card-board")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("tree-column")).toHaveLength(0);
+    expect(getOpeningTreeStatusMock).not.toHaveBeenCalled();
+    expect(getOpeningTreeMock).not.toHaveBeenCalled();
+  });
+
+  it("gates an invalid color without rewriting its deep-link inputs", () => {
+    renderAt("/openings?color=chartreuse&move=e2e4");
+
+    expect(
+      screen.getByText("Choose a side to load your opening tree"),
+    ).toBeInTheDocument();
+    expect(location()).toBe("/openings?color=chartreuse&move=e2e4");
+    expect(getOpeningTreeStatusMock).not.toHaveBeenCalled();
+    expect(getOpeningTreeMock).not.toHaveBeenCalled();
+  });
+
+  it("chooses White from a gated repeated-move link and preserves the line", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
+    renderAt("/openings?move=e2e4&move=c7c5&noise=drop-me");
+
+    fireEvent.click(screen.getByRole("button", { name: "White" }));
+
+    expect(location()).toBe(
+      "/openings?color=white&move=e2e4&move=c7c5",
+    );
+    await waitFor(() =>
+      expect(getOpeningTreeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerColor: "white",
+          moves: ["e2e4", "c7c5"],
+        }),
+        expect.anything(),
+      ),
+    );
+    expect(captureEventMock).not.toHaveBeenCalled();
+  });
+
+  it("chooses Black from a gated legacy link and preserves its opening", async () => {
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeStatusMock.mockResolvedValue({
+      player_color: "black",
+      state: "warm",
+    });
+    getOpeningTreeMock.mockReturnValue(pending.promise);
+    renderAt("/openings?opening=some%20fen&noise=drop-me");
+
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+
+    expect(location()).toBe("/openings?color=black&opening=some+fen");
+    await waitFor(() =>
+      expect(getOpeningTreeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerColor: "black",
+          moves: [],
+          opening: "some fen",
+        }),
+        expect.anything(),
+      ),
+    );
+    expect(captureEventMock).not.toHaveBeenCalled();
+  });
+
+  it("replaces the gated history entry when a side is first chosen", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_E4);
+    render(
+      <MemoryRouter
+        initialEntries={["/prior", "/openings?move=e2e4"]}
+        initialIndex={1}
+      >
+        <LocationProbe />
+        <HistoryBackButton />
+        <Routes>
+          <Route path="/prior" element={<div>Prior route</div>} />
+          <Route path="/openings" element={<OpeningsPage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "White" }));
+    await waitFor(() =>
+      expect(location()).toBe("/openings?color=white&move=e2e4"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(location()).toBe("/prior"));
+  });
+
+  it.each([
+    { color: "white" as const, response: WHITE_ROOT },
+    { color: "black" as const, response: BLACK_ROOT },
+  ])("loads a valid $color route with exactly that side pressed", async ({
+    color,
+    response,
+  }) => {
+    getOpeningTreeStatusMock.mockResolvedValue({
+      player_color: color,
+      state: "warm",
+    });
+    getOpeningTreeMock.mockResolvedValue(response);
+    renderAt(`/openings?color=${color}`);
+
+    await screen.findByTestId("opening-card-board");
+    expect(screen.getByRole("button", { name: "White" })).toHaveAttribute(
+      "aria-pressed",
+      String(color === "white"),
+    );
+    expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
+      "aria-pressed",
+      String(color === "black"),
+    );
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the board + root column and stays canonical at the root", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
     renderAt("/openings?color=white");
@@ -679,6 +818,26 @@ describe("OpeningsPage tree", () => {
     );
     // Color-specific metric re-hydrates (e4 score 61 → 40).
     await screen.findByText("40", { selector: ".tree-node-card__score" });
+  });
+
+  it("preserves a legacy opening while switching perspective before it settles", async () => {
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValue(pending.promise);
+    renderAt("/openings?color=white&opening=somefen");
+
+    await waitFor(() => expect(getOpeningTreeMock).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+
+    expect(location()).toBe("/openings?color=black&opening=somefen");
+    await waitFor(() => expect(getOpeningTreeMock).toHaveBeenCalledTimes(2));
+    expect(getOpeningTreeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        playerColor: "black",
+        moves: [],
+        opening: "somefen",
+      }),
+      expect.anything(),
+    );
   });
 
   it("legacy opening= link never short-circuits a displayed response", async () => {

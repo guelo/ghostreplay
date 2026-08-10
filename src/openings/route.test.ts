@@ -62,17 +62,31 @@ describe("buildOpeningsSearchParams", () => {
 });
 
 describe("parseOpeningsSearchParams", () => {
-  it("normalizes color: black preserved, missing → white, garbage → white", () => {
+  it("accepts only exact white and black color selections", () => {
+    expect(
+      parseOpeningsSearchParams(new URLSearchParams("color=white")).playerColor,
+    ).toBe("white");
     expect(
       parseOpeningsSearchParams(new URLSearchParams("color=black")).playerColor,
     ).toBe("black");
+  });
+
+  it("leaves missing, empty, and invalid colors unselected", () => {
     expect(
       parseOpeningsSearchParams(new URLSearchParams("")).playerColor,
-    ).toBe("white");
+    ).toBeNull();
+    expect(
+      parseOpeningsSearchParams(new URLSearchParams("color=")).playerColor,
+    ).toBeNull();
     expect(
       parseOpeningsSearchParams(new URLSearchParams("color=chartreuse"))
         .playerColor,
-    ).toBe("white");
+    ).toBeNull();
+    expect(
+      parseOpeningsSearchParams(
+        new URLSearchParams("color=chartreuse&color=black"),
+      ).playerColor,
+    ).toBeNull();
   });
 
   it("returns all repeated move= values in order; absent → []", () => {
@@ -97,6 +111,20 @@ describe("parseOpeningsSearchParams", () => {
     expect(
       parseOpeningsSearchParams(new URLSearchParams("color=white")).opening,
     ).toBeNull();
+  });
+
+  it("preserves move and legacy opening inputs while color is unselected", () => {
+    const parsed = parseOpeningsSearchParams(
+      new URLSearchParams(
+        `move=e2e4&move=c7c5&opening=${encodeURIComponent(FEN)}`,
+      ),
+    );
+
+    expect(parsed).toEqual({
+      playerColor: null,
+      moves: ["e2e4", "c7c5"],
+      opening: FEN,
+    });
   });
 });
 
@@ -128,12 +156,6 @@ describe("buildCanonicalReplacement", () => {
     const current = new URLSearchParams(
       "color=white&move=e2e4&opening=foo&path=bar",
     );
-    const replacement = buildCanonicalReplacement(current, "white", ["e2e4"]);
-    expect(replacement?.toString()).toBe("color=white&move=e2e4");
-  });
-
-  it("normalizes a bad color in the current params via the normalized playerColor", () => {
-    const current = new URLSearchParams("color=chartreuse&move=e2e4");
     const replacement = buildCanonicalReplacement(current, "white", ["e2e4"]);
     expect(replacement?.toString()).toBe("color=white&move=e2e4");
   });

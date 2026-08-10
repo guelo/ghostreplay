@@ -3368,6 +3368,15 @@ ply along the selected line). `src/openings/route.ts` owns this contract:
 the tree route. No component hand-builds or inline-parses an `/openings` query
 string.
 
+- A loaded or canonical tree route requires an explicit, exact `color=white` or
+  `color=black`. The general AppNav **Openings** link and home **Start an opening
+  drill** CTA intentionally point to bare `/openings`, so each entry presents a
+  frontend-only side-selection gate. Missing, empty, and invalid colors mount no
+  explorer and issue no tree status/tree request. Any repeated `move=` line, or
+  legacy `opening=` FEN when there are no moves, remains in the parsed route
+  until the user chooses a side; that first choice replaces the gated history
+  entry rather than pushing another one. The URL is the durable source of the
+  choice—there is no inferred/default or stored color.
 - **Param mapping is 1:1 with the tree API request _except the color param is
   renamed_:** frontend `color` → API **`player_color`**; `move` and `opening`
   keep their names. A future tree API client must send `player_color=`, not
@@ -3376,7 +3385,9 @@ string.
   `move` is present, and is rewritten to the resolved `move=` line on response
   (the frontend replaces the URL with `canonical_line` via
   `buildCanonicalReplacement`, which returns `null` — no history write — when the
-  URL is already canonical).
+  URL is already canonical). If the user switches color before that legacy
+  response settles, the pending `opening=` FEN is retained under the new color;
+  settled canonical replacement remains `color` plus repeated `move=` params.
 - The legacy `openingKey`+`path` URL form has been removed (g-tree-cleanup);
   only the `opening=<fen>` deep-link entry above remains as a non-tree input, and
   it is rewritten to the canonical `move=` line on response.

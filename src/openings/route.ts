@@ -44,8 +44,8 @@ export function buildOpeningsSearchParams(route: OpeningRoute): URLSearchParams 
 }
 
 export type ParsedOpeningsRoute = {
-  /** Normalized: `black` preserved, missing/garbage → `white`. */
-  playerColor: OpeningPlayerColor;
+  /** Exact `white`/`black` choice; missing or invalid → unselected (`null`). */
+  playerColor: OpeningPlayerColor | null;
   /** Repeated `move=` values in URL order; absent → `[]`. */
   moves: string[];
   /** Legacy FEN entry (`opening=`); meaningful only when `moves` is empty. */
@@ -53,9 +53,10 @@ export type ParsedOpeningsRoute = {
 };
 
 /**
- * Parse `/openings` query params into the tree-contract shape. Color rule:
- * `black` preserved, everything else → `white`. Any legacy `path` param is
- * intentionally ignored — the tree contract drops it.
+ * Parse `/openings` query params into the tree-contract shape. Only exact
+ * `white` and `black` color values are selected; missing or invalid values are
+ * left unselected. Any legacy `path` param is intentionally ignored — the tree
+ * contract drops it.
  */
 export function parseOpeningsSearchParams(
   params: URLSearchParams,
@@ -63,7 +64,8 @@ export function parseOpeningsSearchParams(
   const rawColor = params.get("color");
 
   return {
-    playerColor: rawColor === "black" ? "black" : "white",
+    playerColor:
+      rawColor === "white" || rawColor === "black" ? rawColor : null,
     moves: params.getAll("move"),
     opening: params.get("opening"),
   };
@@ -77,9 +79,9 @@ export function parseOpeningsSearchParams(
  *
  * Comparison is on the full `.toString()`, so this also rewrites a legacy
  * `opening=<fen>` link to the resolved `move=` line, strips stale
- * `opening`/`path`/extra `move` params, reorders params, drops unknown params,
- * and normalizes a bad `color` (because `playerColor` is already normalized by
- * `parseOpeningsSearchParams`).
+ * `opening`/`path`/extra `move` params, reorders params, and drops unknown
+ * params. Callers supply an explicitly valid `playerColor`; unselected routes
+ * never reach settled tree canonicalization.
  */
 export function buildCanonicalReplacement(
   currentParams: URLSearchParams,

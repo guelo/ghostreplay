@@ -27,12 +27,17 @@ const COLOR_OPTIONS: Array<{
   { label: "Black", value: "black", King: BlackKing },
 ];
 
-/** Route and page chrome for the shared interactive openings-tree explorer. */
-function OpeningsPage() {
+function SelectedOpeningsExplorer({
+  playerColor,
+  moves,
+  opening,
+}: {
+  playerColor: OpeningPlayerColor;
+  moves: string[];
+  opening: string | null;
+}) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { playerColor, moves, opening } =
-    parseOpeningsSearchParams(searchParams);
 
   const selectLine = useCallback(
     (newLine: string[]) => {
@@ -62,11 +67,6 @@ function OpeningsPage() {
     [playerColor, searchParams, setSearchParams],
   );
 
-  const switchColor = (color: OpeningPlayerColor) => {
-    if (color === playerColor) return;
-    setSearchParams(buildOpeningsSearchParams({ playerColor: color, moves }));
-  };
-
   const expandedAction = useMemo(
     () => ({
       label: "Start Drill",
@@ -78,6 +78,39 @@ function OpeningsPage() {
     }),
     [navigate, playerColor],
   );
+
+  return (
+    <OpeningsTreeExplorer
+      route={{ playerColor, moves, opening }}
+      onSelectLine={selectLine}
+      onCanonicalLine={canonicalizeLine}
+      expandedAction={expandedAction}
+    />
+  );
+}
+
+/** Route and page chrome for the shared interactive openings-tree explorer. */
+function OpeningsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { playerColor, moves, opening } =
+    parseOpeningsSearchParams(searchParams);
+
+  const changeColor = (color: OpeningPlayerColor) => {
+    if (color === playerColor) return;
+
+    const nextParams = buildOpeningsSearchParams({
+      playerColor: color,
+      moves,
+      opening: opening ?? undefined,
+    });
+
+    if (playerColor === null) {
+      setSearchParams(nextParams, { replace: true });
+      return;
+    }
+
+    setSearchParams(nextParams);
+  };
 
   return (
     <main className="app-shell openings-page">
@@ -103,7 +136,7 @@ function OpeningsPage() {
                         playerColor === value ? " active" : ""
                       }`}
                       aria-pressed={playerColor === value}
-                      onClick={() => switchColor(value)}
+                      onClick={() => changeColor(value)}
                     >
                       <span className="openings-color-picker__piece">
                         <King />
@@ -117,12 +150,30 @@ function OpeningsPage() {
             </div>
           </header>
 
-          <OpeningsTreeExplorer
-            route={{ playerColor, moves, opening }}
-            onSelectLine={selectLine}
-            onCanonicalLine={canonicalizeLine}
-            expandedAction={expandedAction}
-          />
+          {playerColor === null ? (
+            <div className="openings-selection-gate">
+              <section
+                className="openings-state openings-selection-gate__card"
+                aria-labelledby="openings-selection-gate-title"
+              >
+                <h2
+                  id="openings-selection-gate-title"
+                  className="openings-state__title"
+                >
+                  Choose a side to load your opening tree
+                </h2>
+                <p className="openings-state__body">
+                  Select White or Black above to explore your repertoire.
+                </p>
+              </section>
+            </div>
+          ) : (
+            <SelectedOpeningsExplorer
+              playerColor={playerColor}
+              moves={moves}
+              opening={opening}
+            />
+          )}
         </section>
       </div>
     </main>
