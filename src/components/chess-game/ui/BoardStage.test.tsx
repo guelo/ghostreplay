@@ -404,6 +404,18 @@ describe("BoardStage", () => {
     expect(screen.queryByRole("button", { name: /close/i })).not.toBeInTheDocument();
   });
 
+  it("opens the start overlay during an active replaceable drill", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        isGameActive
+        canStartDrillWhileGameActive
+      />,
+    );
+    expect(screen.getByRole("button", { name: /close/i })).toBeInTheDocument();
+  });
+
   it("opens the start overlay over a stopped drill even while isGameActive is true", () => {
     const props = makeProps();
     render(<BoardStage {...props} isGameActive isStoppedDrill />);

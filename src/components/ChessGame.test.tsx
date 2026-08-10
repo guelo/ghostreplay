@@ -2556,8 +2556,14 @@ describe("ChessGame characterization safeguards", () => {
       fireEvent.click(again);
     });
 
+    // Successful abandonment immediately finalizes the old drill locally, so
+    // the pending replacement is represented by the ended-drill banner rather
+    // than the former live stopped-drill controls. Its replacement actions must
+    // remain disabled until startDrill settles.
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^again$/i })).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: /^new drill$/i }),
+      ).toBeDisabled();
       expect(
         screen.getByRole("button", { name: /change drill settings/i }),
       ).toBeDisabled();
@@ -4606,6 +4612,11 @@ describe("ChessGame opening lineage", () => {
     evaluatePositionMock.mockReset();
     gameAnalysisStore.getState().clearAll();
     capturedPieceDrop = null;
+    abandonDrillMock.mockReset();
+    startDrillMock.mockReset();
+    getOpeningRootsMock.mockReset();
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
 
     getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
@@ -4865,7 +4876,7 @@ describe("ChessGame opening lineage", () => {
     expect(
       screen.queryByRole("button", { name: /^Collapse .* details$/ }),
     ).not.toBeInTheDocument();
-    // Start Drill is post-game only — not offered mid-game.
+    // Start Drill is not offered during a regular rated live game.
     expect(
       screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();
@@ -4873,6 +4884,15 @@ describe("ChessGame opening lineage", () => {
     // Board navigation is wired during play (history parity), so selecting the
     // card reviews the opening's past position.
     fireEvent.click(select);
+
+    // Expanding a regular live-game card still does not expose the destructive
+    // replacement action; the absence above was not merely compact-card UI.
+    await screen.findByRole("button", {
+      name: /Collapse King's Pawn Game details/,
+    });
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
 
     // Selecting reviews the opening's past position without disturbing the live
     // game (the store's live position is untouched — only viewIndex moves).
@@ -4883,6 +4903,250 @@ describe("ChessGame opening lineage", () => {
       ),
     );
     expect(useGameStore.getState().liveFen).toBe(LINEAGE_FEN_E5);
+  });
+
+  it("replaces an active drill from a lineage card", async () => {
+    const targetOpeningKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
+    getOpeningRootsMock.mockReset();
+    getOpeningRootsMock.mockResolvedValue({
+      families: [
+        {
+          family_name: "King's Pawn",
+          roots: [
+            {
+              opening_key: targetOpeningKey,
+              opening_name: "King's Pawn Game",
+              opening_family: "King's Pawn",
+              eco: "C20",
+              depth: 0,
+            },
+          ],
+        },
+      ],
+    });
+    __resetOpeningRootIndexCache();
+    fetchSessionOpeningsMock.mockResolvedValue(
+      lineageResponse(targetOpeningKey),
+    );
+    abandonDrillMock.mockReset();
+    abandonDrillMock.mockResolvedValue({ drill_state: "abandoned" });
+    startDrillMock.mockReset();
+    startDrillMock.mockResolvedValue({
+      session_id: "session-replacement-drill",
+      drill_state: "active",
+      opening_name: "King's Pawn Game",
+      strictness_cp: 25,
+    });
+    useGameStore.setState({
+      sessionId: "session-active-drill",
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+      liveFen: LINEAGE_FEN_E4,
+      drillOpeningKey: "old-target",
+      drillOpeningName: "Old target",
+      drillState: "active",
+      drillStrictness: "standard",
+      drillStrictnessCp: 25,
+    });
+
+    render(<ChessGame />);
+
+    // The active drill sits on this card's crossing, so it is expanded and the
+    // unrated-session replacement action is available.
+    await screen.findByRole("button", {
+      name: /Collapse King's Pawn Game details/,
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: /start drill/i }),
+    );
+
+    const close = await screen.findByRole("button", { name: /close/i });
+    const overlay = close.closest<HTMLElement>(".chessboard-overlay");
+    expect(overlay).not.toBeNull();
+    await waitFor(() =>
+      expect(within(overlay!).getByRole("combobox")).toHaveTextContent(
+        "King's Pawn Game",
+      ),
+    );
+
+    // Opening the panel is non-destructive. The old drill is abandoned only
+    // after the player selects the required tier and submits the replacement.
+    expect(abandonDrillMock).not.toHaveBeenCalled();
+    fireEvent.click(
+      within(overlay!).getByRole("button", { name: /^standard$/i }),
+    );
+    await act(async () => {
+      fireEvent.click(
+        within(overlay!).getByRole("button", { name: /^start drill$/i }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(abandonDrillMock).toHaveBeenCalledWith("session-active-drill"),
+    );
+    expect(startDrillMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        opening_key: targetOpeningKey,
+        player_color: "white",
+        strictness: "standard",
+        strictness_cp: 25,
+      }),
+    );
+    expect(abandonDrillMock.mock.invocationCallOrder[0]).toBeLessThan(
+      startDrillMock.mock.invocationCallOrder[0],
+    );
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        sessionId: "session-replacement-drill",
+        drillOpeningKey: targetOpeningKey,
+        drillState: "active",
+        isGameActive: true,
+        isRated: false,
+      }),
+    );
+  });
+
+  it("blocks a retained same-mount ad-hoc selection until the lineage target resolves", async () => {
+    const targetOpeningKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
+    const rootsResponse = {
+      families: [
+        {
+          family_name: "King's Pawn",
+          roots: [
+            {
+              opening_key: targetOpeningKey,
+              opening_name: "King's Pawn Game",
+              opening_family: "King's Pawn",
+              eco: "C20",
+              depth: 0,
+            },
+          ],
+        },
+      ],
+    };
+    getOpeningRootsMock.mockReset();
+    getOpeningRootsMock.mockResolvedValue(rootsResponse);
+    __resetOpeningRootIndexCache();
+    fetchSessionOpeningsMock.mockResolvedValue(
+      lineageResponse(targetOpeningKey),
+    );
+    mockLocation = {
+      state: {
+        drillSetup: {
+          targetFen: "stale-ad-hoc-target",
+          line: ["d2d4", "d7d5"],
+          displayName: "Stale custom line",
+          eco: null,
+          playerColor: "white",
+        },
+      },
+      pathname: "/play",
+    };
+    startDrillMock
+      .mockResolvedValueOnce({
+        session_id: "session-mounted-drill",
+        drill_state: "active",
+        opening_name: "Stale custom line",
+        strictness_cp: 25,
+      })
+      .mockResolvedValueOnce({
+        session_id: "session-lineage-replacement",
+        drill_state: "active",
+        opening_name: "King's Pawn Game",
+        strictness_cp: 25,
+      });
+    abandonDrillMock.mockResolvedValue({ drill_state: "abandoned" });
+
+    render(<ChessGame />);
+
+    // Start an ad-hoc drill so this mounted ChessGame genuinely retains both
+    // its synthetic opening selection and line after the overlay unmounts.
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent(
+        "Stale custom line",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^start drill$/i }));
+    });
+    await waitFor(() =>
+      expect(useGameStore.getState().sessionId).toBe("session-mounted-drill"),
+    );
+    expect(startDrillMock).toHaveBeenCalledTimes(1);
+    expect(startDrillMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        opening_key: "stale-ad-hoc-target",
+        line: ["d2d4", "d7d5"],
+      }),
+    );
+
+    // Give that same live drill a lineage crossing, still without remounting.
+    act(() => {
+      useGameStore.setState({
+        moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+        liveFen: LINEAGE_FEN_E4,
+      });
+    });
+    await screen.findByRole("button", {
+      name: /Collapse King's Pawn Game details/,
+    });
+
+    let resolveReplacementRoots!: (value: typeof rootsResponse) => void;
+    getOpeningRootsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveReplacementRoots = resolve;
+        }),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /start drill/i }),
+    );
+
+    const close = await screen.findByRole("button", { name: /close/i });
+    const overlay = close.closest<HTMLElement>(".chessboard-overlay");
+    expect(overlay).not.toBeNull();
+    const setup = within(overlay!);
+    fireEvent.click(setup.getByRole("button", { name: /^standard$/i }));
+
+    // The old synthetic selection/line is gone before roots resolve. Choosing
+    // strictness cannot enable or submit the stale ad-hoc draft during the gap.
+    const start = setup.getByRole("button", { name: /^start drill$/i });
+    expect(start).toBeDisabled();
+    fireEvent.click(start);
+    expect(startDrillMock).toHaveBeenCalledTimes(1);
+    expect(abandonDrillMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveReplacementRoots({
+        families: rootsResponse.families.map((family) => ({
+          ...family,
+          roots: [...family.roots],
+        })),
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(setup.getByRole("combobox")).toHaveTextContent(
+        "King's Pawn Game",
+      ),
+    );
+    expect(start).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(start);
+    });
+
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(2));
+    expect(abandonDrillMock).toHaveBeenCalledWith("session-mounted-drill");
+    expect(startDrillMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        opening_key: targetOpeningKey,
+        line: undefined,
+      }),
+    );
   });
 
   it("post-game lineage offers Start Drill that opens the drill setup (route-state intercept)", async () => {

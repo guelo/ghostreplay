@@ -410,6 +410,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const drillOpeningName = useGameStore((s) => s.drillOpeningName);
   const drillState = useGameStore((s) => s.drillState);
   const isStoppedDrill = drillOpeningKey !== null && drillState === "failed";
+  const isActiveDrill =
+    drillOpeningKey !== null &&
+    isGameActive &&
+    (drillState === "active" || drillState === "root_reached");
+  // A live drill can be replaced without affecting Elo. Converted drills are
+  // rated games from the conversion point onward, so they keep the regular
+  // live-game guard and cannot open a replacement from an opening card.
+  const canStartDrillWhileGameActive =
+    drillOpeningKey !== null &&
+    drillState !== null &&
+    drillState !== "converted" &&
+    isGameActive;
   const drillTerminalReason = useGameStore((s) => s.drillTerminalReason);
   // -------------------------------------------------------------------
 
@@ -661,7 +673,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isViewingLive &&
     !chess.isGameOver();
   const blocksStreakToast =
-    (showStartOverlay && (!isGameActive || isStoppedDrill)) ||
+    (showStartOverlay &&
+      (!isGameActive || isStoppedDrill || canStartDrillWhileGameActive)) ||
     showRevertWarning ||
     showResignWarning ||
     pendingPromotion !== null ||
@@ -1511,15 +1524,20 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   );
 
   // Start Drill: mirror the /openings route-state intercept flow rather than
-  // resolving openingFamilies directly — that list is null post-game until the
-  // overlay opens it (the L1034 effect fetches only when showStartOverlay &&
-  // isDrillMode). Seeding the pending setup + opening the overlay triggers that
-  // fetch; the roots-match effect then resolves pendingDrillSetupRef ->
+  // resolving openingFamilies directly — that list can be null until the
+  // overlay opens it (the fetch effect runs only when showStartOverlay &&
+  // isDrillMode). Seeding the pending setup + opening the overlay triggers the
+  // load; the roots-match effect then resolves pendingDrillSetupRef ->
   // setSelectedDrillOpening. Not handleStartDrill (needs a full draft) or
   // handleShowStartOverlay alone (doesn't set drill mode / seed the ref).
   const handleLineageStartDrill = useCallback(
     (item: OpeningLineageItem) => {
       setIsDrillMode(true);
+      // Fail closed while the requested registered root resolves. This state is
+      // retained after a successful start, so leaving it intact would let the
+      // newly-mounted panel submit a prior registered/ad-hoc opening before the
+      // async roots fetch installs this card's selection.
+      setSelectedDrillOpening(null);
       adHocLineRef.current = null;
       pendingDrillSetupRef.current = {
         openingKey: item.opening_key,
@@ -2406,11 +2424,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             isPracticeContinuation={isPracticeContinuation}
             isStoppedDrill={isStoppedDrill}
             isGameActive={isGameActive}
-            isActiveDrill={
-              drillOpeningKey !== null &&
-              isGameActive &&
-              (drillState === "active" || drillState === "root_reached")
-            }
+            isActiveDrill={isActiveDrill}
             drillOpeningName={drillOpeningName}
             playerColorChoice={playerColorChoice}
             playerColor={playerColor}
@@ -2448,10 +2462,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     // Board navigation works during play AND post-game (history
                     // parity): selecting a card only REVIEWS the opening's past
                     // position (viewIndex) — it never disturbs the live game.
-                    // Start Drill is post-game only (gameResult !== null).
+                    // Rated live games keep the Elo-integrity guard. Active,
+                    // root-reached, and stopped drills can be replaced safely.
                     onSelectRoot={handleLineageSelectRoot}
                     onStartDrill={
-                      gameResult !== null ? handleLineageStartDrill : undefined
+                      gameResult !== null || canStartDrillWhileGameActive
+                        ? handleLineageStartDrill
+                        : undefined
                     }
                   />
                 </div>
@@ -2476,6 +2493,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 arrows={blunderArrows}
                 showStartOverlay={showStartOverlay}
                 isGameActive={isGameActive}
+                canStartDrillWhileGameActive={canStartDrillWhileGameActive}
                 isReviewingPast={isReviewingPast}
                 onReturnToLive={handleReturnToLive}
                 reviewNudge={reviewNudge}

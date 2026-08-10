@@ -29,7 +29,7 @@ interface GameOpeningLineageProps {
    *  cards are expand-only and must NOT move the live board. */
   onSelectRoot?: (item: OpeningLineageItem) => void;
   /** When provided, the expanded card shows a Start Drill button. Omit to hide
-   *  it (live game panel). */
+   *  it (regular/converted live game panel). */
   onStartDrill?: (item: OpeningLineageItem) => void;
   /** Whether the server's opening scores are still being computed (g-a5v3).
    *  "pending" makes each card render a loading placeholder in place of its

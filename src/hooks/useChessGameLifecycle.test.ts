@@ -208,6 +208,7 @@ const setup = ({
     setShowRevertWarning,
     setShowPostGamePrompt,
     setShowStartOverlay,
+    setStartError,
     setSeedEngineElo,
     setResolvedReview,
     onGameFinished,
@@ -1438,6 +1439,81 @@ describe("useChessGameLifecycle", () => {
     expect(store.drillState).toBe("active");
     expect(store.drillStrictness).toBe("standard");
     expect(store.isRated).toBe(false);
+  });
+
+  it("finalizes an abandoned drill locally before a replacement start that fails", async () => {
+    const {
+      result,
+      coordinator,
+      setShowStartOverlay,
+      setStartError,
+    } = setup({
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-old",
+      drillOpeningKey: "old-target",
+      drillState: "active",
+      drillStrictness: "standard",
+    });
+    abandonDrillMock.mockResolvedValueOnce({ drill_state: "abandoned" });
+    let rejectStart!: (error: Error) => void;
+    startDrillMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectStart = reject;
+        }),
+    );
+
+    let pendingReplacement!: Promise<unknown>;
+    act(() => {
+      pendingReplacement = result.current.handleNewDrill({
+        openingKey: "new-target",
+        playerColor: "white",
+        engineElo: 1000,
+        strictness: "standard",
+        strictnessCp: 25,
+      });
+    });
+
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(1));
+    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-old");
+    expect(abandonDrillMock.mock.invocationCallOrder[0]).toBeLessThan(
+      startDrillMock.mock.invocationCallOrder[0],
+    );
+    expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
+    expect(coordinator.clearSession).toHaveBeenCalledTimes(1);
+    expect(coordinator.startSession).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        sessionId: "drill-session-old",
+        isGameActive: false,
+        isRated: false,
+        drillState: "abandoned",
+        gameResult: { type: "resign", message: "Drill abandoned." },
+        departingSessionId: "drill-session-old",
+      }),
+    );
+
+    await act(async () => {
+      rejectStart(new Error("replacement unavailable"));
+      await pendingReplacement;
+    });
+
+    expect(setStartError).toHaveBeenCalledWith("replacement unavailable");
+    expect(setShowStartOverlay).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        sessionId: "drill-session-old",
+        isGameActive: false,
+        isRated: false,
+        drillState: "abandoned",
+        gameResult: { type: "resign", message: "Drill abandoned." },
+        departingSessionId: null,
+      }),
+    );
   });
 
   it("handleNewDrill forwards the ad-hoc line to startDrill", async () => {

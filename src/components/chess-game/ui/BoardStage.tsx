@@ -23,6 +23,9 @@ type BoardStageProps = {
   arrows: { startSquare: string; endSquare: string; color: string }[];
   showStartOverlay: boolean;
   isGameActive: boolean;
+  // A non-converted drill may open the replacement-drill setup without first
+  // ending its unrated session. Regular and converted live games pass false.
+  canStartDrillWhileGameActive?: boolean;
   // Live game + not on the latest move: wash the squares so the board reads as
   // history, not the live position (a lighter cousin of the what-if wash).
   isReviewingPast?: boolean;
@@ -122,6 +125,7 @@ const BoardStage = ({
   arrows,
   showStartOverlay,
   isGameActive,
+  canStartDrillWhileGameActive = false,
   isReviewingPast = false,
   onReturnToLive,
   reviewNudge = 0,
@@ -338,7 +342,10 @@ const BoardStage = ({
               )}
             </div>
           )}
-          {showStartOverlay && (!isGameActive || isStoppedDrill) && (
+          {showStartOverlay &&
+            (!isGameActive ||
+              isStoppedDrill ||
+              canStartDrillWhileGameActive) && (
             <div className="chessboard-overlay">
               <StartPanel
                 isDrillMode={isDrillMode}

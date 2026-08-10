@@ -873,6 +873,7 @@ export const useChessGameLifecycle = ({
       // for registered-root drills (routed via the book BFS).
       line?: string[];
     }) => {
+      let clearedDepartingDrillCoordinator = false;
       try {
         setIsStartingGame(true);
         setStartError(null);
@@ -888,8 +889,26 @@ export const useChessGameLifecycle = ({
           coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
           if (store.drillOpeningKey && store.drillState !== "converted") {
-            await abandonDrill(store.sessionId);
+            const abandonedSessionId = store.sessionId;
+            await abandonDrill(abandonedSessionId);
+            if (useGameStore.getState().sessionId !== abandonedSessionId) {
+              setIsStartingGame(false);
+              return null;
+            }
             coordinator.stopSessionUploads();
+            // The backend has ended this drill. Cross the matching client-side
+            // terminal boundary before requesting its replacement so a failed
+            // start cannot resurrect a playable-but-abandoned board, and so no
+            // old-session analysis can resolve during the request gap.
+            coordinator.clearSession();
+            clearedDepartingDrillCoordinator = true;
+            const abandonedStore = useGameStore.getState();
+            abandonedStore.setDrillState("abandoned");
+            abandonedStore.setIsRated(false);
+            finishLocalGame(
+              { type: "resign", message: "Drill abandoned." },
+              { playEndGameAudio: false, finalizingSessionId: abandonedSessionId },
+            );
           } else {
             coordinator.flushPendingUploads().catch((err) =>
               console.error("[SessionMoves] Flush failed:", err),
@@ -942,7 +961,9 @@ export const useChessGameLifecycle = ({
         s.setScoreChanges(null);
 
         resetEngine();
-        coordinator.clearSession();
+        if (!clearedDepartingDrillCoordinator) {
+          coordinator.clearSession();
+        }
         coordinator.startSession(response.session_id);
         clearBlunderBoardOverride?.();
         setBlunderAlert(null);
@@ -996,7 +1017,9 @@ export const useChessGameLifecycle = ({
         setEngineMessage(message);
         setStartError(message);
         setIsStartingGame(false);
-        // See handleNewGame: a failed start leaves the old end screen up.
+        // A successfully abandoned drill was finalized locally before startDrill;
+        // clearing this marker only restores delta routing and never reactivates
+        // that old board. Other failures still leave their prior end screen up.
         useGameStore.getState().setDepartingSession(null);
         return null;
       }
@@ -1005,6 +1028,7 @@ export const useChessGameLifecycle = ({
       chess,
       coordinator,
       clearMoveHighlights,
+      finishLocalGame,
       resetEngine,
       resetMode,
       setBlunderAlert,
