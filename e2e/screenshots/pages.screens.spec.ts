@@ -496,6 +496,74 @@ const startGameAsWhite = async (page: Page): Promise<void> => {
 };
 
 /**
+ * Script the seeded Giuoco Piano review line used by the gallery's transient
+ * review states.
+ *
+ * The due account is intentionally shared by the E2E suite, so another test
+ * can refresh its SRS opportunity and make the real ghost selector fall back
+ * to Maia. Routing the complete line keeps these visual-review artifacts
+ * independent of mutable backend review state; the integration suite covers
+ * the real selector and review write path.
+ */
+const routeSeededReviewGhostLine = async (page: Page): Promise<void> => {
+  const ghostReplies: {
+    move: { uci: string; san: string };
+    target_blunder_id?: number;
+    target_fen?: string;
+    target_blunder_srs?: {
+      last_reviewed_at: string | null;
+      created_at: string | null;
+      pass_count: number;
+      fail_count: number;
+      pass_streak: number;
+    };
+  }[] = [
+    { move: { uci: "e7e5", san: "e5" } }, // reply to e4
+    { move: { uci: "b8c6", san: "Nc6" } }, // reply to Nf3
+    {
+      // reply to Bc4 — arms the SRS review at the Giuoco Piano position
+      move: { uci: "f8c5", san: "Bc5" },
+      target_blunder_id: 1,
+      // This must be the exact FEN AFTER Bc5 (white to move):
+      // applyPlayerMove gates the SRS review via hasReviewTargetAtFen, whose
+      // normalize_fen comparison keeps fields 1-4.
+      target_fen:
+        "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+      target_blunder_srs: {
+        last_reviewed_at: "2026-05-01T12:00:00Z",
+        created_at: "2026-04-01T12:00:00Z",
+        pass_count: 0,
+        fail_count: 1,
+        pass_streak: 0,
+      },
+    },
+    { move: { uci: "g8f6", san: "Nf6" } }, // reply to the failing Ke2
+  ];
+  let ghostReplyIndex = 0;
+
+  await page.route("**/api/game/next-opponent-move", (route) => {
+    const reply =
+      ghostReplies[Math.min(ghostReplyIndex, ghostReplies.length - 1)];
+    ghostReplyIndex += 1;
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        // Match replay mode throughout; only the first reply transitions the
+        // live game from engine to ghost.
+        mode: "ghost",
+        move: reply.move,
+        target_blunder_id: reply.target_blunder_id ?? null,
+        target_blunder_srs: reply.target_blunder_srs ?? null,
+        target_fen: reply.target_fen ?? null,
+        decision_source: "ghost_path",
+        drill_route: null,
+      }),
+    });
+  });
+};
+
+/**
  * Tick the (paused) clock frame-by-frame until the SRS-fail spotlight content
  * re-anchors to the CURRENT board rect. The scrim re-measures on resize via a
  * rAF the paused clock won't fire on its own, so we poll the measured geometry
@@ -535,6 +603,7 @@ test.describe("play", () => {
   test("fresh board + review toast", async ({ page, loginAs }) => {
     await prepareDeterministicPage(page);
     await loginAs(page, "due");
+    await routeSeededReviewGhostLine(page);
     await page.goto("/play");
 
     // Fresh board: start a new game as White.
@@ -554,12 +623,21 @@ test.describe("play", () => {
     await waitForMoveCountAtLeast(page, 4);
     await playMove(page, "f1", "c4");
     await waitForMoveCountAtLeast(page, 6);
+    await expect(
+      page.locator(".board-notice--review-warning:visible"),
+    ).toBeVisible({ timeout: 30_000 });
+
+    // The review warning auto-dismisses after four seconds. Freeze it only
+    // after it has appeared so six sequential viewport captures cannot race
+    // its timer under full-suite load.
+    await page.clock.pauseAt(FIXED_TIME);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "review-warning-toast",
       // The review warning renders as a single on-board notice (top-left).
       waitFor: (p) => p.locator(".board-notice--review-warning:visible"),
     });
+    await page.unrouteAll();
   });
 
   test("mid-game (no toasts)", async ({ page, loginAs }) => {
@@ -731,7 +809,7 @@ test.describe("play", () => {
     });
   });
 
-  // --- Review-fail spotlight (real moves, no mocks) ---------------------
+  // --- Review-fail spotlight (real player moves, scripted replies) ------
   // Replay the seeded SRS review and FAIL it (Ke2) to fire the full-screen
   // spotlight scrim. The scrim auto-dismisses on a timer and re-measures its
   // clip-path hole via rAF, so pause the clock and tick one frame per resize.
@@ -744,60 +822,8 @@ test.describe("play", () => {
     // ghost path is timing-sensitive: on a cold/fresh DB a reply can fall
     // through to Maia (e.g. Nf6 instead of Bc5), producing the wrong opening
     // (C55) and arming no review. Scripting every reply makes the whole line
-    // deterministic. mode "ghost" matches the replay mode (only the first reply
-    // transitions engine->ghost). The Bc5 reply carries the review target: the
-    // FEN AFTER Bc5 (white to move) — applyPlayerMove gates the SRS review on
-    // hasReviewTargetAtFen comparing this against the board FEN at Ke2, so it
-    // must be the exact Giuoco Piano position (normalize_fen keeps fields 1-4).
-    const ghostReplies: {
-      move: { uci: string; san: string };
-      target_blunder_id?: number;
-      target_fen?: string;
-      target_blunder_srs?: {
-        last_reviewed_at: string | null;
-        created_at: string | null;
-        pass_count: number;
-        fail_count: number;
-        pass_streak: number;
-      };
-    }[] = [
-      { move: { uci: "e7e5", san: "e5" } }, // reply to e4
-      { move: { uci: "b8c6", san: "Nc6" } }, // reply to Nf3
-      {
-        // reply to Bc4 — arms the SRS review at the Giuoco Piano position
-        move: { uci: "f8c5", san: "Bc5" },
-        target_blunder_id: 1,
-        target_fen:
-          "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
-        target_blunder_srs: {
-          last_reviewed_at: "2026-05-01T12:00:00Z",
-          created_at: "2026-04-01T12:00:00Z",
-          pass_count: 0,
-          fail_count: 1,
-          pass_streak: 0,
-        },
-      },
-      { move: { uci: "g8f6", san: "Nf6" } }, // reply to the failing Ke2
-    ];
-    let ghostReplyIndex = 0;
-    await page.route("**/api/game/next-opponent-move", (route) => {
-      const reply =
-        ghostReplies[Math.min(ghostReplyIndex, ghostReplies.length - 1)];
-      ghostReplyIndex += 1;
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          mode: "ghost",
-          move: reply.move,
-          target_blunder_id: reply.target_blunder_id ?? null,
-          target_blunder_srs: reply.target_blunder_srs ?? null,
-          target_fen: reply.target_fen ?? null,
-          decision_source: "ghost_path",
-          drill_route: null,
-        }),
-      });
-    });
+    // deterministic.
+    await routeSeededReviewGhostLine(page);
 
     await page.goto("/play");
     await startGameAsWhite(page);
