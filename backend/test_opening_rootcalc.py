@@ -8,7 +8,7 @@ import pytest
 
 from app.fen import active_color, normalize_fen
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
-from app.opening_graph import OpeningGraph, OpeningGraphNode
+from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_rootcalc import (
     REPORT_FOLD_SCOPES,
     REPORT_SCORER_CONTRACT_ID,
@@ -41,6 +41,44 @@ def _positions(moves: list[str]) -> list[str]:
         board.push_uci(uci)
         result.append(_fen(board))
     return result
+
+
+def _san_line(sans: list[str]) -> tuple[list[str], list[str]]:
+    board = chess.Board()
+    fens = [_fen(board)]
+    ucis: list[str] = []
+    for san in sans:
+        move = board.parse_san(san)
+        ucis.append(move.uci())
+        board.push(move)
+        fens.append(_fen(board))
+    return fens, ucis
+
+
+def _played_line_overlay(sans: list[str], player_color: str) -> EvidenceOverlay:
+    fens, ucis = _san_line(sans)
+    overlay = EvidenceOverlay(1, player_color)
+    for ply, uci in enumerate(ucis):
+        parent, child = fens[ply], fens[ply + 1]
+        edge = overlay.edges.setdefault(
+            (parent, child), EdgeEvidence(parent, child, uci)
+        )
+        edge.traversal_count += 1
+        if active_color(parent) == player_color:
+            edge.live_attempts += 1
+            edge.live_passes += 1
+            node = overlay.nodes.setdefault(parent, NodeEvidence(parent))
+            node.live_attempts += 1
+            node.live_passes += 1
+            node.quality_sum += 0.9
+            node.quality_count += 1
+    return overlay
+
+
+def _assert_coverage_invariants(calculator: _SharedCalculator) -> None:
+    for earned, available in calculator._coverage_masses.values():
+        assert 0.0 <= earned <= available + 1e-9
+        assert available <= 1.0 + earned + 1e-9
 
 
 def _graph(paths: list[list[str]]) -> OpeningGraph:
@@ -136,7 +174,11 @@ def _prepared(
     attempts: int = 2,
 ) -> None:
     overlay.edges[(parent, child)] = EdgeEvidence(
-        parent, child, uci, live_attempts=attempts
+        parent,
+        child,
+        uci,
+        traversal_count=attempts,
+        live_attempts=attempts,
     )
 
 
@@ -235,22 +277,391 @@ def test_score_recursion_and_weighted_depth():
     assert score.weighted_depth == pytest.approx(0.625)
 
 
-def test_opponent_weights_prefer_reference_replies_over_observed_off_book_replies():
+def test_coverage_opponent_weights_add_one_shared_off_book_bucket():
     root, opponent, reference = _positions(["e2e4", "e7e5"])
-    off_book = _positions(["e2e4", "c7c5"])[2]
+    off_book_a = _positions(["e2e4", "c7c5"])[2]
+    off_book_b = _positions(["e2e4", "d7d5"])[2]
     graph = _graph([["e2e4", "e7e5"]])
     roots = _roots(_root(root))
     overlay = EvidenceOverlay(1, "white")
     _prepared(overlay, root, opponent, "e2e4")
-    overlay.edges[(opponent, off_book)] = EdgeEvidence(
-        opponent, off_book, "c7c5"
+    overlay.edges[(opponent, off_book_a)] = EdgeEvidence(
+        opponent, off_book_a, "c7c5", traversal_count=1
+    )
+    overlay.edges[(opponent, off_book_b)] = EdgeEvidence(
+        opponent, off_book_b, "d7d5", traversal_count=1
     )
     overlay.nodes[reference] = _quality(reference, 1.0)
-    overlay.nodes[off_book] = _quality(off_book, 0.0)
+    overlay.nodes[off_book_a] = _quality(off_book_a, 0.0)
 
-    score = compute_root_score(root, "white", graph, overlay, roots, debug=True)
-    debug = next(node for node in score.debug_nodes if node.fen == opponent)
-    assert debug.weights == {reference: 1.0}
+    calculator = _SharedCalculator(
+        "white", graph, overlay, roots, RootCalcConfig(), FOLD_NOW
+    )
+    assert calculator._get_weights(opponent) == {reference: 1.0}
+    assert calculator._get_coverage_weights(opponent) == pytest.approx(
+        {reference: 0.5, off_book_a: 0.25, off_book_b: 0.25}
+    )
+
+
+def test_coverage_opponent_weights_fall_back_to_observed_only_without_reference():
+    opponent = _positions(["e2e4"])[1]
+    observed_a = _positions(["e2e4", "c7c5"])[2]
+    observed_b = _positions(["e2e4", "d7d5"])[2]
+    graph = OpeningGraph(
+        {opponent: OpeningGraphNode(opponent, "black")}, opponent
+    )
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(opponent, observed_a)] = EdgeEvidence(
+        opponent, observed_a, "c7c5", traversal_count=1
+    )
+    overlay.edges[(opponent, observed_b)] = EdgeEvidence(
+        opponent, observed_b, "d7d5", traversal_count=1
+    )
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        _roots(_root(opponent)),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+
+    assert calculator._get_coverage_weights(opponent) == pytest.approx(
+        {observed_a: 0.5, observed_b: 0.5}
+    )
+
+
+def test_short_observed_route_keeps_answered_prefix_exposure():
+    sans = ["g3", "d5", "Bg2", "e5", "b3"]
+    fens, _ = _san_line(sans)
+    graph = get_opening_graph()
+    overlay = _played_line_overlay(sans, "black")
+    seed = fens[1]
+    calculator = _SharedCalculator(
+        "black",
+        graph,
+        overlay,
+        _roots(_root(seed, "After 1.g3")),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[seed],
+    )
+
+    after_e5 = fens[4]
+    after_b3 = fens[5]
+    graph_node = graph.get_node(after_e5)
+    assert graph_node is not None
+    assert set(graph_node.children) == {"b2b4", "c2c4", "d2d4"}
+    reference_children = set(calculator._reference_children(after_e5))
+    assert after_b3 not in reference_children
+    weights = calculator._get_coverage_weights(after_e5)
+    assert set(weights) == reference_children | {after_b3}
+    assert all(weight == pytest.approx(0.25) for weight in weights.values())
+
+    assert calculator._coverage_opportunity_mass(after_e5) == pytest.approx(
+        (0.25, 1.0)
+    )
+    assert calculator._coverage_fraction(after_e5) == pytest.approx(0.25)
+    assert calculator._coverage_fraction(fens[3]) == pytest.approx(0.25)
+    assert calculator._coverage_opportunity_mass(fens[2]) == pytest.approx(
+        (5.0 / 8.0, 3.0 / 2.0)
+    )
+    assert calculator._coverage_fraction(fens[2]) == pytest.approx(5.0 / 12.0)
+    assert calculator._coverage_fraction(seed) == pytest.approx(5.0 / 12.0)
+    assert calculator._direct_metrics(after_e5)[2] == pytest.approx(25.0)
+    assert calculator._direct_metrics(seed)[2] == pytest.approx(100.0 * 5.0 / 12.0)
+    assert calculator._calc(seed, False)[2] == calculator._calc(seed, True)[2]
+
+    named = calculator.compute_roots(
+        [calculator.roots.get_root(seed)], include_branch_summaries=False
+    )[seed]
+    direct = {
+        row.normalized_fen: row for row in calculator.compute_position_scores()
+    }[seed]
+    assert (
+        named.opening_score,
+        named.confidence,
+        named.coverage,
+        named.weighted_depth,
+    ) == pytest.approx(
+        (
+            direct.opening_score,
+            direct.confidence,
+            direct.coverage,
+            direct.weighted_depth,
+        )
+    )
+    _assert_coverage_invariants(calculator)
+
+
+def test_long_observed_only_route_credits_terminal_opponent_reply():
+    sans = ["g3", "d5", "Bg2", "Nf6", "d4", "Bf5", "Nf3", "e6", "O-O"]
+    fens, _ = _san_line(sans)
+    graph = get_opening_graph()
+    overlay = _played_line_overlay(sans, "black")
+    seed = fens[1]
+    calculator = _SharedCalculator(
+        "black",
+        graph,
+        overlay,
+        _roots(_root(seed, "After 1.g3")),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[seed],
+    )
+
+    after_d5_node = graph.get_node(fens[2])
+    assert after_d5_node is not None
+    assert set(after_d5_node.children) == {"f1g2", "g1f3"}
+    assert calculator._reference_children(fens[4]) == ()
+    for parent in fens[4:9]:
+        assert calculator._reference_children(parent) == ()
+    assert calculator._structural_children(fens[9]) == ()
+
+    assert calculator._coverage_opportunity_mass(fens[8]) == pytest.approx(
+        (1.0, 1.0)
+    )
+    assert calculator._coverage_fraction(fens[8]) == pytest.approx(1.0)
+    for fen in fens[3:]:
+        assert calculator._coverage_fraction(fen) == pytest.approx(1.0)
+    assert calculator._coverage_opportunity_mass(fens[2]) == pytest.approx(
+        (2.0, 2.5)
+    )
+    assert calculator._coverage_fraction(fens[2]) == pytest.approx(0.8)
+    assert calculator._coverage_fraction(seed) == pytest.approx(0.8)
+    assert calculator._direct_metrics(seed)[2] == pytest.approx(80.0)
+    _assert_coverage_invariants(calculator)
+
+
+def test_local_reply_credit_survives_zero_descendant_coverage():
+    opponent, answered, user_move, unseen = _positions(
+        ["e2e4", "e7e5", "g1f3", "b8c6"]
+    )[1:]
+    graph = _graph([["e2e4", "e7e5", "g1f3", "b8c6"]])
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(opponent, answered)] = EdgeEvidence(
+        opponent, answered, "e7e5", traversal_count=1
+    )
+    overlay.edges[(answered, user_move)] = EdgeEvidence(
+        answered,
+        user_move,
+        "g1f3",
+        traversal_count=1,
+        live_attempts=1,
+        live_passes=1,
+    )
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        _roots(_root(opponent)),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+
+    assert calculator._coverage_fraction(answered) == pytest.approx(0.0)
+    assert calculator._coverage_opportunity_mass(opponent) == pytest.approx(
+        (1.0, 2.0)
+    )
+    assert calculator._coverage_fraction(opponent) == pytest.approx(0.5)
+    assert calculator._coverage_fraction(user_move) == pytest.approx(0.0)
+    assert calculator._edge_was_traversed(user_move, unseen) is False
+    _assert_coverage_invariants(calculator)
+
+
+def test_untraversed_parent_edge_gets_no_credit_from_transposed_child():
+    parent_a = _positions(["e2e4"])[1]
+    parent_b = _positions(["d2d4"])[1]
+    shared = _positions(["e2e4", "e7e5"])[2]
+    deep = _positions(["e2e4", "e7e5", "g1f3"])[3]
+    leaf = _positions(["e2e4", "e7e5", "g1f3", "b8c6"])[4]
+    nodes = {
+        fen: OpeningGraphNode(fen, active_color(fen))
+        for fen in (parent_a, parent_b, shared, deep, leaf)
+    }
+    nodes[parent_a].children["a-shared"] = shared
+    nodes[parent_b].children["b-shared"] = shared
+    nodes[shared].children["shared-deep"] = deep
+    nodes[deep].children["deep-leaf"] = leaf
+    graph = OpeningGraph(nodes, parent_a)
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(parent_a, shared)] = EdgeEvidence(
+        parent_a, shared, "a-shared", traversal_count=1
+    )
+    overlay.edges[(shared, deep)] = EdgeEvidence(
+        shared,
+        deep,
+        "shared-deep",
+        traversal_count=1,
+        live_attempts=1,
+        live_passes=1,
+    )
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        _roots(_root(parent_a), _root(parent_b)),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[parent_a, parent_b],
+    )
+
+    assert calculator._coverage_opportunity_mass(shared) == pytest.approx((0.0, 1.0))
+    assert calculator._coverage_fraction(parent_a) == pytest.approx(0.5)
+    assert calculator._coverage_fraction(parent_b) == pytest.approx(0.0)
+    _assert_coverage_invariants(calculator)
+
+
+def test_coverage_user_routes_ignore_unchosen_and_ghost_only_alternatives():
+    root = _positions([])[0]
+    e4 = _positions(["e2e4"])[1]
+    d4 = _positions(["d2d4"])[1]
+    c4 = _positions(["c2c4"])[1]
+    graph = _graph([["e2e4"], ["d2d4"], ["c2c4"]])
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4", attempts=3)
+    overlay.nodes[d4] = NodeEvidence(d4, is_ghost_target=True)
+    calculator = _SharedCalculator(
+        "white", graph, overlay, _roots(_root(root)), RootCalcConfig(), FOLD_NOW
+    )
+
+    assert set(calculator._get_weights(root)) == {e4, d4}
+    assert calculator._get_coverage_weights(root) == {e4: 1.0}
+    assert c4 not in calculator._get_coverage_weights(root)
+    assert calculator._coverage_fraction(root) == pytest.approx(1.0)
+
+
+def test_coverage_user_routes_use_traversal_plus_rho_weights():
+    root = _positions([])[0]
+    e4 = _positions(["e2e4"])[1]
+    d4 = _positions(["d2d4"])[1]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4", attempts=3)
+    _prepared(overlay, root, d4, "d2d4", attempts=1)
+    calculator = _SharedCalculator(
+        "white", graph, overlay, _roots(_root(root)), RootCalcConfig(), FOLD_NOW
+    )
+
+    assert calculator._get_coverage_weights(root) == pytest.approx(
+        {e4: 4.0 / 6.0, d4: 2.0 / 6.0}
+    )
+
+
+def test_terminal_traversal_changes_coverage_without_fabricating_score_credit():
+    opponent, child, unplayed = _positions(
+        ["e2e4", "e7e5", "g1f3"]
+    )[1:]
+    graph = _graph([["e2e4", "e7e5", "g1f3"]])
+    roots = _roots(_root(opponent))
+    absent = _SharedCalculator(
+        "white",
+        graph,
+        EvidenceOverlay(1, "white"),
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(opponent, child)] = EdgeEvidence(
+        opponent, child, "e7e5", traversal_count=1
+    )
+    traversed = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+
+    assert absent._coverage_fraction(opponent) == pytest.approx(0.0)
+    assert traversed._coverage_fraction(opponent) == pytest.approx(1.0)
+    assert traversed._coverage_fraction(child) == pytest.approx(0.0)
+    assert traversed._calc(opponent, False)[0] == absent._calc(opponent, False)[0]
+    assert traversed._calc(opponent, False)[0] == pytest.approx(0.0)
+    assert traversed._edge_was_traversed(child, unplayed) is False
+
+
+def test_fixed_opponent_topology_traversal_is_coverage_monotone():
+    opponent, a = _positions(["e2e4", "e7e5"])[1:]
+    b = _positions(["e2e4", "c7c5"])[2]
+    graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
+    roots = _roots(_root(opponent))
+    before = _SharedCalculator(
+        "white",
+        graph,
+        EvidenceOverlay(1, "white"),
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(opponent, a)] = EdgeEvidence(
+        opponent, a, "e7e5", traversal_count=1
+    )
+    after = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+
+    assert a in after._get_coverage_weights(opponent)
+    assert b in after._get_coverage_weights(opponent)
+    assert after._coverage_fraction(opponent) >= before._coverage_fraction(opponent)
+
+
+def test_route_extension_can_reveal_a_deeper_coverage_gap():
+    opponent, terminal, extended, unseen = _positions(
+        ["e2e4", "e7e5", "g1f3", "b8c6"]
+    )[1:]
+    graph = _graph([["e2e4", "e7e5", "g1f3", "b8c6"]])
+    roots = _roots(_root(opponent))
+    terminal_overlay = EvidenceOverlay(1, "white")
+    terminal_overlay.edges[(opponent, terminal)] = EdgeEvidence(
+        opponent, terminal, "e7e5", traversal_count=1
+    )
+    terminal_calc = _SharedCalculator(
+        "white",
+        graph,
+        terminal_overlay,
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+    extended_overlay = EvidenceOverlay(1, "white")
+    extended_overlay.edges.update(terminal_overlay.edges)
+    extended_overlay.edges[(terminal, extended)] = EdgeEvidence(
+        terminal,
+        extended,
+        "g1f3",
+        traversal_count=1,
+        live_attempts=1,
+        live_passes=1,
+    )
+    extended_calc = _SharedCalculator(
+        "white",
+        graph,
+        extended_overlay,
+        roots,
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[opponent],
+    )
+
+    assert terminal_calc._coverage_fraction(opponent) == pytest.approx(1.0)
+    assert extended_calc._edge_was_traversed(extended, unseen) is False
+    assert extended_calc._coverage_fraction(opponent) == pytest.approx(0.5)
 
 
 def test_observed_continuations_cross_raw_middlegame_but_book_edges_stop():
@@ -315,9 +726,15 @@ def test_cycle_cut_is_seed_independent_and_renormalized():
     for total in (
         sum(calc._get_weights(a).values()),
         sum(calc._get_weights(b).values()),
+        sum(calc._get_coverage_weights(a).values()),
+        sum(calc._get_coverage_weights(b).values()),
     ):
         assert total == 0 or total == pytest.approx(1.0)
     assert not (calc._score_children(a) and calc._score_children(b))
+    assert not (calc._coverage_children(a) and calc._coverage_children(b))
+    assert calc._coverage_fraction(a) == pytest.approx(1.0)
+    assert calc._coverage_fraction(b) == pytest.approx(1.0)
+    _assert_coverage_invariants(calc)
 
 
 def test_scoped_root_scores_match_full_named_rows_at_fixed_now():
@@ -506,6 +923,41 @@ def test_underexposed_value_is_fractional_coverage_gap():
     assert summary.value == pytest.approx(1.0)
 
 
+def test_underexposed_branch_uses_route_coverage_not_readiness_gate():
+    root, opponent = _positions(["e2e4"])
+    observed = _positions(["e2e4", "e7e5"])[2]
+    unseen = _positions(["e2e4", "c7c5"])[2]
+    graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
+    roots = _roots(
+        _root(root, "Root", children={opponent}),
+        _root(opponent, "Opponent replies", parents={root}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, opponent, "e2e4")
+    overlay.edges[(opponent, observed)] = EdgeEvidence(
+        opponent, observed, "e7e5", traversal_count=1
+    )
+    overlay.nodes[observed] = _quality(observed, 1.0)
+
+    partial, _ = compute_all_root_scores(
+        "white", graph, overlay, roots, _neutral_config()
+    )
+    assert partial[opponent].coverage == pytest.approx(50.0)
+    summary = partial[root].underexposed_branch
+    assert summary is not None
+    assert summary.opening_key == opponent
+    assert summary.value == pytest.approx(0.5)
+
+    overlay.edges[(opponent, unseen)] = EdgeEvidence(
+        opponent, unseen, "c7c5", traversal_count=1
+    )
+    full, _ = compute_all_root_scores(
+        "white", graph, overlay, roots, _neutral_config()
+    )
+    assert full[opponent].coverage == pytest.approx(100.0)
+    assert full[root].underexposed_branch is None
+
+
 def test_scores_are_name_independent():
     root, child = _positions(["e2e4"])
     graph = _graph([["e2e4"]])
@@ -538,8 +990,12 @@ def test_shared_memo_computes_diamond_nodes_once_per_pass():
     overlay = EvidenceOverlay(1, "white")
     _prepared(overlay, root, left, "e2e4")
     _prepared(overlay, root, right, "d2d4")
-    overlay.edges[(left, leaf)] = EdgeEvidence(left, leaf, "left-leaf")
-    overlay.edges[(right, leaf)] = EdgeEvidence(right, leaf, "right-leaf")
+    overlay.edges[(left, leaf)] = EdgeEvidence(
+        left, leaf, "left-leaf", traversal_count=1
+    )
+    overlay.edges[(right, leaf)] = EdgeEvidence(
+        right, leaf, "right-leaf", traversal_count=1
+    )
     overlay.nodes[root] = _quality(root, 0.8)
     overlay.nodes[leaf] = _quality(leaf, 0.9)
     calculator = _SharedCalculator(
@@ -554,6 +1010,8 @@ def test_shared_memo_computes_diamond_nodes_once_per_pass():
     calculator.compute_roots([roots.get_root(root)], include_branch_summaries=False)
     assert calculator.calculation_misses == 8
     assert len(calculator._metrics) == 8
+    assert len(calculator._coverage_masses) == 4
+    _assert_coverage_invariants(calculator)
 
 
 def test_synthetic_initial_root_emitted_only_when_requested():
@@ -1210,7 +1668,7 @@ def test_position_score_hard_zero_for_all_gate_failing_opponent_turn():
 # a change here is a cache-invalidating fingerprint change and must be intentional.
 # ---------------------------------------------------------------------------
 
-# root_calc_config_fingerprint(RootCalcConfig()) — the sm-v2-4 production default.
+# root_calc_config_fingerprint(RootCalcConfig()) — the sm-v2-5 production default.
 GOLDEN = "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090"
 # The literal historical sm-v2-3 config remains byte-stable for comparisons.
 SM_V2_3_GOLDEN = (
@@ -1430,6 +1888,9 @@ def _fold_fixture():
     roots = _roots(_root(root, "Root"), _root(opp, "Opp"))
     overlay = EvidenceOverlay(1, "white")
     _prepared(overlay, root, opp, "e2e4")
+    overlay.edges[(opp, covered)] = EdgeEvidence(
+        opp, covered, "e7e5", traversal_count=1
+    )
     overlay.nodes[root] = _quality(root, 2.0, count=2, at=FOLD_NOW)
     overlay.nodes[covered] = _quality(covered, 4.0, count=4, at=FOLD_NOW)
     return graph, overlay, roots, root, opp, covered
@@ -1545,9 +2006,13 @@ def test_report_fold_out_of_scope_multiplier_is_identity():
     assert user_scope._direct_metrics(opp) == dormant
 
 
-def test_sm_v2_4_full_coverage_user_turn_fold_is_identity():
+def test_sm_v2_5_full_coverage_user_turn_fold_is_identity():
     graph, overlay, roots, root, _opp, _covered = _fold_fixture()
     uncovered = _positions(["e2e4", "c7c5"])[2]
+    opponent = _positions(["e2e4"])[1]
+    overlay.edges[(opponent, uncovered)] = EdgeEvidence(
+        opponent, uncovered, "c7c5", traversal_count=1
+    )
     overlay.nodes[uncovered] = _quality(
         uncovered, 4.0, count=4, at=FOLD_NOW
     )
@@ -1561,7 +2026,7 @@ def test_sm_v2_4_full_coverage_user_turn_fold_is_identity():
     assert current_metrics == pytest.approx(historical_metrics)
 
 
-def test_sm_v2_4_zero_coverage_user_turn_hard_zeros_positive_quality():
+def test_sm_v2_5_zero_coverage_user_turn_hard_zeros_positive_quality():
     # A user-turn row can have structural book children but no prepared edge. Its
     # own mastery still gives the historical p=0 scorer positive quality, while the
     # coverage channel is exactly zero. The active sqrt fold intentionally makes
@@ -1592,11 +2057,10 @@ def test_sm_v2_4_zero_coverage_user_turn_hard_zeros_positive_quality():
     )
 
 
-def test_report_fold_clamps_ulp_coverage_overshoot_from_accumulation():
-    # Four fully covered child branches exercise the production failure shape. Their
-    # normalized weights accumulate to 1.0000000000000002 even though the exact
-    # coverage is 1.0; the report fold must treat that representational overshoot as
-    # full coverage instead of aborting the whole score rebuild.
+def test_route_coverage_ignores_ghost_score_weight_and_stays_bounded():
+    # Score/preparation weights may include a ghost-only branch and accumulate one
+    # ULP above 1. Route coverage has independent traversal weights: it excludes
+    # that branch and returns the exact zero-opportunity identity.
     root = _positions([])[0]
     moves = ("e2e4", "d2d4", "c2c4", "g1f3")
     children_by_move = {move: _positions([move])[1] for move in moves}
@@ -1607,7 +2071,7 @@ def test_report_fold_clamps_ulp_coverage_overshoot_from_accumulation():
     # In sorted-child order the weight bases are [1, 3, 12, 6]. The first child is
     # prepared by ghost-target status (zero attempts + rho=1); the others are
     # prepared by 2/11/5 live attempts. _get_weights' renormalization produces the
-    # observed one-ULP overshoot when _calc accumulates the four coverage terms.
+    # observed one-ULP overshoot. Coverage follows only the traversed routes.
     moves_by_child = {child: move for move, child in children_by_move.items()}
     ordered_children = sorted(children_by_move.values())
     overlay.nodes[ordered_children[0]] = NodeEvidence(
@@ -1619,11 +2083,12 @@ def test_report_fold_clamps_ulp_coverage_overshoot_from_accumulation():
     historical = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
     weights = historical._get_weights(root)
     assert sum(weights.values()) == 1.0000000000000002
-    assert historical._calc(root, False)[2] == 1.0000000000000002
+    assert set(historical._get_coverage_weights(root)) == set(ordered_children[1:])
+    assert historical._calc(root, False)[2] == 1.0
     unfolded = historical._direct_metrics(root)
 
     active = _fold_calc(graph, overlay, roots, RootCalcConfig())
-    assert active._calc(root, False)[2] == 1.0000000000000002
+    assert active._calc(root, False)[2] == 1.0
     assert active._direct_metrics(root) == unfolded
 
 
@@ -2141,11 +2606,13 @@ def test_user14_topology_self_check(user14_scenario):
     pre_fold = cal.pre_fold_quality_for(black_root, root_fen)
 
     # Absolute tolerances (a topology drift is caught deterministically). Verified:
-    # root pre-fold quality 54.32, Caro child 34.38, coverage fraction 0.0833.
+    # root pre-fold quality 54.32, Caro child 34.38, route coverage 7/18.
     assert 53.0 <= pre_fold <= 55.0
     assert 33.0 <= caro_child.opening_score <= 35.0
-    assert 8.33 == pytest.approx(black_root.coverage, abs=0.5)  # coverage is 0-100 PERCENT
-    assert 0.077 <= black_root.coverage / 100.0 <= 0.087
+    assert 100.0 * 7.0 / 18.0 == pytest.approx(
+        black_root.coverage, abs=0.5
+    )  # coverage is 0-100 PERCENT
+    assert 0.38 <= black_root.coverage / 100.0 <= 0.40
     # p=0 -> no fold, so pre_fold_quality == opening_score at the root.
     assert pre_fold == pytest.approx(black_root.opening_score)
 
@@ -2167,7 +2634,7 @@ def test_user14_clock_invariant(user14_scenario):
     assert at_other.coverage == pytest.approx(at_synth.coverage)
 
 
-def test_checked_in_user14_fixture_matches_sm_v2_4_and_behavior():
+def test_checked_in_user14_fixture_matches_sm_v2_5_and_behavior():
     fixture_path = (
         Path(__file__).resolve().parents[1]
         / "src"
@@ -2177,7 +2644,7 @@ def test_checked_in_user14_fixture_matches_sm_v2_4_and_behavior():
     )
     checked_in = json.loads(fixture_path.read_text(encoding="utf-8"))
     regenerated = cal.build_user14_fixture(
-        cal.SM_V2_4_DEFAULT_CELL,
+        cal.SM_V2_5_DEFAULT_CELL,
         cal.SCORE_MODEL_VERSION,
         as_of=cal.SYNTHETIC_AS_OF,
     )
@@ -2193,7 +2660,7 @@ def test_checked_in_user14_fixture_matches_sm_v2_4_and_behavior():
         "sm-v2-3",
         as_of=cal.SYNTHETIC_AS_OF,
     )
-    assert checked_in["model_version"] == "sm-v2-4"
+    assert checked_in["model_version"] == "sm-v2-5"
     assert checked_in["config_fingerprint"] == root_calc_config_fingerprint()
     assert checked_in["black_root_score"] <= checked_in["caro_child_score"] + 1.0
     assert checked_in["black_root_score"] < historical["black_root_score"]

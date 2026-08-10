@@ -33,10 +33,10 @@ export function formatGames(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
-// The g-xnv7 boundaries remain intentionally frozen through sm-v2-4 while
-// representative post-release population data accumulates. sm-v2-4 adds a
-// user-turn-only square-root coverage fold, so the old distribution cannot be
-// algebraically remapped into new global bands. Recalibration is separate,
+// The g-xnv7 boundaries remain intentionally frozen through sm-v2-5 while
+// representative post-release population data accumulates. Coverage varies by
+// opening (and sm-v2-5 corrects its route-exposure semantics), so no global
+// algebraic remap can preserve grades. Recalibration is separate,
 // reviewed follow-up work; these exact A/B/C/D/F and tone thresholds stay pinned
 // here and in format.test.ts until then. See docs/openingscore_final.md.
 export function getPriorityTone(score: number | null): OpeningTone {

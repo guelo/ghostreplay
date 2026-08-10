@@ -299,7 +299,7 @@ authorise its cutoffs.
 
 Regenerates `src/openings/__fixtures__/user14_synthetic.json` from the fixed
 synthetic scenario at `SYNTHETIC_AS_OF`, bound to
-`SM_V2_4_DEFAULT_CELL` and `SCORE_MODEL_VERSION="sm-v2-4"`:
+`SM_V2_5_DEFAULT_CELL` and `SCORE_MODEL_VERSION="sm-v2-5"`:
 
 ```bash
 cd backend
@@ -584,3 +584,20 @@ above remain historical tooling; none is authority for this decision and no new
 run is required. The shared synthetic fixture is the product regression.
 Display grades remain the g-xnv7 boundaries above until representative
 post-release recalibration; no provisional or private-cohort cutoff is emitted.
+
+## sm-v2-5 coverage correction
+
+g-coverage-book-leaf keeps the six served `RootCalcConfig` axes above but changes
+Coverage from recursively completed path mass to route-specific opponent-reply
+opportunity mass. The model version is `sm-v2-5`; the config fingerprint is
+intentionally unchanged. `SM_V2_5_DEFAULT_CELL` is the served config anchor used
+by `emit-user14-fixture`.
+
+The diagnostic `gate_x_cov` arm consumes the new Coverage channel, so its outputs
+cannot be compared numerically across sm-v2-4 and sm-v2-5. The served `gate` arm
+remains the independent readiness gate. No frozen-cohort selection or cutoff
+approval is implied by this correctness change; the regenerated synthetic fixture
+is the product regression and display grades remain frozen pending representative
+population recalibration. Accordingly, the report retains the historical User-14
+arm rows as operands but renders their aggregate status as `n/a`, not a hard failure;
+the release selector's independent raw and derived gates are unchanged.

@@ -1128,10 +1128,34 @@ def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
     )
     current_config_fp = root_calc_config_fingerprint()
     assert old_config_fp != current_config_fp
-    assert oc.SCORE_MODEL_VERSION == "sm-v2-4"
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-5"
     first.registry_fingerprint = first.registry_fingerprint.replace(
         current_config_fp, old_config_fp
     ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-3")
+    db_session.commit()
+
+    second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
+    third = _cached_batch(db_session, 123, "black")
+
+    assert second is not None and third is not None
+    assert second.id != first.id
+    assert third.id == second.id
+    assert second.registry_fingerprint == opening_score_inputs_fingerprint(
+        _make_graph(), _make_roots()
+    )
+
+
+def test_sm_v2_4_batch_recomputes_once_under_sm_v2_5(db_session):
+    """The coverage semantic bump invalidates an otherwise current-config batch."""
+    _seed_black_opening_session(db_session)
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
+    assert first is not None
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-5"
+    assert root_calc_config_fingerprint() in first.registry_fingerprint
+
+    first.registry_fingerprint = first.registry_fingerprint.replace(
+        oc.SCORE_MODEL_VERSION, "sm-v2-4"
+    )
     db_session.commit()
 
     second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
@@ -1179,7 +1203,7 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
 # ---------------------------------------------------------------------------
 # Report-fold config compatibility at the cache boundary.
 #
-# The sm-v2-4 default embeds its active user-scope fold fingerprint. A batch
+# The sm-v2-5 default embeds its active user-scope fold fingerprint. A batch
 # stamped under any non-default report-stage shape is registry drift and
 # recomputes once.
 # ---------------------------------------------------------------------------
@@ -1190,7 +1214,7 @@ GOLDEN = "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090"
 
 
 def test_registry_fingerprint_composes_golden_config():
-    # Pin the exact sm-v2-4 registry composition, with GOLDEN as the config-fp segment.
+    # Pin the exact sm-v2-5 registry composition, with GOLDEN as the config-fp segment.
     graph = _make_graph()
     roots = _make_roots()
     assert root_calc_config_fingerprint() == GOLDEN

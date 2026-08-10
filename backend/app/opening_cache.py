@@ -79,6 +79,10 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # quality by sqrt(coverage); opponent-turn rows retain the recursive coverage
 # gate without a second report-time fold.
 #
+# sm-v2-5: Coverage measures route-specific opponent-reply exposure using local
+# traversed-edge credit plus descendant opportunity mass instead of recursively
+# completed global-DAG path mass. The sm-v2-4 report fold remains configured.
+#
 # sm-v2-3: readiness fold calibration (lcb_z=1.0, coverage_fold="gate",
 # coverage_live_threshold=1) shifts the public score semantics from posterior
 # mean mastery toward earned real-game readiness.
@@ -89,7 +93,7 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # (recompute_opening_scores_if_needed) would serve them with no direct rows. The
 # bump changes registry_fingerprint -> registry drift -> exactly one recompute per
 # (user, color) on first read after deploy, backfilling position rows.
-SCORE_MODEL_VERSION = "sm-v2-4"
+SCORE_MODEL_VERSION = "sm-v2-5"
 
 # Persisted-read-model schema version. Bump when the SET of persisted batch
 # read-model tables/columns changes (NOT the scoring math — that is

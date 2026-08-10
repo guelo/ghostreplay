@@ -1522,13 +1522,14 @@ class TestFoldSymmetryOnRealOperands:
 
     def test_fold_gate_catches_opponent_multiplier_inconsistent_with_its_own_coverage(self):
         cell = cal.ARM1.cells[0]
-        # opp coverage is 0 on this fixture, so a folded opponent report must read 0.0.
-        # The score is restated from the mutated multiplier for the same reason as above.
+        # Move the multiplier off the fixture's route-specific opponent coverage and
+        # restate the score from it, so only the multiplier-vs-coverage contract fails.
         real = self._real_dcr(cell)
+        bad_multiplier = real.synth_opp_turn_multiplier * 0.99
         dcr = dataclasses.replace(
             real,
-            synth_opp_turn_multiplier=1.0,
-            synth_opp_turn_score=real.synth_opp_turn_pre_fold_quality * 1.0,
+            synth_opp_turn_multiplier=bad_multiplier,
+            synth_opp_turn_score=real.synth_opp_turn_pre_fold_quality * bad_multiplier,
         )
         outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
         assert [c.name for c in outcome.checks if not c.passed] == [

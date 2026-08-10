@@ -84,6 +84,7 @@ def _overlay_with_evidence() -> EvidenceOverlay:
         uci="e7e5",
         live_attempts=5,
         live_passes=4,
+        traversal_count=5,
     )
     return overlay
 

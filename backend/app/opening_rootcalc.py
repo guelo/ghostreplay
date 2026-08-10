@@ -30,8 +30,9 @@ COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 # Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). The identity
 # values (report_fold_p=0.0, report_fold_scope="all", report_self_term="keep")
 # remain available for historical comparison and keep their pre-Phase-1
-# fingerprint (see root_calc_config_fingerprint). The served sm-v2-4 default
-# activates the user-turn-only square-root fold while retaining the self-term.
+# fingerprint (see root_calc_config_fingerprint). The served sm-v2-5 default
+# retains the user-turn-only square-root fold while changing the evidence-derived
+# coverage channel from completed-path mass to opponent-reply exposure mass.
 #
 #   - report_fold_scope: which turns the report-time coverage fold applies to.
 #     "all" folds both turns; "user" folds only user-turn rows (g-report-fold-score).
@@ -125,7 +126,7 @@ class RootCalcConfig:
     lcb_z: float = 1.0
     coverage_fold: str = "gate"
     # Report-stage axes (see REPORT_FOLD_SCOPES / REPORT_SELF_TERM_MODES).
-    # sm-v2-4 folds only user-turn reported rows by sqrt(coverage), preserving
+    # sm-v2-5 folds only user-turn reported rows by sqrt(coverage), preserving
     # opponent-turn rows already governed by the recursive coverage gate. The
     # historical p=0 identity remains fingerprint-compatible with sm-v2-3.
     report_fold_p: float = 0.5
@@ -259,6 +260,8 @@ class NodeDebug:
     weights: dict[str, float]
     subtree_live_attempts: int
     subtree_review_attempts: int
+    # Historical debug/API field name. This is the score-readiness evidence gate,
+    # not the sm-v2-5 route-exposure Coverage definition.
     covered_locally: bool
     raw_score: float
     raw_confidence: float
@@ -439,6 +442,8 @@ class _SharedCalculator:
         self._coverage_totals_cache: dict[str, tuple[int, int]] = {}
         self._middlegame_cache: dict[str, bool] = {}
         self._weights_cache: dict[str, dict[str, float]] = {}
+        self._coverage_weights_cache: dict[str, dict[str, float]] = {}
+        self._coverage_masses: dict[str, tuple[float, float]] = {}
         self._score_reachable_cache: dict[str, set[str]] = {}
         self._metrics: dict[tuple[str, bool], tuple[float, float, float, float]] = {}
         self.debug_nodes: dict[str, NodeDebug] = {}
@@ -466,7 +471,17 @@ class _SharedCalculator:
             fen: self._base_weights(fen, self._structural_children(fen))
             for fen in self._domain
         }
-        self._scc_index, self._scc_order = self._build_scc_cut()
+        self._coverage_precut_weights = {
+            fen: self._coverage_base_weights(fen, self._structural_children(fen))
+            for fen in self._domain
+        }
+        self._scc_index, self._scc_order = self._build_scc_cut(
+            self._precut_weights
+        )
+        (
+            self._coverage_scc_index,
+            self._coverage_scc_order,
+        ) = self._build_scc_cut(self._coverage_precut_weights)
 
     def _is_middlegame(self, fen: str) -> bool:
         if fen not in self._middlegame_cache:
@@ -590,7 +605,69 @@ class _SharedCalculator:
         weight = 1.0 / len(weighted_children)
         return {child: weight for child in weighted_children}
 
-    def _build_scc_cut(self) -> tuple[dict[str, int], dict[str, int]]:
+    def _edge_was_traversed(self, fen: str, child: str) -> bool:
+        edge = self._overlay_edges.get((fen, child))
+        return edge is not None and edge.traversal_count > 0
+
+    def _coverage_base_weights(
+        self, fen: str, children: tuple[str, ...] | list[str]
+    ) -> dict[str, float]:
+        """Pre-cut route weights for opponent-reply exposure coverage.
+
+        Coverage follows only actually traversed user moves. At opponent nodes,
+        every reference reply retains one equal bucket; traversed off-reference
+        replies collectively occupy one additional bucket. With no reference
+        replies, traversed observed replies share the full mass uniformly.
+
+        These weights are intentionally independent from score/preparation
+        weights: ghost-only preparation and unchosen user alternatives must not
+        create route breadth, while an observed off-book opponent reply must not
+        disappear merely because reference replies coexist at the same FEN.
+        """
+        if self._is_user_turn(fen):
+            traversed = [
+                child for child in children if self._edge_was_traversed(fen, child)
+            ]
+            if not traversed:
+                return {}
+            bases = {
+                child: self._overlay_edges[(fen, child)].traversal_count
+                + self.config.rho
+                for child in traversed
+            }
+            total = sum(bases.values())
+            return {child: basis / total for child, basis in bases.items()}
+
+        reference_children = set(self._reference_children(fen))
+        traversed_off_reference = [
+            child
+            for child in children
+            if child not in reference_children
+            and self._edge_was_traversed(fen, child)
+        ]
+        if reference_children:
+            bucket_count = len(reference_children) + bool(traversed_off_reference)
+            bucket_weight = 1.0 / bucket_count
+            weights = {
+                child: bucket_weight for child in sorted(reference_children)
+            }
+            if traversed_off_reference:
+                other_weight = bucket_weight / len(traversed_off_reference)
+                weights.update(
+                    {
+                        child: other_weight
+                        for child in sorted(traversed_off_reference)
+                    }
+                )
+            return weights
+        if not traversed_off_reference:
+            return {}
+        weight = 1.0 / len(traversed_off_reference)
+        return {child: weight for child in sorted(traversed_off_reference)}
+
+    def _build_scc_cut(
+        self, precut_weights: dict[str, dict[str, float]]
+    ) -> tuple[dict[str, int], dict[str, int]]:
         index = 0
         indexes: dict[str, int] = {}
         lowlinks: dict[str, int] = {}
@@ -605,7 +682,7 @@ class _SharedCalculator:
             index += 1
             stack.append(fen)
             on_stack.add(fen)
-            for child in self._precut_weights.get(fen, ()):
+            for child in precut_weights.get(fen, ()):
                 if child not in indexes:
                     strongconnect(child)
                     lowlinks[fen] = min(lowlinks[fen], lowlinks[child])
@@ -666,6 +743,105 @@ class _SharedCalculator:
                 else {}
             )
         return self._weights_cache[fen]
+
+    def _coverage_children(self, fen: str) -> tuple[str, ...]:
+        result: list[str] = []
+        for child in self._coverage_precut_weights.get(fen, {}):
+            same_scc = self._coverage_scc_index.get(
+                fen
+            ) == self._coverage_scc_index.get(child)
+            backward = same_scc and self._coverage_scc_order.get(
+                child, 0
+            ) <= self._coverage_scc_order.get(fen, 0)
+            if not backward:
+                result.append(child)
+        return tuple(result)
+
+    def _get_coverage_weights(self, fen: str) -> dict[str, float]:
+        if fen not in self._coverage_weights_cache:
+            survivors = {
+                child: self._coverage_precut_weights[fen][child]
+                for child in self._coverage_children(fen)
+            }
+            total = sum(survivors.values())
+            self._coverage_weights_cache[fen] = (
+                {
+                    child: weight / total
+                    for child, weight in survivors.items()
+                }
+                if total > 0
+                else {}
+            )
+        return self._coverage_weights_cache[fen]
+
+    def _coverage_opportunity_mass(self, fen: str) -> tuple[float, float]:
+        """Return memoized ``(earned, available)`` opponent-reply opportunity mass.
+
+        Opponent replies earn one local unit when their exact edge was traversed.
+        Descendant opportunity mass is admitted only through such a traversal, so
+        evidence below a transposed child cannot credit an untraversed parent edge.
+        User nodes add no local unit and only average actually traversed routes.
+        """
+        fen = _normalized(fen)
+        cached = self._coverage_masses.get(fen)
+        if cached is not None:
+            return cached
+
+        earned = 0.0
+        available = 0.0
+        weights = self._get_coverage_weights(fen)
+        if self._is_user_turn(fen):
+            for child, weight in weights.items():
+                child_earned, child_available = self._coverage_opportunity_mass(
+                    child
+                )
+                earned += weight * child_earned
+                available += weight * child_available
+        else:
+            for child, weight in weights.items():
+                if self._edge_was_traversed(fen, child):
+                    child_earned, child_available = (
+                        self._coverage_opportunity_mass(child)
+                    )
+                    earned += weight * (1.0 + child_earned)
+                    available += weight * (1.0 + child_available)
+                else:
+                    available += weight
+
+        if not (
+            -_REPORT_FOLD_COVERAGE_EPSILON
+            <= earned
+            <= available + _REPORT_FOLD_COVERAGE_EPSILON
+            and available
+            <= 1.0 + earned + _REPORT_FOLD_COVERAGE_EPSILON
+        ):
+            raise ValueError(
+                "coverage opportunity invariants failed for "
+                f"{fen!r}: earned={earned!r}, available={available!r}"
+            )
+        result = earned, available
+        self._coverage_masses[fen] = result
+        return result
+
+    def _coverage_fraction(self, fen: str) -> float:
+        """Observed opponent-reply exposure for one normalized position.
+
+        Zero-opportunity structural/SCC leaves, and selected user routes that end
+        before another opponent opportunity, are fully covered. A non-leaf user
+        node with no traversed route remains uncovered rather than inheriting the
+        leaf identity.
+        """
+        fen = _normalized(fen)
+        earned, available = self._coverage_opportunity_mass(fen)
+        if available > 0.0:
+            return earned / available
+        if (
+            self._is_user_turn(fen)
+            and self._structural_children(fen)
+            and not self._coverage_precut_weights.get(fen)
+        ):
+            return 0.0
+        return 1.0
 
     def _mastery(self, fen: str) -> float:
         """Local mastery: the lower-confidence bound on the Beta posterior mean.
@@ -732,7 +908,7 @@ class _SharedCalculator:
             self._coverage_totals_cache[fen] = live, review
         return self._coverage_totals_cache[fen]
 
-    def _subtree_is_locally_covered(self, fen: str) -> bool:
+    def _subtree_passes_readiness_gate(self, fen: str) -> bool:
         live, review = self._subtree_coverage_totals(fen)
         return live >= self.config.coverage_live_threshold or (
             live >= 1 and review >= 1
@@ -778,7 +954,7 @@ class _SharedCalculator:
             weights=dict(weights),
             subtree_live_attempts=live,
             subtree_review_attempts=review,
-            covered_locally=self._subtree_is_locally_covered(fen),
+            covered_locally=self._subtree_passes_readiness_gate(fen),
             raw_score=0.0,
             raw_confidence=0.0,
             raw_coverage=0.0,
@@ -799,6 +975,7 @@ class _SharedCalculator:
         is_user = self._is_user_turn(fen)
         score_children = self._score_children(fen)
         weights = self._get_weights(fen)
+        coverage = self._coverage_fraction(fen)
         prepared = list(weights) if is_user else []
         is_leaf = not score_children
         self._record_debug(fen, weights, prepared, is_leaf)
@@ -807,35 +984,36 @@ class _SharedCalculator:
             if is_user:
                 mastery = 1.0 if perfect else self._mastery(fen)
                 confidence = 1.0 if perfect else self._confidence_components(fen)[0]
-                result = mastery, confidence, 1.0, mastery
+                result = mastery, confidence, coverage, mastery
             else:
-                result = 1.0, 1.0, 1.0, 0.0
+                result = 1.0, 1.0, coverage, 0.0
         elif is_user:
             mastery = 1.0 if perfect else self._mastery(fen)
             confidence = 1.0 if perfect else self._confidence_components(fen)[0]
             if not weights:
-                result = mastery, confidence, 0.0, mastery
+                result = mastery, confidence, coverage, mastery
             else:
-                score_sum = confidence_sum = coverage_sum = depth_sum = 0.0
+                score_sum = confidence_sum = depth_sum = 0.0
                 for child, weight in weights.items():
-                    child_score, child_conf, child_cov, child_depth = self._calc(
+                    child_score, child_conf, _, child_depth = self._calc(
                         child, perfect
                     )
                     score_sum += weight * child_score
                     confidence_sum += weight * child_conf
-                    coverage_sum += weight * child_cov
                     depth_sum += weight * child_depth
                 result = (
                     mastery * (1.0 + self.config.gamma * score_sum),
                     confidence * confidence_sum,
-                    coverage_sum,
+                    coverage,
                     mastery * (1.0 + self.config.gamma * depth_sum),
                 )
         else:
-            # Opponent node: gate each reply's SCORE credit by local coverage so an
+            # Opponent node: gate each reply's SCORE credit by subtree readiness so an
             # unprepared book reply no longer falls back to the ~0.33 mastery prior
             # (g-zc3p Part 2). Applies at opponent nodes ONLY (user-turn breadth is
-            # not penalized). The COVERAGE accumulator is unchanged from today.
+            # not penalized). The coverage channel is computed independently from
+            # traversed opponent-reply opportunities; this readiness gate remains a
+            # score-only mechanism.
             #
             # branch_cov factors:
             #   - perfect pass OR coverage_fold "off" → 1.0. The perfect pass MUST
@@ -845,13 +1023,13 @@ class _SharedCalculator:
             #     folded in once by the recursive gate at deeper opponent nodes.
             #   - "gate_x_cov" → gate * child_cov, the double-counting arm kept only
             #     so the calibration grid can confirm the over-penalty empirically.
-            score_sum = confidence_sum = coverage_sum = depth_sum = 0.0
+            score_sum = confidence_sum = depth_sum = 0.0
             fold = self.config.coverage_fold
             for child, weight in weights.items():
                 child_score, child_conf, child_cov, child_depth = self._calc(
                     child, perfect
                 )
-                covered = float(self._subtree_is_locally_covered(child))
+                covered = float(self._subtree_passes_readiness_gate(child))
                 if perfect or fold == "off":
                     branch_cov = 1.0
                 elif fold == "gate_x_cov":
@@ -860,9 +1038,8 @@ class _SharedCalculator:
                     branch_cov = covered
                 score_sum += weight * branch_cov * child_score
                 confidence_sum += weight * child_conf
-                coverage_sum += weight * covered * child_cov
                 depth_sum += weight * child_depth
-            result = score_sum, confidence_sum, coverage_sum, depth_sum
+            result = score_sum, confidence_sum, coverage, depth_sum
 
         self._metrics[key] = result
         if not perfect and self.debug:
@@ -1208,9 +1385,8 @@ class _SharedCalculator:
                 for descendant in self.roots.get_descendants(root.opening_key)
                 if descendant.opening_key in scores
                 and _normalized(descendant.opening_key) in score_reachable
-                and not self._subtree_is_locally_covered(
-                    _normalized(descendant.opening_key)
-                )
+                and scores[descendant.opening_key].coverage
+                < 100.0 * (1.0 - _REPORT_FOLD_COVERAGE_EPSILON)
             ]
             underexposed = (
                 min(

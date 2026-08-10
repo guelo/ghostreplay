@@ -203,16 +203,16 @@ surfaced as a separate opening-card tile.
 
 ### Metric 3: Coverage
 
-`Coverage` is the fraction of important opponent-response weight that has
-actually been exposed with enough evidence to be meaningful.
+`Coverage` is the fraction of important opponent-reply opportunity mass that
+has actually been traversed in live opening evidence.
 
 It exists to separate:
 
 - "you fail here"
 - "you have barely been shown this branch"
 
-Opponent-branch coverage also gates score credit, so the visible score no longer
-grants a prior freebie for opponent replies the user has not prepared.
+The score-readiness gate remains separate: a traversed terminal opponent reply
+earns exposure, but it does not fabricate user mastery or recursive score credit.
 
 ## Local Statistics
 
@@ -421,40 +421,78 @@ Coverage is opponent-centric.
 
 The user should be judged on whether they have been exposed to important opponent replies, not on whether they memorized every alternative move for themselves.
 
-### Covered branch rule
+### Structural leaves and observed-route terminals
 
-An opponent child branch counts as covered if its subtree has at least one of:
+A **global structural leaf** is a normalized FEN with no reference or observed
+scoring children. An **observed-route terminal** is the deepest opening position
+reached by one session before that session ends, takes an off-book edge, or hits
+the phase horizon. A FEN can be a non-leaf in the global union DAG while being a
+terminal on a particular route; unplayed global continuations must not erase the
+exposure already earned on that route.
 
-- `1` or more live attempts
+An opponent edge `e=(parent, child)` is locally exposed exactly when its
+`EdgeEvidence.traversal_count > 0`. One traversal earns breadth; repetitions
+continue to affect mastery/confidence but do not duplicate the local opportunity.
+A later user move is not required. Reviews and ghost targets alone do not create
+opponent exposure. The final opening move entering the divider's first
+middlegame position is retained by evidence reconstruction and can therefore earn
+terminal exposure even though the following middlegame response is excluded.
 
-The historical `1` live plus `1` review clause remains available through
-configuration, but with the calibrated default `coverage_live_threshold = 1` a
-single live pass earns coverage. Thinness is handled by the score's LCB rather
-than by a hard coverage cliff.
+### Coverage route weights
 
-### Recursive coverage
+Coverage has weights and an SCC cut independent from score/preparation weights:
 
-At opponent nodes:
+- At user nodes, include only exactly traversed user edges. Weight each by
+  `traversal_count + rho` and normalize. Unchosen and ghost-only alternatives add
+  no breadth penalty.
+- At opponent nodes with reference replies, each reference reply owns one equal
+  bucket. Any traversed off-reference replies collectively own one additional
+  `other observed replies` bucket, split uniformly among those replies. Thus `R`
+  reference replies plus observed off-book replies normalize over `R + 1`
+  buckets.
+- With no reference replies, traversed observed replies split the full mass
+  uniformly. Opponent popularity weighting remains deferred.
+
+The deterministic coverage SCC cut filters and renormalizes these weights
+without changing the score graph. Normalized-FEN descendants are memoized once;
+the immediate local term remains keyed by the exact parent-child edge, so a
+transposed child reached elsewhere cannot credit an untraversed parent edge.
+
+### Exposure-opportunity mass
+
+The memoized coverage recursion returns `(earned, available)`. At an opponent
+node, for each coverage-weighted reply `e=(n, child)` with weight `w_e`:
 
 ```text
-covered_e = 1 if child subtree meets the coverage threshold, else 0
-
-Cov_opp(n) = sum over known children e of w_e * covered_e * Cov(child_e)
+if e was traversed:
+    earned    += w_e * (1 + earned(child))
+    available += w_e * (1 + available(child))
+else:
+    available += w_e
 ```
 
-At user nodes:
+The leading `1` is the immediate opponent-reply opportunity. Descendant mass is
+admitted only through a traversed reply, so immediate exposure survives a zero
+descendant value while deeper unseen important replies can still reduce the
+ratio. At a user node there is no local opportunity:
 
 ```text
-Cov_user(n) = 1, if n is a leaf
-Cov_user(n) = 0, if there are no prepared children
-Cov_user(n) = sum over prepared children e of r_e * Cov(child_e), otherwise
+earned(n)    = sum over traversed user routes e of r_e * earned(child_e)
+available(n) = sum over traversed user routes e of r_e * available(child_e)
 ```
 
-Then:
+For `available > 0`, `Coverage = 100 * earned / available`. Every memoized pair
+satisfies `0 <= earned <= available <= 1 + earned`. With topology and weights
+fixed, traversing an already-weighted opponent edge cannot lower Coverage. The
+stronger claim that every new game is monotone is intentionally false: extending
+a former terminal or introducing a new route/bucket can reveal additional
+available reply mass.
 
-```text
-Coverage = 100 * Cov(root)
-```
+For zero-opportunity subtrees, a structural/SCC leaf is `100%`; a selected user
+route that ends before another opponent opportunity is also `100%`; a non-leaf
+user node with no traversed user route is `0%`. This makes row semantics local: a
+parent can receive full local exposure for a traversed reply while the child row
+shows `0%` breadth below its own position.
 
 ## Underexposed Branch
 
@@ -464,9 +502,10 @@ Return one branch summary specifically for the engine-exposure problem:
 
 Definition:
 
-- among named descendant subtrees, choose the branch with the largest weighted coverage gap
-- weighted coverage gap = branch importance toward the root multiplied by `(1 - coverage_branch)`
-- require the branch to fail the local coverage rule
+- among scored named descendant subtrees with Coverage below full, choose the
+  lowest-Coverage branch, breaking ties by opening key
+- expose `(1 - coverage_branch)` as the gap value
+- exclude fully covered branches; do not filter through the separate readiness gate
 
 This tells the user:
 
@@ -714,7 +753,7 @@ The stats page strongest/weakest top-3 lists sort persisted `opening_score`, so
 specialist openings can reshuffle downward under the readiness fold. That is a
 coherent score-model change, not a stats regression.
 
-### User-turn report fold — **served in sm-v2-4** (g-rescope-p4ih-fix, 2026-07-28)
+### User-turn report fold — **introduced in sm-v2-4, retained in sm-v2-5**
 
 The served configuration is exactly:
 
@@ -725,14 +764,18 @@ coverage_live_threshold = 1
 report_fold_p            = 0.5
 report_fold_scope        = "user"
 report_self_term         = "keep"
-SCORE_MODEL_VERSION      = "sm-v2-4"
+SCORE_MODEL_VERSION      = "sm-v2-5"
 ```
 
-`_calc` and its recursive opponent coverage gate are unchanged. The shared
-named-root/tree-position reporting funnel applies
+The score-readiness gate is unchanged. The shared named-root/tree-position
+reporting funnel applies
 `reported = pre_fold_quality × coverage_fraction**0.5` only when the reported
 row is the user's turn. Opponent-turn rows keep multiplier `1.0`, avoiding a
 second coverage penalty, and full coverage is identity on either turn.
+
+The diagnostic `gate_x_cov` arm now consumes the sm-v2-5 route-exposure child
+Coverage channel. Its outputs are not numerically comparable across the
+sm-v2-4/sm-v2-5 boundary and must not be used as cross-version tuning evidence.
 
 This was an explicit product decision using an already-tested synthetic ARM-2
 cell, not another percentile selection run. The pre-release cohort was not
@@ -746,7 +789,7 @@ The model bump moves the cache registry fingerprint, forcing exactly one
 recompute per `(user, color)` before the new batch becomes the fast path. Newly
 captured session baselines carry
 `{schema_version, model_version, root_calc_config_fingerprint, scores}`.
-Legacy, malformed, non-sm-v2-4, or non-current-config baselines cannot be
+Legacy, malformed, non-sm-v2-5, or non-current-config baselines cannot be
 subtracted from current scores; their after-scores may render, but
 before/delta/new claims are suppressed. The model version protects scorer
 changes outside `RootCalcConfig`; the config fingerprint separately protects
@@ -757,7 +800,7 @@ config-only retunes that legitimately keep the same model version.
 `A ≥ 44`, `B ≥ 29`, `C ≥ 8`, `D ≥ 2`, `F < 2`; tones `alert < 5`,
 `watch < 29` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
 
-These are the g-xnv7 boundaries, intentionally kept unchanged through sm-v2-4.
+These are the g-xnv7 boundaries, intentionally kept unchanged through sm-v2-5.
 Their original percentile interpretation belongs to the sm-v2-3 distribution;
 it is not claimed for the new user-turn-folded distribution. Representative
 post-release data owns any later recalibration.
@@ -770,7 +813,7 @@ post-release data owns any later recalibration.
 >
 > Grade/tone are display of an unchanged stored score, so this re-centre does
 > **not** bump `QUALITY_VERSION`. The score-model semantic change itself is
-> represented by `RootCalcConfig` drift and `SCORE_MODEL_VERSION = sm-v2-4`.
+> represented by `SCORE_MODEL_VERSION = sm-v2-5` (the RootCalcConfig is unchanged).
 > The cohort is still volume-dominated by one user, so the central tendency is
 > useful but the fine 5-band *shape* should be revisited when more high-observation
 > users exist.

@@ -375,7 +375,7 @@ def test_tree_default_root_lists_book_first_move(client, auth_headers):
     assert data["selected_fen"] == START
     assert data["selected_ply"] == 0
     assert data["selected_is_terminal"] is False
-    assert data["model_version"] == "sm-v2-4"
+    assert data["model_version"] == "sm-v2-5"
     assert len(data["columns"]) == 1
     col = data["columns"][0]
     assert col["position_fen"] == START

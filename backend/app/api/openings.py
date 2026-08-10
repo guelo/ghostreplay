@@ -133,6 +133,7 @@ class NodeDebugResponse(BaseModel):
     weights: dict[str, float]
     subtree_live_attempts: int
     subtree_review_attempts: int
+    # Historical wire name: score-readiness gate, not route-exposure Coverage.
     covered_locally: bool
     raw_score: float
     raw_confidence: float

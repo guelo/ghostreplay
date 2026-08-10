@@ -838,7 +838,7 @@ CURRENT_SM_V2_3_CELL = GridCell(
     report_fold_scope="all",
     report_self_term="keep",
 )
-SM_V2_4_DEFAULT_CELL = GridCell(
+SM_V2_5_DEFAULT_CELL = GridCell(
     lcb_z=1.0,
     coverage_fold="gate",
     coverage_live_threshold=1,
@@ -2837,6 +2837,9 @@ def _specialist_scenario() -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots,
     overlay.nodes[strong] = NodeEvidence(
         fen=strong, quality_sum=4.0, quality_count=4, live_attempts=4
     )
+    overlay.edges[(opp, strong)] = EdgeEvidence(
+        opp, strong, "e7e5", traversal_count=4
+    )
     return graph, overlay, _diag_roots(opp), opp
 
 
@@ -2852,9 +2855,12 @@ def _broad_guard_scenario() -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots
         [["e2e4", "e7e5"], ["e2e4", "c7c5"], ["e2e4", "e7e6"]]
     )
     overlay = EvidenceOverlay(0, "white")
-    for reply in replies:
+    for uci, reply in zip(("e7e5", "c7c5", "e7e6"), replies, strict=True):
         overlay.nodes[reply] = NodeEvidence(
             fen=reply, quality_sum=4.0, quality_count=4, live_attempts=4
+        )
+        overlay.edges[(opp, reply)] = EdgeEvidence(
+            opp, reply, uci, traversal_count=4
         )
     return graph, overlay, _diag_roots(opp), opp
 
@@ -2877,6 +2883,9 @@ def _cliff_scenario(
         live_attempts=1,
         review_attempts=1 if reviewed else 0,
     )
+    overlay.edges[(opp, reply)] = EdgeEvidence(
+        opp, reply, "e7e5", traversal_count=1
+    )
     return graph, overlay, _diag_roots(opp), opp
 
 
@@ -2890,7 +2899,7 @@ def _user14_scenario() -> tuple[
     node under white on IDENTICAL evidence. Returns (graph, black_overlay, white_overlay,
     roots, root_fen, child_fen). The pinned values reproduce (scored under
     CURRENT_SM_V2_3_CELL at SYNTHETIC_AS_OF) root pre-fold quality 54.32, Caro child
-    34.38, coverage fraction 0.0833 (each inside its self-check tolerance).
+    34.38, and sm-v2-5 route coverage 7/18 (each inside its self-check tolerance).
     """
     root_fen = _diag_positions(["e2e4"])[1]  # 1.e4, black to move (USER / OPP mirror)
     child_fen = _diag_positions(["e2e4", "c7c6"])[2]  # Caro-Kann, white to move (OPP)
@@ -2900,8 +2909,9 @@ def _user14_scenario() -> tuple[
 
     # Exactly SEVEN paths: the prepared mainline plus the unprepared siblings at each of
     # the two opponent levels. The Caro node gets 2 White replies (d4 + Nc3); the deep
-    # node gets 6 (exd5 + 5 siblings). Their PRODUCT is the coverage denominator
-    # (1 / (2*6) = 0.0833).
+    # node gets 6 (exd5 + 5 siblings). Under sm-v2-5 the traversed d4 reply earns
+    # immediate local credit before its deeper 1/6 opportunity mass, producing
+    # (earned, available)=(7/12, 3/2) and route coverage 7/18 at the Caro node.
     paths = [
         ["e2e4", "c7c6", "d2d4", "d7d5", "e4d5"],  # prepared mainline: Caro Exchange
         ["e2e4", "c7c6", "b1c3"],                    # 1 unprepared Caro reply (2.Nc3)
@@ -2933,10 +2943,26 @@ def _user14_scenario() -> tuple[
         # overlay edge also registers as an OBSERVED structural child, injecting a
         # phantom child that would corrupt the topology.
         overlay.edges[(root_fen, child_fen)] = EdgeEvidence(
-            root_fen, child_fen, "c7c6", live_attempts=60, live_passes=60
+            root_fen,
+            child_fen,
+            "c7c6",
+            traversal_count=60,
+            live_attempts=60,
+            live_passes=60,
+        )
+        overlay.edges[(child_fen, mid_fen)] = EdgeEvidence(
+            child_fen, mid_fen, "d2d4", traversal_count=40
         )
         overlay.edges[(mid_fen, deep_fen)] = EdgeEvidence(
-            mid_fen, deep_fen, "d7d5", live_attempts=40, live_passes=40
+            mid_fen,
+            deep_fen,
+            "d7d5",
+            traversal_count=40,
+            live_attempts=40,
+            live_passes=40,
+        )
+        overlay.edges[(deep_fen, leaf_fen)] = EdgeEvidence(
+            deep_fen, leaf_fen, "e4d5", traversal_count=20
         )
         return overlay
 
@@ -3015,10 +3041,20 @@ def _fold_mirror_scenario() -> tuple[
         # (d2d4), so whichever color is scored finds exactly one prepared child on its own
         # user-turn node — that is the mirror.
         overlay.edges[(root_fen, a_fen)] = EdgeEvidence(
-            root_fen, a_fen, "c7c6", live_attempts=60, live_passes=60
+            root_fen,
+            a_fen,
+            "c7c6",
+            traversal_count=60,
+            live_attempts=60,
+            live_passes=60,
         )
         overlay.edges[(a_fen, a1_fen)] = EdgeEvidence(
-            a_fen, a1_fen, "d2d4", live_attempts=40, live_passes=40
+            a_fen,
+            a1_fen,
+            "d2d4",
+            traversal_count=40,
+            live_attempts=40,
+            live_passes=40,
         )
         return overlay
 
@@ -3260,13 +3296,15 @@ def _fold_mirror_cell_operands(
 def run_user14_diagnostic(
     grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
 ) -> dict[str, object]:
-    """User-turn true-positive + fold operands (the ~54 A -> <= C drop under the fold).
+    """User-turn true-positive + fold operands from the historical arm sweep.
 
     Scores the frozen _user14_scenario under each grid cell on BOTH colors from the
-    identical synthetic evidence, at now=as_of, debug=True. AGGREGATE passed: True iff
-    for EVERY graded-for-selection arm row with user_moves_vs_current the user_tp_score
-    grades <= C, while the reference (CURRENT_SM_V2_3_CELL) row is A. B1 is GRADED-FOR-
-    REFERENCE (its ~34 user-turn drop is reported but NEVER enters passed).
+    identical synthetic evidence, at now=as_of, debug=True. The old aggregate required
+    every graded-for-selection arm to lower the reference A to <= C. sm-v2-5's corrected
+    route-exposure operand intentionally invalidates that numerical comparison, and this
+    dormant grid is not release authority for the new model, so ``passed`` is ``None``.
+    The per-cell operands remain useful diagnostics; the checked-in User-14 fixture is
+    the sm-v2-5 product regression.
     """
     scenario = _user14_scenario()
 
@@ -3277,20 +3315,11 @@ def run_user14_diagnostic(
         return _user_behavior_key(cell) != _user_behavior_key(CURRENT_SM_V2_3_CELL)
 
     rows, reference = _diagnostic_rows(grid, demo_cells, operands, applicable)
-    selection = _selection_rows(rows)
-    passed: bool | None
-    if not selection:
-        passed = None
-    else:
-        passed = fixed_band(reference["user_tp_score"]) == "A" and all(
-            grade_rank(fixed_band(r["user_tp_score"])) >= grade_rank("C")
-            for r in selection
-        )
     return {
-        "name": "User-14 user-turn true-positive (A -> <= C fold drop)",
+        "name": "User-14 user-turn true-positive (historical fold-drop sweep)",
         "reference": reference,
         "rows": rows,
-        "passed": passed,
+        "passed": None,
     }
 
 
@@ -7459,7 +7488,7 @@ def select_candidate(inputs: SelectionInputs) -> SelectionResult:
 
 # The settled repo-relative fixture path, computed from __file__ (NOT the process CWD,
 # so it is stable regardless of where the CLI is invoked). The explicit
-# --emit-user14-fixture mode binds the builder+writer to SM_V2_4_DEFAULT_CELL and
+# --emit-user14-fixture mode binds the builder+writer to SM_V2_5_DEFAULT_CELL and
 # SCORE_MODEL_VERSION; ordinary report/release paths never write the checked-in file.
 DEFAULT_USER14_FIXTURE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -7696,7 +7725,7 @@ def _fmt_operands(row: dict[str, object], operand_keys: tuple[str, ...]) -> str:
 def _render_paired_diagnostic(
     diag: dict[str, object], lines: list[str], operand_keys: tuple[str, ...]
 ) -> None:
-    """Render a paired diagnostic: name + PASS/FAIL, the reference row, then one row per
+    """Render a paired diagnostic: name + PASS/FAIL/n/a, reference, then one row per
     cell reading the operand keys that EXIST on the row it renders (never a generic
     pre_fold_quality — the NAMED per-turn operands are surfaced), so the leak channel is
     visible in text. A graded_for="none" anchor/continuity/demo row is a plain column."""
@@ -7716,7 +7745,7 @@ def _render_paired_diagnostic(
 
 
 def _render_diagnostics(diagnostics: dict[str, object], lines: list[str]) -> None:
-    lines.append("=== Calibration diagnostics (PASS/FAIL) ===")
+    lines.append("=== Calibration diagnostics (PASS/FAIL/n/a) ===")
 
     _render_paired_diagnostic(
         diagnostics["user14"],
@@ -8791,7 +8820,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     subparsers.add_parser(
         "emit-user14-fixture",
-        help="Write the deterministic sm-v2-4 synthetic User-14 product regression.",
+        help="Write the deterministic sm-v2-5 synthetic User-14 product regression.",
     )
 
     # LEGACY COMPATIBILITY. A bare invocation (`--json`, `--limit 5`, or nothing at all) is
@@ -9107,7 +9136,7 @@ def main(argv: list[str] | None = None, *, session_factory=None):
     if args.mode == "select-release":
         return _run_select_release(args)
     if args.mode == "emit-user14-fixture":
-        payload = build_user14_fixture(SM_V2_4_DEFAULT_CELL, SCORE_MODEL_VERSION)
+        payload = build_user14_fixture(SM_V2_5_DEFAULT_CELL, SCORE_MODEL_VERSION)
         write_user14_fixture(payload)
         return 0
 

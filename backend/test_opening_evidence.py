@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 import tempfile
 import uuid
 from pathlib import Path
@@ -35,6 +36,8 @@ from app.opening_graph import (
     _fen_from_board,
     build_opening_graph,
 )
+from app.opening_rootcalc import RootCalcConfig, _SharedCalculator
+from app.opening_roots import OpeningRoot, OpeningRoots
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
@@ -1513,6 +1516,80 @@ class TestPhaseExclusion:
         white_plies = [p for p, r in enumerate(rows) if r[1] == "white"]
         assert any(p < division.middle for p in white_plies)
         assert any(p >= division.middle for p in white_plies)
+
+    def test_terminal_opponent_edge_at_phase_horizon_earns_exposure(
+        self, db_session, branching_graph
+    ):
+        from app.game_phase import divide, reconstruct_board_sequence
+
+        uci_line = [
+            "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "b1c3", "f8c5",
+            "d2d3", "d7d6", "c1g5", "c8g4", "d1d2", "d8d7", "e1c1", "e8c8",
+        ]
+        board = chess.Board()
+        rows = []
+        for ply, uci in enumerate(uci_line):
+            move = chess.Move.from_uci(uci)
+            san = board.san(move)
+            fen_before = board.fen()
+            color = "white" if board.turn == chess.WHITE else "black"
+            board.push(move)
+            rows.append((ply // 2 + 1, color, san, fen_before, board.fen()))
+
+        boards = reconstruct_board_sequence([(r[3], r[4], r[2]) for r in rows])
+        division = divide(boards)
+        assert division.middle == 13
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session, player_color="black")
+        for move_number, color, san, fen_before, fen_after in rows:
+            _insert_move(
+                db_session,
+                sid,
+                move_number,
+                color,
+                san,
+                fen_before,
+                fen_after,
+                eval_delta=10,
+            )
+
+        overlay = overlay_evidence(db_session, 1, "black", branching_graph)
+        terminal_parent = normalize_fen(rows[12][3])
+        terminal_child = normalize_fen(rows[12][4])
+        excluded_child = normalize_fen(rows[13][4])
+        terminal_edge = overlay.edges[(terminal_parent, terminal_child)]
+        assert rows[12][1] == "white"
+        assert terminal_edge.traversal_count > 0
+        assert (terminal_child, excluded_child) not in overlay.edges
+
+        root = OpeningRoot(
+            opening_key=terminal_parent,
+            opening_name="Pre-Qd2 horizon",
+            opening_family="Synthetic",
+            eco=None,
+            depth=0,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        )
+        roots = OpeningRoots(
+            {terminal_parent: root},
+            {terminal_parent: frozenset({terminal_parent})},
+        )
+        calculator = _SharedCalculator(
+            "black",
+            branching_graph,
+            overlay,
+            roots,
+            RootCalcConfig(),
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+            seeds=[terminal_parent],
+        )
+
+        assert calculator._coverage_opportunity_mass(
+            terminal_parent
+        ) == pytest.approx((1.0, 1.0))
+        assert calculator._coverage_fraction(terminal_parent) == pytest.approx(1.0)
 
 
 class TestReviews:

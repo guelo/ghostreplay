@@ -576,9 +576,9 @@ class TestArmGrid:
 
 
 class TestGridCellConfig:
-    def test_sm_v2_4_cell_matches_served_default(self):
-        assert cal.SM_V2_4_DEFAULT_CELL.config == RootCalcConfig()
-        assert cal._cfg_fp(cal.SM_V2_4_DEFAULT_CELL) == root_calc_config_fingerprint(
+    def test_sm_v2_5_cell_matches_served_default(self):
+        assert cal.SM_V2_5_DEFAULT_CELL.config == RootCalcConfig()
+        assert cal._cfg_fp(cal.SM_V2_5_DEFAULT_CELL) == root_calc_config_fingerprint(
             RootCalcConfig()
         )
         assert cal.CURRENT_SM_V2_3_CELL.config != RootCalcConfig()
@@ -906,9 +906,11 @@ class TestDiagnostics:
     def test_user14_operands_aggregate_and_roles(self):
         grid = cal.build_arm_grid()
         diag = cal.run_user14_diagnostic(grid)
-        # reference row is CURRENT and grades A; aggregate passes (all arms drop <= C).
+        # The historical sm-v2-4 selection gate is informational under sm-v2-5:
+        # corrected route exposure raises the synthetic fold operand, so the old
+        # all-arms-reach-<=C predicate is no longer an approval oracle or a hard failure.
         assert cal.fixed_band(diag["reference"]["user_tp_score"]) == "A"
-        assert diag["passed"] is True
+        assert diag["passed"] is None
         # full operand set present on every row
         for row in diag["rows"]:
             assert _USER14_OPERANDS <= set(row.keys())
@@ -918,7 +920,7 @@ class TestDiagnostics:
         assert by_roles[("current",)]["graded_for"] == "none"
         arm_rows = [r for r in diag["rows"] if r["graded_for"] == "selection"]
         assert len(arm_rows) == 8  # 4 arm1 + 4 arm2
-        assert all(
+        assert not all(
             cal.grade_rank(cal.fixed_band(r["user_tp_score"])) >= cal.grade_rank("C")
             for r in arm_rows
         )
@@ -928,15 +930,14 @@ class TestDiagnostics:
 
     def test_user14_mirror_coverage_is_asymmetric_by_construction(self):
         # WHY _fold_mirror_scenario has to exist (g-fold-sym-gate): the User-14 mirror
-        # exposes the same FEN on both turns, but NOT at the same coverage — under white
-        # the Caro child is a user-turn node with no prepared children, so the opponent
-        # side's coverage is 0 while the user side's is 1/12. Comparing the two
-        # multipliers HERE demands (1/12)**p == 0, which no p > 0 satisfies.
+        # exposes the same FEN on both turns, but NOT at the same coverage. Route
+        # traversal makes the opponent side fully covered while the user side is 7/18;
+        # multiplier equality therefore remains invalid on this fixture.
         scenario = cal._user14_scenario()
         for cell in cal.ARM1.cells:
             ops = cal._user14_cell_operands(scenario, cell, as_of=cal.SYNTHETIC_AS_OF)
-            assert ops["synth_opp_root_coverage_fraction"] == 0.0
-            assert ops["synth_root_coverage_fraction"] == pytest.approx(1.0 / 12.0)
+            assert ops["synth_opp_root_coverage_fraction"] == 1.0
+            assert ops["synth_root_coverage_fraction"] == pytest.approx(7.0 / 18.0)
             assert ops["synth_user_turn_multiplier"] != ops["synth_opp_turn_multiplier"]
 
     def test_fold_mirror_scenario_is_coverage_symmetric(self):
@@ -958,15 +959,24 @@ class TestDiagnostics:
             else:
                 assert om == 1.0, cell.label  # a user-scope fold never folds the opponent
 
-    def test_user14_b1_failure_never_flips_passed(self):
-        # B1 is graded_for="reference": even scored, it never enters passed.
+    def test_user14_historical_selection_outcome_remains_visible_in_rows(self):
+        # B1 remains a reference row, and the old selection outcome can still be read
+        # from the operands even though it is no longer rendered as a model verdict.
         grid = cal.build_arm_grid()
         diag = cal.run_user14_diagnostic(grid)
         selection = [
             r for r in diag["rows"] if r["graded_for"] == "selection" and r["applicable"]
         ]
         assert all(r["roles"] in {("arm1",), ("arm2",)} for r in selection)
-        assert diag["passed"] is True
+        b1 = next(r for r in diag["rows"] if r["roles"] == ("b1",))
+        assert b1 not in selection
+        expected = cal.fixed_band(diag["reference"]["user_tp_score"]) == "A" and all(
+            cal.grade_rank(cal.fixed_band(r["user_tp_score"]))
+            >= cal.grade_rank("C")
+            for r in selection
+        )
+        assert expected is False
+        assert diag["passed"] is None
 
     def test_opponent_guard_applicability_and_operands(self):
         diag = cal.run_opponent_guard_diagnostic(cal.build_arm_grid())
@@ -1240,14 +1250,14 @@ class TestUser14Fixture:
         cal.write_user14_fixture(payload, path=target)
         assert cal.DEFAULT_USER14_FIXTURE_PATH != target
 
-    def test_emit_mode_is_bound_to_sm_v2_4_default(self):
+    def test_emit_mode_is_bound_to_sm_v2_5_default(self):
         with patch.object(cal, "write_user14_fixture") as writer:
             assert cal.main(["emit-user14-fixture"]) == 0
         payload = writer.call_args.args[0]
         assert payload == cal.build_user14_fixture(
-            cal.SM_V2_4_DEFAULT_CELL, cal.SCORE_MODEL_VERSION
+            cal.SM_V2_5_DEFAULT_CELL, cal.SCORE_MODEL_VERSION
         )
-        assert payload["model_version"] == "sm-v2-4"
+        assert payload["model_version"] == "sm-v2-5"
         assert payload["config_fingerprint"] == root_calc_config_fingerprint()
 
 
@@ -1287,6 +1297,8 @@ class TestMainEndToEnd:
         # text renders and names all three diagnostics
         text = cal.render_text(report)
         assert "User-14" in text
+        assert "[n/a] User-14" in text
+        assert "[FAIL] User-14" not in text
         assert "opponent regression guard" in text
         assert "cliff" in text
 

@@ -14,7 +14,7 @@ import {
 } from './format'
 import user14Synthetic from './__fixtures__/user14_synthetic.json'
 
-// The g-xnv7 grade/tone boundaries remain frozen through sm-v2-4
+// The g-xnv7 grade/tone boundaries remain frozen through sm-v2-5
 // (2026-07-09 final grid: pooled p50≈10, p75≈21, p95≈44). These tests pin the
 // boundaries so any future shift is a deliberate, reviewed change.
 describe('getPriorityLabel', () => {
@@ -53,12 +53,12 @@ describe('getPriorityTone', () => {
   })
 })
 
-describe('sm-v2-4 synthetic product regression', () => {
-  it('keeps the low-coverage user-turn root below ready bands', () => {
-    expect(['C', 'D', 'F']).toContain(
-      getPriorityLabel(user14Synthetic.black_root_score),
-    )
-    expect(getPriorityTone(user14Synthetic.black_root_score)).not.toBe('steady')
+describe('sm-v2-5 synthetic product regression', () => {
+  it('renders the regenerated route-exposure score on frozen bands', () => {
+    expect(user14Synthetic.model_version).toBe('sm-v2-5')
+    expect(user14Synthetic.root_coverage_fraction).toBeCloseTo(7 / 18)
+    expect(getPriorityLabel(user14Synthetic.black_root_score)).toBe('B')
+    expect(getPriorityTone(user14Synthetic.black_root_score)).toBe('steady')
   })
 })
 
