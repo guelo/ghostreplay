@@ -158,10 +158,7 @@ const StartPanel = ({
             selectedOpening={draftOpening}
             selectedLine={draftLine}
             playerColor={draftColor}
-            engineElo={draftElo}
             strictnessCp={draftStrictnessCp}
-            maiaEloBins={maiaEloBins}
-            botLabel={botLabel}
             isLoadingOpenings={isLoadingOpenings}
             isStarting={isStartingGame}
             startError={startError}
@@ -170,7 +167,6 @@ const StartPanel = ({
               setDraftLine(selection.line);
             }}
             onPlayerColorChange={setDraftColor}
-            onEngineEloChange={setDraftElo}
             onStrictnessChange={setDraftStrictnessCp}
             onStartDrill={() => {
               if (!draftOpening || draftStrictnessCp == null) return;

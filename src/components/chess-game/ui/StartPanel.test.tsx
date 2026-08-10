@@ -83,10 +83,6 @@ const baseProps = () => ({
   onStartDrill: vi.fn(),
 });
 
-// Engine-difficulty slider has max = bins.length - 1. The strictness fine-tune
-// slider only exists once a tier is picked, and is band-constrained.
-const eloSlider = () =>
-  screen.getAllByRole("slider").find((s) => s.getAttribute("max") === "2")!;
 const strictnessSlider = () =>
   screen.getByRole("slider", { name: /fine-tune strictness/i });
 
@@ -103,7 +99,7 @@ describe("StartPanel", () => {
     expect(props.onStartPlay).toHaveBeenCalledWith("black", 1200);
   });
 
-  it("commits dragged elo + tier-picked, fine-tuned strictness on Start Drill, keeping the seeded ad-hoc line", () => {
+  it("commits the automatic elo seed + chosen strictness on Start Drill, keeping the seeded ad-hoc line", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
@@ -112,7 +108,8 @@ describe("StartPanel", () => {
     };
     render(<StartPanel {...props} />);
 
-    fireEvent.change(eloSlider(), { target: { value: "2" } }); // bins[2] === 1200
+    expect(screen.queryByText("Engine Difficulty")).not.toBeInTheDocument();
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
     // Forced flow: pick a tier (reveals the band slider), then fine-tune within
     // the Standard band (16–35).
     fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
@@ -121,12 +118,30 @@ describe("StartPanel", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
     expect(props.onStartDrill).toHaveBeenCalledWith({
-      engineElo: 1200,
+      engineElo: 1000,
       strictnessCp: 30,
       playerColor: "white",
       opening: adHocOpening,
       line: ["e2e4", "e7e5"],
     });
+  });
+
+  it("commits an asynchronously refreshed automatic elo seed without exposing a drill slider", () => {
+    const props = {
+      ...baseProps(),
+      isDrillMode: true,
+      seedOpening: registered,
+    };
+    const { rerender } = render(<StartPanel {...props} />);
+
+    rerender(<StartPanel {...props} seedEngineElo={1200} />);
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenCalledWith(
+      expect.objectContaining({ engineElo: 1200 }),
+    );
   });
 
   it("drops the ad-hoc line when a registered opening is picked (Finding 2: no leak)", () => {

@@ -1,7 +1,6 @@
 import { memo } from "react";
 import { defaultPieces } from "react-chessboard";
 import type { OpeningRootItem } from "../../../utils/api";
-import OpponentAvatar from "./OpponentAvatar";
 import OpeningPicker, { type OpeningPickerSelection } from "./OpeningPicker";
 import {
   STRICTNESS_TIERS,
@@ -19,11 +18,8 @@ type DrillSetupPanelProps = {
   selectedOpening: OpeningRootItem | null;
   selectedLine: string[] | null;
   playerColor: "white" | "black";
-  engineElo: number;
   // null = no tier chosen yet; Start stays disabled until the user picks one.
   strictnessCp: number | null;
-  maiaEloBins: readonly number[];
-  botLabel: string;
 
   // State
   isLoadingOpenings: boolean;
@@ -33,7 +29,6 @@ type DrillSetupPanelProps = {
   // Handlers
   onSelectOpening: (selection: OpeningPickerSelection) => void;
   onPlayerColorChange: (color: "white" | "black") => void;
-  onEngineEloChange: (elo: number) => void;
   onStrictnessChange: (cp: number) => void;
   onStartDrill: () => void;
 };
@@ -43,16 +38,12 @@ const DrillSetupPanel = ({
   selectedOpening,
   selectedLine,
   playerColor,
-  engineElo,
   strictnessCp,
-  maiaEloBins,
-  botLabel,
   isLoadingOpenings,
   isStarting,
   startError,
   onSelectOpening,
   onPlayerColorChange,
-  onEngineEloChange,
   onStrictnessChange,
   onStartDrill,
 }: DrillSetupPanelProps) => {
@@ -101,33 +92,6 @@ const DrillSetupPanel = ({
               </span>
               <span className="play-side-button__label">Black</span>
             </button>
-          </div>
-        </div>
-
-        <div className="drill-field">
-          <span className="drill-field__label">Engine Difficulty</span>
-          <div className="drill-field__control chess-elo-selector">
-            <div className="chess-elo-slider-row">
-              <input
-                type="range"
-                min={0}
-                max={maiaEloBins.length - 1}
-                step={1}
-                value={maiaEloBins.indexOf(engineElo)}
-                onChange={(e) => {
-                  const nextElo = maiaEloBins[Number(e.target.value)];
-                  if (nextElo !== undefined) {
-                    onEngineEloChange(nextElo);
-                  }
-                }}
-                disabled={isStarting}
-                className="chess-elo-slider"
-              />
-            </div>
-            <div className="chess-elo-bot-row">
-              <OpponentAvatar mode="engine" engineElo={engineElo} size={48} />
-              <span className="chess-elo-label">{botLabel}</span>
-            </div>
           </div>
         </div>
 

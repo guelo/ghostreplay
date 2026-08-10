@@ -5,7 +5,6 @@ import DrillSetupPanel from "./DrillSetupPanel";
 const makeProps = () => {
   const onSelectOpening = vi.fn();
   const onPlayerColorChange = vi.fn();
-  const onEngineEloChange = vi.fn();
   const onStrictnessChange = vi.fn();
   const onStartDrill = vi.fn();
 
@@ -40,28 +39,24 @@ const makeProps = () => {
     selectedOpening: null,
     selectedLine: null as string[] | null,
     playerColor: "white" as const,
-    engineElo: 1000,
     strictnessCp: 25 as number | null,
-    maiaEloBins: [800, 1000, 1200] as const,
-    botLabel: "Ghost Master 1000",
     isLoadingOpenings: false,
     isStarting: false,
     startError: null,
     onSelectOpening,
     onPlayerColorChange,
-    onEngineEloChange,
     onStrictnessChange,
     onStartDrill,
   };
 };
 
 describe("DrillSetupPanel", () => {
-  it("renders left-side labels for each field", () => {
+  it("renders the drill fields without a manual difficulty control", () => {
     render(<DrillSetupPanel {...makeProps()} />);
     expect(screen.getByText("Opening")).toBeInTheDocument();
     expect(screen.getByText("Side")).toBeInTheDocument();
-    expect(screen.getByText("Engine Difficulty")).toBeInTheDocument();
     expect(screen.getByText("Strictness")).toBeInTheDocument();
+    expect(screen.queryByText("Engine Difficulty")).not.toBeInTheDocument();
   });
 
   it("does not render a Random side option", () => {
@@ -130,6 +125,7 @@ describe("DrillSetupPanel", () => {
     expect(
       screen.queryByRole("slider", { name: /fine-tune strictness/i }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
     expect(
       screen.getByText(/pick a strictness to start/i),
     ).toBeInTheDocument();

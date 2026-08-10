@@ -9086,12 +9086,6 @@
     min-width: 0;
 }
 
-.drill-field .chess-elo-bot-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
 /* ---- Opening picker (anchored List popover + near-fullscreen Tree dialog) ---- */
 .opening-picker {
     width: 100%;
