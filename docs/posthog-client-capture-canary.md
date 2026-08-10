@@ -23,32 +23,27 @@ every `api_request` with the HTTP-header equivalents:
 | Property | Source header | Mirrors |
 |---|---|---|
 | `dnt_signaled` | `DNT: 1` / `DNT: yes` | posthog-js `respect_dnt` opt-out — **the live client gate** |
-| `gpc_signaled` | `Sec-GPC: 1` | nothing, as of `f763907` — see below |
-| `client_capture_gated` | either of the above | **stale**: still ORs GPC in |
+| `client_capture_gated` | `DNT: 1` / `DNT: yes` | the complete client opt-out decision |
 
-> **The server tag is out of sync with the client as of `f763907`** ("get rid of
-> gpc gate"), which removed the `isGpcSignaled()` pre-init bail. The client now
-> gates on DNT alone, but `_privacy_signals` still computes
-> `client_capture_gated = gpc OR dnt`. A browser that sends `Sec-GPC: 1` without
-> `DNT: 1` now captures normally, yet is tagged as gated — so it is wrongly
-> excluded from the denominator, biasing `B` low and the ratio high (the canary
-> under-fires).
->
-> **Use `dnt_signaled = false` as the denominator filter, not
-> `client_capture_gated = false`**, until the server tag is realigned. Both
-> queries below already do.
+`client_capture_gated = false` therefore means "this browser should have been
+emitting `api_request_client`". If a healthy volume of those requests arrives
+and no client events do, client capture is genuinely broken.
 
-`dnt_signaled = false` therefore means "this browser should have been emitting
-`api_request_client`". If a healthy volume of those requests arrives and no
-client events do, client capture is genuinely broken.
+> **Deployment cutover:** existing PostHog events are immutable. Before
+> `g-privacy-tag-drift` deploys, `client_capture_gated` also includes the old
+> GPC decision, so a 30-day view that spans the deploy would still exclude
+> pre-deploy GPC-only requests and bias the ratio high. Keep the canary and
+> backfill query on `dnt_signaled = false` until the entire lookback starts
+> after the Railway deploy timestamp for this fix. Once that 30-day transition
+> has elapsed, `client_capture_gated = false` is the canonical equivalent.
 
 ### Content blockers sit inside the denominator, deliberately
 
-DNT and GPC announce themselves in a request header, so the server can subtract
-them. A content blocker does not. uBlock Origin drops the `/ingest` POST while
-the `/api` calls beside it go through untouched — so that browser is tagged
-`dnt_signaled = false`, lands in the denominator, and contributes nothing to the
-numerator.
+DNT announces itself in a request header, so the server can subtract it. A
+content blocker does not. uBlock Origin drops the `/ingest` POST while the
+`/api` calls beside it go through untouched — so that browser is tagged
+`dnt_signaled = false`, lands in the denominator, and contributes nothing to
+the numerator.
 
 That is the right treatment: blocker-induced loss is real telemetry loss, and it
 is invisible to every other signal we have. But it has two consequences. A
@@ -63,15 +58,12 @@ uBlock Origin blocked capture straight through it on this app, discovered
 
 ### What the first read showed (2026-07-28)
 
-The gate rate came back at **~100%**, and it is **DNT, not GPC**, doing the
-gating: `pct_gated` tracked `pct_dnt` on every day measured (100.0 / 100.0 /
-99.9), while `gpc_signaled` was 0% on three of four days. `respect_dnt: true` is
-what silences capture; the GPC pre-init bail was close to a no-op on this
-traffic, and was removed outright in `f763907` on the strength of this read.
+The gate rate came back at **~100%**: `pct_gated` tracked `pct_dnt` on every day
+measured (100.0 / 100.0 / 99.9). `respect_dnt: true` is what silences capture.
 
 The breakdown by `distinct_id` explains why. Over five days production traffic
-was **two browsers**: one with 3,107 requests (DNT, no GPC) and one with 315
-(DNT and GPC), plus 9 anonymous requests of which 8 were verification probes.
+was **two browsers**: one with 3,107 requests and one with 315, and both sent
+DNT. There were also 9 anonymous requests, 8 of which were verification probes.
 The app is unreleased — all of it is developer testing, and both test browsers
 had DNT enabled.
 
@@ -179,7 +171,7 @@ shape of the ratio, not as a target.
 | Observation | Reading |
 |---|---|
 | `capture_ratio` ~0, `ungated_requests` healthy | Real outage. Client capture is broken for browsers that never asked to be excluded. Bisect recent frontend commits touching `src/analytics/posthog.ts`, `main.tsx`, or `vercel.json`'s `/ingest` rewrites. |
-| `capture_ratio` ~0, `ungated_requests` ~0 | Not an outage — the audience really is asserting GPC/DNT. Nothing to fix client-side; measure the affected outcomes server-side instead. |
+| `capture_ratio` ~0, `ungated_requests` ~0 | Not an outage — the audience really is asserting DNT. Nothing to fix client-side; measure the affected outcomes server-side instead. |
 | `capture_ratio` sags gradually, no deploy correlates | Likely a drifting content-blocker share, not a regression. Blocked browsers are in the denominator by design (above). Confirm against the bundle/`vercel.json` history before chasing code. |
 | `capture_ratio` healthy, a specific route missing | Not this canary's job — a call-site bug, not a capture outage. |
 | Both series ~0 | Ingest or traffic outage, not client-specific. The existing `api_request` volume insight covers it. |
@@ -188,22 +180,21 @@ shape of the ratio, not as a target.
 
 Prod browsers reach the API through Vercel's `/api/:match*` rewrite (see
 `resolveApiBaseUrl` — a `.vercel.app` host always forces the same-origin `/api`
-base), so `Sec-GPC` and `DNT` must survive that hop for the denominator to be
-correct. If the proxy stripped them, every request would look ungated and the
+base), so `DNT` must survive that hop for the denominator to be correct. If the
+proxy stripped it, every request would look ungated and the
 canary would over-fire.
 
-**Verified 2026-07-28: the rewrite forwards both headers intact.** Eight probes
-(gpc-only / dnt-only / both / neither, each sent through the rewrite and direct
-to Railway) returned matching tags on every pair. Re-run this only after a
-`vercel.json` change.
+**Verified 2026-07-28: the rewrite forwards DNT intact.** Matched DNT and
+non-DNT probes sent through the rewrite and directly to Railway returned the
+same tags. Re-run this only after a `vercel.json` change.
 
 To re-check after any `vercel.json` change, send probes with known ids through
 both paths and confirm the tags match:
 
 ```bash
-curl -s -o /dev/null -H 'X-Client-Request-ID: <uuid>' -H 'Sec-GPC: 1' \
+curl -s -o /dev/null -H 'X-Client-Request-ID: <uuid>' -H 'DNT: 1' \
   https://ghostreplay.vercel.app/api/__gap_probe          # via the rewrite
-curl -s -o /dev/null -H 'X-Client-Request-ID: <other-uuid>' -H 'Sec-GPC: 1' \
+curl -s -o /dev/null -H 'X-Client-Request-ID: <other-uuid>' -H 'DNT: 1' \
   https://ghostreplay-production.up.railway.app/api/__gap_probe   # direct control
 ```
 
@@ -213,7 +204,7 @@ probes up by `client_request_id`:
 
 ```sql
 SELECT properties.client_request_id AS id,
-       properties.gpc_signaled, properties.dnt_signaled, properties.client_capture_gated
+       properties.dnt_signaled, properties.client_capture_gated
 FROM events
 WHERE event = 'api_request'
   AND properties.client_request_id LIKE '9c000000-%'

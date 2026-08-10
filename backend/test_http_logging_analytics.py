@@ -72,19 +72,19 @@ def test_response_echoes_request_id_matching_captured_event(recorded_captures):
 
 
 @pytest.mark.parametrize(
-    "headers, gpc, dnt",
+    "headers, dnt",
     [
-        ({}, False, False),
-        ({"Sec-GPC": "1"}, True, False),
-        ({"DNT": "1"}, False, True),
-        ({"DNT": "yes"}, False, True),
+        ({}, False),
+        # This header no longer gates capture unless DNT is also asserted.
+        ({"Sec-GPC": "1"}, False),
+        ({"DNT": "1"}, True),
+        ({"DNT": "yes"}, True),
         # Non-asserting values must NOT gate (matches the client's strict reads).
-        ({"Sec-GPC": "0", "DNT": "0"}, False, False),
-        ({"Sec-GPC": "1", "DNT": "1"}, True, True),
+        ({"DNT": "0"}, False),
     ],
 )
-def test_privacy_signals_tag_api_request(recorded_captures, headers, gpc, dnt):
-    """`api_request` carries the GPC/DNT header signals so the true gate rate is
+def test_privacy_signals_tag_api_request(recorded_captures, headers, dnt):
+    """`api_request` carries the DNT header signal so the true gate rate is
     measurable server-side even while client capture is silenced (g-client-event-gap)."""
     mini = FastAPI()
     mini.add_middleware(HTTPLoggingMiddleware)
@@ -97,9 +97,8 @@ def test_privacy_signals_tag_api_request(recorded_captures, headers, gpc, dnt):
         c.get("/api/ok", headers=headers)
 
     props = _api_request_props(recorded_captures)
-    assert props["gpc_signaled"] is gpc
     assert props["dnt_signaled"] is dnt
-    assert props["client_capture_gated"] is (gpc or dnt)
+    assert props["client_capture_gated"] is dnt
 
 
 def test_unmatched_route_falls_back_to_label(recorded_captures):
