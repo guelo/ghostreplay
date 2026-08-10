@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "../../../test/utils";
+import { fireEvent, render, screen, within } from "../../../test/utils";
 import DrillSetupPanel from "./DrillSetupPanel";
 
 const makeProps = () => {
@@ -90,13 +90,29 @@ describe("DrillSetupPanel", () => {
 
   it("calls onPlayerColorChange when a color toggle is clicked", () => {
     const props = makeProps();
-    render(<DrillSetupPanel {...props} />);
+    const { rerender } = render(<DrillSetupPanel {...props} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /^white$/i }));
+    const sideToggle = screen.getByRole("group", { name: "Playing as" });
+    expect(
+      within(sideToggle).getByRole("button", { name: "White" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(sideToggle).getByRole("button", { name: "Black" }),
+    ).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(within(sideToggle).getByRole("button", { name: "White" }));
     expect(props.onPlayerColorChange).toHaveBeenCalledWith("white");
 
-    fireEvent.click(screen.getByRole("button", { name: /^black$/i }));
+    fireEvent.click(within(sideToggle).getByRole("button", { name: "Black" }));
     expect(props.onPlayerColorChange).toHaveBeenCalledWith("black");
+
+    rerender(<DrillSetupPanel {...props} playerColor="black" />);
+    expect(
+      within(sideToggle).getByRole("button", { name: "White" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(
+      within(sideToggle).getByRole("button", { name: "Black" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   it("renders three strictness tier buttons", () => {
@@ -228,6 +244,13 @@ describe("DrillSetupPanel", () => {
     );
 
     expect(screen.getByRole("button", { name: /starting/i })).toBeDisabled();
+    const sideToggle = screen.getByRole("group", { name: "Playing as" });
+    expect(
+      within(sideToggle).getByRole("button", { name: "White" }),
+    ).toBeDisabled();
+    expect(
+      within(sideToggle).getByRole("button", { name: "Black" }),
+    ).toBeDisabled();
   });
 
   it("renders startError when provided", () => {

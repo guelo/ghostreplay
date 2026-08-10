@@ -1,20 +1,28 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "../../../test/utils";
+import { fireEvent, render, screen, within } from "../../../test/utils";
 import StartPanel from "./StartPanel";
 import type { OpeningRootItem } from "../../../utils/api";
 
 vi.mock("./OpeningPicker", () => ({
   default: ({
     openingFamilies,
+    playerColor,
     onSelect,
+    onPlayerColorChange,
   }: {
     openingFamilies: Array<{ roots: OpeningRootItem[] }> | null;
+    playerColor: "white" | "black";
     onSelect: (selection: {
       opening: OpeningRootItem;
       line: string[] | null;
     }) => void;
+    onPlayerColorChange: (color: "white" | "black") => void;
   }) => (
     <div>
+      <output data-testid="picker-player-color">{playerColor}</output>
+      <button type="button" onClick={() => onPlayerColorChange("black")}>
+        Switch picker side to Black
+      </button>
       <button
         type="button"
         onClick={() =>
@@ -197,6 +205,39 @@ describe("StartPanel", () => {
       },
       line: ["e2e4", "c7c5", "g1f3"],
     });
+  });
+
+  it("synchronizes picker and dialog side changes through the uncommitted draft", () => {
+    const props = {
+      ...baseProps(),
+      isDrillMode: true,
+      seedOpening: registered,
+    };
+    render(<StartPanel {...props} />);
+
+    expect(screen.getByTestId("picker-player-color")).toHaveTextContent("white");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Switch picker side to Black" }),
+    );
+
+    const sideToggle = screen.getByRole("group", { name: "Playing as" });
+    expect(
+      within(sideToggle).getByRole("button", { name: "Black" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("picker-player-color")).toHaveTextContent("black");
+
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playerColor: "black" }),
+    );
+
+    fireEvent.click(within(sideToggle).getByRole("button", { name: "White" }));
+    expect(screen.getByTestId("picker-player-color")).toHaveTextContent("white");
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playerColor: "white" }),
+    );
   });
 
   it("resyncs the draft when a seed prop changes (async reseed, null → number)", () => {

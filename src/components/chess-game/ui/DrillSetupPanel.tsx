@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { defaultPieces } from "react-chessboard";
+import OpeningSideToggle from "../../OpeningSideToggle";
 import type { OpeningRootItem } from "../../../utils/api";
 import OpeningPicker, { type OpeningPickerSelection } from "./OpeningPicker";
 import {
@@ -8,9 +8,6 @@ import {
   strictnessFromCp,
   strictnessStopCopy,
 } from "./DrillSetupPanel.helpers";
-
-const WhiteKing = defaultPieces.wK;
-const BlackKing = defaultPieces.bK;
 
 type DrillSetupPanelProps = {
   // Data
@@ -63,35 +60,19 @@ const DrillSetupPanel = ({
               disabled={isStarting}
               isLoading={isLoadingOpenings}
               onSelect={onSelectOpening}
+              onPlayerColorChange={onPlayerColorChange}
             />
           </div>
         </div>
 
         <div className="drill-field">
           <span className="drill-field__label">Side</span>
-          <div className="drill-field__control chess-start-options">
-            <button
-              className={`play-side-button${playerColor === "white" ? " play-side-button--active" : ""}`}
-              type="button"
-              onClick={() => onPlayerColorChange("white")}
+          <div className="drill-field__control">
+            <OpeningSideToggle
+              playerColor={playerColor}
+              onPlayerColorChange={onPlayerColorChange}
               disabled={isStarting}
-            >
-              <span className="play-side-button__piece">
-                <WhiteKing />
-              </span>
-              <span className="play-side-button__label">White</span>
-            </button>
-            <button
-              className={`play-side-button${playerColor === "black" ? " play-side-button--active" : ""}`}
-              type="button"
-              onClick={() => onPlayerColorChange("black")}
-              disabled={isStarting}
-            >
-              <span className="play-side-button__piece">
-                <BlackKing />
-              </span>
-              <span className="play-side-button__label">Black</span>
-            </button>
+            />
           </div>
         </div>
 

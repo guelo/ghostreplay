@@ -2674,9 +2674,10 @@ describe("ChessGame characterization safeguards", () => {
     // (g-fxrm) — it commits on Start.
     expect(useGameStore.getState().engineElo).toBe(1500);
     // Drill side is now local state, decoupled from the store playerColorChoice;
-    // the White side king button should be active (from the store's player_color).
-    expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
-      "play-side-button--active",
+    // the White side choice reflects the store's player_color in the draft.
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
     );
     // Strictness is force-always (g-09mu): neither the store's exact 20cp nor
     // the localStorage 50 pre-selects a tier — the panel opens unset and Start

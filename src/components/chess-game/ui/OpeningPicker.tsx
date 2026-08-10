@@ -13,6 +13,7 @@ import { captureEvent } from "../../../analytics/posthog";
 import OpeningsTreeExplorer, {
   type OpeningsTreeActionTarget,
 } from "../../OpeningsTreeExplorer";
+import OpeningSideToggle from "../../OpeningSideToggle";
 import type { OpeningsTreeRoute } from "../../../hooks/useOpeningsTree";
 import type {
   OpeningPlayerColor,
@@ -34,6 +35,7 @@ type OpeningPickerProps = {
   disabled?: boolean;
   isLoading?: boolean;
   onSelect: (selection: OpeningPickerSelection) => void;
+  onPlayerColorChange: (color: OpeningPlayerColor) => void;
 };
 
 type PickerMode = "list" | "tree";
@@ -78,25 +80,22 @@ function rootLabel(root: OpeningRootItem): string {
 }
 
 function initialTreeRoute(
-  playerColor: OpeningPlayerColor,
   selectedOpening: OpeningRootItem | null,
   selectedLine: string[] | null,
-): OpeningsTreeRoute {
+): Omit<OpeningsTreeRoute, "playerColor"> {
   if (selectedLine !== null) {
     return {
-      playerColor,
       moves: [...selectedLine],
       opening: null,
     };
   }
   if (selectedOpening) {
     return {
-      playerColor,
       moves: [],
       opening: selectedOpening.opening_key,
     };
   }
-  return { playerColor, moves: [], opening: null };
+  return { moves: [], opening: null };
 }
 
 /**
@@ -114,8 +113,12 @@ function OpeningPickerTree({
   selectedLine: string[] | null;
   onConfirm: (selection: OpeningPickerSelection) => void;
 }) {
-  const [route, setRoute] = useState<OpeningsTreeRoute>(() =>
-    initialTreeRoute(playerColor, selectedOpening, selectedLine),
+  const [tentativeRoute, setTentativeRoute] = useState(() =>
+    initialTreeRoute(selectedOpening, selectedLine),
+  );
+  const route = useMemo<OpeningsTreeRoute>(
+    () => ({ ...tentativeRoute, playerColor }),
+    [playerColor, tentativeRoute],
   );
 
   const selectLine = useCallback(
@@ -125,26 +128,26 @@ function OpeningPickerTree({
         from_key: route.moves.join(","),
         to_key: line.join(","),
         depth: line.length,
-        player_color: playerColor,
+        player_color: route.playerColor,
       });
-      setRoute({ playerColor, moves: [...line], opening: null });
+      setTentativeRoute({ moves: [...line], opening: null });
     },
-    [playerColor, route.moves],
+    [route],
   );
 
   const adoptCanonicalLine = useCallback(
     (line: string[]) => {
-      setRoute((current) => {
+      setTentativeRoute((current) => {
         const alreadyCanonical =
           current.opening === null &&
           current.moves.length === line.length &&
           current.moves.every((move, index) => move === line[index]);
         return alreadyCanonical
           ? current
-          : { playerColor, moves: [...line], opening: null };
+          : { moves: [...line], opening: null };
       });
     },
-    [playerColor],
+    [],
   );
 
   const confirm = useCallback(
@@ -154,7 +157,7 @@ function OpeningPickerTree({
         source: "tree",
         opening_key: target.targetFen,
         depth: line.length,
-        player_color: playerColor,
+        player_color: route.playerColor,
       });
       onConfirm({
         opening: {
@@ -167,7 +170,7 @@ function OpeningPickerTree({
         line,
       });
     },
-    [onConfirm, playerColor],
+    [onConfirm, route.playerColor],
   );
 
   const expandedAction = useMemo(
@@ -193,6 +196,7 @@ const OpeningPicker = ({
   disabled = false,
   isLoading = false,
   onSelect,
+  onPlayerColorChange,
 }: OpeningPickerProps) => {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<PickerMode>("list");
@@ -545,6 +549,11 @@ const OpeningPicker = ({
               >
                 <div className="opening-picker__tree-chrome">
                   {toggle}
+                  <OpeningSideToggle
+                    playerColor={playerColor}
+                    onPlayerColorChange={onPlayerColorChange}
+                    disabled={disabled}
+                  />
                   <button
                     ref={closeRef}
                     type="button"
@@ -556,9 +565,7 @@ const OpeningPicker = ({
                 </div>
                 <div className="opening-picker__tree-body">
                   <OpeningPickerTree
-                    key={`${playerColor}\u0000${
-                      selectedOpening?.opening_key ?? ""
-                    }\u0000${
+                    key={`${selectedOpening?.opening_key ?? ""}\u0000${
                       selectedLine === null
                         ? "<registered>"
                         : selectedLine.join("\u0000")

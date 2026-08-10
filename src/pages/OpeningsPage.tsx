@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { defaultPieces } from "react-chessboard";
 import AppNav from "../components/AppNav";
+import OpeningSideToggle from "../components/OpeningSideToggle";
 import OpeningsMetricsLegend from "../components/OpeningsMetricsLegend";
 import OpeningsTreeExplorer, {
   type OpeningsTreeActionTarget,
@@ -14,18 +14,6 @@ import {
 } from "../openings/route";
 import type { OpeningPlayerColor } from "../utils/api";
 import "../App.css";
-
-const WhiteKing = defaultPieces.wK;
-const BlackKing = defaultPieces.bK;
-
-const COLOR_OPTIONS: Array<{
-  label: string;
-  value: OpeningPlayerColor;
-  King: typeof WhiteKing;
-}> = [
-  { label: "White", value: "white", King: WhiteKing },
-  { label: "Black", value: "black", King: BlackKing },
-];
 
 function SelectedOpeningsExplorer({
   playerColor,
@@ -121,30 +109,12 @@ function OpeningsPage() {
           <header className="openings-tree__header">
             <h1 className="openings-tree__title">Openings Tree</h1>
             <div className="openings-tree__controls-row">
-              <div
-                className="openings-color-picker"
-                role="group"
-                aria-label="Playing as"
-              >
+              <div className="openings-color-picker">
                 <span className="openings-tree__color-label">Playing as:</span>
-                <div className="mode-toggle-row segmented-toggle openings-color-picker__toggle">
-                  {COLOR_OPTIONS.map(({ label, value, King }) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`chess-button toggle${
-                        playerColor === value ? " active" : ""
-                      }`}
-                      aria-pressed={playerColor === value}
-                      onClick={() => changeColor(value)}
-                    >
-                      <span className="openings-color-picker__piece">
-                        <King />
-                      </span>
-                      {label}
-                    </button>
-                  ))}
-                </div>
+                <OpeningSideToggle
+                  playerColor={playerColor}
+                  onPlayerColorChange={changeColor}
+                />
               </div>
               <OpeningsMetricsLegend />
             </div>

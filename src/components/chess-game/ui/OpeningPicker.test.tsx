@@ -1,6 +1,6 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "../../../test/utils";
+import { fireEvent, render, screen, within } from "../../../test/utils";
 import type { OpeningsTreeExplorerProps } from "../../OpeningsTreeExplorer";
 import type { OpeningRootItem } from "../../../utils/api";
 
@@ -55,7 +55,7 @@ vi.mock("../../OpeningsTreeExplorer", () => ({
   },
 }));
 
-import OpeningPicker from "./OpeningPicker";
+import OpeningPicker, { type OpeningPickerSelection } from "./OpeningPicker";
 
 const KINGS_PAWN: OpeningRootItem = {
   opening_key: "kings-pawn-fen",
@@ -90,16 +90,46 @@ function renderPicker(
   overrides: Partial<React.ComponentProps<typeof OpeningPicker>> = {},
 ) {
   const onSelect = vi.fn();
+  const onPlayerColorChange = vi.fn();
   const props: React.ComponentProps<typeof OpeningPicker> = {
     openingFamilies: makeFamilies(),
     selectedOpening: null,
     selectedLine: null,
     playerColor: "white",
     onSelect,
+    onPlayerColorChange,
     ...overrides,
   };
   const result = render(<OpeningPicker {...props} />);
-  return { ...result, onSelect, props };
+  return { ...result, onSelect, onPlayerColorChange, props };
+}
+
+function ControlledPicker({
+  selectedOpening = null,
+  selectedLine = null,
+  onSelect,
+  onPlayerColorChange,
+}: {
+  selectedOpening?: OpeningRootItem | null;
+  selectedLine?: string[] | null;
+  onSelect: (selection: OpeningPickerSelection) => void;
+  onPlayerColorChange: (color: "white" | "black") => void;
+}) {
+  const [playerColor, setPlayerColor] = useState<"white" | "black">("white");
+
+  return (
+    <OpeningPicker
+      openingFamilies={makeFamilies()}
+      selectedOpening={selectedOpening}
+      selectedLine={selectedLine}
+      playerColor={playerColor}
+      onSelect={onSelect}
+      onPlayerColorChange={(color) => {
+        onPlayerColorChange(color);
+        setPlayerColor(color);
+      }}
+    />
+  );
 }
 
 function openList() {
@@ -215,6 +245,7 @@ describe("OpeningPicker", () => {
           selectedLine={null}
           playerColor="white"
           onSelect={vi.fn()}
+          onPlayerColorChange={vi.fn()}
         />
       </div>,
     );
@@ -314,6 +345,75 @@ describe("OpeningPicker", () => {
     });
   });
 
+  it("preserves a tentative line and uses the synchronized color for Tree events", () => {
+    const onSelect = vi.fn();
+    const onPlayerColorChange = vi.fn();
+    render(
+      <ControlledPicker
+        onSelect={onSelect}
+        onPlayerColorChange={onPlayerColorChange}
+      />,
+    );
+    openTree();
+    fireEvent.click(screen.getByRole("button", { name: "Explore e4" }));
+
+    const sideToggle = screen.getByRole("group", { name: "Playing as" });
+    fireEvent.click(within(sideToggle).getByRole("button", { name: "Black" }));
+
+    expect(onPlayerColorChange).toHaveBeenCalledWith("black");
+    expect(explorerProps?.route).toEqual({
+      playerColor: "black",
+      moves: ["e2e4"],
+      opening: null,
+    });
+    expect(
+      within(sideToggle).getByRole("button", { name: "Black" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore e4" }));
+    expect(captureEventMock).toHaveBeenLastCalledWith("opening_explored", {
+      source: "drill_picker",
+      from_key: "e2e4",
+      to_key: "e2e4",
+      depth: 1,
+      player_color: "black",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use this opening" }),
+    );
+    expect(onSelect).toHaveBeenCalledWith(
+      expect.objectContaining({ line: treeTarget.line }),
+    );
+    expect(captureEventMock).toHaveBeenLastCalledWith(
+      "drill_opening_selected",
+      expect.objectContaining({ player_color: "black" }),
+    );
+  });
+
+  it("preserves an unresolved registered opening across a Tree color switch", () => {
+    const onPlayerColorChange = vi.fn();
+    render(
+      <ControlledPicker
+        selectedOpening={CARO_KANN}
+        selectedLine={null}
+        onSelect={vi.fn()}
+        onPlayerColorChange={onPlayerColorChange}
+      />,
+    );
+    openTree();
+    expect(explorerProps?.route.opening).toBe(CARO_KANN.opening_key);
+
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+
+    expect(onPlayerColorChange).toHaveBeenCalledWith("black");
+    expect(explorerProps?.route).toEqual({
+      playerColor: "black",
+      moves: [],
+      opening: CARO_KANN.opening_key,
+    });
+  });
+
   it("confirms Tree with a synthetic opening and copied exact line", () => {
     const { onSelect } = renderPicker({ playerColor: "black" });
     openTree();
@@ -372,6 +472,7 @@ describe("OpeningPicker", () => {
         playerColor="white"
         isLoading={false}
         onSelect={vi.fn()}
+        onPlayerColorChange={vi.fn()}
       />,
     );
     expect(screen.getByRole("combobox")).toBeDisabled();
