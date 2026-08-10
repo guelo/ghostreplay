@@ -31,6 +31,21 @@ GHOSTREPLAY_TEST_PG_MAINT_URL="postgresql://.../postgres" \
 pytest -m pg_gate --strict-markers -rs
 ```
 
+The configured test database is shared only across time, never concurrently. When
+an `@pg_gate` test or a known shared-schema PG fixture remains selected, an autouse
+session fixture acquires a database-scoped PostgreSQL advisory lease before the first
+test setup and holds it through Alembic setup, all per-test `TRUNCATE` resets or
+legacy-fixture writes, and final engine disposal. The fixture allowlist includes the
+unmarked analysis-cache and position-analysis PostgreSQL suites without adding them
+to the required release manifest. Genuinely SQLite-only selections ignore an ambient
+test URL. A second PG run pointed at the same `GHOSTREPLAY_TEST_PG_URL` polls the
+session lock and resumes after the first run exits; its terminal immediately
+identifies the holder PID/application/state/query from `pg_locks` and
+`pg_stat_activity`, then repeats the diagnostic periodically. A killed process
+releases the lease with its PostgreSQL session. The maintenance URL remains
+separately scoped to guarded, UUID-named `ghostreplay_mig_test_*` databases and is
+never used to drop the shared test DB.
+
 Recorded from one run against PostgreSQL 18.3 (throwaway cluster):
 
 | Fact | Value |

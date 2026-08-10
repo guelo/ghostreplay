@@ -8,7 +8,8 @@ Importable pytest plugin that owns everything PostgreSQL-backed tests need:
   hookwrapper that make the gate fail closed rather than pass with missing
   coverage,
 - the shared migrated-schema fixtures (``pg_engine`` / ``pg_session_factory`` /
-  ``pg_client``) moved out of ``conftest.py``, and
+  ``pg_client``), protected by a database-scoped lease for the whole pytest
+  invocation, and
 - ``pg_migration_db``, a disposable-database fixture for migration tests that
   need to upgrade a fresh database from base.
 
@@ -32,6 +33,18 @@ The required PostgreSQL gate command (CI and the release rehearsal) is::
     GHOSTREPLAY_TEST_PG_URL="postgresql://.../ghostreplay_test" \\
     GHOSTREPLAY_TEST_PG_MAINT_URL="postgresql://.../postgres" \\
     pytest -m pg_gate --strict-markers -rs
+
+Every invocation that selects either an ``@pg_gate`` test or one of the known
+shared-schema PostgreSQL fixtures takes a session-scoped, two-key advisory lock when
+the test URL is configured. The fixture check includes the deliberately unmarked
+legacy analysis-cache and position-analysis PostgreSQL suites; SQLite-only selections
+do not connect merely because an ambient URL exists. The lock is held across Alembic
+setup, every per-test TRUNCATE or legacy-fixture write, and engine disposal, so two
+pytest processes pointed at the same database serialize instead of resetting one
+another's state. A contender immediately and periodically reports the holder from
+``pg_locks`` / ``pg_stat_activity``. The dedicated lease session is labelled
+``ghostreplay_pytest_schema_lease``, and PostgreSQL releases the lock automatically
+if the pytest process dies.
 """
 
 from __future__ import annotations
@@ -41,13 +54,15 @@ import pathlib
 import re
 import time
 import uuid
+from collections.abc import Callable
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Connection, Engine, make_url
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 # ---------------------------------------------------------------------------
 # Environment reads (always call-time, never module-level constants).
@@ -64,6 +79,31 @@ _POOL_DRAIN_GRACE_SECONDS = 5.0
 # Nothing the suite itself owns is running when it fires, so waiting longer only
 # converts an attributable failure into a hung run.
 _TRUNCATE_LOCK_TIMEOUT = "20s"
+
+# One fixed two-key advisory lock per DATABASE. PostgreSQL includes the current
+# database in an advisory-lock tag, so runs against different disposable databases
+# remain independent while every run sharing one GHOSTREPLAY_TEST_PG_URL contends on
+# this key. The two-key space cannot collide with the one-key per-user graph locks.
+_PG_SCHEMA_LEASE_CLASSID = 1_734_239_597
+_PG_SCHEMA_LEASE_OBJID = 2
+_PG_SCHEMA_LEASE_APP_NAME = "ghostreplay_pytest_schema_lease"
+_PG_SCHEMA_LEASE_POLL_SECONDS = 0.25
+_PG_SCHEMA_LEASE_REPORT_SECONDS = 30.0
+
+# Selected items expose their transitive fixture closure through ``fixturenames``.
+# Most shared-schema users carry ``@pg_gate``, but these names also cover the
+# plugin fixtures and the two deliberately unmarked legacy PostgreSQL suites:
+# ``pg_db`` in test_analysis_cache_repo.py and ``pg_pos_factory`` in
+# test_position_analysis_write_policy.py. Keep this explicit rather than treating
+# every configured run as PostgreSQL-backed; an ambient stale URL must remain inert
+# for a genuinely SQLite-only selection.
+_SHARED_PG_FIXTURE_NAMES = frozenset({
+    "pg_client",
+    "pg_db",
+    "pg_engine",
+    "pg_pos_factory",
+    "pg_session_factory",
+})
 
 # The live ``pg_engine`` for this run, published by the fixture so the autouse pool
 # leak guard can read it WITHOUT requesting the fixture (which would build an engine —
@@ -380,6 +420,11 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_real_recompute_persists_l2_across_caller_rollback",
     "test_opening_evidence_digest_pg.py::test_sql_and_python_digest_bodies_are_byte_equal",
     "test_opening_evidence_digest_pg.py::test_warm_rebuild_on_postgres_fetches_no_rows",
+    # The shared-schema pytest lease (g-pytest-tmp-collide). Two complete pytest
+    # subprocesses target one disposable database concurrently; the second records a
+    # failed pg_try_advisory_lock while the first owns a committed sentinel row, and
+    # both pass only if Alembic/TRUNCATE stays blocked until the first process releases.
+    "test_pg_gate_plugin.py::test_pg_schema_lease_serializes_two_pytest_invocations",
 })
 
 # The SRS/moves cross-root lock matrix must run all four session/blunder lock
@@ -538,8 +583,9 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
 # These exercise behaviour SQLite cannot: real SELECT ... FOR UPDATE row locks
 # and the partial unique index on blunder_reviews. The schema under test is the
 # ALEMBIC-MIGRATED one (never create_all from models, never drop_all), so PG
-# behaviour tests always exercise the real migrated DDL. Session-scoped schema;
-# per-test isolation via TRUNCATE.
+# behaviour tests always exercise the real migrated DDL. A PostgreSQL advisory
+# lease makes the schema exclusive to this pytest invocation; inside that lease,
+# per-test isolation still comes from TRUNCATE.
 # ---------------------------------------------------------------------------
 
 
@@ -550,8 +596,209 @@ def _normalized_pg_url(raw: str) -> str:
     return _normalize_postgres_scheme(raw)
 
 
+def _pg_schema_lease_holders(connection: Connection) -> str:
+    """Describe the backend currently holding this database's schema lease."""
+    try:
+        rows = connection.execute(
+            text(
+                "SELECT a.pid, a.application_name, a.state, a.wait_event_type, "
+                "       a.wait_event, a.backend_start, left(a.query, 160) AS query "
+                "FROM pg_locks AS l "
+                "JOIN pg_stat_activity AS a ON a.pid = l.pid "
+                "WHERE l.locktype = 'advisory' "
+                "  AND l.database = ("
+                "      SELECT oid FROM pg_database WHERE datname = current_database()"
+                "  ) "
+                "  AND l.classid::bigint = :classid "
+                "  AND l.objid::bigint = :objid "
+                "  AND l.objsubid = 2 "
+                "  AND l.granted "
+                "ORDER BY a.backend_start"
+            ).bindparams(
+                classid=_PG_SCHEMA_LEASE_CLASSID,
+                objid=_PG_SCHEMA_LEASE_OBJID,
+            )
+        ).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not stop the wait
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        return f"<could not inspect holder: {exc!r}>"
+    if not rows:
+        return "<holder changed before it could be inspected>"
+    return "; ".join(repr(dict(row)) for row in rows)
+
+
+def _pg_schema_lease_wait_reporter(config: pytest.Config) -> Callable[[str], None]:
+    """Return an uncaptured reporter so a blocked gate is visibly making progress."""
+    terminal = config.pluginmanager.get_plugin("terminalreporter")
+    if terminal is not None:
+        return terminal.write_line
+    return lambda message: print(message, flush=True)
+
+
+def _acquire_pg_schema_lease(
+    url: str, *, report_wait: Callable[[str], None] | None = None
+) -> tuple[Engine, Connection]:
+    """Serialize pytest invocations that target the same PostgreSQL database.
+
+    The lease uses a dedicated ``NullPool`` connection and a SESSION advisory
+    lock.  It is acquired before Alembic or the ordinary pooled test engine can
+    touch the schema.  A clean teardown explicitly unlocks it; closing the backend
+    session is the fail-safe release for an exception, interrupt, or process death.
+
+    There is deliberately no short timeout. A second correctly configured gate is
+    expected to wait for the first complete run, not fail merely because that run
+    is exercising a long PostgreSQL concurrency proof. Nonblocking lock attempts
+    keep that wait observable: the terminal names the current holder immediately
+    and periodically until the lease becomes available.
+    """
+    lease_engine = create_engine(url, poolclass=NullPool)
+    lease_connection = None
+    try:
+        lease_connection = lease_engine.connect()
+        lease_connection.execute(
+            text("SELECT set_config('application_name', :v, false)").bindparams(
+                v=_PG_SCHEMA_LEASE_APP_NAME
+            )
+        )
+        lease_connection.commit()
+
+        database = make_url(url).database or "<unknown>"
+        waiting_since = None
+        next_report_at = 0.0
+        while True:
+            acquired = lease_connection.execute(
+                text(
+                    "SELECT pg_try_advisory_lock(:classid, :objid)"
+                ).bindparams(
+                    classid=_PG_SCHEMA_LEASE_CLASSID,
+                    objid=_PG_SCHEMA_LEASE_OBJID,
+                )
+            ).scalar()
+            if acquired:
+                # The advisory lock is session-scoped and survives this commit.
+                # Committing leaves the otherwise-idle lease visible as `idle`,
+                # not `idle in transaction`, for the duration of the test run.
+                lease_connection.commit()
+                if waiting_since is not None and report_wait is not None:
+                    report_wait(
+                        "Acquired PostgreSQL pytest schema lease for "
+                        f"database={database!r} after "
+                        f"{time.monotonic() - waiting_since:.1f}s."
+                    )
+                break
+
+            holders = _pg_schema_lease_holders(lease_connection)
+            lease_connection.commit()
+            now = time.monotonic()
+            if waiting_since is None:
+                waiting_since = now
+            if report_wait is not None and now >= next_report_at:
+                report_wait(
+                    "Waiting for PostgreSQL pytest schema lease "
+                    f"database={database!r} key=({_PG_SCHEMA_LEASE_CLASSID}, "
+                    f"{_PG_SCHEMA_LEASE_OBJID}) for "
+                    f"{now - waiting_since:.1f}s; holder(s): {holders}"
+                )
+                next_report_at = now + _PG_SCHEMA_LEASE_REPORT_SECONDS
+            time.sleep(_PG_SCHEMA_LEASE_POLL_SECONDS)
+    except BaseException:
+        # Preserve the acquisition error. Always invalidate after the best-effort
+        # rollback so PostgreSQL ends the session and releases any lock that may
+        # have been granted immediately before the failure surfaced.
+        if lease_connection is not None:
+            try:
+                lease_connection.rollback()
+            except BaseException:
+                pass
+            try:
+                lease_connection.invalidate()
+            except BaseException:
+                pass
+            try:
+                lease_connection.close()
+            except BaseException:
+                pass
+        try:
+            lease_engine.dispose()
+        except BaseException:
+            pass
+        raise
+    return lease_engine, lease_connection
+
+
+def _release_pg_schema_lease(lease: tuple[Engine, Connection]) -> None:
+    """Release the pytest schema lease without masking the test run's result."""
+    lease_engine, lease_connection = lease
+    try:
+        released = lease_connection.execute(
+            text("SELECT pg_advisory_unlock(:classid, :objid)").bindparams(
+                classid=_PG_SCHEMA_LEASE_CLASSID,
+                objid=_PG_SCHEMA_LEASE_OBJID,
+            )
+        ).scalar()
+        lease_connection.commit()
+    except Exception:
+        released = False
+    if not released:
+        try:
+            # End the backend session; PostgreSQL then releases every session lock.
+            lease_connection.invalidate()
+        except Exception:
+            pass
+    try:
+        lease_connection.close()
+    except Exception:
+        pass
+    try:
+        lease_engine.dispose()
+    except Exception:
+        pass
+
+
+def _selected_run_needs_pg_schema_lease(session: pytest.Session) -> bool:
+    """True when a selected test can touch the shared PostgreSQL schema."""
+    return any(
+        _is_gated(item)
+        or not _SHARED_PG_FIXTURE_NAMES.isdisjoint(
+            getattr(item, "fixturenames", ())
+        )
+        for item in session.items
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pg_schema_lease(request: pytest.FixtureRequest):
+    """Hold exclusive schema ownership for a selected PostgreSQL-backed run.
+
+    Autouse scope is load-bearing: two legacy suites build their own engines rather
+    than requesting ``pg_engine`` or carrying ``@pg_gate``. Fixture-name detection
+    protects those tests too. Holding through session teardown keeps their cleanup
+    inside the same ownership boundary. The post-deselection item check is equally
+    important: an ambient, stale PostgreSQL URL must not make a genuinely SQLite-only
+    selection connect to PostgreSQL.
+    """
+    if not _selected_run_needs_pg_schema_lease(request.session):
+        yield None
+        return
+    raw_url = _pg_url()
+    if not raw_url:
+        yield None
+        return
+    lease = _acquire_pg_schema_lease(
+        _normalized_pg_url(raw_url),
+        report_wait=_pg_schema_lease_wait_reporter(request.config),
+    )
+    try:
+        yield lease
+    finally:
+        _release_pg_schema_lease(lease)
+
+
 @pytest.fixture(scope="session")
-def pg_engine():
+def pg_engine(_pg_schema_lease):
     url = _pg_url()
     if not url:
         if _require_pg():
@@ -561,34 +808,36 @@ def pg_engine():
             )
         pytest.skip("GHOSTREPLAY_TEST_PG_URL not set")
     url = _normalized_pg_url(url)
-
-    # Ensure the migrated schema via Alembic (idempotent: a no-op when CI has
-    # already run `alembic upgrade head`). env.py resolves the URL from
-    # DATABASE_URL, so point it at the test DB for the duration of the upgrade.
-    alembic_ini = pathlib.Path(__file__).resolve().parent / "alembic.ini"
-    prior_database_url = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = url
+    pg = None
     try:
-        command.upgrade(Config(str(alembic_ini)), "head")
-    finally:
-        if prior_database_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = prior_database_url
+        # Ensure the migrated schema via Alembic (idempotent: a no-op when CI has
+        # already run `alembic upgrade head`). The schema lease is already held, so
+        # a second pytest process cannot race this setup. env.py resolves the URL
+        # from DATABASE_URL, so point it at the test DB only for the upgrade.
+        alembic_ini = pathlib.Path(__file__).resolve().parent / "alembic.ini"
+        prior_database_url = os.environ.get("DATABASE_URL")
+        os.environ["DATABASE_URL"] = url
+        try:
+            command.upgrade(Config(str(alembic_ini)), "head")
+        finally:
+            if prior_database_url is None:
+                os.environ.pop("DATABASE_URL", None)
+            else:
+                os.environ["DATABASE_URL"] = prior_database_url
 
-    # pool_pre_ping mirrors app/db.py. One engine backs the WHOLE gate run, so a
-    # pooled connection can sit for minutes between checkouts and can be killed out
-    # from under the pool (the capture suite SIGKILLs backends, the migration suite
-    # terminates them). Without the ping, the next checkout of such a connection
-    # surfaces as an opaque 500 in whatever test happens to draw it —
-    # g-rating-serialize-flake, where the victim is never the culprit.
-    pg = create_engine(url, pool_pre_ping=True)
-    _LIVE_PG_ENGINE["engine"] = pg
-    try:
+        # pool_pre_ping mirrors app/db.py. One engine backs the WHOLE gate run, so
+        # a pooled connection can sit for minutes between checkouts and can be killed
+        # out from under the pool (the capture suite SIGKILLs backends, the migration
+        # suite terminates them). Without the ping, the next checkout of such a
+        # connection surfaces as an opaque 500 in whatever test happens to draw it —
+        # g-rating-serialize-flake, where the victim is never the culprit.
+        pg = create_engine(url, pool_pre_ping=True)
+        _LIVE_PG_ENGINE["engine"] = pg
         yield pg
     finally:
         _LIVE_PG_ENGINE["engine"] = None
-        pg.dispose()
+        if pg is not None:
+            pg.dispose()
 
 
 @pytest.fixture(autouse=True)
@@ -634,10 +883,12 @@ def _other_backends(engine) -> str:
     """Every OTHER backend on this database, as a diagnostic block.
 
     Read on a fresh connection with autocommit so it works even from a failed
-    transaction. Anything here in ``active`` or ``idle in transaction`` while a test
-    fixture is truncating is a writer the suite does not own — a leaked daemon bound
-    to ``app.db.SessionLocal`` (which points at THIS database whenever DATABASE_URL
-    does, as it does in CI), a stray subprocess, or a second pytest run.
+    transaction. A correctly participating second pytest run appears only as a
+    ``ghostreplay_pytest_schema_lease`` backend polling the advisory key and cannot
+    reach TRUNCATE. Any other backend in ``active`` or ``idle in transaction`` while
+    a fixture is truncating is a writer the suite does not own — a leaked daemon
+    bound to ``app.db.SessionLocal`` (which points at THIS database whenever
+    DATABASE_URL does, as it does in CI), or a stray subprocess.
     """
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:

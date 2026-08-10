@@ -69,6 +69,11 @@ jobs:
       # deleted, renamed, or left unmarked. This is the canonical gate command and
       # is what actually activates the guards the plugin defines; the plain
       # `pytest -v` below runs with the guards dormant (URL set, required mode off).
+      # Both steps select @pg_gate tests (and the full run also selects the legacy
+      # shared-PG fixtures), so they hold the plugin's database-scoped schema lease
+      # for their complete test phase. Another process pointed at this URL reports
+      # the holder while it waits instead of racing Alembic, per-test TRUNCATEs, or
+      # legacy writes; genuinely SQLite-only selections take no lock.
       - name: Run required PostgreSQL gate
         env:
           GHOSTREPLAY_REQUIRE_PG_TESTS: '1'

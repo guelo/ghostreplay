@@ -27,8 +27,10 @@ Covered (mirrors g-release-integrate's acceptance criteria):
 8. developer-default mode still skips cleanly;
 
 plus a direct import check (an import error must not masquerade as gate
-enforcement) and a drift guard that the shipped manifest matches the real
-``@pg_gate`` decorations.
+enforcement), a drift guard that the shipped manifest matches the real
+``@pg_gate`` decorations, and the run-wide schema lease: unit lifecycle/cleanup
+coverage plus two real, overlapping pytest processes targeting one PostgreSQL
+database.
 """
 
 from __future__ import annotations
@@ -37,8 +39,10 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 import pytest
+from sqlalchemy import create_engine, text
 
 import pg_gate_plugin
 
@@ -99,6 +103,8 @@ def _write_synthetic_project(pytester, *, body: str,
         "import pg_gate_plugin\n"
         f"pg_gate_plugin.REQUIRED_PG_GATE_TESTS = frozenset({sorted(manifest_tests)!r})\n"
         f"pg_gate_plugin.REQUIRED_PG_GATE_PARAM_CASES = frozenset({sorted(manifest_cases)!r})\n"
+        "pg_gate_plugin._acquire_pg_schema_lease = lambda _url, **_kwargs: object()\n"
+        "pg_gate_plugin._release_pg_schema_lease = lambda _lease: None\n"
         "pytest_plugins = ['pg_gate_plugin']\n"
     )
     pytester.makepyfile(test_synth=body)
@@ -477,6 +483,446 @@ def test_bare_pg_session_factory_resets_before_each_construction(monkeypatch):
             built[1],
         ),
     ]
+
+
+def test_pg_schema_lease_ignores_ambient_url_for_sqlite_only_selection(monkeypatch):
+    """An unrelated configured URL cannot break a non-gate test selection."""
+
+    class SQLiteItem:
+        fixturenames = ["file_db"]
+
+        def get_closest_marker(self, _name):
+            return None
+
+    class Request:
+        session = type("Session", (), {"items": [SQLiteItem()]})()
+
+    monkeypatch.setattr(pg_gate_plugin, "_pg_url", lambda: "postgresql://unreachable/db")
+
+    def unexpected_acquire(*_args, **_kwargs):
+        raise AssertionError("SQLite-only selection tried to acquire the PG lease")
+
+    monkeypatch.setattr(
+        pg_gate_plugin, "_acquire_pg_schema_lease", unexpected_acquire
+    )
+
+    fixture = pg_gate_plugin._pg_schema_lease.__wrapped__(Request())
+    assert next(fixture) is None
+    with pytest.raises(StopIteration):
+        next(fixture)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["pg_client", "pg_db", "pg_engine", "pg_pos_factory", "pg_session_factory"],
+)
+def test_pg_schema_lease_recognizes_every_shared_schema_fixture(fixture_name):
+    """Plugin and unmarked legacy PG fixtures all participate in the lease."""
+
+    class SharedPgItem:
+        fixturenames = [fixture_name]
+
+        def get_closest_marker(self, _name):
+            return None
+
+    session = type("Session", (), {"items": [SharedPgItem()]})()
+    assert pg_gate_plugin._selected_run_needs_pg_schema_lease(session)
+
+
+def test_pg_schema_lease_spans_the_selected_gate_session(monkeypatch):
+    """The autouse lease is acquired before setup and released after teardown."""
+    events = []
+    lease = object()
+    wait_reporter = object()
+
+    class GatedItem:
+        def get_closest_marker(self, name):
+            return object() if name == "pg_gate" else None
+
+    class Request:
+        session = type("Session", (), {"items": [GatedItem()]})()
+        config = object()
+
+    def fake_acquire(url, *, report_wait):
+        events.append(("acquire_lease", url, report_wait))
+        return lease
+
+    def fake_release(actual_lease):
+        events.append(("release_lease", actual_lease))
+
+    monkeypatch.setattr(pg_gate_plugin, "_pg_url", lambda: "postgresql://raw/db")
+    monkeypatch.setattr(
+        pg_gate_plugin,
+        "_normalized_pg_url",
+        lambda _url: "postgresql+psycopg://normalized/db",
+    )
+    monkeypatch.setattr(pg_gate_plugin, "_acquire_pg_schema_lease", fake_acquire)
+    monkeypatch.setattr(pg_gate_plugin, "_release_pg_schema_lease", fake_release)
+    monkeypatch.setattr(
+        pg_gate_plugin,
+        "_pg_schema_lease_wait_reporter",
+        lambda _config: wait_reporter,
+    )
+
+    fixture = pg_gate_plugin._pg_schema_lease.__wrapped__(Request())
+    assert next(fixture) is lease
+    assert events == [
+        (
+            "acquire_lease",
+            "postgresql+psycopg://normalized/db",
+            wait_reporter,
+        ),
+    ]
+
+    with pytest.raises(StopIteration):
+        next(fixture)
+    assert events[-1] == ("release_lease", lease)
+
+
+def test_pg_engine_migrates_before_pool_and_disposes_it(monkeypatch):
+    """The leased engine restores DATABASE_URL and tears down its whole pool."""
+    events = []
+
+    class FakeEngine:
+        def dispose(self):
+            events.append("dispose_pool")
+
+    fake_engine = FakeEngine()
+
+    def fake_upgrade(_config, revision):
+        events.append(("upgrade", revision, os.environ["DATABASE_URL"]))
+
+    def fake_create_engine(url, **kwargs):
+        events.append(("create_pool", url, kwargs))
+        return fake_engine
+
+    monkeypatch.setattr(pg_gate_plugin, "_pg_url", lambda: "postgresql://raw/db")
+    monkeypatch.setattr(
+        pg_gate_plugin,
+        "_normalized_pg_url",
+        lambda _url: "postgresql+psycopg://normalized/db",
+    )
+    monkeypatch.setattr(pg_gate_plugin.command, "upgrade", fake_upgrade)
+    monkeypatch.setattr(pg_gate_plugin, "create_engine", fake_create_engine)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://prior/db")
+
+    fixture = pg_gate_plugin.pg_engine.__wrapped__(object())
+    try:
+        assert next(fixture) is fake_engine
+        assert os.environ["DATABASE_URL"] == "postgresql://prior/db"
+        assert events == [
+            ("upgrade", "head", "postgresql+psycopg://normalized/db"),
+            (
+                "create_pool",
+                "postgresql+psycopg://normalized/db",
+                {"pool_pre_ping": True},
+            ),
+        ]
+    finally:
+        fixture.close()
+    assert events[-1] == "dispose_pool"
+    assert pg_gate_plugin._LIVE_PG_ENGINE["engine"] is None
+
+
+@pytest.mark.parametrize("unlock_confirmed", [True, False])
+def test_pg_schema_lease_uses_session_lock_and_fail_safe_cleanup(
+    monkeypatch, unlock_confirmed
+):
+    """The dedicated session is labelled, committed, unlocked, and closed."""
+    events = []
+
+    class FakeResult:
+        def __init__(self, scalar_value=None):
+            self.scalar_value = scalar_value
+
+        def scalar(self):
+            return self.scalar_value
+
+    class FakeConnection:
+        def execute(self, statement):
+            sql = str(statement)
+            params = statement.compile().params
+            events.append(("execute", sql, params))
+            if "pg_try_advisory_lock" in sql:
+                value = True
+            elif "pg_advisory_unlock" in sql:
+                value = unlock_confirmed
+            else:
+                value = None
+            return FakeResult(value)
+
+        def commit(self):
+            events.append("commit")
+
+        def rollback(self):
+            events.append("rollback")
+
+        def invalidate(self):
+            events.append("invalidate")
+
+        def close(self):
+            events.append("close")
+
+    class FakeLeaseEngine:
+        def __init__(self):
+            self.connection = FakeConnection()
+
+        def connect(self):
+            events.append("connect")
+            return self.connection
+
+        def dispose(self):
+            events.append("dispose_lease_engine")
+
+    lease_engine = FakeLeaseEngine()
+
+    def fake_create_engine(url, **kwargs):
+        events.append(("create_lease_engine", url, kwargs))
+        return lease_engine
+
+    monkeypatch.setattr(pg_gate_plugin, "create_engine", fake_create_engine)
+
+    lease = pg_gate_plugin._acquire_pg_schema_lease("postgresql://test/db")
+    assert lease == (lease_engine, lease_engine.connection)
+    assert events[0] == (
+        "create_lease_engine",
+        "postgresql://test/db",
+        {"poolclass": pg_gate_plugin.NullPool},
+    )
+    assert "set_config('application_name'" in events[2][1]
+    assert events[2][2]["v"] == pg_gate_plugin._PG_SCHEMA_LEASE_APP_NAME
+    assert events[3] == "commit"
+    assert "pg_try_advisory_lock" in events[4][1]
+    assert events[4][2] == {
+        "classid": pg_gate_plugin._PG_SCHEMA_LEASE_CLASSID,
+        "objid": pg_gate_plugin._PG_SCHEMA_LEASE_OBJID,
+    }
+    assert events[5] == "commit"
+
+    pg_gate_plugin._release_pg_schema_lease(lease)
+    assert "pg_advisory_unlock" in events[6][1]
+    expected_cleanup = ["commit"]
+    if not unlock_confirmed:
+        expected_cleanup.append("invalidate")
+    expected_cleanup.extend(["close", "dispose_lease_engine"])
+    assert events[7:] == expected_cleanup
+
+
+def test_pg_schema_lease_reports_holder_and_eventual_acquisition(monkeypatch):
+    """A contending run immediately names its wait and the current holder."""
+    lock_attempts = iter([False, True])
+    reports = []
+
+    class FakeResult:
+        def __init__(self, value=None):
+            self.value = value
+
+        def scalar(self):
+            return self.value
+
+    class FakeConnection:
+        def execute(self, statement):
+            sql = str(statement)
+            if "pg_try_advisory_lock" in sql:
+                return FakeResult(next(lock_attempts))
+            if "pg_advisory_unlock" in sql:
+                return FakeResult(True)
+            return FakeResult()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def invalidate(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeLeaseEngine:
+        connection = FakeConnection()
+
+        def connect(self):
+            return self.connection
+
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(
+        pg_gate_plugin,
+        "create_engine",
+        lambda _url, **_kwargs: FakeLeaseEngine(),
+    )
+    monkeypatch.setattr(
+        pg_gate_plugin,
+        "_pg_schema_lease_holders",
+        lambda _connection: (
+            "{'pid': 4242, 'application_name': "
+            f"'{pg_gate_plugin._PG_SCHEMA_LEASE_APP_NAME}'}}"
+        ),
+    )
+    monkeypatch.setattr(pg_gate_plugin.time, "sleep", lambda _seconds: None)
+
+    lease = pg_gate_plugin._acquire_pg_schema_lease(
+        "postgresql://test/lease_db", report_wait=reports.append
+    )
+    try:
+        assert reports[0].startswith("Waiting for PostgreSQL pytest schema lease")
+        assert "database='lease_db'" in reports[0]
+        assert "pid': 4242" in reports[0]
+        assert pg_gate_plugin._PG_SCHEMA_LEASE_APP_NAME in reports[0]
+        assert reports[1].startswith("Acquired PostgreSQL pytest schema lease")
+    finally:
+        pg_gate_plugin._release_pg_schema_lease(lease)
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_schema_lease_serializes_two_pytest_invocations(pg_migration_db, tmp_path):
+    """Two pytest processes cannot TRUNCATE one configured database at once.
+
+    The synthetic projects activate the real plugin but replace Alembic setup with
+    a no-op; the disposable database needs only one probe table. The first process
+    commits a sentinel, then observes it after the second process has received a
+    false result from ``pg_try_advisory_lock``. Without the run-wide lease, that
+    structural contention signal never arrives (or the second process reaches
+    ``_truncate_all`` and deletes the sentinel).
+    """
+    setup_engine = create_engine(pg_migration_db)
+    try:
+        with setup_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE pytest_schema_lease_probe "
+                    "(owner TEXT PRIMARY KEY NOT NULL)"
+                )
+            )
+    finally:
+        setup_engine.dispose()
+
+    project = tmp_path / "lease-project"
+    project.mkdir()
+    (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (project / "conftest.py").write_text(
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        f"sys.path.insert(0, {str(_BACKEND_DIR)!r})\n"
+        "import pytest\n"
+        "pytest.register_assert_rewrite('pg_gate_plugin')\n"
+        "import pg_gate_plugin\n"
+        "pg_gate_plugin.command.upgrade = lambda _config, _revision: None\n"
+        "_real_wait_reporter = pg_gate_plugin._pg_schema_lease_wait_reporter\n"
+        "def _test_wait_reporter(config):\n"
+        "    report = _real_wait_reporter(config)\n"
+        "    def report_and_signal(message):\n"
+        "        if (os.environ['GHOSTREPLAY_LEASE_ROLE'] == 'second' and\n"
+        "                message.startswith('Waiting for PostgreSQL')):\n"
+        "            pathlib.Path(\n"
+        "                os.environ['GHOSTREPLAY_LEASE_ATTEMPT_FILE']\n"
+        "            ).touch()\n"
+        "        report(message)\n"
+        "    return report_and_signal\n"
+        "pg_gate_plugin._pg_schema_lease_wait_reporter = _test_wait_reporter\n"
+        "pytest_plugins = ['pg_gate_plugin']\n",
+        encoding="utf-8",
+    )
+    (project / "test_lease.py").write_text(
+        "import os\n"
+        "import pathlib\n"
+        "import time\n"
+        "import pytest\n"
+        "from sqlalchemy import text\n"
+        "import pg_gate_plugin\n"
+        "\n"
+        "@pytest.mark.pg_gate\n"
+        "def test_process_owns_schema(pg_engine):\n"
+        "    pg_gate_plugin._truncate_all(pg_engine, 'pytest_schema_lease_probe')\n"
+        "    role = os.environ['GHOSTREPLAY_LEASE_ROLE']\n"
+        "    with pg_engine.begin() as connection:\n"
+        "        connection.execute(text(\n"
+        "            'INSERT INTO pytest_schema_lease_probe (owner) VALUES (:owner)'\n"
+        "        ), {'owner': role})\n"
+        "    if role != 'first':\n"
+        "        return\n"
+        "    pathlib.Path(os.environ['GHOSTREPLAY_LEASE_READY_FILE']).touch()\n"
+        "    attempt = pathlib.Path(os.environ['GHOSTREPLAY_LEASE_ATTEMPT_FILE'])\n"
+        "    deadline = time.monotonic() + 20\n"
+        "    while not attempt.exists() and time.monotonic() < deadline:\n"
+        "        time.sleep(0.02)\n"
+        "    assert attempt.exists(), (\n"
+        "        'second pytest never reported real schema-lease contention'\n"
+        "    )\n"
+        "    observe_until = time.monotonic() + 3\n"
+        "    while time.monotonic() < observe_until:\n"
+        "        with pg_engine.connect() as connection:\n"
+        "            owner = connection.execute(text(\n"
+        "                'SELECT owner FROM pytest_schema_lease_probe'\n"
+        "            )).scalar_one()\n"
+        "        assert owner == 'first'\n"
+        "        time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+
+    ready_file = tmp_path / "first-ready"
+    attempt_file = tmp_path / "second-attempt"
+    base_env = {**os.environ}
+    base_env.pop("GHOSTREPLAY_REQUIRE_PG_TESTS", None)
+    base_env.pop("TEST_DATABASE_URL_PG", None)
+    base_env["DATABASE_URL"] = pg_migration_db
+    base_env["GHOSTREPLAY_TEST_PG_URL"] = pg_migration_db
+    base_env["GHOSTREPLAY_LEASE_READY_FILE"] = str(ready_file)
+    base_env["GHOSTREPLAY_LEASE_ATTEMPT_FILE"] = str(attempt_file)
+    command = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    processes = []
+    outputs = {}
+    try:
+        first_env = {**base_env, "GHOSTREPLAY_LEASE_ROLE": "first"}
+        first = subprocess.Popen(
+            command,
+            cwd=project,
+            env=first_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        processes.append(first)
+        deadline = time.monotonic() + 30
+        while (
+            not ready_file.exists()
+            and first.poll() is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        assert ready_file.exists(), (
+            "first pytest did not acquire the schema lease and seed its row:\n"
+            + (first.communicate(timeout=10)[0] if first.poll() is not None else "")
+        )
+
+        second_env = {**base_env, "GHOSTREPLAY_LEASE_ROLE": "second"}
+        second = subprocess.Popen(
+            command,
+            cwd=project,
+            env=second_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        processes.append(second)
+        outputs["first"] = first.communicate(timeout=60)[0]
+        outputs["second"] = second.communicate(timeout=60)[0]
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+
+    assert first.returncode == 0, outputs.get("first", "")
+    assert second.returncode == 0, outputs.get("second", "")
+    assert "Waiting for PostgreSQL pytest schema lease" in outputs["second"]
+    assert pg_gate_plugin._PG_SCHEMA_LEASE_APP_NAME in outputs["second"]
+    assert "Acquired PostgreSQL pytest schema lease" in outputs["second"]
 
 
 def test_manifest_matches_real_pg_gate_collection():
