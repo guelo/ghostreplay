@@ -2671,12 +2671,8 @@ describe("ChessGame characterization safeguards", () => {
     ).toBeInTheDocument();
     // Difficulty is re-randomized to MAIA_ELO_BINS[0] (mocked) and seeds the
     // panel draft only; opening the overlay does NOT mutate the store engineElo
-    // (g-fxrm) — it commits on Start. The panel shows the sampled bot, while the
-    // committed store value stays at the prior 1500.
+    // (g-fxrm) — it commits on Start.
     expect(useGameStore.getState().engineElo).toBe(1500);
-    expect(
-      screen.getByText(MAIA_BOT_NAMES[MAIA_ELO_BINS[0]]),
-    ).toBeInTheDocument();
     // Drill side is now local state, decoupled from the store playerColorChoice;
     // the White side king button should be active (from the store's player_color).
     expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
@@ -2699,6 +2695,23 @@ describe("ChessGame characterization safeguards", () => {
     // shows the selected opening name).
     await waitFor(() => {
       expect(screen.getByRole("combobox")).toHaveTextContent("Target");
+    });
+
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    });
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          opening_key: "target-fen",
+          player_color: "white",
+          engine_elo: MAIA_ELO_BINS[0],
+          strictness: "standard",
+          strictness_cp: 25,
+        }),
+      );
     });
     localStorage.removeItem("ghostreplay_drill_prefs");
   });
