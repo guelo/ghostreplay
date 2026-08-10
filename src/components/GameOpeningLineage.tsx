@@ -209,20 +209,23 @@ function GameOpeningLineage({
           const change = changeByKey.get(item.opening_key);
           const badge = badgeFor(change);
           const badgeSign = badge && badge.diff > 0 ? "+" : "";
-          // Pre-game score pin (g-gkkn): during play `change` is undefined and
-          // item.score is already pre-game-fresh (g-dmd1); at a terminal event the
-          // delta's `before` overrides the refetched post-game item.score so the
-          // card number never changes. is_new keeps "—" (no baseline); a non-new
-          // entry missing `before` (data anomaly) falls back to item.score.
+          // Pre-game score pin (g-gkkn): a known `before` overrides the
+          // refetched post-game item.score, while a truly new opening keeps
+          // "—" because it has no baseline. For a non-new opening whose baseline
+          // is unavailable or incompatible, use the delta's available `after`
+          // instead of a stale lineage score. That branch deliberately applies
+          // to both the warm terminal envelope and its reconciled replacement;
+          // during the warm phase its `after` agrees with the same persisted
+          // batch read by the lineage refetch. item.score remains the defensive
+          // fallback only when neither delta value is available.
           const cardScore = !change
             ? item.score
             : change.is_new
               ? null
-              : change.before ?? item.score;
-          // The terminal pin wins over the pending spinner: once `change` is
-          // present the card shows the pinned pre-game number beside the diff
-          // badge, and swapping that number for a spinner mid-pin would make
-          // the badge reference a value that is no longer on screen.
+              : change.before ?? change.after ?? item.score;
+          // A settled delta display wins over the pending spinner: once `change`
+          // is present the card shows the selected baseline/after value, and a
+          // spinner would hide the number that the terminal state established.
           const scorePending =
             !change &&
             (scoreStatus === "pending" || pendingScoreIndices?.has(index) === true);

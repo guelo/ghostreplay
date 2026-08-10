@@ -482,6 +482,28 @@ describe("GameOpeningLineage", () => {
       expect(screen.getByText("+3 → 44")).toBeInTheDocument();
     });
 
+    it("shows the available after-score without a baseline and suppresses the badge", () => {
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Italian Game", score: 60 })],
+        {
+          scoreChanges: [
+            makeChange({
+              opening_key: "k1",
+              before: null,
+              after: 72,
+              delta: null,
+              is_new: false,
+            }),
+          ],
+        },
+      );
+
+      const card = screen.getByRole("button", { name: /Italian Game/ });
+      expect(within(card).getByText("72")).toBeInTheDocument();
+      expect(within(card).queryByText("60")).not.toBeInTheDocument();
+      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+    });
+
     it("resign/empty-lineage first paint: changed cards show `before`, unchanged cards keep item.score", () => {
       // Resign loads the lineage for the first time with POST-game item.scores.
       // A card with a matching delta renders its pre-game `before`; a card with no

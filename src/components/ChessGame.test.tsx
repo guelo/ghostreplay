@@ -5102,6 +5102,106 @@ describe("ChessGame opening lineage", () => {
     expect(badge).toHaveClass("game-opening-lineage__delta--up");
   });
 
+  it("updates a same-session card to the reconciled after-score when no baseline exists", async () => {
+    const sessionId = "session-reconciled-no-baseline";
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
+    // Keep every lineage response deliberately stale. The final score must come
+    // from the reconciled store envelope, not a navigation or lineage refetch.
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          ...lineageCard("k1", "King's Pawn Game", ["e4"]),
+          score: 60,
+        },
+      ],
+      start_ply: 1,
+    });
+    useGameStore.setState({
+      sessionId,
+      isGameActive: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+      gameResult: { type: "resign", message: "Resigned." },
+      liveFen: LINEAGE_FEN_E4,
+      viewIndex: null,
+    });
+
+    render(<ChessGame />);
+    const region = await screen.findByRole("region", {
+      name: "Openings played",
+    });
+    expect(within(region).getByText("60")).toBeInTheDocument();
+    const callsBeforeTerminal = fetchSessionOpeningsMock.mock.calls.length;
+
+    act(() => {
+      useGameStore.getState().setTerminalOpeningDelta(sessionId, [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          before: null,
+          after: 61,
+          delta: null,
+          is_new: false,
+        },
+      ]);
+    });
+
+    // The first non-null terminal envelope changes the Boolean refetch key once.
+    await waitFor(() =>
+      expect(fetchSessionOpeningsMock.mock.calls.length).toBeGreaterThan(
+        callsBeforeTerminal,
+      ),
+    );
+    expect(within(region).getByText("61")).toBeInTheDocument();
+    expect(within(region).queryByText(/→/)).not.toBeInTheDocument();
+
+    const callsAfterTerminalRefetch = fetchSessionOpeningsMock.mock.calls.length;
+    const stateBeforeReconcile = useGameStore.getState();
+    const moveHistoryBeforeReconcile = stateBeforeReconcile.moveHistory;
+
+    act(() => {
+      useGameStore.getState().applyPolledOpeningDelta(
+        sessionId,
+        [
+          {
+            opening_key: "k1",
+            opening_name: "King's Pawn Game",
+            opening_family: "King's Pawn",
+            eco: "C20",
+            depth: 0,
+            before: null,
+            after: 72,
+            delta: null,
+            is_new: false,
+          },
+        ],
+        stateBeforeReconcile.openingDeltaPollToken,
+      );
+    });
+
+    await waitFor(() =>
+      expect(within(region).getByText("72")).toBeInTheDocument(),
+    );
+    expect(within(region).queryByText("60")).not.toBeInTheDocument();
+    expect(within(region).queryByText("61")).not.toBeInTheDocument();
+    expect(within(region).queryByText(/→/)).not.toBeInTheDocument();
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(
+      callsAfterTerminalRefetch,
+    );
+
+    const stateAfterReconcile = useGameStore.getState();
+    expect(stateAfterReconcile.sessionId).toBe(sessionId);
+    expect(stateAfterReconcile.viewIndex).toBe(stateBeforeReconcile.viewIndex);
+    expect(stateAfterReconcile.liveFen).toBe(stateBeforeReconcile.liveFen);
+    expect(stateAfterReconcile.moveHistory).toBe(moveHistoryBeforeReconcile);
+  });
+
   it("renders no lineage when the session has no openings yet", async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: "session-empty-lineage",
