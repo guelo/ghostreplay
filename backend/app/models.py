@@ -235,6 +235,13 @@ class GameSession(Base):
             name="ck_game_sessions_derived_tail_rows",
         ),
         CheckConstraint(
+            "(baseline_watermark_seq is null and baseline_watermark_epoch is null "
+            "and baseline_watermark_fingerprint is null) or "
+            "(baseline_watermark_seq is not null and baseline_watermark_epoch is not null "
+            "and baseline_watermark_fingerprint is not null)",
+            name="ck_game_sessions_baseline_watermark_complete",
+        ),
+        CheckConstraint(
             "session_mode = 'normal' "
             "or (drill_state = 'converted' and is_rated = true and normal_started_at is not null "
             "and converted_at is not null and rated_start_ply is not null) "
@@ -301,13 +308,20 @@ class GameSession(Base):
     # convention), so end-of-session opening-score deltas have a stable "before" to
     # diff against (live games feed request_recompute incrementally, so the cached
     # score already reflects most of the game by the time it ends). Captured
-    # ASYNCHRONOUSLY shortly after session start by the OpeningBaselineScheduler
-    # worker (g-mxeo), and persisted ONLY when the pre-session cached batch is
-    # provably fresh AND dated STRICTLY BEFORE started_at; otherwise it remains
-    # NULL. NULL (older sessions, best-effort skip/race, or a dropped job) omits
-    # the delta; "{}" means "captured, user had no scored openings yet" (every
-    # crossed opening reads as new). See app/opening_score_delta.py.
+    # ASYNCHRONOUSLY shortly after session start by the OpeningBaselineScheduler.
+    # Persistence requires a current-state batch freshness proof plus the
+    # historical watermark proof below; wall-clock order is not the authority.
+    # NULL (legacy session, best-effort skip/race, or an unprovable start state)
+    # omits the delta; an empty ``scores`` envelope means "captured, user had no
+    # scored openings yet". See app/opening_score_delta.py.
     opening_score_baseline: Mapped[str | None] = mapped_column(Text)
+    # Durable start-state watermark (g-f3m4). All three columns are written in the
+    # initial session transaction or all remain NULL, enforced by the named CHECK
+    # above. The tuple lets a later batch prove that its per-user evidence, shared
+    # evidence scope, and scorer registry still represent this session's start.
+    baseline_watermark_seq: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    baseline_watermark_epoch: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    baseline_watermark_fingerprint: Mapped[str | None] = mapped_column(Text)
     # Cached session accuracy. An integer 0..100 or NULL for sessions not yet
     # scored, guarded by the named range CHECK ck_game_sessions_player_accuracy.
     # player_accuracy_algo_version records which accuracy algorithm produced the
@@ -950,18 +964,12 @@ class OpeningScoreBatch(Base):
 class EvidenceEpoch(Base):
     """Single-row global change counter for the SHARED evidence tables (g-jact).
 
-    ``value`` is advanced by MANDATORY database triggers (created in the alembic
-    migration and mirrored in the conftest test schema — they are not part of ORM
-    metadata) on every INSERT/UPDATE/DELETE against ``analysis_cache`` and
-    ``position_analysis``, so any writer — repo txn, repair-script delete, backfill,
-    future code — bumps it without app-level discipline. Only CHANGE matters, never
-    magnitude: the cheap freshness check compares the live value to the one stamped
-    on a batch at build time.
-
-    The singleton row (id=1, value=0) MUST be seeded by the migration/test schema:
-    the triggers do ``UPDATE ... WHERE id = 1``, which silently no-ops when the row
-    is missing. A missing row degrades safely (freshness cannot be proven -> always
-    rebuild) but forfeits the fast path.
+    ``value`` is advanced by mandatory database triggers on every mutation of the
+    three shared evidence surfaces. Proofs compare numerical order, so the
+    singleton is fail-closed and monotonic: it cannot be deleted, truncated, or
+    moved sideways/backward, and a shared write is rejected if the row is absent.
+    A NULL epoch on a legacy/partial batch still fails freshness closed, but a live
+    database may no longer silently continue through a missing singleton.
     """
 
     __tablename__ = "evidence_epoch"
@@ -971,8 +979,46 @@ class EvidenceEpoch(Base):
     value: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False, server_default="0")
 
 
-# Tables whose writes must advance EvidenceEpoch (mirrored by the 20260708_01 and
-# 20260727_01 migrations; keep the lists in sync).
+class SharedEvidenceScopeVersion(Base):
+    """Last global shared-evidence change for one exact raw/normalized FEN.
+
+    Source deletes update these rows rather than deleting them, preserving a
+    tombstone for change-and-revert and delete history used by the session-start
+    baseline proof.
+    """
+
+    __tablename__ = "shared_evidence_scope_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('raw','norm')",
+            name="ck_shared_evidence_scope_versions_kind",
+        ),
+    )
+
+    kind: Mapped[str] = mapped_column(String(4), primary_key=True)
+    fen: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_changed_epoch: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+
+
+class SharedEvidenceScopeInvalidation(Base):
+    """Last wholesale invalidation epoch for one shared-scope kind."""
+
+    __tablename__ = "shared_evidence_scope_invalidations"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('raw','norm')",
+            name="ck_shared_evidence_scope_invalidations_kind",
+        ),
+    )
+
+    kind: Mapped[str] = mapped_column(String(4), primary_key=True)
+    last_changed_epoch: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+
+
+# Tables whose writes must advance EvidenceEpoch. ``20260708_01`` introduced the
+# legacy triggers for the first two tables, ``20260727_01`` extended them to
+# submissions, and ``20260809_01`` carries the current frozen ``SHARED_TABLES`` /
+# per-event trigger generation. Keep that migration copy and this list in sync.
 #
 # ``analysis_cache_submission`` (g-v21l) is here for the same reason the evidence
 # tables are: submitter associations gate the OPENING_EVIDENCE trust filter, so an
@@ -987,77 +1033,368 @@ EVIDENCE_EPOCH_SHARED_TABLES = (
 )
 
 
-def ensure_evidence_epoch_infrastructure(bind) -> None:
-    """Idempotently seed the ``evidence_epoch`` singleton and (re)create the
-    shared-table triggers on an EXISTING schema.
+def ensure_evidence_epoch_infrastructure(
+    bind,
+    *,
+    assume_new_schema: bool = False,
+) -> None:
+    """Install the fail-closed epoch and scoped last-change trigger generation.
 
-    ``Base.metadata.create_all`` builds the tables but NOT the trigger DDL or
-    the singleton row — without them ``capture_freshness_snapshot`` stamps a
-    NULL ``cache_epoch`` and no batch can ever be proven fresh. Every non-alembic
-    schema path (the E2E/dev seed script, the hand-written conftest test schema)
-    must call this after creating tables. Alembic-managed databases get the same
-    DDL from the 20260708_01 migration and do not need this.
-
-    ``bind`` is an Engine or Connection; dialect-specific DDL is emitted for
-    sqlite (row-level triggers) and postgresql (statement-level, including
-    TRUNCATE — a maintenance truncate changes shared evidence like any delete).
+    ``Base.metadata.create_all`` creates tables but not triggers or singleton
+    rows. Callers may opt into ``assume_new_schema`` only immediately after
+    creating a known-empty schema. Established mode never heals missing proof
+    state: row 1 and both invalidation rows must already exist or installation
+    aborts. The drop/recreate runs inside one transaction/savepoint.
     """
     from sqlalchemy import text as _text
     from sqlalchemy.engine import Connection as _Connection
 
+    events = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
+
+    def _postgres_scope_select(table: str, event: str) -> str:
+        if table == "analysis_cache":
+            aliases = {
+                "INSERT": ("new_rows",),
+                "UPDATE": ("old_rows", "new_rows"),
+                "DELETE": ("old_rows",),
+            }[event]
+            parts: list[str] = []
+            for alias in aliases:
+                parts.extend(
+                    [
+                        f"SELECT 'raw'::varchar(4) AS kind, fen_before AS fen FROM {alias}",
+                        f"SELECT 'norm'::varchar(4) AS kind, normalized_fen_before AS fen "
+                        f"FROM {alias} WHERE normalized_fen_before IS NOT NULL",
+                    ]
+                )
+            return "\nUNION\n".join(parts)
+        if table == "position_analysis":
+            aliases = {
+                "INSERT": ("new_rows",),
+                "UPDATE": ("old_rows", "new_rows"),
+                "DELETE": ("old_rows",),
+            }[event]
+            return "\nUNION\n".join(
+                f"SELECT 'norm'::varchar(4) AS kind, normalized_fen AS fen FROM {alias}"
+                for alias in aliases
+            )
+        id_sources = {
+            "INSERT": "SELECT analysis_cache_id FROM new_rows",
+            "UPDATE": (
+                "SELECT analysis_cache_id FROM old_rows "
+                "UNION SELECT analysis_cache_id FROM new_rows"
+            ),
+            "DELETE": "SELECT analysis_cache_id FROM old_rows",
+        }
+        return f"""
+            WITH affected_ids AS ({id_sources[event]})
+            SELECT 'raw'::varchar(4) AS kind, cache.fen_before AS fen
+            FROM analysis_cache AS cache
+            JOIN affected_ids ON affected_ids.analysis_cache_id = cache.id
+            UNION
+            SELECT 'norm'::varchar(4) AS kind, cache.normalized_fen_before AS fen
+            FROM analysis_cache AS cache
+            JOIN affected_ids ON affected_ids.analysis_cache_id = cache.id
+            WHERE cache.normalized_fen_before IS NOT NULL
+        """
+
+    def _postgres_install(conn) -> None:
+        conn.execute(_text("""
+            CREATE OR REPLACE FUNCTION guard_evidence_epoch_mutation()
+            RETURNS trigger AS $$
+            BEGIN
+                IF TG_OP = 'DELETE' THEN
+                    RAISE EXCEPTION 'evidence_epoch singleton cannot be deleted';
+                END IF;
+                IF NEW.value <= OLD.value THEN
+                    RAISE EXCEPTION 'evidence_epoch value must increase';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """))
+        conn.execute(_text("""
+            CREATE OR REPLACE FUNCTION reject_evidence_epoch_truncate()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'evidence_epoch singleton cannot be truncated';
+            END;
+            $$ LANGUAGE plpgsql
+        """))
+        conn.execute(_text(
+            "DROP TRIGGER IF EXISTS trg_evidence_epoch_monotonic ON evidence_epoch"
+        ))
+        conn.execute(_text(
+            "DROP TRIGGER IF EXISTS trg_evidence_epoch_no_truncate ON evidence_epoch"
+        ))
+        conn.execute(_text("""
+            CREATE TRIGGER trg_evidence_epoch_monotonic
+            BEFORE UPDATE OR DELETE ON evidence_epoch
+            FOR EACH ROW EXECUTE FUNCTION guard_evidence_epoch_mutation()
+        """))
+        conn.execute(_text("""
+            CREATE TRIGGER trg_evidence_epoch_no_truncate
+            BEFORE TRUNCATE ON evidence_epoch
+            FOR EACH STATEMENT EXECUTE FUNCTION reject_evidence_epoch_truncate()
+        """))
+
+        for table in EVIDENCE_EPOCH_SHARED_TABLES:
+            conn.execute(_text(
+                f"DROP TRIGGER IF EXISTS trg_{table}_evidence_epoch ON {table}"
+            ))
+            for event in events:
+                event_lower = event.lower()
+                trigger = f"trg_{table}_evidence_epoch_{event_lower}"
+                function = f"track_{table}_evidence_{event_lower}"
+                conn.execute(_text(f"DROP TRIGGER IF EXISTS {trigger} ON {table}"))
+                if event == "TRUNCATE":
+                    kinds = "('norm')" if table == "position_analysis" else "('raw','norm')"
+                    body = f"""
+                        UPDATE shared_evidence_scope_invalidations
+                        SET last_changed_epoch = new_epoch
+                        WHERE kind IN {kinds};
+                    """
+                else:
+                    scope_select = _postgres_scope_select(table, event)
+                    body = f"""
+                        INSERT INTO shared_evidence_scope_versions
+                            (kind, fen, last_changed_epoch)
+                        SELECT affected.kind, affected.fen, new_epoch
+                        FROM ({scope_select}) AS affected
+                        WHERE affected.fen IS NOT NULL
+                        GROUP BY affected.kind, affected.fen
+                        ORDER BY affected.kind, affected.fen
+                        ON CONFLICT (kind, fen) DO UPDATE
+                        SET last_changed_epoch = EXCLUDED.last_changed_epoch;
+                    """
+                conn.execute(_text(f"""
+                    CREATE OR REPLACE FUNCTION {function}() RETURNS trigger AS $$
+                    DECLARE
+                        new_epoch bigint;
+                    BEGIN
+                        IF (
+                            SELECT count(*)
+                            FROM shared_evidence_scope_invalidations
+                            WHERE kind IN ('raw', 'norm')
+                        ) <> 2 THEN
+                            RAISE EXCEPTION 'shared evidence invalidation rows missing';
+                        END IF;
+                        UPDATE evidence_epoch
+                        SET value = value + 1
+                        WHERE id = 1
+                        RETURNING value INTO new_epoch;
+                        IF NOT FOUND THEN
+                            RAISE EXCEPTION 'evidence_epoch singleton missing';
+                        END IF;
+                        {body}
+                        RETURN NULL;
+                    END;
+                    $$ LANGUAGE plpgsql
+                """))
+                if event == "INSERT":
+                    referencing = "REFERENCING NEW TABLE AS new_rows"
+                elif event == "UPDATE":
+                    referencing = (
+                        "REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows"
+                    )
+                elif event == "DELETE":
+                    referencing = "REFERENCING OLD TABLE AS old_rows"
+                else:
+                    referencing = ""
+                conn.execute(_text(f"""
+                    CREATE TRIGGER {trigger}
+                    AFTER {event} ON {table}
+                    {referencing}
+                    FOR EACH STATEMENT EXECUTE FUNCTION {function}()
+                """))
+
+    def _sqlite_version_statements(table: str, event: str) -> list[str]:
+        aliases = {
+            "INSERT": ("NEW",),
+            "UPDATE": ("OLD", "NEW"),
+            "DELETE": ("OLD",),
+        }[event]
+        statements: list[str] = []
+        if table == "analysis_cache":
+            for alias in aliases:
+                statements.append(f"""
+                    INSERT INTO shared_evidence_scope_versions
+                        (kind, fen, last_changed_epoch)
+                    VALUES ('raw', {alias}.fen_before,
+                        (SELECT value FROM evidence_epoch WHERE id = 1))
+                    ON CONFLICT(kind, fen) DO UPDATE SET
+                        last_changed_epoch = excluded.last_changed_epoch;
+                """)
+                statements.append(f"""
+                    INSERT INTO shared_evidence_scope_versions
+                        (kind, fen, last_changed_epoch)
+                    SELECT 'norm', {alias}.normalized_fen_before,
+                        (SELECT value FROM evidence_epoch WHERE id = 1)
+                    WHERE {alias}.normalized_fen_before IS NOT NULL
+                    ON CONFLICT(kind, fen) DO UPDATE SET
+                        last_changed_epoch = excluded.last_changed_epoch;
+                """)
+        elif table == "position_analysis":
+            for alias in aliases:
+                statements.append(f"""
+                    INSERT INTO shared_evidence_scope_versions
+                        (kind, fen, last_changed_epoch)
+                    VALUES ('norm', {alias}.normalized_fen,
+                        (SELECT value FROM evidence_epoch WHERE id = 1))
+                    ON CONFLICT(kind, fen) DO UPDATE SET
+                        last_changed_epoch = excluded.last_changed_epoch;
+                """)
+        else:
+            for alias in aliases:
+                statements.append(f"""
+                    INSERT INTO shared_evidence_scope_versions
+                        (kind, fen, last_changed_epoch)
+                    SELECT 'raw', fen_before,
+                        (SELECT value FROM evidence_epoch WHERE id = 1)
+                    FROM analysis_cache
+                    WHERE id = {alias}.analysis_cache_id
+                    ON CONFLICT(kind, fen) DO UPDATE SET
+                        last_changed_epoch = excluded.last_changed_epoch;
+                """)
+                statements.append(f"""
+                    INSERT INTO shared_evidence_scope_versions
+                        (kind, fen, last_changed_epoch)
+                    SELECT 'norm', normalized_fen_before,
+                        (SELECT value FROM evidence_epoch WHERE id = 1)
+                    FROM analysis_cache
+                    WHERE id = {alias}.analysis_cache_id
+                      AND normalized_fen_before IS NOT NULL
+                    ON CONFLICT(kind, fen) DO UPDATE SET
+                        last_changed_epoch = excluded.last_changed_epoch;
+                """)
+        return statements
+
+    def _sqlite_install(conn) -> None:
+        conn.execute(_text("DROP TRIGGER IF EXISTS trg_evidence_epoch_monotonic"))
+        conn.execute(_text("DROP TRIGGER IF EXISTS trg_evidence_epoch_no_delete"))
+        conn.execute(_text("""
+            CREATE TRIGGER trg_evidence_epoch_monotonic
+            BEFORE UPDATE ON evidence_epoch
+            WHEN NEW.value <= OLD.value
+            BEGIN
+                SELECT RAISE(ABORT, 'evidence_epoch value must increase');
+            END
+        """))
+        conn.execute(_text("""
+            CREATE TRIGGER trg_evidence_epoch_no_delete
+            BEFORE DELETE ON evidence_epoch
+            BEGIN
+                SELECT RAISE(ABORT, 'evidence_epoch singleton cannot be deleted');
+            END
+        """))
+        for table in EVIDENCE_EPOCH_SHARED_TABLES:
+            for event in ("INSERT", "UPDATE", "DELETE"):
+                trigger = f"trg_{table}_evidence_epoch_{event.lower()}"
+                conn.execute(_text(f"DROP TRIGGER IF EXISTS {trigger}"))
+                version_sql = "\n".join(
+                    _sqlite_version_statements(table, event)
+                )
+                conn.execute(_text(f"""
+                    CREATE TRIGGER {trigger}
+                    AFTER {event} ON {table}
+                    BEGIN
+                        SELECT CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM evidence_epoch WHERE id = 1
+                        ) THEN RAISE(ABORT, 'evidence_epoch singleton missing') END;
+                        SELECT CASE WHEN (
+                            SELECT count(*)
+                            FROM shared_evidence_scope_invalidations
+                            WHERE kind IN ('raw', 'norm')
+                        ) <> 2 THEN RAISE(
+                            ABORT, 'shared evidence invalidation rows missing'
+                        ) END;
+                        UPDATE evidence_epoch SET value = value + 1 WHERE id = 1;
+                        {version_sql}
+                    END
+                """))
+
     def _install(conn) -> None:
         dialect = conn.dialect.name
+        if dialect not in {"postgresql", "sqlite"}:
+            raise RuntimeError(f"unsupported evidence epoch dialect: {dialect}")
+
+        if assume_new_schema:
+            conn.execute(_text("""
+                CREATE TABLE IF NOT EXISTS shared_evidence_scope_versions (
+                    kind VARCHAR(4) NOT NULL,
+                    fen TEXT NOT NULL,
+                    last_changed_epoch BIGINT NOT NULL,
+                    PRIMARY KEY (kind, fen),
+                    CONSTRAINT ck_shared_evidence_scope_versions_kind
+                        CHECK (kind IN ('raw','norm'))
+                )
+            """))
+            conn.execute(_text("""
+                CREATE TABLE IF NOT EXISTS shared_evidence_scope_invalidations (
+                    kind VARCHAR(4) PRIMARY KEY,
+                    last_changed_epoch BIGINT NOT NULL,
+                    CONSTRAINT ck_shared_evidence_scope_invalidations_kind
+                        CHECK (kind IN ('raw','norm'))
+                )
+            """))
+            epoch = conn.execute(_text(
+                "SELECT value FROM evidence_epoch WHERE id = 1"
+            )).scalar_one_or_none()
+            if epoch is None:
+                has_shared_rows = any(
+                    conn.execute(_text(f"SELECT 1 FROM {table} LIMIT 1")).first()
+                    is not None
+                    for table in EVIDENCE_EPOCH_SHARED_TABLES
+                )
+                if has_shared_rows:
+                    raise RuntimeError(
+                        "cannot seed evidence_epoch after shared evidence exists"
+                    )
+                conn.execute(_text(
+                    "INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"
+                ))
+                epoch = 0
+            if dialect == "postgresql":
+                insert_invalidation = _text("""
+                    INSERT INTO shared_evidence_scope_invalidations
+                        (kind, last_changed_epoch)
+                    VALUES ('raw', :epoch), ('norm', :epoch)
+                    ON CONFLICT (kind) DO NOTHING
+                """)
+            else:
+                insert_invalidation = _text("""
+                    INSERT OR IGNORE INTO shared_evidence_scope_invalidations
+                        (kind, last_changed_epoch)
+                    VALUES ('raw', :epoch), ('norm', :epoch)
+                """)
+            conn.execute(insert_invalidation, {"epoch": int(epoch)})
+
+        epoch = conn.execute(_text(
+            "SELECT value FROM evidence_epoch WHERE id = 1"
+        )).scalar_one_or_none()
+        invalidation_count = conn.execute(_text("""
+            SELECT count(*)
+            FROM shared_evidence_scope_invalidations
+            WHERE kind IN ('raw', 'norm')
+        """)).scalar_one()
+        if epoch is None or invalidation_count != 2:
+            raise RuntimeError("established evidence epoch infrastructure is incomplete")
+
         if dialect == "postgresql":
-            conn.execute(_text(
-                "INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"
-                " ON CONFLICT (id) DO NOTHING"
-            ))
-            conn.execute(_text(
-                """
-                CREATE OR REPLACE FUNCTION bump_evidence_epoch() RETURNS trigger AS $$
-                BEGIN
-                    UPDATE evidence_epoch SET value = value + 1 WHERE id = 1;
-                    RETURN NULL;
-                END;
-                $$ LANGUAGE plpgsql
-                """
-            ))
-            for table in EVIDENCE_EPOCH_SHARED_TABLES:
-                conn.execute(_text(
-                    f"DROP TRIGGER IF EXISTS trg_{table}_evidence_epoch ON {table}"
-                ))
-                conn.execute(_text(
-                    f"""
-                    CREATE TRIGGER trg_{table}_evidence_epoch
-                    AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON {table}
-                    FOR EACH STATEMENT EXECUTE FUNCTION bump_evidence_epoch()
-                    """
-                ))
+            _postgres_install(conn)
         else:
-            # sqlite (and a best-effort generic fallback): row-level, per-event
-            # (no multi-event or statement-level trigger syntax). N bumps per
-            # batch write are harmless — only change matters, never magnitude.
-            conn.execute(_text(
-                "INSERT OR IGNORE INTO evidence_epoch (id, value) VALUES (1, 0)"
-            ))
-            for table in EVIDENCE_EPOCH_SHARED_TABLES:
-                for event in ("INSERT", "UPDATE", "DELETE"):
-                    conn.execute(_text(
-                        f"""
-                        CREATE TRIGGER IF NOT EXISTS trg_{table}_evidence_epoch_{event.lower()}
-                        AFTER {event} ON {table}
-                        BEGIN
-                            UPDATE evidence_epoch SET value = value + 1 WHERE id = 1;
-                        END
-                        """
-                    ))
-        conn.commit()
+            _sqlite_install(conn)
+
+    def _run_transaction(conn) -> None:
+        transaction = conn.begin_nested() if conn.in_transaction() else conn.begin()
+        with transaction:
+            _install(conn)
 
     if isinstance(bind, _Connection):
-        _install(bind)
+        _run_transaction(bind)
     else:
         with bind.connect() as conn:
-            _install(conn)
+            _run_transaction(conn)
 
 
 class OpeningScoreBatchSharedScope(Base):

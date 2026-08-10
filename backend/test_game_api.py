@@ -3,6 +3,7 @@ Simple test for POST /api/game/start endpoint.
 
 Run with: pytest test_game_api.py -v
 """
+import json
 import logging
 import re
 import time
@@ -2188,7 +2189,9 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
 
     db_session.expire_all()
     session = db_session.get(GameSession, sid)
-    import json
+    assert session.baseline_watermark_seq is not None
+    assert session.baseline_watermark_epoch is not None
+    assert session.baseline_watermark_fingerprint is not None
     assert json.loads(session.opening_score_baseline) == {
         "schema_version": 1,
         "model_version": oc.SCORE_MODEL_VERSION,
@@ -2197,9 +2200,9 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
     }
 
 
-def test_game_start_baseline_null_when_date_guard_loses_race(client, auth_headers, db_session):
-    # End-to-end race loss: only a POST-session batch exists when the worker drains,
-    # so the strict date guard rejects it and the baseline degrades to NULL (no delta).
+def test_game_start_accepts_later_batch_when_watermark_still_matches(
+    client, auth_headers, db_session
+):
     sched, enqueue_patch = _inject_baseline_scheduler("app.api.game")
     with enqueue_patch:
         resp = client.post(
@@ -2210,7 +2213,7 @@ def test_game_start_baseline_null_when_date_guard_loses_race(client, auth_header
         assert resp.status_code == 201
         sid = uuid.UUID(resp.json()["session_id"])
 
-        # A recompute lands AFTER the session started (post-session batch).
+        # A recompute lands after the session started, but no relevant input moved.
         _seed_fresh_batch(
             db_session, user_id=123, player_color="white",
             computed_at=datetime.now(timezone.utc) + timedelta(hours=1),
@@ -2220,7 +2223,15 @@ def test_game_start_baseline_null_when_date_guard_loses_race(client, auth_header
 
     db_session.expire_all()
     session = db_session.get(GameSession, sid)
-    assert session.opening_score_baseline is None
+    assert session.baseline_watermark_seq is not None
+    assert session.baseline_watermark_epoch is not None
+    assert session.baseline_watermark_fingerprint is not None
+    assert json.loads(session.opening_score_baseline) == {
+        "schema_version": 1,
+        "model_version": oc.SCORE_MODEL_VERSION,
+        "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "scores": {"opening-x": 41.0},
+    }
 
 
 if __name__ == "__main__":

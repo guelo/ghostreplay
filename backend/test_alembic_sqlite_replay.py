@@ -86,6 +86,57 @@ def test_sqlite_full_chain_matches_model_schema_and_downgrades(tmp_path, monkeyp
     engine.dispose()
 
 
+def test_baseline_watermark_revision_downgrade_upgrade_restores_trigger_generations(
+    tmp_path, monkeypatch
+):
+    url = f"sqlite:///{tmp_path / 'baseline-watermark-cycle.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    cfg = _alembic_config()
+    command.upgrade(cfg, "head")
+
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO analysis_cache "
+                "(id, fen_before, normalized_fen_before, move_uci, move_san, played_eval) "
+                "VALUES (1, 'raw-fen', 'norm-fen', 'e2e4', 'e4', 1)"
+            )
+        )
+        assert connection.execute(
+            text(
+                "SELECT kind, fen FROM shared_evidence_scope_versions "
+                "ORDER BY kind"
+            )
+        ).all() == [("norm", "norm-fen"), ("raw", "raw-fen")]
+    engine.dispose()
+
+    command.downgrade(cfg, "20260802_01")
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    assert "shared_evidence_scope_versions" not in inspector.get_table_names()
+    assert "baseline_watermark_seq" not in {
+        column["name"] for column in inspector.get_columns("game_sessions")
+    }
+    with engine.connect() as connection:
+        trigger_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name = 'trg_analysis_cache_evidence_epoch_insert'"
+            )
+        ).scalar_one()
+        assert "shared_evidence_scope_versions" not in trigger_sql
+    engine.dispose()
+
+    command.upgrade(cfg, "head")
+    engine = create_engine(url)
+    inspector = inspect(engine)
+    assert "shared_evidence_scope_versions" in inspector.get_table_names()
+    assert "baseline_watermark_seq" in {
+        column["name"] for column in inspector.get_columns("game_sessions")
+    }
+    engine.dispose()
+
 def test_sqlite_early_color_migrations_backfill_and_preserve_rows(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'color-backfill.db'}"
     monkeypatch.setenv("DATABASE_URL", url)

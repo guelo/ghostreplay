@@ -758,12 +758,14 @@ def test_pg_run_recomputes_accuracy_and_bumps_under_real_locks(pg_engine, pg_ses
 
     from app.models import Base, User
 
-    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
+    preserved = {"evidence_epoch", "shared_evidence_scope_invalidations"}
+    table_names = ", ".join(
+        table.name
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in preserved
+    )
     with pg_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
-        # Re-seed the evidence_epoch singleton the TRUNCATE removed (its triggers no-op
-        # without id=1), mirroring the pg_client fixture.
-        conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
 
     scholar, s_pgn = _play(SCHOLAR)
     seed = pg_session_factory()

@@ -2245,6 +2245,9 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
     db_session.expire_all()
     session = db_session.get(GameSession, sid)
     import json
+    assert session.baseline_watermark_seq is not None
+    assert session.baseline_watermark_epoch is not None
+    assert session.baseline_watermark_fingerprint is not None
     assert json.loads(session.opening_score_baseline) == {
         "schema_version": 1,
         "model_version": oc.SCORE_MODEL_VERSION,

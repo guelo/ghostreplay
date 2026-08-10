@@ -9,12 +9,10 @@ moves that capture OFF the request thread: the start handler enqueues a
 best-effort job and returns 201 immediately; a background worker fills the
 baseline shortly after.
 
-Correctness: the worker persists a baseline ONLY when the pre-session cached
-batch is provably fresh AND dated strictly before ``session.started_at`` (see
-``opening_score_delta.run_baseline_snapshot_job``). If the worker loses the race
-with this session's own evidence — or a hard kill drops the enqueued job — the
-baseline stays NULL and the end-of-session delta degrades to "no delta". A wrong
-(post-session) baseline is never written.
+Correctness: the worker persists a baseline only when a current-state batch proof
+and the session's durable start-watermark proof both hold. Retryable cold/stale
+outcomes use bounded backoff; terminal watermark mismatches remain NULL rather
+than inventing a before-score.
 
 IMPORTANT — single-process assumption (same as the other two schedulers):
     Pending state lives in memory and runs on one daemon thread, so coalescing is
@@ -36,11 +34,17 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
 from app.db import SessionLocal
+from app.opening_score_delta import (
+    BASELINE_RETRYABLE_SOURCES,
+    BaselineSnapshotSource,
+    run_baseline_snapshot_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,9 @@ class _Entry:
     # for THAT identity; these are used only for logging and a cheap sanity check.
     user_id: int
     player_color: str
+    not_before: float
+    first_enqueued_at: float
+    attempts: int = 0
     enqueue_count: int = 0
 
 
@@ -63,10 +70,12 @@ class OpeningBaselineScheduler:
 
     session_factory: Callable = SessionLocal
     run_job: Callable = None  # set in __post_init__ to break import cycle
+    clock: Callable[[], float] = time.monotonic
     auto_start: bool = True
 
     _pending: dict[Key, _Entry] = field(default_factory=dict, init=False)
     _inflight: set[Key] = field(default_factory=set, init=False)
+    _active_entries: dict[Key, _Entry] = field(default_factory=dict, init=False)
     _shutdown: bool = field(default=False, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
 
@@ -88,9 +97,22 @@ class OpeningBaselineScheduler:
         with self._cond:
             if self._shutdown:
                 return
+            active = self._active_entries.get(session_id)
+            if active is not None:
+                # The running job re-reads the authoritative row. A duplicate is
+                # already covered; if its outcome is retryable, that same entry is
+                # requeued without resetting its original budget.
+                active.enqueue_count += 1
+                return
             entry = self._pending.get(session_id)
             if entry is None:
-                entry = _Entry(user_id=user_id, player_color=player_color)
+                now = self.clock()
+                entry = _Entry(
+                    user_id=user_id,
+                    player_color=player_color,
+                    not_before=now,
+                    first_enqueued_at=now,
+                )
                 self._pending[session_id] = entry
             entry.enqueue_count += 1
             self._cond.notify_all()
@@ -105,20 +127,25 @@ class OpeningBaselineScheduler:
     # ------------------------------------------------------------------
     # Synchronous test surface
     # ------------------------------------------------------------------
-    def run_due(self) -> None:
-        """Run every coalesced session's job. Runs on the caller's thread.
-
-        There is no debounce, so every pending, not-in-flight session is due.
-        """
+    def run_due(self, now: float | None = None) -> None:
+        """Run entries whose retry deadline has passed on the caller's thread."""
+        if now is None:
+            now = self.clock()
         while True:
             with self._lock:
-                due = [sid for sid in self._pending if sid not in self._inflight]
+                due = [
+                    sid
+                    for sid, entry in self._pending.items()
+                    if entry.not_before <= now and sid not in self._inflight
+                ]
                 if not due:
                     return
                 runs: list[tuple[Key, _Entry]] = []
                 for session_id in due:
                     entry = self._pending.pop(session_id)
+                    entry.attempts += 1
                     self._inflight.add(session_id)
+                    self._active_entries[session_id] = entry
                     runs.append((session_id, entry))
             for session_id, entry in runs:
                 self._run_one(session_id, entry)
@@ -174,24 +201,31 @@ class OpeningBaselineScheduler:
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
-                has_due = any(
-                    session_id not in self._inflight for session_id in self._pending
-                )
-                if not has_due:
-                    # Bounded wait: enqueue notifies, so this normally wakes at
-                    # once; the timeout is a defensive fallback against a missed
-                    # notify and keeps shutdown responsive.
-                    self._cond.wait(timeout=1.0)
-            self.run_due()
+                now = self.clock()
+                deadlines = [
+                    entry.not_before
+                    for session_id, entry in self._pending.items()
+                    if session_id not in self._inflight
+                ]
+                wait_for = None if not deadlines else max(0.0, min(deadlines) - now)
+                if wait_for is None or wait_for > 0:
+                    # Bounded fallback keeps shutdown responsive even if a notify
+                    # is missed; ordinary retries wake at their earliest deadline.
+                    self._cond.wait(
+                        timeout=1.0 if wait_for is None else min(wait_for, 1.0)
+                    )
+                shutting_down = self._shutdown
+            self.run_due(now=float("inf") if shutting_down else None)
 
     # ------------------------------------------------------------------
     # Run a single session's baseline job
     # ------------------------------------------------------------------
     def _run_one(self, session_id: Key, entry: _Entry) -> None:
         db = None
+        raw_source: object = BaselineSnapshotSource.FAILED.value
         try:
             db = self.session_factory()
-            self.run_job(
+            raw_source = self.run_job(
                 db,
                 session_id=session_id,
                 user_id=entry.user_id,
@@ -216,22 +250,77 @@ class OpeningBaselineScheduler:
                     logger.exception(
                         "opening baseline scheduler failed to close session"
                     )
+
+            try:
+                source = BaselineSnapshotSource(raw_source)
+            except (TypeError, ValueError):
+                source = None
+                logger.error(
+                    "opening baseline job returned an unknown source type=%s; stopping",
+                    type(raw_source).__name__,
+                )
+
+            should_requeue = source in BASELINE_RETRYABLE_SOURCES
+            if source in {
+                BaselineSnapshotSource.SKIPPED_COLD,
+                BaselineSnapshotSource.SKIPPED_STALE,
+                BaselineSnapshotSource.SKIPPED_RECOMPUTE_INFLIGHT,
+            }:
+                with self._lock:
+                    shutting_down = self._shutdown
+                if not shutting_down:
+                    try:
+                        from app.opening_score_scheduler import (
+                            OpeningScoreTrigger,
+                            is_recompute_scheduled,
+                            request_recompute,
+                        )
+
+                        if not is_recompute_scheduled(
+                            entry.user_id, entry.player_color
+                        ):
+                            request_recompute(
+                                entry.user_id,
+                                entry.player_color,
+                                source=OpeningScoreTrigger.BASELINE_RECOVERY,
+                            )
+                    except Exception:
+                        logger.exception(
+                            "opening baseline recovery recompute request failed"
+                        )
+
+            requeue = False
+            if should_requeue:
+                now = self.clock()
+                delay = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)[
+                    min(entry.attempts - 1, 5)
+                ]
+                next_not_before = now + delay
+                with self._lock:
+                    shutting_down = self._shutdown
+                requeue = (
+                    not shutting_down
+                    and entry.attempts < 8
+                    and next_not_before - entry.first_enqueued_at <= 120.0
+                )
+                if requeue:
+                    entry.not_before = next_not_before
+
             with self._cond:
                 self._inflight.discard(session_id)
+                self._active_entries.pop(session_id, None)
+                if requeue:
+                    self._pending[session_id] = entry
                 self._cond.notify_all()
 
 
 # Module-level singleton + thin facade -------------------------------------
-def _default_run_baseline_snapshot_job(db, **kwargs) -> None:
+def _default_run_baseline_snapshot_job(db, **kwargs) -> str:
     """Run the real baseline-capture job on ``db``.
 
-    The function-local import breaks the import cycle: ``app.api.game`` /
-    ``app.api.drills`` import ``enqueue_baseline_snapshot`` from this module at
-    top, so this module must NOT import ``app.opening_score_delta`` at top.
+    Kept as a seam so scheduler tests can inject a deterministic job.
     """
-    from app.opening_score_delta import run_baseline_snapshot_job
-
-    run_baseline_snapshot_job(
+    return run_baseline_snapshot_job(
         db,
         kwargs["session_id"],
         kwargs["user_id"],

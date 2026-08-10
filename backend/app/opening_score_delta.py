@@ -13,16 +13,11 @@ live play feeds ``request_recompute`` incrementally as moves upload, so by the
 time a session ends the cached score already reflects most of that session. There
 is no "pre-session" score left to diff against unless it was captured up front.
 
-ASYNC CAPTURE (g-mxeo): proving the cached batch fresh costs an O(all-evidence)
-digest that ballooned start latency, so capture no longer runs inline on the
-``/start`` request. The start handler enqueues a job on ``OpeningBaselineScheduler``
-and returns immediately; the worker calls ``run_baseline_snapshot_job`` shortly
-after. Because that races this session's own evidence, the worker persists a
-baseline ONLY when the pre-session cached batch is provably fresh AND dated
-STRICTLY BEFORE ``session.started_at`` (``computed_at`` is an evidence-read upper
-bound — see ``opening_cache._utcnow``). Otherwise the baseline stays NULL and the
-end-of-session delta degrades to "no delta". A post-session baseline is never
-written.
+ASYNC CAPTURE: each start transaction stores a durable per-user/shared/registry
+watermark. The worker may accept a batch built later only after composing two
+proofs: the batch equals current relevant state, and current relevant state still
+equals the session's start state. This recovers cold/stale starts without using a
+wall-clock ordering claim and keeps post-start evidence fail-closed.
 
 The terminal and poll helpers are best-effort and never raise: the delta is
 supplementary to the end-of-session response (rating change, drill contract), so
@@ -40,18 +35,23 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable
 
 from pydantic import BaseModel
-from sqlalchemy import case, select, update
+from sqlalchemy import case, func, literal, select, update
 from sqlalchemy.orm import Session
 
+from app.db import SessionLocal
 from app.models import (
-    Blunder,
-    BlunderReview,
+    EvidenceEpoch,
     GameSession,
     OpeningScoreBatch,
+    OpeningScoreBatchSharedScope,
+    OpeningScoreCursor,
     SessionMove,
+    SharedEvidenceScopeInvalidation,
+    SharedEvidenceScopeVersion,
     UserOpeningScore,
 )
 from app.opening_cache import (
@@ -82,6 +82,43 @@ from app.opening_roots import get_opening_roots, played_opening_chain
 logger = logging.getLogger(__name__)
 
 OPENING_BASELINE_SCHEMA_VERSION = 1
+
+
+class BaselineSnapshotSource(str, Enum):
+    """Closed scheduler/result vocabulary for baseline capture."""
+
+    CACHED_FRESH = "cached_fresh"
+    EMPTY_NO_EVIDENCE = "empty_no_evidence"
+    SKIPPED_STALE = "skipped_stale"
+    SKIPPED_COLD = "skipped_cold"
+    SKIPPED_RECOMPUTE_INFLIGHT = "skipped_recompute_inflight"
+    RACED_EVIDENCE_OR_ALREADY_SET = "raced_evidence_or_already_set"
+    ALREADY_SET = "already_set"
+    MISSING_SESSION = "missing_session"
+    NOT_ACTIVE = "not_active"
+    SESSION_MISMATCH = "session_mismatch"
+    WATERMARK_MISSING = "watermark_missing"
+    WATERMARK_MISMATCH = "watermark_mismatch"
+    FAILED = "failed"
+
+
+BASELINE_RETRYABLE_SOURCES = frozenset(
+    {
+        BaselineSnapshotSource.SKIPPED_STALE,
+        BaselineSnapshotSource.SKIPPED_COLD,
+        BaselineSnapshotSource.SKIPPED_RECOMPUTE_INFLIGHT,
+        BaselineSnapshotSource.RACED_EVIDENCE_OR_ALREADY_SET,
+    }
+)
+BASELINE_TERMINAL_SOURCES = frozenset(BaselineSnapshotSource) - BASELINE_RETRYABLE_SOURCES
+
+
+class BaselineWatermarkMismatch(str, Enum):
+    SEQ = "seq"
+    REGISTRY = "registry"
+    SHARED_SCOPE = "shared_scope"
+    SHARED_INVALIDATION = "shared_invalidation"
+    EPOCH_CORRUPTION = "epoch_corruption"
 
 
 def _serialize_baseline(scores: dict[str, float]) -> str:
@@ -136,14 +173,48 @@ def _parse_compatible_baseline(payload: str | None) -> dict[str, float] | None:
     return compatible
 
 
-def _as_utc(value: datetime) -> datetime:
-    """Coerce a datetime to timezone-aware UTC, treating naive as UTC.
+def capture_baseline_watermark(
+    db: Session,
+    user_id: int,
+    player_color: str,
+) -> tuple[int, int, str] | None:
+    """Capture the complete start-state watermark without poisoning ``db``.
 
-    SQLite test paths and older rows can return naive datetimes; normalizing both
-    sides before an ordering comparison avoids the aware/naive ``TypeError``.
-    Mirrors the guard around ``opening_cache.recompute_opening_scores_if_needed``.
+    The per-user sequence and global epoch are read by one SQL statement. The
+    SAVEPOINT isolates a failed read/fingerprint calculation; it does not create
+    the counter snapshot semantics. Missing epoch state fails closed to ``None``.
     """
-    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    seq_value = (
+        select(OpeningScoreCursor.evidence_seq)
+        .where(
+            OpeningScoreCursor.user_id == user_id,
+            OpeningScoreCursor.player_color == player_color,
+        )
+        .scalar_subquery()
+    )
+    epoch_value = (
+        select(EvidenceEpoch.value)
+        .where(EvidenceEpoch.id == 1)
+        .scalar_subquery()
+    )
+    try:
+        with db.begin_nested():
+            evidence_seq, evidence_epoch = db.execute(
+                select(func.coalesce(seq_value, 0), epoch_value)
+            ).one()
+            registry_fingerprint = opening_score_inputs_fingerprint(
+                get_opening_graph(), get_opening_roots()
+            )
+        if evidence_epoch is None:
+            logger.warning("opening baseline watermark capture source=missing_epoch")
+            return None
+        return int(evidence_seq), int(evidence_epoch), registry_fingerprint
+    except Exception:  # noqa: BLE001 - start remains best-effort
+        logger.warning(
+            "opening baseline watermark capture source=failed",
+            exc_info=True,
+        )
+        return None
 
 
 class OpeningScoreDeltaItem(BaseModel):
@@ -300,10 +371,9 @@ def _capture_baseline_json(
     user_id: int,
     player_color: str,
     *,
-    not_after: datetime | None,
     skip_when_inflight: bool,
 ) -> tuple[str | None, str]:
-    """Capture current scores in the versioned baseline envelope — PURE.
+    """Capture current scores for the legacy synchronous-before-insert surface.
 
     Returns ``(json_or_none, source)``. No ``try/except``, no rollback, no logging,
     no timing ``finally`` — the two best-effort wrappers own those, and unexpected
@@ -325,14 +395,11 @@ def _capture_baseline_json(
       only runs in the no-batch case (to keep a brand-new user's empty baseline).
       The async worker passes ``skip_when_inflight=False``: it is off the request
       thread, so correctness comes from the strict date/freshness proof instead.
-    - ``not_after`` date guard (async worker, g-mxeo): if the batch's normalized
-      ``computed_at >= not_after``, the batch may already reflect this session's
-      evidence (``computed_at`` is an evidence-read upper bound), so return
-      ``(None, "skipped_post_session_batch")`` BEFORE paying the O(evidence) digest.
-      The predicate is strict: a batch tying ``started_at`` at clock resolution
-      cannot be proven pre-session and is rejected.
     - Freshness: a provably-stale batch returns ``(None, "skipped_stale")``; a fresh
       batch returns ``(json.dumps({key: score}), "cached_fresh")``.
+
+    The async worker does not call this helper: it uses the durable session
+    watermark and the two-proof acceptance path below.
     """
     # Cheap indexed batch+rows read first (no fingerprint/digest).
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
@@ -366,12 +433,6 @@ def _capture_baseline_json(
             return None, "skipped_cold"
         return _serialize_baseline({}), "empty_no_evidence"
 
-    # Date guard (g-mxeo): reject a batch that may already reflect this session's
-    # evidence BEFORE paying the O(evidence) freshness digest. Strict ``>=``: a
-    # batch whose computed_at ties started_at cannot be proven pre-session.
-    if not_after is not None and _as_utc(batch.computed_at) >= _as_utc(not_after):
-        return None, "skipped_post_session_batch"
-
     if not _is_batch_fresh(db, batch, rows):
         # Cache exists but is provably stale (evidence/registry drift or legacy
         # branch keys). Persisting it would reintroduce the misattribution.
@@ -393,14 +454,14 @@ def snapshot_opening_baseline(
     contract: it never raises, rolls back best-effort on failure, returns None on
     failure, gates the O(evidence) digest behind the in-flight-only probe
     (``skip_when_inflight=True``), and logs the ``opening_baseline_snapshot ...``
-    line. It passes ``not_after=None`` (no date guard): a synchronous capture runs
-    BEFORE the session INSERT, so it races nothing.
+    line. The synchronous capture runs BEFORE the session INSERT, so its fresh
+    current-state batch is already a valid pre-session baseline.
     """
     t0 = time.perf_counter()
     source = "failed"
     try:
         result, source = _capture_baseline_json(
-            db, user_id, player_color, not_after=None, skip_when_inflight=True
+            db, user_id, player_color, skip_when_inflight=True
         )
         return result
     except Exception:  # noqa: BLE001 — best-effort snapshot must never block start
@@ -432,120 +493,188 @@ def snapshot_opening_baseline(
         )
 
 
+def _baseline_watermark(session: GameSession) -> tuple[int, int, str] | None:
+    values = (
+        session.baseline_watermark_seq,
+        session.baseline_watermark_epoch,
+        session.baseline_watermark_fingerprint,
+    )
+    if any(value is None for value in values):
+        return None
+    return int(values[0]), int(values[1]), str(values[2])
+
+
+def _batch_start_mismatch(
+    db: Session,
+    batch: OpeningScoreBatch,
+    session: GameSession,
+) -> BaselineWatermarkMismatch | None:
+    """Proof 2: does current batch-relevant state still equal session start?"""
+    watermark = _baseline_watermark(session)
+    if watermark is None:
+        return BaselineWatermarkMismatch.EPOCH_CORRUPTION
+    watermark_seq, watermark_epoch, watermark_fingerprint = watermark
+
+    live_seq = current_evidence_seq(db, session.user_id, session.player_color)
+    if batch.evidence_seq != watermark_seq or live_seq != watermark_seq:
+        return BaselineWatermarkMismatch.SEQ
+    if batch.registry_fingerprint != watermark_fingerprint:
+        return BaselineWatermarkMismatch.REGISTRY
+
+    live_epoch = current_cache_epoch(db)
+    if live_epoch is None or live_epoch < watermark_epoch:
+        return BaselineWatermarkMismatch.EPOCH_CORRUPTION
+    if live_epoch == watermark_epoch:
+        return None
+
+    exact_change = db.execute(
+        select(literal(1))
+        .select_from(OpeningScoreBatchSharedScope)
+        .join(
+            SharedEvidenceScopeVersion,
+            (
+                SharedEvidenceScopeVersion.kind
+                == OpeningScoreBatchSharedScope.kind
+            )
+            & (
+                SharedEvidenceScopeVersion.fen
+                == OpeningScoreBatchSharedScope.fen
+            ),
+        )
+        .where(
+            OpeningScoreBatchSharedScope.batch_id == batch.id,
+            SharedEvidenceScopeVersion.last_changed_epoch > watermark_epoch,
+        )
+        .limit(1)
+    ).first()
+    if exact_change is not None:
+        return BaselineWatermarkMismatch.SHARED_SCOPE
+
+    scoped_kinds = (
+        select(OpeningScoreBatchSharedScope.kind)
+        .where(OpeningScoreBatchSharedScope.batch_id == batch.id)
+        .distinct()
+    )
+    invalidated = db.execute(
+        select(literal(1))
+        .select_from(SharedEvidenceScopeInvalidation)
+        .where(
+            SharedEvidenceScopeInvalidation.kind.in_(scoped_kinds),
+            SharedEvidenceScopeInvalidation.last_changed_epoch > watermark_epoch,
+        )
+        .limit(1)
+    ).first()
+    if invalidated is not None:
+        return BaselineWatermarkMismatch.SHARED_INVALIDATION
+    return None
+
+
+def _conditional_store_baseline(
+    db: Session,
+    session: GameSession,
+    baseline_json: str,
+) -> bool:
+    """Linearization write after both proofs; reruns no proof implicitly."""
+    watermark = _baseline_watermark(session)
+    if watermark is None:
+        return False
+    watermark_seq, watermark_epoch, watermark_fingerprint = watermark
+    stmt = (
+        update(GameSession)
+        .where(
+            GameSession.id == session.id,
+            GameSession.status == "active",
+            GameSession.user_id == session.user_id,
+            GameSession.player_color == session.player_color,
+            GameSession.opening_score_baseline.is_(None),
+            GameSession.baseline_watermark_seq == watermark_seq,
+            GameSession.baseline_watermark_epoch == watermark_epoch,
+            GameSession.baseline_watermark_fingerprint == watermark_fingerprint,
+        )
+        .values(opening_score_baseline=baseline_json)
+    )
+    return db.execute(stmt).rowcount == 1
+
+
+def _empty_start_mismatch(
+    db: Session,
+    session: GameSession,
+) -> BaselineWatermarkMismatch | None:
+    """Historical proof for the no-batch/no-evidence special case."""
+    watermark = _baseline_watermark(session)
+    if watermark is None:
+        return BaselineWatermarkMismatch.EPOCH_CORRUPTION
+    watermark_seq, _watermark_epoch, watermark_fingerprint = watermark
+    if current_evidence_seq(db, session.user_id, session.player_color) != watermark_seq:
+        return BaselineWatermarkMismatch.SEQ
+    current_fingerprint = opening_score_inputs_fingerprint(
+        get_opening_graph(), get_opening_roots()
+    )
+    if current_fingerprint != watermark_fingerprint:
+        return BaselineWatermarkMismatch.REGISTRY
+    return None
+
+
 def run_baseline_snapshot_job(
     db: Session, session_id, user_id: int, player_color: str
 ) -> str:
-    """Async opening-baseline capture job for ``OpeningBaselineScheduler`` — NEVER
-    raises. Returns a ``source`` string (also logged) describing the outcome.
-
-    The queued ``user_id``/``player_color`` are UNTRUSTED routing hints, not
-    authoritative capture inputs. A stale or mis-routed duplicate enqueue carrying
-    the wrong pair would otherwise capture ANOTHER user's/color's cached scores and
-    persist them onto this session. So capture always keys off the SESSION ROW's own
-    ``user_id``/``player_color``; the queued copies are used only for logging and one
-    cheap sanity check.
-
-    Flow:
-
-    1. Session missing -> ``"missing_session"``.
-    2. Baseline already set -> ``"already_set"`` (idempotent).
-    3. Session not active -> ``"not_active"`` (cheap early-exit; the UPDATE re-checks
-       it atomically).
-    4. Queued hints disagree with the row -> ``"session_mismatch"`` (surface the
-       upstream bug; correctness does not depend on it — capture uses the row).
-    5. Capture from the ROW via ``_capture_baseline_json`` with the strict date guard
-       (``not_after=session.started_at``) and ``skip_when_inflight=False``.
-    6. None -> leave the baseline NULL, return the helper's source.
-    7. Persist via a single conditional UPDATE that re-checks ``status="active"``,
-       the captured identity, NULL baseline, and the absence of any session-scoped
-       evidence — atomic with the write. ``rowcount == 1`` returns the helper source;
-       otherwise ``"raced_evidence_or_already_set"``.
-    8. Unexpected errors -> guarded rollback, ``"failed"``, never crash the worker.
-    """
+    """Prove and persist one session's start baseline; never raise."""
     t0 = time.perf_counter()
-    source = "failed"
+    source = BaselineSnapshotSource.FAILED.value
+    mismatch_reason: BaselineWatermarkMismatch | None = None
     try:
         session = db.get(GameSession, session_id)
         if session is None:
-            source = "missing_session"
+            source = BaselineSnapshotSource.MISSING_SESSION.value
             return source
         if session.opening_score_baseline is not None:
-            source = "already_set"
+            source = BaselineSnapshotSource.ALREADY_SET.value
             return source
         if session.status != "active":
-            source = "not_active"
+            source = BaselineSnapshotSource.NOT_ACTIVE.value
             return source
         if (user_id, player_color) != (session.user_id, session.player_color):
-            # Mis-routed / stale enqueue. Capture would use the row either way, so
-            # correctness does not depend on this check; it surfaces the upstream
-            # bug rather than silently doing the right thing.
-            source = "session_mismatch"
+            source = BaselineSnapshotSource.SESSION_MISMATCH.value
+            return source
+        if _baseline_watermark(session) is None:
+            source = BaselineSnapshotSource.WATERMARK_MISSING.value
             return source
 
-        json_str, source = _capture_baseline_json(
-            db,
-            session.user_id,
-            session.player_color,
-            not_after=session.started_at,
-            skip_when_inflight=False,
+        batch, rows = list_cached_opening_scores(
+            db, session.user_id, session.player_color
         )
-        if json_str is None:
-            return source
+        if batch is None:
+            mismatch_reason = _empty_start_mismatch(db, session)
+            if mismatch_reason is not None:
+                source = BaselineSnapshotSource.WATERMARK_MISMATCH.value
+                return source
+            if has_opening_evidence(db, session.user_id, session.player_color):
+                source = BaselineSnapshotSource.SKIPPED_COLD.value
+                return source
+            baseline_json = _serialize_baseline({})
+            source = BaselineSnapshotSource.EMPTY_NO_EVIDENCE.value
+        else:
+            # Proof 1 is mandatory even when the batch stamps equal the watermark:
+            # both counters are lower bounds sampled before the evidence read.
+            if not _is_batch_fresh(db, batch, rows):
+                source = BaselineSnapshotSource.SKIPPED_STALE.value
+                return source
+            mismatch_reason = _batch_start_mismatch(db, batch, session)
+            if mismatch_reason is not None:
+                source = BaselineSnapshotSource.WATERMARK_MISMATCH.value
+                return source
+            baseline_json = _serialize_baseline(
+                {row.opening_key: row.opening_score for row in rows}
+            )
+            source = BaselineSnapshotSource.CACHED_FRESH.value
 
-        # Defense-in-depth persist (typed SQLAlchemy Core so the UUID id binds on
-        # both the SQLite test schema — id TEXT — and Postgres — id UUID). A single
-        # conditional UPDATE re-checks status/identity, NULL-baseline idempotency,
-        # and the absence of any session-scoped evidence, ATOMIC with the write. The
-        # session_moves.session_id index covers its check; the review/blunder checks
-        # may table-scan but run once per session start on the background worker.
-        #
-        # AIRTIGHTNESS: these NOT EXISTS clauses — not the date guard — are the real
-        # correctness guarantee. They directly assert the invariant that matters
-        # ("has this session fed any evidence yet?") and are clock-INDEPENDENT; the
-        # date guard is a cheap clock-DEPENDENT early-out that can be fooled by
-        # DB/app clock skew. So the clauses must enumerate EVERY session-scoped
-        # source that feeds ``raw_evidence_inputs_digest``: session_moves (SM|),
-        # ghost-target blunders via source_session_id (GT|), and blunder_reviews
-        # (BR|). (The digest's analysis_cache/position_analysis grains are global,
-        # not session-attributable, so they are intentionally absent here.)
-        # MAINTENANCE: any NEW session-scoped evidence source added to
-        # ``raw_evidence_inputs_digest`` MUST also get a NOT EXISTS clause here —
-        # otherwise a session contributing only that source would slip past this
-        # airtight check and be protected by the clock-dependent date guard alone.
-        # (Since SESSION_EVIDENCE_ELIGIBLE_SQL excludes in-progress sessions from
-        # the digest, a brand-new active session can no longer feed evidence at
-        # all — these clauses are belt-and-suspenders on top of that narrowing.)
-        stmt = (
-            update(GameSession)
-            .where(GameSession.id == session_id)
-            .where(GameSession.status == "active")
-            .where(GameSession.user_id == session.user_id)
-            .where(GameSession.player_color == session.player_color)
-            .where(GameSession.opening_score_baseline.is_(None))
-            .where(
-                ~select(SessionMove.id)
-                .where(SessionMove.session_id == GameSession.id)
-                .exists()
-            )
-            .where(
-                ~select(BlunderReview.id)
-                .where(BlunderReview.session_id == GameSession.id)
-                .exists()
-            )
-            .where(
-                ~select(Blunder.id)
-                .where(Blunder.source_session_id == GameSession.id)
-                .exists()
-            )
-            .values(opening_score_baseline=json_str)
-        )
-        persisted = db.execute(stmt).rowcount == 1
+        persisted = _conditional_store_baseline(db, session, baseline_json)
         db.commit()
         if not persisted:
-            source = "raced_evidence_or_already_set"
+            source = BaselineSnapshotSource.RACED_EVIDENCE_OR_ALREADY_SET.value
         return source
-    except Exception:  # noqa: BLE001 — worker job must never crash the scheduler
-        source = "failed"
+    except Exception:  # noqa: BLE001 - worker job must never crash the scheduler
+        source = BaselineSnapshotSource.FAILED.value
         try:
             db.rollback()
         except Exception:  # noqa: BLE001
@@ -559,15 +688,88 @@ def run_baseline_snapshot_job(
         )
         return source
     finally:
-        # Fields go IN THE MESSAGE (root formatter prints %(message)s only).
         logger.info(
-            "opening_baseline_job session_id=%s user_id=%s color=%s source=%s snapshot_ms=%.2f",
+            "opening_baseline_job session_id=%s user_id=%s color=%s source=%s "
+            "mismatch_reason=%s snapshot_ms=%.2f",
             session_id,
             user_id,
             player_color,
             source,
+            mismatch_reason.value if mismatch_reason is not None else None,
             (time.perf_counter() - t0) * 1000.0,
         )
+
+
+def fill_opening_baselines_for_batch(
+    batch_id: int,
+    *,
+    session_factory: Callable[[], Session] = SessionLocal,
+) -> int:
+    """Best-effort push-fill of active session baselines for one durable batch."""
+    db = session_factory()
+    try:
+        batch = (
+            db.query(OpeningScoreBatch)
+            .filter(OpeningScoreBatch.id == batch_id)
+            .populate_existing()
+            .one_or_none()
+        )
+        if batch is None:
+            return 0
+        rows = (
+            db.query(UserOpeningScore)
+            .filter(
+                UserOpeningScore.batch_id == batch.id,
+                UserOpeningScore.user_id == batch.user_id,
+                UserOpeningScore.player_color == batch.player_color,
+            )
+            .all()
+        )
+        # Proof 1 runs once for the exact durable batch. The scoped re-arm it may
+        # perform writes only cache_epoch through an independent session and does
+        # not change either historical proof.
+        if not _is_batch_fresh(db, batch, rows):
+            return 0
+
+        baseline_json = _serialize_baseline(
+            {row.opening_key: row.opening_score for row in rows}
+        )
+        candidates = (
+            db.query(GameSession)
+            .filter(
+                GameSession.user_id == batch.user_id,
+                GameSession.player_color == batch.player_color,
+                GameSession.status == "active",
+                GameSession.opening_score_baseline.is_(None),
+                GameSession.baseline_watermark_seq.is_not(None),
+                GameSession.baseline_watermark_epoch.is_not(None),
+                GameSession.baseline_watermark_fingerprint.is_not(None),
+            )
+            .all()
+        )
+        filled = 0
+        for session in candidates:
+            mismatch = _batch_start_mismatch(db, batch, session)
+            if mismatch is not None:
+                logger.info(
+                    "opening baseline push-fill rejected mismatch_reason=%s",
+                    mismatch.value,
+                )
+                continue
+            if _conditional_store_baseline(db, session, baseline_json):
+                filled += 1
+        db.commit()
+        return filled
+    except Exception:  # noqa: BLE001 - optional scheduler side effect
+        db.rollback()
+        logger.warning(
+            "opening baseline push-fill failed batch_id=%s",
+            batch_id,
+            exc_info=True,
+        )
+        return 0
+    finally:
+        db.close()
 
 
 def _session_played_fens(db: Session, session_id) -> list[str]:

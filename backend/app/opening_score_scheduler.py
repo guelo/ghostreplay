@@ -121,6 +121,7 @@ class OpeningScoreTrigger(str, Enum):
     SCORE_DELTA = "score_delta"
     SESSION_EVIDENCE = "session_evidence"
     SRS_REVIEW = "srs_review"
+    BASELINE_RECOVERY = "baseline_recovery"
 
 
 class UnknownOpeningScoreTrigger(ValueError):
@@ -255,6 +256,7 @@ class OpeningScoreScheduler:
 
     session_factory: Callable = SessionLocal
     recompute: Callable = staticmethod(recompute_opening_scores_if_needed)
+    fill_baselines: Callable | None = None
     clock: Callable[[], float] = time.monotonic
     quiet_window: float = 1.5
     max_wait: float = 10.0
@@ -272,6 +274,16 @@ class OpeningScoreScheduler:
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
+        if self.fill_baselines is None:
+            session_factory = self.session_factory
+
+            def fill_baselines(batch_id: int) -> int:
+                return _default_fill_opening_baselines_for_batch(
+                    batch_id,
+                    session_factory=session_factory,
+                )
+
+            self.fill_baselines = fill_baselines
 
     # ------------------------------------------------------------------
     # Enqueue
@@ -678,6 +690,7 @@ class OpeningScoreScheduler:
         rebuild_reason: str | None = None
         generation: int | None = None
         worker_run_ms: float | None = None
+        push_fill_batch_id: int | None = None
         token = None
         try:
             token = _run_context.set(context)
@@ -690,6 +703,9 @@ class OpeningScoreScheduler:
                 run_outcome = result.disposition.value
                 rebuild_reason = result.reason
                 generation = getattr(result.batch, "generation", None)
+                batch_id = getattr(result.batch, "id", None)
+                if batch_id is not None:
+                    push_fill_batch_id = int(batch_id)
                 ok = True
             else:
                 # A bare batch / None is the pre-contract shape and cannot be
@@ -699,6 +715,30 @@ class OpeningScoreScheduler:
                     "opening score recompute returned a non-contract result type=%s",
                     type(result).__name__,
                 )
+
+            # The recompute's commit is the durability boundary for push-fill.
+            # Close its session before opening the independent best-effort fill
+            # transaction, and keep the optional side effect out of recompute timing.
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    logger.exception(
+                        "opening score scheduler failed to close recompute session"
+                    )
+                db = None
+            if token is not None:
+                _run_context.reset(token)
+                token = None
+            if push_fill_batch_id is not None:
+                try:
+                    assert self.fill_baselines is not None
+                    self.fill_baselines(push_fill_batch_id)
+                except Exception:
+                    logger.exception(
+                        "opening baseline push-fill failed after durable recompute",
+                        extra={"batch_id": push_fill_batch_id},
+                    )
         except Exception:
             worker_run_ms = (self.clock() - worker_started) * 1000.0
             logger.exception(
@@ -734,6 +774,20 @@ class OpeningScoreScheduler:
 
 
 # Module-level singleton + thin facade -------------------------------------
+def _default_fill_opening_baselines_for_batch(
+    batch_id: int,
+    *,
+    session_factory: Callable,
+) -> int:
+    # Function-local import avoids opening_score_delta -> scheduler import cycles.
+    from app.opening_score_delta import fill_opening_baselines_for_batch
+
+    return fill_opening_baselines_for_batch(
+        batch_id,
+        session_factory=session_factory,
+    )
+
+
 _scheduler = OpeningScoreScheduler()
 
 

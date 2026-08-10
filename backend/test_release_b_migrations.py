@@ -617,9 +617,11 @@ def test_sqlite_release_b_backfill_repair_and_assertions(tmp_path, monkeypatch):
         ).scalar()
         assert "ck_game_sessions_player_accuracy" in gs_sql
 
-    # Idempotent: at head, `upgrade head` is a no-op with values unchanged.
+    # Idempotent at the frozen Release-B revision. This deliberately partial
+    # pre-B fixture is not a full historical schema and therefore cannot be
+    # advanced through unrelated later migrations with ``upgrade head``.
     before = _snapshot(eng)
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, REVISION)
     assert _snapshot(eng) == before
 
     # Idempotent across both PHASES too, not just across the Alembic no-op:

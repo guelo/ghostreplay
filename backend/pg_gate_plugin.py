@@ -129,6 +129,11 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     # parent-session FOR NO KEY UPDATE lock, and cached-accuracy recompute on the
     # migrated schema (g-c60b data repair, sibling of the checkmate backfill above)
     "test_backfill_draw_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
+    # Session-start baseline migration/trigger contract (g-f3m4): exact scope
+    # tracking, monotonic singleton guards, TRUNCATE invalidation, downgrade
+    # restoration, and deterministic multi-row version lock order.
+    "test_baseline_watermark_pg.py::test_pg_baseline_watermark_migration_cycle_and_truncate_contract",
+    "test_baseline_watermark_pg.py::test_pg_submission_multirow_opposite_orders_do_not_deadlock",
     # blunder NKU idempotency (g-writer-locks)
     "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
     # advisory lock before the first graph write + cursor-is-last on the
@@ -661,9 +666,6 @@ def _truncate_all(engine, table_names: str) -> None:
         with engine.begin() as conn:
             conn.execute(text(f"SET LOCAL lock_timeout = '{_TRUNCATE_LOCK_TIMEOUT}'"))
             conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
-            # Re-seed the evidence_epoch singleton the TRUNCATE just removed — its
-            # triggers UPDATE ... WHERE id = 1 and silently no-op without the row.
-            conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
     except Exception as exc:  # noqa: BLE001 - re-raised, enriched
         raise RuntimeError(
             f"per-test TRUNCATE of the shared PostgreSQL test database failed: {exc}\n"
@@ -676,7 +678,17 @@ def _make_isolated_pg_session_factory(pg_engine):
     """Reset the shared schema before constructing one test's Session factory."""
     from app.models import Base
 
-    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
+    # The epoch singleton is monotonic/non-truncatable, and the two invalidation
+    # rows must exist while shared-table TRUNCATE triggers fire. Preserve both;
+    # every other table (including exact-key version tombstones) is disposable
+    # between tests. The shared TRUNCATE triggers advance invalidations to the
+    # retained live epoch as part of this reset transaction.
+    preserved = {"evidence_epoch", "shared_evidence_scope_invalidations"}
+    table_names = ", ".join(
+        table.name
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in preserved
+    )
     _truncate_all(pg_engine, table_names)
     return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
 

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import chess
 import chess.pgn
-from sqlalchemy import create_engine, func
+from sqlalchemy import create_engine, func, inspect
 from sqlalchemy.orm import Session
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -292,14 +292,19 @@ def _seed_blunder_user(
 
 def seed_database(database_url: str, *, reset: bool) -> dict[str, SeedUser]:
     engine = create_engine(database_url)
+    schema_was_empty = not inspect(engine).get_table_names()
     if reset:
         Base.metadata.drop_all(engine)
+        schema_was_empty = True
     Base.metadata.create_all(engine)
     # create_all builds tables only: the evidence_epoch singleton row and the
     # shared-table triggers (g-jact) come from the migration on alembic-managed
     # DBs, so a metadata-created DB must install them explicitly or no opening
     # score batch can ever be proven fresh.
-    ensure_evidence_epoch_infrastructure(engine)
+    ensure_evidence_epoch_infrastructure(
+        engine,
+        assume_new_schema=schema_was_empty,
+    )
 
     users = _load_seed_users()
     with Session(engine) as db:

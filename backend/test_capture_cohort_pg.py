@@ -57,12 +57,14 @@ OPEN_GAME_FULL = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 
 
 def _reset(engine):
-    tables = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
+    preserved = {"evidence_epoch", "shared_evidence_scope_invalidations"}
+    tables = ", ".join(
+        table.name
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in preserved
+    )
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
-        # The evidence_epoch triggers UPDATE ... WHERE id = 1 and silently no-op without the
-        # singleton the TRUNCATE just removed.
-        conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
 
 
 def _seed_pair(db, user_id: int, color: str, n_moves: int = 1) -> None:
@@ -336,10 +338,10 @@ def test_strict_mode_retries_on_global_epoch_movement(capenv, monkeypatch):
 def test_unavailable_epoch_strict_fails_default_stamps_null(capenv, monkeypatch):
     _seed_default_cohort(capenv.session_factory)
     _stub_validate_ok(monkeypatch)
-    # Remove the singleton so current_cache_epoch returns None.
-    with capenv.session_factory() as db:
-        db.execute(text("DELETE FROM evidence_epoch WHERE id = 1"))
-        db.commit()
+    # Current schemas prevent singleton loss. Patch both call surfaces to retain
+    # the release tool's legacy/partial fail-closed coverage.
+    monkeypatch.setattr(cal, "current_cache_epoch", lambda db: None)
+    monkeypatch.setattr(oc, "current_cache_epoch", lambda db: None)
 
     with pytest.raises(cal.CaptureEpochUnavailableError):
         _capture(capenv, require_quiescent_epoch=True)

@@ -456,8 +456,11 @@ def test_bare_pg_session_factory_resets_before_each_construction(monkeypatch):
         for engine in engines
     ]
 
+    preserved = {"evidence_epoch", "shared_evidence_scope_invalidations"}
     expected_tables = ", ".join(
-        table.name for table in reversed(Base.metadata.sorted_tables)
+        table.name
+        for table in reversed(Base.metadata.sorted_tables)
+        if table.name not in preserved
     )
     assert built == expected_factories
     assert events == [

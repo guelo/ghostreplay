@@ -42,6 +42,7 @@ from app.opening_evidence import session_is_evidence_eligible
 from app.opening_graph import get_opening_graph
 from app.opening_score_delta import (
     OpeningScoreDeltaItem,
+    capture_baseline_watermark,
     compute_opening_score_delta,
 )
 from app.posthog_client import capture
@@ -734,6 +735,10 @@ def start_game(
 
     Returns the session_id to be used for subsequent game operations.
     """
+    baseline_watermark = capture_baseline_watermark(
+        db, user.user_id, request.player_color.value
+    )
+    watermark_values = baseline_watermark or (None, None, None)
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -744,6 +749,9 @@ def start_game(
         player_color=request.player_color.value,
         session_mode="normal",
         opening_score_baseline=None,
+        baseline_watermark_seq=watermark_values[0],
+        baseline_watermark_epoch=watermark_values[1],
+        baseline_watermark_fingerprint=watermark_values[2],
     )
 
     db.add(session)
@@ -751,11 +759,10 @@ def start_game(
     db.refresh(session)
 
     # Capture the opening-score baseline OFF the request thread (g-mxeo): proving
-    # the cached batch fresh costs an O(all-evidence) digest. The worker fills
-    # ``opening_score_baseline`` shortly after, only when the pre-session batch is
-    # provably fresh and dated strictly before ``started_at``; otherwise it stays
-    # NULL and the end-of-game delta degrades to "no delta". Best-effort: an
-    # enqueue failure must not regress /start from 201.
+    # the current batch may be cold/stale. The worker fills
+    # ``opening_score_baseline`` only after proving a batch represents the durable
+    # start watermark above; otherwise it stays NULL. Best-effort: an enqueue
+    # failure must not regress /start from 201.
     enqueue_baseline_snapshot(session.id, user.user_id, request.player_color.value)
 
     capture(

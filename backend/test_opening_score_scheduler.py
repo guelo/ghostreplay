@@ -54,23 +54,29 @@ class _FakeClock:
 
 
 class _FakeBatch:
-    """Stand-in for ``OpeningScoreBatch`` — the scheduler only reads ``generation``."""
+    """Stand-in for a durable batch; ``id=None`` suppresses push-fill."""
 
-    def __init__(self, generation: int = 7) -> None:
+    def __init__(self, generation: int = 7, batch_id: int | None = None) -> None:
         self.generation = generation
+        self.id = batch_id
 
 
-def _rebuilt(reason: str = "cache_miss", generation: int = 7):
+def _rebuilt(
+    reason: str = "cache_miss",
+    generation: int = 7,
+    batch_id: int | None = None,
+):
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,
-        batch=_FakeBatch(generation),
+        batch=_FakeBatch(generation, batch_id),
         reason=reason,
     )
 
 
-def _cached(generation: int = 7):
+def _cached(generation: int = 7, batch_id: int | None = None):
     return OpeningScoreRecomputeResult(
-        disposition=RecomputeDisposition.CACHED, batch=_FakeBatch(generation)
+        disposition=RecomputeDisposition.CACHED,
+        batch=_FakeBatch(generation, batch_id),
     )
 
 
@@ -809,6 +815,66 @@ def test_failed_run_does_not_prevent_the_next_due_key():
     sched.run_due()
 
     assert sorted(calls) == [(1, "white"), (2, "white")]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [_rebuilt(batch_id=17), _cached(batch_id=23)],
+    ids=["rebuilt", "cached"],
+)
+def test_durable_batch_result_push_fills_after_recompute_session_close(result):
+    clock = _FakeClock()
+    fills: list[int] = []
+    sched, sessions = _make_scheduler(
+        clock,
+        lambda *args: result,
+        fill_baselines=fills.append,
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+
+    sched.run_due()
+
+    assert fills == [result.batch.id]
+    assert sessions[0].closed is True
+    assert sched._last_result[(1, "white")][1] is True
+
+
+def test_no_evidence_result_has_no_push_candidate():
+    clock = _FakeClock()
+    fills: list[int] = []
+    sched, _ = _make_scheduler(
+        clock,
+        lambda *args: _no_evidence(),
+        fill_baselines=fills.append,
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+
+    sched.run_due()
+
+    assert fills == []
+
+
+def test_push_fill_failure_cannot_relabel_durable_recompute(caplog):
+    clock = _FakeClock()
+
+    def fail_fill(batch_id):
+        raise RuntimeError("optional fill failed")
+
+    sched, _ = _make_scheduler(
+        clock,
+        lambda *args: _rebuilt(batch_id=31),
+        fill_baselines=fail_fill,
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    seq = sched._seq_counter[(1, "white")]
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    assert sched._last_result[(1, "white")] == (seq, True)
+    assert "run_outcome=rebuilt" in _rendered_completion(caplog)
 
 
 @pytest.mark.parametrize("legacy_result", [None, _FakeBatch(3)])

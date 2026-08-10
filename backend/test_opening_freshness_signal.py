@@ -32,6 +32,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from conftest import TestingSessionLocal
 
@@ -589,6 +590,152 @@ def test_bump_scopes_by_player_color(db_session):
 # Shared surfaces through the DB triggers (any writer, incl. raw SQL)
 # ---------------------------------------------------------------------------
 
+def _scope_version(db, kind: str, fen: str) -> int | None:
+    return db.execute(
+        text(
+            "SELECT last_changed_epoch FROM shared_evidence_scope_versions "
+            "WHERE kind = :kind AND fen = :fen"
+        ),
+        {"kind": kind, "fen": fen},
+    ).scalar_one_or_none()
+
+
+def test_analysis_cache_trigger_marks_old_new_keys_and_delete_tombstone(db_session):
+    db_session.execute(
+        text(
+            "INSERT INTO analysis_cache "
+            "(fen_before, normalized_fen_before, move_uci, move_san, played_eval) "
+            "VALUES (:raw, :norm, 'e2e4', 'e4', 1)"
+        ),
+        {"raw": START_FULL, "norm": START_FEN},
+    )
+    db_session.commit()
+    inserted_epoch = current_cache_epoch(db_session)
+    assert _scope_version(db_session, "raw", START_FULL) == inserted_epoch
+    assert _scope_version(db_session, "norm", START_FEN) == inserted_epoch
+
+    db_session.execute(
+        text(
+            "UPDATE analysis_cache SET fen_before = :raw, "
+            "normalized_fen_before = :norm WHERE fen_before = :old"
+        ),
+        {"raw": KINGS_PAWN_FULL, "norm": KINGS_PAWN_FEN, "old": START_FULL},
+    )
+    db_session.commit()
+    updated_epoch = current_cache_epoch(db_session)
+    assert updated_epoch > inserted_epoch
+    assert _scope_version(db_session, "raw", START_FULL) == updated_epoch
+    assert _scope_version(db_session, "norm", START_FEN) == updated_epoch
+    assert _scope_version(db_session, "raw", KINGS_PAWN_FULL) == updated_epoch
+    assert _scope_version(db_session, "norm", KINGS_PAWN_FEN) == updated_epoch
+
+    db_session.execute(text("DELETE FROM analysis_cache"))
+    db_session.commit()
+    deleted_epoch = current_cache_epoch(db_session)
+    assert deleted_epoch > updated_epoch
+    assert _scope_version(db_session, "raw", KINGS_PAWN_FULL) == deleted_epoch
+    assert _scope_version(db_session, "norm", KINGS_PAWN_FEN) == deleted_epoch
+
+
+def test_analysis_cache_normalized_null_transitions_are_tracked(db_session):
+    _insert_analysis_cache(db_session, START_FULL)
+    first_epoch = current_cache_epoch(db_session)
+    assert _scope_version(db_session, "norm", START_FEN) is None
+
+    db_session.execute(
+        text(
+            "UPDATE analysis_cache SET normalized_fen_before = :norm "
+            "WHERE fen_before = :raw"
+        ),
+        {"norm": START_FEN, "raw": START_FULL},
+    )
+    db_session.commit()
+    value_epoch = current_cache_epoch(db_session)
+    assert value_epoch > first_epoch
+    assert _scope_version(db_session, "norm", START_FEN) == value_epoch
+
+    db_session.execute(
+        text(
+            "UPDATE analysis_cache SET normalized_fen_before = NULL "
+            "WHERE fen_before = :raw"
+        ),
+        {"raw": START_FULL},
+    )
+    db_session.commit()
+    null_epoch = current_cache_epoch(db_session)
+    assert _scope_version(db_session, "norm", START_FEN) == null_epoch
+
+
+def test_position_analysis_trigger_marks_old_new_and_delete(db_session):
+    db_session.execute(
+        text(
+            "INSERT INTO position_analysis (normalized_fen, fen, best_move_uci) "
+            "VALUES (:norm, :raw, 'e2e4')"
+        ),
+        {"norm": START_FEN, "raw": START_FULL},
+    )
+    db_session.commit()
+    inserted_epoch = current_cache_epoch(db_session)
+    assert _scope_version(db_session, "norm", START_FEN) == inserted_epoch
+
+    db_session.execute(
+        text(
+            "UPDATE position_analysis SET normalized_fen = :new "
+            "WHERE normalized_fen = :old"
+        ),
+        {"new": KINGS_PAWN_FEN, "old": START_FEN},
+    )
+    db_session.commit()
+    updated_epoch = current_cache_epoch(db_session)
+    assert _scope_version(db_session, "norm", START_FEN) == updated_epoch
+    assert _scope_version(db_session, "norm", KINGS_PAWN_FEN) == updated_epoch
+
+    db_session.execute(text("DELETE FROM position_analysis"))
+    db_session.commit()
+    assert _scope_version(
+        db_session, "norm", KINGS_PAWN_FEN
+    ) == current_cache_epoch(db_session)
+
+
+def test_shared_trigger_side_effects_roll_back_with_source_write(db_session):
+    epoch = current_cache_epoch(db_session)
+    db_session.execute(
+        text(
+            "INSERT INTO analysis_cache "
+            "(fen_before, move_uci, move_san, played_eval) "
+            "VALUES (:raw, 'e2e4', 'e4', 1)"
+        ),
+        {"raw": START_FULL},
+    )
+    db_session.rollback()
+
+    assert current_cache_epoch(db_session) == epoch
+    assert _scope_version(db_session, "raw", START_FULL) is None
+
+
+def test_sqlite_unqualified_delete_keeps_every_exact_tombstone(db_session):
+    _insert_analysis_cache(db_session, START_FULL)
+    _insert_analysis_cache(db_session, KINGS_PAWN_FULL, move_uci="e7e5")
+    before_invalidation = db_session.execute(
+        text(
+            "SELECT kind, last_changed_epoch "
+            "FROM shared_evidence_scope_invalidations ORDER BY kind"
+        )
+    ).all()
+
+    db_session.execute(text("DELETE FROM analysis_cache"))
+    db_session.commit()
+    epoch = current_cache_epoch(db_session)
+
+    assert _scope_version(db_session, "raw", START_FULL) <= epoch
+    assert _scope_version(db_session, "raw", KINGS_PAWN_FULL) == epoch
+    assert db_session.execute(
+        text(
+            "SELECT kind, last_changed_epoch "
+            "FROM shared_evidence_scope_invalidations ORDER BY kind"
+        )
+    ).all() == before_invalidation
+
 def test_analysis_cache_insert_at_candidate_fen_stales(db_session):
     _seed_base_evidence(db_session)
     _build_batch(db_session)
@@ -827,42 +974,32 @@ def test_registry_change_stales(db_session, monkeypatch):
     assert _is_batch_fresh(db_session, batch, rows) is False
 
 
-def test_build_during_missing_singleton_never_aliases_reseeded_epoch(db_session):
-    # Regression: a batch built while the evidence_epoch singleton is MISSING
-    # must stamp cache_epoch NULL, never 0. During the window the triggers
-    # silently no-op (UPDATE ... WHERE id = 1 hits no row), so a shared write is
-    # invisible to the epoch; if the singleton is later re-seeded as (1, 0), a
-    # 0-stamped batch would fast-accept on 0 == 0 over that invisible write —
-    # a false positive. The NULL stamp keeps the batch unprovable forever.
-    _seed_base_evidence(db_session)
-    db_session.execute(text("DELETE FROM evidence_epoch"))
+def test_singleton_cannot_be_deleted_or_moved_non_increasing(db_session):
+    before = current_cache_epoch(db_session)
+    assert before is not None
+
+    with pytest.raises(IntegrityError):
+        db_session.execute(text("DELETE FROM evidence_epoch WHERE id = 1"))
+    db_session.rollback()
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            text("UPDATE evidence_epoch SET value = value WHERE id = 1")
+        )
+    db_session.rollback()
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            text("UPDATE evidence_epoch SET value = value - 1 WHERE id = 1")
+        )
+    db_session.rollback()
+
+    db_session.execute(
+        text("UPDATE evidence_epoch SET value = value + 5 WHERE id = 1")
+    )
     db_session.commit()
-
-    batch = _build_batch(db_session)
-    assert batch.cache_epoch is None  # NULL stamp, not a 0 coercion
-    digest_at_build = raw_evidence_inputs_digest(db_session, USER, "white")
-
-    # Shared write during the window: the trigger no-ops (no singleton row).
-    _insert_analysis_cache(db_session, START_FULL)
-    assert current_cache_epoch(db_session) is None
-
-    # Operator restores the singleton exactly as seeded: (1, 0).
-    db_session.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
-    db_session.commit()
-
-    batch, rows = list_cached_opening_scores(db_session, USER, "white")
-    assert _is_batch_fresh(db_session, batch, rows) is False
-    assert raw_evidence_inputs_digest(db_session, USER, "white") != digest_at_build
-
-    # A rebuild with the singleton present re-stamps a real epoch and recovers
-    # the provable fast path.
-    rebuilt = _build_batch(db_session)
-    assert rebuilt.cache_epoch == 0
-    digest = raw_evidence_inputs_digest(db_session, USER, "white")
-    _assert_fresh_unchanged(db_session, digest)
+    assert current_cache_epoch(db_session) == before + 5
 
 
-def test_unstamped_or_missing_singleton_is_stale_not_error(db_session):
+def test_unstamped_batch_is_stale_not_error(db_session):
     _seed_base_evidence(db_session)
     _build_batch(db_session)
     batch, rows = list_cached_opening_scores(db_session, USER, "white")
@@ -872,12 +1009,6 @@ def test_unstamped_or_missing_singleton_is_stale_not_error(db_session):
     db_session.commit()
     assert _is_batch_fresh(db_session, batch, rows) is False
 
-    # Missing epoch singleton -> not provable (safe degradation, no crash).
-    _build_batch(db_session)
-    batch, rows = list_cached_opening_scores(db_session, USER, "white")
-    db_session.execute(text("DELETE FROM evidence_epoch"))
-    db_session.commit()
-    assert _is_batch_fresh(db_session, batch, rows) is False
 
 
 # ---------------------------------------------------------------------------

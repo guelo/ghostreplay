@@ -1609,7 +1609,6 @@ def test_active_only_user_baseline_is_empty_no_evidence(db_session):
 
     json_str, source = _capture_baseline_json(
         db_session, 123, "black",
-        not_after=datetime.now(timezone.utc),
         skip_when_inflight=False,
     )
     assert source == "empty_no_evidence"

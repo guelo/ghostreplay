@@ -34,6 +34,7 @@ from app.opening_graph import get_opening_graph
 from app.opening_roots import derive_family, get_opening_roots
 from app.opening_score_delta import (
     OpeningScoreDeltaItem,
+    capture_baseline_watermark,
     compute_opening_score_delta,
 )
 from app.posthog_client import capture
@@ -566,6 +567,10 @@ def start_drill(
         drill_opening_key = normalized_target
         drill_line = encode_uci_line(request.line)
 
+    baseline_watermark = capture_baseline_watermark(
+        db, user.user_id, request.player_color.value
+    )
+    watermark_values = baseline_watermark or (None, None, None)
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -582,14 +587,16 @@ def start_drill(
         drill_strictness=request.strictness.value,
         drill_strictness_cp=request.strictness_cp,
         opening_score_baseline=None,
+        baseline_watermark_seq=watermark_values[0],
+        baseline_watermark_epoch=watermark_values[1],
+        baseline_watermark_fingerprint=watermark_values[2],
     )
     db.add(session)
     db.commit()
     db.refresh(session)
     # Capture the opening-score baseline OFF the request thread (g-mxeo) — mirrors
-    # the game-start path. The worker fills it only when the pre-session batch is
-    # provably fresh and dated strictly before ``started_at``; otherwise it stays
-    # NULL and the end-of-drill delta degrades to "no delta". Best-effort.
+    # the game-start path. The worker fills it only when a batch is proven to
+    # represent the durable start watermark; otherwise it stays NULL. Best-effort.
     enqueue_baseline_snapshot(session.id, user.user_id, request.player_color.value)
     contract = _contract(session)
     capture(

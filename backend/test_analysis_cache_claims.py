@@ -51,13 +51,97 @@ ALICE = 11
 BOB = 22
 
 
+def test_epoch_helper_never_heals_established_missing_state():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        ensure_evidence_epoch_infrastructure(engine)
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT count(*) FROM evidence_epoch")
+        ).scalar_one() == 0
+
+    ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM shared_evidence_scope_invalidations "
+                "WHERE kind = 'norm'"
+            )
+        )
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        ensure_evidence_epoch_infrastructure(engine)
+    with engine.connect() as connection:
+        assert connection.execute(
+            text(
+                "SELECT count(*) FROM shared_evidence_scope_invalidations "
+                "WHERE kind = 'norm'"
+            )
+        ).scalar_one() == 0
+    engine.dispose()
+
+
+def test_known_new_helper_preserves_epoch_and_replaces_stale_trigger_body():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text("UPDATE evidence_epoch SET value = value + 7 WHERE id = 1")
+        )
+        connection.execute(
+            text("DROP TRIGGER trg_analysis_cache_evidence_epoch_insert")
+        )
+        connection.execute(
+            text(
+                "CREATE TRIGGER trg_analysis_cache_evidence_epoch_insert "
+                "AFTER INSERT ON analysis_cache BEGIN SELECT 1; END"
+            )
+        )
+
+    ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
+
+    with engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT value FROM evidence_epoch WHERE id = 1")
+        ).scalar_one() == 7
+        trigger_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name = 'trg_analysis_cache_evidence_epoch_insert'"
+            )
+        ).scalar_one()
+        assert "shared_evidence_scope_versions" in trigger_sql
+    engine.dispose()
+
+
+def test_known_new_helper_refuses_to_seed_after_shared_rows_exist():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO analysis_cache "
+                "(fen_before, move_uci, move_san, played_eval) "
+                "VALUES (:fen, 'e2e4', 'e4', 1)"
+            ),
+            {"fen": START},
+        )
+
+    with pytest.raises(RuntimeError, match="after shared evidence exists"):
+        ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
+    engine.dispose()
+
+
 @pytest.fixture
 def db():
     """An isolated in-memory database. The writer reuses the caller bind for
     ``:memory:``, so seeds, writes and assertions all see the same data."""
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
-    ensure_evidence_epoch_infrastructure(engine)
+    ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
     Factory = sessionmaker(bind=engine)
     s = Factory()
     s.add_all([User(id=ALICE, username="alice"), User(id=BOB, username="bob")])
@@ -80,7 +164,7 @@ def file_db(tmp_path):
     url = f"sqlite:///{tmp_path/'claims.db'}"
     engine = create_engine(url)
     Base.metadata.create_all(engine)
-    ensure_evidence_epoch_infrastructure(engine)
+    ensure_evidence_epoch_infrastructure(engine, assume_new_schema=True)
     Factory = sessionmaker(bind=engine)
     s = Factory()
     s.add_all([User(id=ALICE, username="alice"), User(id=BOB, username="bob")])
@@ -585,6 +669,15 @@ def test_an_association_write_bumps_evidence_epoch(db):
     # No evidence column changed (SAME_PROFILE_IDEMPOTENT); only the association
     # row was inserted — and that alone must advance the shared epoch.
     assert after > before
+    assert s.execute(
+        text(
+            "SELECT kind, fen, last_changed_epoch "
+            "FROM shared_evidence_scope_versions "
+            "WHERE (kind = 'raw' AND fen = :raw) "
+            "OR (kind = 'norm' AND fen = :norm) ORDER BY kind"
+        ),
+        {"raw": START, "norm": NORM},
+    ).all() == [("norm", NORM, after), ("raw", START, after)]
     assert viewer_associated_ids(
         s, ALICE, [r.id for r in s.query(AnalysisCache).all()]
     )

@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
 
 import app.opening_cache as opening_cache
 import app.opening_evidence as opening_evidence
@@ -137,11 +136,12 @@ def test_fallback_event_merges_discarded_overlay_cache_work(
 
 
 def test_missing_epoch_emits_and_logs_null_epoch_fallback(
-    db_session, captured, caplog
+    db_session, captured, caplog, monkeypatch
 ):
     _seed_black_opening_session(db_session)
-    db_session.execute(text("DELETE FROM evidence_epoch"))
-    db_session.commit()
+    # Current schemas prevent singleton loss; patch the read to retain coverage
+    # for legacy/partial databases without violating the live DB invariant.
+    monkeypatch.setattr(opening_cache, "current_cache_epoch", lambda db: None)
 
     with caplog.at_level("INFO", logger="app.opening_cache"):
         result = recompute_opening_scores_if_needed(db_session, 123, "black")

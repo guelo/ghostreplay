@@ -2301,18 +2301,14 @@ def raw_evidence_inputs_snapshot(
     ``OPENING_EVIDENCE_INPUTS_VERSION`` / ``FRESHNESS_CONTRACT_VERSION``, folded
     into the registry fingerprint (``opening_score_inputs_fingerprint``).
 
-    MAINTENANCE (g-mxeo): the SESSION-SCOPED sources — session_moves (SM|),
-    ghost-target blunders via ``source_session_id`` (GT|), and blunder_reviews
-    (BR|), built in ``_per_user_evidence_lines`` — are ALSO enumerated by the
-    opening-baseline persist guard in
-    ``opening_score_delta.run_baseline_snapshot_job`` (its NOT EXISTS clauses),
-    which is that guard's airtight, clock-independent correctness check. If you add
-    a new source there that a single session can contribute (i.e. scoped to a
-    session_id / source_session_id), add a matching NOT EXISTS clause there too, or
-    a session feeding only the new source could receive a wrongly-attributed
-    baseline. MAINTENANCE (g-jact): a new PER-USER source also needs a
-    ``bump_evidence_seq`` choke-point; a new SHARED table needs evidence_epoch
-    triggers.
+    MAINTENANCE (g-f3m4): every digest-visible mutation of the per-user SM|, GT|,
+    or BR| sources must advance the affected ``OpeningScoreCursor.evidence_seq``
+    in the same transaction. The session-start baseline proof relies on equality
+    with that monotonic counter; it intentionally does not enumerate source tables
+    in a parallel NOT EXISTS guard. A new per-user source therefore needs the same
+    bump choke point and bidirectional tests (ineligible mutations do not bump;
+    visible mutations do). A new shared table needs both evidence-epoch and scoped
+    last-change trigger coverage.
     """
     per_user_lines, candidate_fens, norm_list = _per_user_evidence_lines(
         db, user_id, player_color

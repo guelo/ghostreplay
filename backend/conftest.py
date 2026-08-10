@@ -90,12 +90,22 @@ def _create_test_schema(conn) -> None:
             recorded_blunder_id INTEGER,
             blunder_idempotency_key VARCHAR(64),
             opening_score_baseline TEXT,
+            baseline_watermark_seq INTEGER,
+            baseline_watermark_epoch INTEGER,
+            baseline_watermark_fingerprint TEXT,
             player_accuracy INTEGER,
             player_accuracy_algo_version SMALLINT,
             derived_tail_rows INTEGER,
             CHECK (session_mode IN ('normal','drill')),
             CONSTRAINT ck_game_sessions_player_accuracy CHECK (player_accuracy IS NULL OR (player_accuracy >= 0 AND player_accuracy <= 100)),
             CONSTRAINT ck_game_sessions_derived_tail_rows CHECK (derived_tail_rows IS NULL OR derived_tail_rows > 0),
+            CONSTRAINT ck_game_sessions_baseline_watermark_complete CHECK (
+                (baseline_watermark_seq IS NULL AND baseline_watermark_epoch IS NULL
+                    AND baseline_watermark_fingerprint IS NULL)
+                OR
+                (baseline_watermark_seq IS NOT NULL AND baseline_watermark_epoch IS NOT NULL
+                    AND baseline_watermark_fingerprint IS NOT NULL)
+            ),
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
             CHECK (drill_strictness_cp IS NULL OR (drill_strictness_cp >= 0 AND drill_strictness_cp <= 50)),
@@ -411,19 +421,34 @@ def _create_test_schema(conn) -> None:
             PRIMARY KEY (user_id, player_color)
         )
     """))
-    # Global shared-cache change counter (g-jact). The singleton row MUST be
-    # seeded: its triggers UPDATE ... WHERE id = 1 and silently no-op when the
-    # row is missing (epoch never advances -> freshness never provable). The
-    # seed + mandatory shared-table triggers are installed by the shared helper
-    # below (single runtime copy, also used by the E2E seed script); the alembic
-    # migration 20260708_01 carries its own frozen copy of the same DDL.
+    # Global shared-cache change counter and historical scoped-change surfaces.
+    # The helper below seeds only this explicitly-known-new schema, then installs
+    # fail-closed monotonic guards and all shared-table trigger bodies.
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS evidence_epoch (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             value INTEGER NOT NULL DEFAULT 0
         )
     """))
-    ensure_evidence_epoch_infrastructure(conn)
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS shared_evidence_scope_versions (
+            kind VARCHAR(4) NOT NULL,
+            fen TEXT NOT NULL,
+            last_changed_epoch INTEGER NOT NULL,
+            PRIMARY KEY (kind, fen),
+            CONSTRAINT ck_shared_evidence_scope_versions_kind
+                CHECK (kind IN ('raw','norm'))
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS shared_evidence_scope_invalidations (
+            kind VARCHAR(4) PRIMARY KEY,
+            last_changed_epoch INTEGER NOT NULL,
+            CONSTRAINT ck_shared_evidence_scope_invalidations_kind
+                CHECK (kind IN ('raw','norm'))
+        )
+    """))
+    ensure_evidence_epoch_infrastructure(conn, assume_new_schema=True)
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS opening_score_batch_shared_scope (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -567,6 +592,8 @@ def _reset_test_schema(conn) -> None:
     # their table).
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache_submission"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batch_shared_scope"))
+    conn.execute(text("DROP TABLE IF EXISTS shared_evidence_scope_versions"))
+    conn.execute(text("DROP TABLE IF EXISTS shared_evidence_scope_invalidations"))
     conn.execute(text("DROP TABLE IF EXISTS evidence_epoch"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))

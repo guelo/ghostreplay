@@ -130,10 +130,9 @@ def _utcnow() -> datetime:
 
     ``recompute_opening_scores`` samples the batch's ``computed_at`` through this
     AFTER the fingerprint + overlay evidence reads, making ``computed_at`` an UPPER
-    BOUND on the evidence reflected in the batch. The opening-baseline date guard
-    (``opening_score_delta._capture_baseline_json``) relies on that invariant: a
-    batch with ``computed_at < session.started_at`` cannot contain any of the
-    session's evidence, so it is safe to persist as the pre-session baseline.
+    BOUND on the evidence reflected in the batch. It is temporal/audit metadata;
+    g-f3m4 replaced the opening-baseline date inference with durable start-state
+    watermarks and exact-scope change versions.
     """
     return datetime.now(timezone.utc)
 
@@ -491,9 +490,11 @@ def current_evidence_seq(
 
 
 def current_cache_epoch(db: Session) -> int | None:
-    """Live global shared-cache epoch; None when the singleton row is missing
-    (pre-migration / mis-seeded DB — freshness is then never provable, which is
-    the safe degradation: every check rebuilds)."""
+    """Live global shared-cache epoch; None only for legacy/partial corruption.
+
+    Current infrastructure rejects singleton deletion and rejects shared writes
+    if it is absent. Readers still fail old/partial state closed for compatibility.
+    """
     value = db.query(EvidenceEpoch.value).filter(EvidenceEpoch.id == 1).scalar()
     return int(value) if value is not None else None
 
@@ -518,14 +519,9 @@ class FreshnessSnapshot:
     accept. (The OPPOSITE of ``computed_at``, which is sampled after the read as
     an evidence upper bound for the g-mxeo date guard.)
 
-    ``cache_epoch`` is None when the ``evidence_epoch`` singleton was MISSING at
-    build time, and MUST be stamped as NULL (never coerced to 0): shared writes
-    during a missing-singleton window fire triggers that silently no-op, so no
-    live epoch value can vouch for them. A 0-stamp would alias with a later
-    re-seeded ``(1, 0)`` row and fast-accept over those invisible writes — the
-    exact false positive this signal forbids. A NULL stamp keeps the batch
-    permanently unprovable (``_cheap_evidence_fresh`` treats it as unstamped →
-    always rebuild), which is the safe degradation.
+    ``cache_epoch`` may be None only on a legacy/partial schema. Current shared
+    writers fail if the singleton is absent and monotonic guards prevent a
+    reseed-to-zero alias. NULL remains a fail-closed batch stamp for compatibility.
     """
 
     inputs_fingerprint: str | None
@@ -551,12 +547,8 @@ def capture_freshness_snapshot(
     _validate_player_color(player_color)
     registry_fp = opening_score_inputs_fingerprint(get_opening_graph(), get_opening_roots())
     # Counters BEFORE the evidence read (lower-bound discipline — see
-    # FreshnessSnapshot). A missing epoch singleton stamps NULL — never 0: the
-    # triggers no-op while the row is missing, so a 0-stamp would alias with a
-    # later re-seeded (1, 0) row and fast-accept over shared writes the epoch
-    # never saw (see the FreshnessSnapshot docstring). NULL keeps the batch
-    # unstamped → never provably fresh → always rebuild until the singleton
-    # exists and a rebuild re-stamps a real epoch.
+    # FreshnessSnapshot). A legacy/partial missing epoch stamps NULL, never 0, and
+    # remains unprovable. Current infrastructure prevents such a window.
     evidence_seq = current_evidence_seq(db, user_id, player_color)
     cache_epoch = current_cache_epoch(db)
     snapshot = raw_evidence_inputs_snapshot(db, user_id, player_color)
@@ -1428,11 +1420,12 @@ def recompute_opening_scores(
     # the pool while score computation is still running.
     db.rollback()
     # Sample computed_at AFTER the fingerprint + overlay reads (or the prebuilt
-    # overlay the caller passed) so it is an UPPER BOUND on the evidence reflected
-    # in this batch, not a lower bound (g-mxeo). The opening-baseline date guard
-    # depends on this: a batch dated strictly before a session's start then cannot
-    # possibly contain that session's evidence. A caller that passes an explicit
-    # computed_at (tests / controlled ordering) keeps its value.
+    # overlay the caller passed) so it remains an UPPER BOUND on the evidence
+    # reflected in this batch, not a lower bound (g-mxeo). Session baselines no
+    # longer infer freshness from this wall-clock value: g-f3m4 proves both batch
+    # currency and session-start evidence identity with durable watermarks. A
+    # caller that passes an explicit computed_at (tests / controlled ordering)
+    # keeps its value.
     if computed_at is None:
         computed_at = _utcnow()
     scores, position_scores = _build_cached_scores(

@@ -873,6 +873,14 @@ def test_baseline_job_swallows_capture_failure(db_session):
         db_session, status="active",
         started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
     )
+    session.baseline_watermark_seq = current_evidence_seq(
+        db_session, session.user_id, session.player_color
+    )
+    session.baseline_watermark_epoch = current_cache_epoch(db_session)
+    session.baseline_watermark_fingerprint = opening_score_inputs_fingerprint(
+        get_opening_graph(), get_opening_roots()
+    )
+    db_session.commit()
     with patch(
         "app.opening_score_delta.list_cached_opening_scores",
         side_effect=RuntimeError("db boom"),
@@ -1529,7 +1537,9 @@ def test_scoped_epoch_drift_rejects_real_in_scope_shared_mutation(
         assert read_opening_score_delta(db_session, session) == ([], False)
 
 
-def test_scoped_publication_rejects_missing_epoch_and_registry_drift(db_session):
+def test_scoped_publication_rejects_missing_epoch_and_registry_drift(
+    db_session, monkeypatch
+):
     graph = _ruy_graph()
     roots = _ruy_roots()
     session = _make_session(db_session, baseline=_baseline_json({}))
@@ -1546,8 +1556,9 @@ def test_scoped_publication_rejects_missing_epoch_and_registry_drift(db_session)
         ):
             assert read_opening_score_delta(db_session, session) == ([], False)
 
-        db_session.execute(text("DELETE FROM evidence_epoch WHERE id = 1"))
-        db_session.commit()
+        monkeypatch.setattr(
+            "app.opening_score_delta.current_cache_epoch", lambda db: None
+        )
         assert read_opening_score_delta(db_session, session) == ([], False)
 
 

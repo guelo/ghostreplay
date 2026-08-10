@@ -1,11 +1,9 @@
-"""Tests for async opening-baseline capture (g-mxeo).
+"""Tests for provable async opening-baseline recovery (g-f3m4).
 
 Two layers:
 
 - ``run_baseline_snapshot_job`` (``app.opening_score_delta``): the DB-backed worker
-  job that proves the pre-session cached batch fresh AND strictly pre-session before
-  persisting the baseline, with a defense-in-depth conditional UPDATE. Driven
-  directly against the ``db_session`` fixture (TestingSessionLocal).
+  job that composes current-batch freshness with the durable start watermark.
 - ``OpeningBaselineScheduler`` mechanics (coalescing, run_due, shutdown, best-effort
   facade): driven with fake sessions + a recording job, mirroring
   ``test_session_evidence_scheduler``.
@@ -20,15 +18,24 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 import app.opening_baseline_scheduler as baseline_mod
+import app.opening_evidence as opening_evidence
+from conftest import TestingSessionLocal
+from app.fen import normalize_fen
 from app.models import (
+    AnalysisCache,
     Blunder,
     BlunderReview,
     GameSession,
     OpeningScoreBatch,
+    OpeningScoreBatchSharedScope,
     Position,
     SessionMove,
+    SharedEvidenceScopeVersion,
+    User,
     UserOpeningScore,
 )
 from app.opening_baseline_scheduler import (
@@ -37,16 +44,23 @@ from app.opening_baseline_scheduler import (
 )
 from app.opening_cache import (
     SCORE_MODEL_VERSION,
+    bump_evidence_seq,
     capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_rootcalc import root_calc_config_fingerprint
-from app.opening_score_delta import run_baseline_snapshot_job
+from app.opening_score_delta import (
+    BASELINE_RETRYABLE_SOURCES,
+    BASELINE_TERMINAL_SOURCES,
+    BaselineSnapshotSource,
+    capture_baseline_watermark,
+    fill_opening_baselines_for_batch,
+    run_baseline_snapshot_job,
+)
 
-# Fixed timeline: a batch dated at T_BEFORE is provably pre-session for a session
-# started at T_START; a batch at T_AFTER is post-session (rejected by the date guard).
+# Fixed timestamps prove the new contract is independent of wall-clock ordering.
 T_BEFORE = datetime(2026, 6, 1, tzinfo=timezone.utc)
 T_START = datetime(2026, 6, 15, tzinfo=timezone.utc)
 T_AFTER = datetime(2026, 6, 20, tzinfo=timezone.utc)
@@ -66,14 +80,23 @@ def _baseline_envelope(scores):
 # ---------------------------------------------------------------------------
 def _make_session(
     db, *, user_id=123, player_color="white", status="active",
-    started_at=T_START, baseline=None,
+    started_at=T_START, baseline=None, with_watermark=True,
 ) -> uuid.UUID:
     sid = uuid.uuid4()
+    watermark = (
+        capture_baseline_watermark(db, user_id, player_color)
+        if with_watermark
+        else None
+    )
+    watermark_values = watermark or (None, None, None)
     db.add(GameSession(
         id=sid, user_id=user_id, started_at=started_at, status=status,
         result="checkmate_win" if status == "ended" else None, engine_elo=1500,
         player_color=player_color, session_mode="normal",
         opening_score_baseline=baseline,
+        baseline_watermark_seq=watermark_values[0],
+        baseline_watermark_epoch=watermark_values[1],
+        baseline_watermark_fingerprint=watermark_values[2],
     ))
     db.commit()
     return sid
@@ -108,6 +131,21 @@ def _seed_batch(
         )
     db.add(batch)
     db.flush()
+    if fresh:
+        db.add_all(
+            [
+                OpeningScoreBatchSharedScope(
+                    batch_id=batch.id, kind="raw", fen=fen
+                )
+                for fen in snap.shared_raw_fens
+            ]
+            + [
+                OpeningScoreBatchSharedScope(
+                    batch_id=batch.id, kind="norm", fen=fen
+                )
+                for fen in snap.shared_norm_fens
+            ]
+        )
     for key, score in scores.items():
         db.add(UserOpeningScore(
             batch_id=batch.id, user_id=user_id, player_color=player_color,
@@ -167,14 +205,20 @@ def _baseline(db, sid) -> str | None:
     return db.get(GameSession, sid).opening_score_baseline
 
 
+def _seed_candidate_history(db) -> None:
+    prior = _make_session(db, status="ended", started_at=T_BEFORE)
+    _seed_move(db, session_id=prior)
+    bump_evidence_seq(db, 123, "white")
+    db.commit()
+
+
 # ---------------------------------------------------------------------------
 # run_baseline_snapshot_job — capture logic
 # ---------------------------------------------------------------------------
-def test_fresh_pre_session_batch_is_persisted(db_session):
-    # (1) Fresh batch dated strictly before started_at, no session evidence ->
-    # the score map is persisted with source=cached_fresh.
+def test_later_fresh_batch_is_persisted_when_inputs_unchanged(db_session):
+    # A batch built after start is valid when both proofs bind it to start state.
     sid = _make_session(db_session)
-    _seed_batch(db_session, computed_at=T_BEFORE, fresh=True, scores={"k": 42.0})
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
 
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
@@ -182,48 +226,41 @@ def test_fresh_pre_session_batch_is_persisted(db_session):
     assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 42.0})
 
 
-def test_review_race_rejected_by_date_guard(db_session):
-    # (2) A session-scoped review plus a newer post-session batch -> NULL,
-    # skipped_post_session_batch (the date guard fires before any digest).
-    sid = _make_session(db_session)
-    _seed_review(db_session, session_id=sid)
-    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
-
-    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
-
-    assert source == "skipped_post_session_batch"
-    assert _baseline(db_session, sid) is None
-
-
-def test_blunder_target_race_rejected_by_date_guard(db_session):
-    # (3) A session-scoped ghost-target blunder plus a newer post-session batch ->
-    # NULL, skipped_post_session_batch.
-    sid = _make_session(db_session)
-    _seed_blunder(db_session, source_session_id=sid)
-    db_session.commit()
-    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
-
-    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
-
-    assert source == "skipped_post_session_batch"
-    assert _baseline(db_session, sid) is None
-
-
-def test_move_race_rejected_by_date_guard(db_session):
-    # (4) A session move plus a newer post-session batch -> NULL,
-    # skipped_post_session_batch.
+def test_digest_ineligible_active_move_does_not_prevent_fill(db_session):
+    # Active session moves are not yet digest-visible and therefore do not bump
+    # evidence_seq. Their mere presence must not recreate the removed NOT EXISTS.
     sid = _make_session(db_session)
     _seed_move(db_session, session_id=sid)
     _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
 
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
-    assert source == "skipped_post_session_batch"
+    assert source == "cached_fresh"
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 42.0})
+
+
+@pytest.mark.parametrize("evidence", ["review", "ghost_target"])
+def test_digest_visible_per_user_change_rejects_later_batch(db_session, evidence):
+    sid = _make_session(db_session)
+    if evidence == "review":
+        _seed_review(db_session, session_id=sid)
+    else:
+        _seed_blunder(db_session, source_session_id=sid)
+        db_session.commit()
+    # The real writers perform this bump in the source transaction; focused API
+    # tests cover those choke points. This unit isolates the historical proof.
+    bump_evidence_seq(db_session, 123, "white")
+    db_session.commit()
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
+
+    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+
+    assert source == "watermark_mismatch"
     assert _baseline(db_session, sid) is None
 
 
 def test_brand_new_user_persists_empty_baseline(db_session):
-    # (5) No batch, no evidence -> a valid empty envelope (empty_no_evidence),
+    # No batch, no evidence -> a valid empty envelope (empty_no_evidence),
     # so the session's first openings later read as new.
     sid = _make_session(db_session)
 
@@ -234,8 +271,7 @@ def test_brand_new_user_persists_empty_baseline(db_session):
 
 
 def test_already_set_baseline_is_a_noop(db_session):
-    # (6) An already-set baseline is idempotent -> already_set, value untouched.
-    import json
+    # An already-set baseline is idempotent -> already_set, value untouched.
     sid = _make_session(db_session, baseline=json.dumps({"x": 1.0}))
     _seed_batch(db_session, computed_at=T_BEFORE, fresh=True, scores={"k": 42.0})
 
@@ -245,24 +281,13 @@ def test_already_set_baseline_is_a_noop(db_session):
     assert json.loads(_baseline(db_session, sid)) == {"x": 1.0}
 
 
-@pytest.mark.parametrize("evidence", ["move", "review", "blunder"])
-def test_persist_race_leaves_baseline_null(db_session, evidence):
-    # (7) Defense-in-depth: capture returns JSON, but session-scoped evidence
-    # inserted before the UPDATE makes rowcount 0 -> NULL,
-    # raced_evidence_or_already_set. Force a JSON capture and insert real evidence
-    # so the conditional UPDATE's NOT EXISTS clause vetoes the write.
+def test_conditional_update_race_leaves_baseline_null(db_session):
     sid = _make_session(db_session)
-    if evidence == "move":
-        _seed_move(db_session, session_id=sid)
-    elif evidence == "review":
-        _seed_review(db_session, session_id=sid)
-    else:
-        _seed_blunder(db_session, source_session_id=sid)
-        db_session.commit()
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
 
     with patch(
-        "app.opening_score_delta._capture_baseline_json",
-        return_value=('{"k": 1.0}', "cached_fresh"),
+        "app.opening_score_delta._conditional_store_baseline",
+        return_value=False,
     ):
         source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
@@ -271,7 +296,7 @@ def test_persist_race_leaves_baseline_null(db_session, evidence):
 
 
 def test_cold_cache_with_evidence_skipped(db_session):
-    # (8a) No batch but the user has evidence (cold, e.g. post-restart) -> NULL,
+    # No batch but the user has evidence (cold, e.g. post-restart) -> NULL,
     # skipped_cold. Seed evidence via a prior ended session's move.
     prior = _make_session(db_session, status="ended", started_at=T_BEFORE)
     _seed_move(db_session, session_id=prior)
@@ -284,8 +309,7 @@ def test_cold_cache_with_evidence_skipped(db_session):
 
 
 def test_stale_pre_session_batch_skipped(db_session):
-    # (8b) A pre-session batch whose fingerprints don't match -> NULL,
-    # skipped_stale (the date guard passes; freshness fails).
+    # A batch whose fingerprints don't match is retryable stale.
     sid = _make_session(db_session)
     _seed_batch(db_session, computed_at=T_BEFORE, fresh=False, scores={"k": 42.0})
 
@@ -295,13 +319,10 @@ def test_stale_pre_session_batch_skipped(db_session):
     assert _baseline(db_session, sid) is None
 
 
-def test_naive_computed_at_strictly_before_is_accepted(db_session):
-    # (9a) A naive computed_at strictly before started_at is accepted without an
-    # aware/naive comparison crash.
+def test_computed_at_equality_no_longer_controls_acceptance(db_session):
     sid = _make_session(db_session)
-    _seed_batch(
-        db_session, computed_at=datetime(2026, 6, 1), fresh=True, scores={"k": 7.0}
-    )
+    started = db_session.get(GameSession, sid).started_at
+    _seed_batch(db_session, computed_at=started, fresh=True, scores={"k": 7.0})
 
     source = run_baseline_snapshot_job(db_session, sid, 123, "white")
 
@@ -309,17 +330,9 @@ def test_naive_computed_at_strictly_before_is_accepted(db_session):
     assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 7.0})
 
 
-def test_naive_computed_at_equal_to_started_at_is_rejected(db_session):
-    # (9b) computed_at tying started_at cannot be proven pre-session -> rejected
-    # (strict guard), and no naive/aware crash. Use the exact started_at the row
-    # round-tripped to as the batch's computed_at so equality is guaranteed.
-    sid = _make_session(db_session)
-    started = db_session.get(GameSession, sid).started_at
-    _seed_batch(db_session, computed_at=started, fresh=True, scores={"k": 7.0})
-
-    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
-
-    assert source == "skipped_post_session_batch"
+def test_legacy_session_without_watermark_is_terminal(db_session):
+    sid = _make_session(db_session, with_watermark=False)
+    assert run_baseline_snapshot_job(db_session, sid, 123, "white") == "watermark_missing"
     assert _baseline(db_session, sid) is None
 
 
@@ -361,6 +374,230 @@ def test_untrusted_queued_identity_captures_from_the_row(db_session):
     )
 
 
+def test_source_classification_is_closed_and_disjoint():
+    assert BASELINE_RETRYABLE_SOURCES.isdisjoint(BASELINE_TERMINAL_SOURCES)
+    assert BASELINE_RETRYABLE_SOURCES | BASELINE_TERMINAL_SOURCES == frozenset(
+        BaselineSnapshotSource
+    )
+
+
+def test_durable_batch_push_fill_recovers_a_cold_start(db_session):
+    sid = _make_session(db_session)
+    batch_id = _seed_batch(
+        db_session,
+        computed_at=T_AFTER,
+        fresh=True,
+        scores={"k": 42.0},
+    )
+
+    filled = fill_opening_baselines_for_batch(
+        batch_id,
+        session_factory=TestingSessionLocal,
+    )
+
+    assert filled == 1
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 42.0})
+
+
+def test_unrelated_shared_write_after_start_still_accepts(db_session):
+    _seed_candidate_history(db_session)
+    sid = _make_session(db_session)
+    db_session.execute(
+        text(
+            "INSERT INTO analysis_cache "
+            "(fen_before, move_uci, move_san, played_eval) "
+            "VALUES ('8/8/8/8/8/8/8/8 w - - 0 1', 'a2a3', 'a3', 1)"
+        )
+    )
+    db_session.commit()
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
+
+    assert run_baseline_snapshot_job(db_session, sid, 123, "white") == "cached_fresh"
+
+
+@pytest.mark.parametrize("revert", [False, True], ids=["changed", "changed_then_reverted"])
+def test_in_scope_shared_history_after_start_rejects(db_session, revert):
+    _seed_candidate_history(db_session)
+    sid = _make_session(db_session)
+    start_full = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/"
+        "RNBQKBNR w KQkq - 0 1"
+    )
+    db_session.execute(
+        text(
+            "INSERT INTO analysis_cache "
+            "(fen_before, move_uci, move_san, played_eval) "
+            "VALUES (:fen, 'e2e4', 'e4', 1)"
+        ),
+        {"fen": start_full},
+    )
+    db_session.commit()
+    if revert:
+        db_session.execute(
+            text("DELETE FROM analysis_cache WHERE fen_before = :fen"),
+            {"fen": start_full},
+        )
+        db_session.commit()
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
+
+    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+
+    assert source == "watermark_mismatch"
+    assert _baseline(db_session, sid) is None
+
+
+def test_viewer_association_change_marks_batch_scope_and_rejects(db_session):
+    """An eligibility-only write is shared evidence, not metadata.
+
+    The real claim writer stores the parent before the start watermark, then an
+    idempotent resubmission adds only its viewer association afterward. Both digest
+    projections and both exact scope kinds move while every evidence column remains
+    byte-identical; a fresh later batch must still fail Proof 2.
+    """
+    from app.analysis_cache_policy import Reason
+    from app.analysis_cache_repo import write_analysis_cache_rows
+    from app.analysis_profiles import (
+        BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        stamp_profile_full,
+    )
+
+    _seed_candidate_history(db_session)
+    start_full = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/"
+        "RNBQKBNR w KQkq - 0 1"
+    )
+    user = db_session.get(User, 123)
+    if user is None:
+        db_session.add(User(id=123, username="baseline-association-user"))
+    db_session.commit()
+
+    browser_row = {
+        "fen_before": start_full,
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "best_move_uci": "d2d4",
+        "best_move_san": "d4",
+        "best_line_uci": "d2d4 d7d5",
+        "played_eval": -30,
+        "best_eval": 20,
+        "eval_delta": 50,
+        "classification": "good",
+        "source": "analysis",
+        "analysis_profile_id": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        "evidence_contract_id": "resolver-complete-v2",
+        **stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
+    }
+    write_analysis_cache_rows(db_session, [browser_row])
+    db_session.expire_all()
+    cache = db_session.query(AnalysisCache).filter_by(
+        fen_before=start_full,
+        move_uci="e2e4",
+    ).one()
+    evidence_columns = {
+        column: getattr(cache, column)
+        for column in (
+            "played_eval",
+            "best_eval",
+            "eval_delta",
+            "classification",
+            "best_move_uci",
+            "best_line_uci",
+        )
+    }
+    before = opening_evidence.raw_evidence_inputs_snapshot(
+        db_session, 123, "white"
+    )
+
+    sid = _make_session(db_session)
+    start_epoch = db_session.get(GameSession, sid).baseline_watermark_epoch
+    cache_id = cache.id
+    db_session.rollback()
+    results = write_analysis_cache_rows(
+        db_session,
+        [browser_row],
+        submitter_user_id=123,
+    )
+    assert [reason for _, reason in results] == [Reason.SAME_PROFILE_IDEMPOTENT]
+    db_session.expire_all()
+    refreshed = db_session.get(AnalysisCache, cache_id)
+    assert {
+        column: getattr(refreshed, column) for column in evidence_columns
+    } == evidence_columns
+
+    after = opening_evidence.raw_evidence_inputs_snapshot(db_session, 123, "white")
+    assert after.digest != before.digest
+    assert after.scoped_shared_digest != before.scoped_shared_digest
+    versions = db_session.query(SharedEvidenceScopeVersion).filter(
+        SharedEvidenceScopeVersion.fen.in_(
+            [start_full, normalize_fen(start_full)]
+        )
+    ).all()
+    assert {(row.kind, row.fen) for row in versions} == {
+        ("raw", start_full),
+        ("norm", normalize_fen(start_full)),
+    }
+    assert all(row.last_changed_epoch > start_epoch for row in versions)
+
+    _seed_batch(db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0})
+
+    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+
+    assert source == "watermark_mismatch"
+    assert _baseline(db_session, sid) is None
+
+
+def test_s0_s1_lower_bound_batch_is_rejected_by_proof_one(db_session):
+    sid = _make_session(db_session)
+    bump_evidence_seq(db_session, 123, "white")
+    db_session.commit()
+    batch_id = _seed_batch(
+        db_session, computed_at=T_AFTER, fresh=True, scores={"k": 42.0}
+    )
+    # Model a batch stamped at S0 that read evidence committed at S1.
+    batch = db_session.get(OpeningScoreBatch, batch_id)
+    batch.evidence_seq = 0
+    db_session.commit()
+
+    assert run_baseline_snapshot_job(db_session, sid, 123, "white") == "skipped_stale"
+
+
+def test_empty_start_rejects_evidence_that_appeared_then_disappeared(db_session):
+    sid = _make_session(db_session)
+    prior = _make_session(db_session, status="ended", started_at=T_BEFORE)
+    _seed_move(db_session, session_id=prior)
+    db_session.query(SessionMove).filter(SessionMove.session_id == prior).delete()
+    bump_evidence_seq(db_session, 123, "white")
+    db_session.commit()
+
+    assert run_baseline_snapshot_job(db_session, sid, 123, "white") == "watermark_mismatch"
+    assert _baseline(db_session, sid) is None
+
+
+@pytest.mark.parametrize(
+    "seq,epoch,fingerprint",
+    [
+        (1, None, None),
+        (None, 1, None),
+        (None, None, "fp"),
+        (1, 1, None),
+        (1, None, "fp"),
+        (None, 1, "fp"),
+    ],
+)
+def test_partial_watermark_combinations_violate_check(
+    db_session, seq, epoch, fingerprint
+):
+    sid = _make_session(db_session, with_watermark=False)
+    session = db_session.get(GameSession, sid)
+    session.baseline_watermark_seq = seq
+    session.baseline_watermark_epoch = epoch
+    session.baseline_watermark_fingerprint = fingerprint
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
 # ---------------------------------------------------------------------------
 # OpeningBaselineScheduler mechanics (fake sessions + recording job)
 # ---------------------------------------------------------------------------
@@ -380,6 +617,7 @@ class _RecordingJob:
     def __call__(self, db, **kwargs):
         self.sessions.append(db)
         self.calls.append(kwargs)
+        return "already_set"
 
 
 def _make_scheduler(run_job=None, **kwargs):
@@ -436,6 +674,149 @@ def test_distinct_sessions_each_run_with_own_session():
     assert sorted(c["session_id"] for c in job.calls) == sorted([sid1, sid2])
     assert job.sessions[0] is not job.sessions[1]
     assert all(s.closed for s in sessions)
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_retryable_outcome_uses_injected_backoff_then_converges():
+    clock = _FakeClock()
+    outcomes = iter(["raced_evidence_or_already_set", "cached_fresh"])
+
+    def job(db, **kwargs):
+        return next(outcomes)
+
+    sched, _ = _make_scheduler(run_job=job, clock=clock)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+
+    sched.run_due()
+    assert sched._pending[sid].attempts == 1
+    assert sched._pending[sid].not_before == 101.0
+    sched.run_due()
+    assert sid in sched._pending
+
+    clock.advance(1.0)
+    sched.run_due()
+    assert sid not in sched._pending
+
+
+def test_cold_retry_requests_one_ordinary_recompute_when_none_scheduled():
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        run_job=lambda db, **kwargs: "skipped_cold",
+        clock=clock,
+    )
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "black")
+
+    with (
+        patch(
+            "app.opening_score_scheduler.is_recompute_scheduled",
+            return_value=False,
+        ),
+        patch("app.opening_score_scheduler.request_recompute") as request,
+    ):
+        sched.run_due()
+
+    from app.opening_score_scheduler import OpeningScoreTrigger
+
+    request.assert_called_once_with(
+        7,
+        "black",
+        source=OpeningScoreTrigger.BASELINE_RECOVERY,
+    )
+
+
+def test_retry_budget_stops_at_eight_attempts():
+    clock = _FakeClock()
+    calls = 0
+
+    def job(db, **kwargs):
+        nonlocal calls
+        calls += 1
+        return "raced_evidence_or_already_set"
+
+    sched, _ = _make_scheduler(run_job=job, clock=clock)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    for delay in (0, 1, 2, 4, 8, 16, 30, 30):
+        clock.advance(delay)
+        sched.run_due()
+
+    assert calls == 8
+    assert sid not in sched._pending
+
+
+def test_elapsed_budget_can_stop_before_second_attempt():
+    clock = _FakeClock()
+
+    def job(db, **kwargs):
+        clock.advance(120.0)
+        return "raced_evidence_or_already_set"
+
+    sched, _ = _make_scheduler(run_job=job, clock=clock)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    sched.run_due(now=100.0)
+
+    assert sid not in sched._pending
+
+
+def test_duplicate_during_backoff_preserves_budget_and_deadline():
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        run_job=lambda db, **kwargs: "raced_evidence_or_already_set",
+        clock=clock,
+    )
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    sched.run_due()
+    first = sched._pending[sid].first_enqueued_at
+    deadline = sched._pending[sid].not_before
+
+    clock.advance(0.5)
+    sched.enqueue(sid, 7, "white")
+
+    assert sched._pending[sid].first_enqueued_at == first
+    assert sched._pending[sid].not_before == deadline
+    assert sched._pending[sid].attempts == 1
+
+
+def test_unknown_source_is_terminal_contract_error(caplog):
+    sched, _ = _make_scheduler(run_job=lambda db, **kwargs: "future_source")
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+
+    with caplog.at_level("ERROR", logger="app.opening_baseline_scheduler"):
+        sched.run_due()
+
+    assert sid not in sched._pending
+    assert any("unknown source" in record.getMessage() for record in caplog.records)
+
+
+def test_shutdown_drain_suppresses_retry_requeue():
+    sched, _ = _make_scheduler(
+        run_job=lambda db, **kwargs: "raced_evidence_or_already_set"
+    )
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    sched.run_due()
+    assert sid in sched._pending
+
+    with sched._cond:
+        sched._shutdown = True
+    sched.run_due(now=float("inf"))
+
+    assert sid not in sched._pending
 
 
 def test_session_closed_when_job_raises_and_later_enqueue_runs():
@@ -633,6 +1014,39 @@ def test_game_start_returns_201_when_enqueue_faults(client, auth_headers, monkey
     assert called, "the endpoint never reached the faulting enqueue"
 
 
+def test_game_start_capture_failure_is_savepoint_isolated_and_still_enqueues(
+    client, auth_headers, db_session
+):
+    enqueued = []
+
+    def record_enqueue(*args):
+        enqueued.append(args)
+
+    with (
+        patch(
+            "app.opening_score_delta.opening_score_inputs_fingerprint",
+            side_effect=RuntimeError("fingerprint failed"),
+        ),
+        patch("app.api.game.enqueue_baseline_snapshot", side_effect=record_enqueue),
+    ):
+        resp = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500, "player_color": "white"},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 201
+    sid = uuid.UUID(resp.json()["session_id"])
+    db_session.expire_all()
+    session = db_session.get(GameSession, sid)
+    assert (
+        session.baseline_watermark_seq,
+        session.baseline_watermark_epoch,
+        session.baseline_watermark_fingerprint,
+    ) == (None, None, None)
+    assert enqueued
+
+
 DRILL_ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
 
 
@@ -670,3 +1084,42 @@ def test_drill_start_returns_201_when_enqueue_faults(client, auth_headers, monke
         )
     assert resp.status_code == 201
     assert called, "the endpoint never reached the faulting enqueue"
+
+
+def test_drill_start_capture_failure_is_savepoint_isolated_and_still_enqueues(
+    client, auth_headers, db_session
+):
+    enqueued = []
+
+    def record_enqueue(*args):
+        enqueued.append(args)
+
+    with (
+        patch(
+            "app.opening_score_delta.opening_score_inputs_fingerprint",
+            side_effect=RuntimeError("fingerprint failed"),
+        ),
+        patch("app.api.drills.enqueue_baseline_snapshot", side_effect=record_enqueue),
+        patch("app.api.drills.get_opening_roots", return_value=_drill_roots()),
+    ):
+        resp = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": DRILL_ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 201
+    sid = uuid.UUID(resp.json()["session_id"])
+    db_session.expire_all()
+    session = db_session.get(GameSession, sid)
+    assert (
+        session.baseline_watermark_seq,
+        session.baseline_watermark_epoch,
+        session.baseline_watermark_fingerprint,
+    ) == (None, None, None)
+    assert enqueued
