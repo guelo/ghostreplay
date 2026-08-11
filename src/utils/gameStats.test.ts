@@ -53,7 +53,8 @@ describe('computeSideStats', () => {
 
   it('rounds an exact-half avgCpl up (2, 3 -> 3), matching the backend', () => {
     // Cross-runtime contract: the backend rounds the same average half-up via
-    // round_half_up_cpl (backend/app/centipawn_loss.py, SPEC §5.2.2). The deltas
+    // round_half_up_cpl (backend/app/centipawn_loss.py; see
+    // docs/architecture/analysis-evidence.md). The deltas
     // above are exact integers, so they would still pass under trunc/floor.
     const moves = makeMoves([
       { color: 'white', eval_delta: 2 },

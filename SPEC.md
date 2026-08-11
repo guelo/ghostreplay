@@ -16,15 +16,15 @@
 - [Feature map and user journeys](#feature-map-and-user-journeys)
 - [System architecture](#system-architecture)
 - [Core domain model](#core-domain-model)
-- [Major end-to-end flows](#major-end-to-end-flows) *(pending Pass 2/3)*
-- [Cross-cutting contracts](#cross-cutting-contracts) *(pending Pass 2/3)*
-- [Engineering map](#engineering-map) *(pending Pass 2/3)*
+- [Major end-to-end flows](#major-end-to-end-flows) *(pending Pass 3)*
+- [Cross-cutting contracts](#cross-cutting-contracts) *(pending Pass 3)*
+- [Engineering map](#engineering-map) *(pending Pass 3)*
 - [Further reading](#further-reading)
 - [Retained detailed reference](#retained-detailed-reference)
-  - [5. Database schema](#5-database-schema)
+  - [5. Domain and data ownership](#5-domain-and-data-ownership)
   - [6. Data and logic flow](#6-data--logic-flow)
   - [7. Game sessions and lifecycle](#7-game-sessions--lifecycle)
-  - [8. API specification](#8-api-specification)
+  - [8. Endpoint families](#8-endpoint-families)
   - [9. After-game analysis display](#9-after-game-analysis-display)
   - [10. Game history view](#10-game-history-view)
   - [11. Testing strategy](#11-testing-strategy)
@@ -121,9 +121,13 @@ side-scoped opening-score snapshots. The exact relational schema, constraints,
 and migration history remain authoritative in the backend model and migration
 layer, not in this overview.
 
+> **Temporary bridge.** [Domain and data ownership](#5-domain-and-data-ownership)
+> expands this domain summary while detailed reference is being retired. Pass 3
+> will merge them into one overview section.
+
 ## Major end-to-end flows
 
-> **Scaffold (pending Pass 2/3).**
+> **Scaffold (pending Pass 3).**
 
 This section will condense session lifecycle, Ghost targeting and re-hooking,
 blunder capture and review, analysis persistence, opening/drill play, and
@@ -132,7 +136,7 @@ until each retained rule has a verified home.
 
 ## Cross-cutting contracts
 
-> **Scaffold (pending Pass 2/3).**
+> **Scaffold (pending Pass 3).**
 
 A later pass will collect the overview-level contracts for identity and
 per-account scope, session visibility, evidence trust, cache freshness, and
@@ -141,7 +145,7 @@ model, migration, and test owners.
 
 ## Engineering map
 
-> **Scaffold (pending Pass 2/3).** The stack and route map below are the
+> **Scaffold (pending Pass 3).** The stack and route map below are the
 > current orientation; later passes will add the tested subsystem seams and
 > operational boundaries.
 
@@ -170,6 +174,8 @@ purposes:
 - [Session-accuracy versioning](docs/session-accuracy-versioning.md) covers its
   release/versioning contract.
 - [Opening book](docs/opening-book.md) covers the maintained opening-book input.
+- [Analysis evidence](docs/architecture/analysis-evidence.md) covers the
+  verified cross-cutting evidence, trust, and freshness contract.
 - [Release A runbook](docs/release_a_runbook.md) and [Release B runbook](docs/release_b_runbook.md)
   are operational reading, not product or API specifications.
 
@@ -178,1120 +184,52 @@ authority are verified.
 
 ## Retained detailed reference
 
-The detailed sections below are intentionally unchanged in this pass. Later
-passes will replace them only after a verified condensed or focused destination
-exists; they remain source material rather than a second, competing overview.
+Most remaining sections below are detailed source material that later passes
+will replace only after a verified condensed or focused destination exists.
+Section 5 and Section 8 are already compact overview material from Pass 2;
+Pass 3 will merge the temporary Core domain model/Section 5 overlap. The
+remaining detailed sections are source material rather than a second,
+competing overview.
 
 ---
 
-## 5. Database Schema
-
-The core innovation is storing chess history as the Ghost Move Library. The Ghost Move Library is composed of positions as nodes and moves as edges, with user decision targets stored in `blunders`.
-The complication is that the user moves only on every other edge, so capture logic must validate side-to-move ownership.
-
-**User Scoping:** All data is scoped per-user. Each user has their own Ghost Move Library graph (`positions` + `moves`) and target rows in `blunders`. There is no sharing of data between users (MVP).
-
-### 5.1 `positions` (Nodes)
-
-Represents a unique board state. Positions are pure Ghost Move Library nodes—they contain no blunder or SRS data.
-
-```sql
-CREATE TABLE positions (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    fen_hash VARCHAR(64) NOT NULL,         -- SHA256 of Normalized FEN
-    fen_raw TEXT NOT NULL,
-    active_color VARCHAR(5) NOT NULL,      -- 'white' or 'black' (side to move)
-    created_at TIMESTAMP DEFAULT NOW(),
-
-    CONSTRAINT ck_positions_active_color CHECK (active_color IN ('white', 'black')),
-    UNIQUE (user_id, fen_hash)
-);
-
-CREATE INDEX idx_positions_user ON positions(user_id);
-CREATE INDEX idx_positions_user_active_color ON positions(user_id, active_color);
-```
-
-#### 5.1.1 FEN Normalization
-
-The `fen_hash` is computed from a **normalized FEN**, not the raw FEN string. This ensures positions reached via different move orders are recognized as identical.
-
-**Standard FEN Fields:**
-```
-rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1
-│                                             │ │    │  │ └─ Fullmove number
-│                                             │ │    │  └─── Halfmove clock
-│                                             │ │    └────── En passant square
-│                                             │ └─────────── Castling rights
-│                                             └───────────── Active color
-└─────────────────────────────────────────────────────────── Piece placement
-```
-
-**Normalization Rule:** Keep fields 1-4, strip fields 5-6.
-
-| Field | Kept | Reason |
-|-------|------|--------|
-| Piece placement | ✓ | Defines the position |
-| Active color | ✓ | Whose turn matters for blunders |
-| Castling rights | ✓ | Affects legal moves and evaluation |
-| En passant square | ✓ | Affects legal moves (canonicalize: only keep when capture is legal) |
-| Halfmove clock | ✗ | Same position via different path should match |
-| Fullmove number | ✗ | Irrelevant for position identity |
-
-**Canonical EP Rule:** Some PGN/FEN sources populate the en passant square even when no capture is legal. Before hashing, recompute the EP flag from the board state: if no legal en passant capture exists, force the value to `-`. This keeps transpositions equivalent and makes Ghost re-hooking reliable.
-
-**Implementation:**
-```python
-def normalize_fen(fen: str) -> str:
-    """Strip move clocks from FEN for position hashing."""
-    parts = fen.split(' ')
-    board = chess.Board(fen)
-    ep = board.ep_square  # None if capture not legal
-    parts[3] = board.square_name(ep) if ep is not None else '-'
-    return ' '.join(parts[:4])
-
-def fen_hash(fen: str) -> str:
-    """Generate SHA256 hash of normalized FEN."""
-    normalized = normalize_fen(fen)
-    return hashlib.sha256(normalized.encode()).hexdigest()
-
-def active_color(fen: str) -> str:
-    """Return 'white' or 'black' from the FEN active color field."""
-    parts = fen.split(' ')
-    return 'white' if parts[1] == 'w' else 'black'
-```
-
-**Example:**
-```
-Raw:        rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1
-Normalized: rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3
-Hash:       a1b2c3d4... (SHA256)
-```
-
-### 5.2 `blunders` (Ghost Move Library Targets)
-
-Represents a decision point the user will practice from a specific position. This is the core SRS entity linked to the Ghost Move Library. Entries come from both:
-- auto-detected blunders (`POST /api/blunder`)
-- manually selected moves from MoveList (`POST /api/blunder/manual`)
-
-```sql
-CREATE TABLE blunders (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    position_id BIGINT NOT NULL REFERENCES positions(id),  -- Pre-move position (decision point)
-    bad_move_san VARCHAR(10) NOT NULL,     -- Selected move captured at this decision point
-    best_move_san VARCHAR(10) NOT NULL,    -- Engine recommended move at capture time
-    eval_loss_cp INTEGER NOT NULL,         -- RAW/UNCAPPED centipawn delta at capture time; MAY BE NEGATIVE (manual captures accept independent eval_before/eval_after). Normalized 0..1000 only at read/decision (Ghost/SRS severity, /stats, Blunder Library).
-
-    -- SRS Fields
-    pass_streak INTEGER NOT NULL DEFAULT 0,
-    last_reviewed_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    source_session_id UUID REFERENCES game_sessions(id),  -- Session that produced this blunder
-
-    UNIQUE (user_id, position_id)          -- One ghost-library target per position per user
-);
-
-CREATE INDEX idx_blunders_user ON blunders(user_id);
-CREATE INDEX idx_blunders_position_user ON blunders(position_id, user_id);
-CREATE INDEX idx_blunders_due ON blunders(user_id, pass_streak, last_reviewed_at);
-```
-
-**Key semantics:**
-- `position_id` references the **pre-move** position—where the user faced the decision
-- `bad_move_san` is the move captured when the target was added (for auto blunders this is the mistake; for manual captures it may be a good move)
-- SRS pass/fail is determined by **real-time engine evaluation**, not by checking against `bad_move_san`
-- Any move within 50cp of the engine's best passes; any move ≥50cp worse fails
-- The unique constraint means duplicate adds at the same position return the existing target (`is_new=false`, shown in UI as "already in library")
-- Targets are only recorded when it is **the user's turn to move**; Ghost selection filters by the session's `player_color` so users can play either side without cross-contamination
-- `eval_loss_cp` is stored **RAW/uncapped** (audit + future severity models) and **may be negative** for manual captures. It is **normalized 0..1000** (`centipawn_loss`: floor 0, cap `CENTIPAWN_LOSS_CAP_CP = 1000`) at every read/decision — Ghost/SRS severity, /stats avg + top-costly, and the Blunder Library list — never in place. No migration corrects legacy rows; read-time normalization is the guarantee.
-
-#### 5.2.1 `blunder_reviews` (Review Events)
-
-Each spaced-repetition encounter with a blunder must be persisted so the API can return a `review_history` timeline. This table stores those immutable review events.
-
-```sql
-CREATE TABLE blunder_reviews (
-    id BIGSERIAL PRIMARY KEY,
-    blunder_id BIGINT NOT NULL REFERENCES blunders(id) ON DELETE CASCADE,
-    session_id UUID NOT NULL REFERENCES game_sessions(id), -- The game context for the review
-    reviewed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    passed BOOLEAN NOT NULL,
-    move_played_san VARCHAR(10) NOT NULL,
-    eval_delta_cp INTEGER NOT NULL                      -- Server-normalized to 0..1000 (centipawn_loss) at write; write-only
-);
-
-CREATE INDEX idx_blunder_reviews_blunder ON blunder_reviews(blunder_id, reviewed_at);
-```
-
-**Usage notes:**
-- Rows are append-only to preserve the user's study history
-- `reviewed_at` doubles as the timestamp returned in `review_history`
-- The API response nests `{ reviewed_at, passed, move_played }` derived from this table (with `move_played` mapped from `move_played_san`)
-- `eval_delta_cp` is **normalized server-side** (`centipawn_loss`: floor 0, cap 1000) at write, regardless of client — an old/non-browser client that bypasses the frontend cap cannot persist a mate-magnitude or negative value. It is a uniform 0..1000 quantity **after server normalization** across storage and analytics (inbound wire values may still arrive raw). The column is **write-only** — no backend decision or display reads it — so legacy pre-normalization rows are harmless and there is no backfill.
-
-#### 5.2.2 Centipawn-loss contract: raw evidence vs. normalized display/decision CPL (living design)
-
-There are two distinct notions of "centipawn loss" that must never be conflated:
-
-1. **RAW evidence** — the exact, uncapped magnitude, retained at rest for audit, contract validation, and future models. A mate blunder legitimately holds ~10020 (`analysis_cache.eval_delta`) or ~10000 (`blunders.eval_loss_cp`). Raw values are **never** capped in place.
-2. **NORMALIZED display/decision CPL** — the 0..1000 value shown to users and read by decisions (Avg CPL, Ghost/SRS severity, /stats, Blunder Library). Produced by the single normalizer pair `centipawn_loss()` / `centipawn_loss_expr()` (Python) ↔ `evalLoss()` (TS), applied at **read / projection / decision** time.
-
-Per-column contract:
-
-| Column | At rest | Normalized |
-|--------|---------|-----------|
-| `analysis_cache.eval_delta` | **RAW** (contract-bound; `/api/analysis/lookup` returns it raw) | Only at projection (`build_move_upgrade` → `centipawn_loss`); capping in place would fail the resolver-complete-v2 `delta == best − played` equality contract |
-| `blunders.eval_loss_cp` | **RAW/uncapped** (may be negative for manual captures) | At every read/decision: Ghost + SRS severity, Ghost sort tiebreaker, /stats avg + top-costly, Blunder Library list |
-| `session_moves.eval_delta` | **Normalized** on new writes; legacy rows **MIXED** (raw >1000) | Again at every read (Avg CPL, per-move echo, opening-quality curve) — read-time normalization is the actual guarantee |
-| `blunder_reviews.eval_delta_cp` | **Normalized** server-authoritatively at write | Write-only — no read normalizes it because nothing reads it |
-
-The cap constant is `CENTIPAWN_LOSS_CAP_CP = 1000` (backend) / `EVAL_LOSS_CAP_CP = 1000` (frontend) — the **decisive-mistake ceiling**, defined independently per runtime and pinned equal by a cross-runtime golden-vector fixture + a unit test. No migration corrects any legacy row; read-time / decision-time normalization is the correctness guarantee (`analysis_cache` and `blunder_reviews` are the exceptions — the former stays raw by contract, the latter is normalized on write).
-
-**Aggregate rounding.** Normalized CPL aggregates are averaged in the database and rounded to an integer with **Decimal-preserving half-up** rounding (`round_half_up_cpl`, `backend/app/centipawn_loss.py`), matching the frontend's `Math.round` (`gameStats.ts`) and the convention `accuracy_v1.py` already set for accuracy. Half-up, not banker's: an exact `.5` rounds **up** (2.5 → 3). The value is rounded through `Decimal`, never a float round-trip — PostgreSQL `AVG(NUMERIC)` returns `Decimal` while SQLite returns `float`, and casting a near-half `Decimal` to float corrupts it (`float(Decimal("2.4999999999999999")) == 2.5`, which would round up to 3 instead of down to 2). The three aggregate sites — `average_centipawn_loss` in session analysis and in history summaries, and `library.avg_blunder_eval_loss_cp` in `/stats` — pass the database aggregate to the helper directly, with no intervening `float()`. The helper is nonnegative-only by contract (`centipawn_loss_expr` floors at 0): half-up and away-from-zero coincide only for nonnegatives, so it is not a general-purpose rounder.
-
-*Forward direction:* a bounded **win-chance-loss** severity would be more meaningful than a centipawn delta, but requires retaining before/after evals — a future refinement, out of scope here.
-
-### 5.3 `moves` (Edges)
-
-Represents the transition between positions.
-
-```sql
-CREATE TABLE moves (
-    from_position_id BIGINT REFERENCES positions(id),
-    to_position_id BIGINT REFERENCES positions(id),
-    move_san VARCHAR(10) NOT NULL,         -- e.g., "Nf3"
-
-    PRIMARY KEY (from_position_id, move_san)
-);
-```
-
-### 5.4 `users` (Identity)
-
-Represents both anonymous and claimed user accounts.
-
-```sql
-CREATE TABLE users (
-    id BIGSERIAL PRIMARY KEY,
-    username VARCHAR(50) UNIQUE,           -- nullable; auto-generated for anonymous accounts
-    password_hash VARCHAR(255),             -- nullable; set during registration or claim
-    is_anonymous BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-```
-
-**Constraints:**
-- `username`: 3-50 characters, alphanumeric + underscores only
-- Anonymous users start with auto-generated usernames (e.g., `ghost_a3b5c7d9`)
-- `is_anonymous`: TRUE for auto-created accounts, FALSE after claiming
-
-### 5.5 `rating_history` (Rating Snapshots)
-
-Tracks per-game rating changes for a user, enabling rating trend display and provisional-flag tracking.
-
-```sql
-CREATE TABLE rating_history (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    game_session_id UUID NOT NULL REFERENCES game_sessions(id) UNIQUE,
-    rating INTEGER NOT NULL,              -- New rating after this game
-    is_provisional BOOLEAN NOT NULL,       -- TRUE if user has played < PROVISIONAL_THRESHOLD games
-    games_played INTEGER NOT NULL,         -- Total rated games played at the time of this record
-    chesscom_rating FLOAT,                 -- Optional: imported Chess.com rating (nullable)
-    chesscom_rd FLOAT,                     -- Optional: Chess.com rating deviation
-    lichess_rating FLOAT,                  -- Optional: imported Lichess rating (nullable)
-    lichess_rd FLOAT,                      -- Optional: Lichess rating deviation
-    lichess_volatility FLOAT,              -- Optional: Lichess Glicko volatility parameter
-    recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_rating_history_user_timestamp ON rating_history(user_id, recorded_at);
-CREATE UNIQUE INDEX uq_rating_history_game_session ON rating_history(game_session_id);
--- Release A durable-head index (g-accuracy-schema). Built CONCURRENTLY in production.
-CREATE INDEX idx_rating_history_user_chain
-    ON rating_history(user_id, games_played DESC, recorded_at DESC, id DESC);
-```
-
-**Key semantics:**
-- One row per completed rated game; inserted by `POST /api/game/end` when `is_rated=true`
-- `is_provisional` tracks whether the rating is still considered provisional (based on games played count)
-- `games_played` enables the frontend to show progress toward a stable rating
-- `chesscom_*` and `lichess_*` fields are nullable; reserved for future cross-platform rating import
-
-**Durable head (Release A, g-rating-serial).** The "current rating for a user" is the row with the greatest `games_played` — not the most recent wall-clock `recorded_at`, which can go backwards under clock skew. The head lookup is `WHERE user_id = ? ORDER BY games_played DESC, recorded_at DESC, id DESC LIMIT 1`; `idx_rating_history_user_chain`'s trailing DESC columns let PostgreSQL answer that ORDER BY straight from the index with **no Sort node**. The older `idx_rating_history_user_timestamp` stays for chronological trend reads.
-
-**Rated game-end serialization (g-rating-serial).** A rated, rating-affecting `POST /api/game/end` takes a `FOR NO KEY UPDATE` lock on the game's `users` row (via `app.row_locks.for_no_key_update`) before computing the rating delta and appending the row, so two concurrent rated ends for the same user cannot both read the same `games_played` and lose an increment. Unrated and non-rating-affecting ends take no users lock. A rated end for a **missing** users row fails closed (500) rather than inventing a rating. The `uq_rating_history_game_session` unique index makes a concurrent double-end of the *same* session idempotent: exactly one insert wins and the loser gets a 400.
-
-**Production build note.** In production `idx_rating_history_user_chain` is created (and, on downgrade, dropped) `CONCURRENTLY` inside an Alembic `autocommit_block` so rated writes stay available during the build. A `CONCURRENTLY` build that fails partway leaves an **INVALID** index that must be `DROP INDEX CONCURRENTLY`-ed and rebuilt — it can never be validated in place (check `SELECT indisvalid FROM pg_index …`). See the release runbook (`docs/release_a_runbook.md`) for the rehearsed durations and recovery drill.
-
-### 5.6 `analysis_cache` (Move Analysis Cache)
-
-Caches move-level analysis results keyed by `(fen_before, move_uci)` to avoid re-running Stockfish for positions that have already been evaluated.
-
-```sql
-CREATE TABLE analysis_cache (
-    id BIGSERIAL PRIMARY KEY,
-    fen_before TEXT NOT NULL,               -- Position before the move (full 6-field FEN)
-    normalized_fen_before TEXT,             -- Normalized 4-field FEN of fen_before (transposition key)
-    move_uci VARCHAR(5) NOT NULL,           -- Move in UCI notation (e.g., "e2e4")
-    move_san VARCHAR(10) NOT NULL,          -- Move in SAN notation (e.g., "e4")
-    best_move_uci VARCHAR(5),               -- Engine's best move in UCI
-    best_move_san VARCHAR(10),              -- Engine's best move in SAN
-    best_line_uci TEXT,                     -- Space-joined root best-move PV
-    played_eval INTEGER,                    -- Eval after the played move (centipawns, white-relative)
-    played_eval_mate INTEGER,               -- White-relative mate count for the played move (NULL = not mate)
-    best_eval INTEGER,                      -- Eval of best move (centipawns, white-relative)
-    best_eval_mate INTEGER,                 -- White-relative mate count for the best move (NULL = not mate)
-    eval_delta INTEGER,                     -- best_eval - played_eval (positive = lost advantage)
-    classification VARCHAR(20),             -- Move classification
-    source VARCHAR(20) NOT NULL DEFAULT 'game',  -- Provenance only: 'game' | 'precomputed' | 'jeffml-scores'
-    -- Provenance / quality metadata (nullable; NULL = legacy/untrusted row)
-    analysis_profile_id VARCHAR(64),        -- id into the in-code profile registry
-    engine_name VARCHAR(64),
-    engine_version VARCHAR(64),
-    engine_build VARCHAR(128),              -- binary SHA-256 (not UCI id author)
-    network_id VARCHAR(128),                -- NNUE EvalFile name + content hash
-    search_limit_type VARCHAR(16),          -- 'depth' | 'nodes' | 'movetime'
-    search_limit_value INTEGER,
-    threads INTEGER,
-    hash_mb INTEGER,
-    multipv INTEGER,
-    eval_file_id TEXT,                      -- Full NNUE big-net identity "<filename>:<hash>"
-    eval_file_small_id TEXT,                -- Full NNUE small-net identity "<filename>:<hash>"
-    analyzer_protocol_version VARCHAR(64),  -- Version of the analyzer output contract
-    profile_manifest_digest VARCHAR(64),    -- Digest of the producing profile's identity bits
-    evidence_contract_id VARCHAR(64),       -- id into the evidence-contract registry
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    UNIQUE (fen_before, move_uci)
-);
-
-CREATE INDEX idx_analysis_cache_fen ON analysis_cache(fen_before);
--- Composite index for the opening-tree normalized transposition fallback.
-CREATE INDEX idx_analysis_cache_norm_move ON analysis_cache(normalized_fen_before, move_uci);
-```
-
-**Key semantics:**
-- The `(fen_before, move_uci)` unique pair enables O(1) lookup: "has this exact position+move been analyzed before?"
-- `normalized_fen_before` is **derived** from `fen_before` (`app/fen.py::normalize_fen`) and set only on INSERT in the shared writer; it is the indexed key for the opening-tree transposition fallback (see below). NULL on rows whose FEN failed to parse during backfill.
-- `played_eval` / `best_eval` (and their `_mate` companions) are **white-relative**: positive favors White regardless of side to move.
-- `source` records provenance only (`game`, `precomputed`, `jeffml-scores`); it is **not** the quality comparator.
-- The frontend races its own local Stockfish worker against this cache to avoid redundant computation
-
-**Opening-tree eval lookup (`backend/app/tree_eval.py`).** The horizontal opening
-tree reads a per-node eval from this cache and never runs its own engine. A move
-node has key `(parent_fen, move_uci)`, but the tree replays the UCI line from the
-initial board so `parent_fen` is a full 6-field FEN whose clocks may differ from a
-stored `fen_before` (transpositions). `lookup_move_evals` resolves each node in at
-most two indexed, batched queries (never a scan, never one query per child):
-1. **Exact `(fen_before, move_uci)` wins** when its row has a usable, *move-trusted*
-   played eval.
-2. Otherwise an **indexed normalized fallback** over `(normalized_fen_before, move_uci)`
-   among *move-trusted* rows selects deterministically: prefer rows with mate data, then
-   `source=precomputed` > `game` > other, then lowest `id`.
-3. Otherwise — only when **no trusted eval exists** — an **untrusted played-eval
-   fallback** surfaces whatever cached eval we have so off-book cards show a number
-   instead of an em dash: the untrusted exact row (tier 3), else the best untrusted
-   normalized row by the same deterministic key (tier 4). This tier is source-agnostic
-   (any non-authoritative row with a usable played eval — browser-game, bare-source, or
-   other — qualifies), so the **move-card eval is NOT strictly trust-gated**. The
-   column-0 **root** eval (`lookup_root_eval`) has no such fallback and stays trusted-only.
-The returned value prefers `played_eval_mate` over `played_eval` (mate over cp). The
-column-0 root uses `lookup_root_eval`, returning the position's `best_eval`/`best_eval_mate`
-(the eval under the engine's best move — a property of the position); any row at the
-starting FEN with a usable best eval qualifies, with the complete best-move row
-(`move_uci == best_move_uci`) merely preferred in ranking. Values stay white-relative;
-`eval_for_perspective` negates cp and mate for Black. Missing eval is a normal null
-state (rendered as an em dash), never an error and never a trigger for browser engine
-analysis.
-
-**Quality-aware writes (rows are NOT immutable).** Every writer — session/game
-uploads, opening precompute, and JeffML score ingestion — routes through one
-shared helper (`backend/app/analysis_cache_repo.py::write_analysis_cache_rows`)
-that applies a single deterministic replacement policy
-(`backend/app/analysis_cache_policy.py::decide_analysis_cache_replacement`)
-returning INSERT / REPLACE / MERGE / KEEP plus a reason code. The policy reasons
-over two registries, never over raw numeric depth:
-- **Profile registry** (`backend/app/analysis_profiles.py`) — immutable, versioned
-  engine/search profiles. A row is *trusted* only when its stored identity
-  metadata matches its claimed profile (`identity_verified`). Cross-family
-  replacement requires an explicit `dominates` edge **and** an authoritative
-  profile.
-- **Evidence-contract registry** (`backend/app/evidence_contracts.py`) — versioned
-  data-shape contracts with per-contract semantic validation
-  (`resolver-complete-v1` mirrors the worker's old combined resolve guard;
-  `resolver-complete-v2` is the fail-closed trust contract — full eval triple,
-  enum-valid classification, PV-first-equals-best, and active-color delta
-  consistency; `minimal-played-eval-v1` / `minimal-best-eval-v1` cover eval-only
-  rows; the grain-split `position-complete-v1` / `move-complete-v1` contracts —
-  §14.6.4 — mirror the worker's now-split `canResolvePositionAnalysis` /
-  `canResolveMoveAnalysis` guards). Replacement/merge requires contract succession
-  plus a populated-field superset so no datum is ever silently dropped.
-
-Net guarantees: a browser `game` upload is non-authoritative — it may fill keys
-that have no evidence but can never downgrade a canonical or legacy row; sparse
-JeffML rows can never replace richer ones; only a re-run authoritative canonical
-profile reclaims legacy rows. Writes are serialized safely: PostgreSQL uses
-insert-first + `SELECT … FOR UPDATE`; file-backed SQLite uses `BEGIN IMMEDIATE` +
-`busy_timeout` with bounded retry; other dialects are rejected. The `/api/analysis/lookup`
-response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_build`,
-`evidence_contract_id`, and an `authoritative` trust flag derived from the same
-validation the writer uses.
-
-**Stronger analysis-board evidence (g-cache-stronger-evals → g-reuse-d21-search).**
-The analysis board runs a depth-21 search that is deeper than the in-game depth-17
-producer, and that stronger evidence is persistable. As of **g-reuse-d21-search**
-the durable producer no longer runs a *second* hidden analyzer: it REUSES the
-already-completed, unrestricted visible depth-21 MultiPV-3 search the board already
-performs for arrows/lines. Key points:
-
-- **Visible-MultiPV reuse producer.** When the exact played mainline move appears in
-  the completed visible MultiPV lines, a same-search evidence row is derived from
-  line 1 (best) and the played line — with NO additional Stockfish search — and
-  submitted through the analysis-evidence endpoint. The best and played facts are two
-  lines of ONE completed request, so the tuple is internally consistent by
-  construction (unlike the retired hidden protocol, whose independent post-move
-  searches could contradict the hidden root ordering — g-kgiq). When the played move
-  is OUTSIDE the visible lines the producer does nothing and the existing depth-17
-  evidence is retained (no targeted search — a separate product/compute decision). A
-  restricted/hybrid visible search (the `trustedBest` `searchmoves` MultiPV-2 path) is
-  skipped; the reuse feature never spends extra compute to widen coverage there.
-- **Five-layer evidence vocabulary (`backend/app/evidence_policy.py`).** The shared
-  browser-evidence policy (g-browser-policy-v2) separates *identity* (does a row's
-  stored metadata match its claimed profile — one `verify_identity`, replacing five
-  duplicated exact-equality checks; a per-profile `dynamic_fields` seam, filled by
-  `browser-game-v2` in g-mk1d), *protocol* (is the producer internally consistent —
-  `PROTOCOLS`, whose `internally_consistent` flag now GATES capability grants at
-  registry load rather than merely documenting them), *contract* (evidence shape —
-  `evidence_contracts`), *comparison*
-  (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
-  and *capability* (which consumers may reuse a row — `has_capability`). g-v21l wires
-  the read/reuse grants beyond `DISPLAY_OVERLAY` and adds submitter (owner) scoping on
-  top of them (§14.7); the cross-grain authority rule (g-6xc3) composes this module's
-  authority answer with the contract registry's grain answer but lives in
-  `analysis_cache_policy` — it is a storage decision about one table's grain ownership,
-  so the comparator stays a pure ordering; measured-strength comparison is wired by
-  g-mk1d (below).
-- **`EDGES` and kinds.** Cross-profile ordering is explicit directed edges, never raw
-  depth, each tagged `AUTHORITY` (canonical over any non-authoritative row),
-  `PROTOCOL_CORRECTION` (a truthful protocol fixes a defective one), or `TIER_BASELINE`
-  (a deeper same-family tier replaces a shallower one). Current edges: both canonical
-  manifests → {`browser-game-v1`, `browser-analysis-v1`, `browser-analysis-multipv-v2`,
-  `jeffml-scores-v1`} (AUTHORITY); `browser-analysis-v1` → `browser-game-v1`
-  (TIER_BASELINE); **`browser-analysis-multipv-v2` → `browser-analysis-v1`**
-  (PROTOCOL_CORRECTION); **`browser-analysis-multipv-v2` → `browser-game-v1`**
-  (TIER_BASELINE). A registry-load assertion fails closed unless `EDGES` and each
-  profile's `dominates` set agree in both directions. `compare_evidence_rows`
-  implements the authority barrier and explicit-edge steps; unequal non-edged rows
-  then fall through to the measured-strength steps g-mk1d filled in, which
-  **delegate to `compare_row_strength`** (see below) and return `INCOMPARABLE` unless
-  the two rows share scoring semantics. Delegation, not a second implementation:
-  one pair of rows must not order differently depending on which caller asked.
-- **`Supersession` carries the GRAIN that decided, not just the winner.**
-  `A_SUPERSEDES` / `B_SUPERSEDES` mean a CATEGORICAL win from the authority barrier or
-  a registered edge — independent of any number either row measured, so a depth-30
-  browser row still loses to canonical. `A_STRONGER` / `B_STRONGER` / `EQUAL` mean a
-  MEASURED ordering from steps 4-5, and carry `kind=None` because no registered edge
-  justifies them; they agree name-for-name with `compare_row_strength`, which is steps
-  4-5 alone (Rule 2a calls it directly, where steps 2-3 cannot fire). The comparator
-  never flattens the measured grain into the categorical one: a caller that cannot
-  tell them apart cannot report a measured replacement as `strength_replace`. Callers
-  whose local decision genuinely treats outcomes alike collapse them THEMSELVES —
-  Rule 5 keeps the stored row for `B_STRONGER`, `EQUAL` and `INCOMPARABLE` alike.
-  Cache Rule 5 routes through it: a measured `A_STRONGER` reports `strength_replace`
-  (the same reason Rule 2a uses for the same fact), a PROTOCOL_CORRECTION supersession
-  reports `protocol_corrected_replace`, AUTHORITY / TIER_BASELINE keep
-  `dominates_replace`. This is REACHABLE today, not latent: a `browser-game-v2` row
-  shares engine, build, net, MultiPV 1 and the `browser-analyzer-v1` protocol with a
-  stored retired `browser-analysis-v1` row and is connected to it by no edge, so the
-  two differ only in depth and rank normally — a self-reported depth above 21 replaces
-  the stored d21 row with `strength_replace`. (The shipped client clamps to 17, but the
-  dynamic provenance contract is deliberately permissive about the VALUE; strength
-  still cannot cross the authority barrier or reclaim an all-`None` legacy row.) Every
-  reason that means "the stored row is now this evidence" must therefore appear in
-  EVERY consumer's success allowlist — the evidence endpoint's
-  `_EVIDENCE_ACCEPTED_REASONS` (else the write lands and the open MoveList silently
-  never receives its `MoveUpgrade`) and the precompute script's `_ACCEPTED_REASONS`
-  (else a successful upgrade is counted as a `write_failure` and fails the run).
-  `protocol_corrected_replace` is excluded from the precompute list on purpose: that
-  producer is authoritative, and the authority barrier resolves canonical-vs-browser
-  before explicit edges, so a canonical write can never earn it.
-- **`browser-analysis-multipv-v2` profile.** The corrective successor. Its identity is
-  the ACTUAL visible worker (`stockfishWorker.ts`): the same pinned
-  `stockfish-18-lite-single` artifact and single net `nn-9067e33176e8.nnue` as the
-  retired hidden profile, but the visible worker's real **Hash 64** and **MultiPV 3**
-  under the internally-consistent `browser-visible-multipv-v1` protocol, at depth 21.
-  NON-authoritative, `replacement_eligible`, ACTIVE. It correctively replaces a
-  defective `browser-analysis-v1` row (PROTOCOL_CORRECTION) and a weaker
-  `browser-game-v1` d17 row (TIER_BASELINE) for the exact key, but never dominates
-  canonical, reclaims legacy rows, or becomes read-trusted. Every newly executed
-  visible depth search starts with `ucinewgame`, before MultiPV/position/go, so its
-  Hash-64 TT is clean and its displayed/evidence-bearing opinion cannot inherit the
-  browsing path. Display-cache hits reuse their already-frozen snapshot without a
-  search; timer-bounded movetime searches remain warm. This changes no profile shape
-  and does not rewrite historical rows.
-- **`browser-analysis-v1` retirement.** The hidden root + independent post-move
-  protocol (`browser-analyzer-v1`) is internally inconsistent and is RETIRED
-  (`active=False`) in this release. Its stored rows stay `identity_verified` (the
-  manifest digest excludes `active`/`dominates`), so they keep `DISPLAY_OVERLAY`
-  (a retirement-surviving capability) and remain correctively replaceable, but a new
-  incoming v1 row fails closed (`inactive_profile_keep`) — closing the fail-open
-  retirement window in the decision layer, in addition to the endpoint discriminator.
-- **Producer discriminator (mandatory).** The endpoint stamps all identity/profile
-  fields server-side; the client selects no profile id and instead sends
-  `producer: "visible-multipv-v1"`. An absent producer (a stale client running the
-  retired hidden worker) is rejected per-row `stale_producer`; an unrecognized value
-  `unknown_producer`; the single allowed token maps to `browser-analysis-multipv-v2`.
-  HTTP stays 200 with the normal result list.
-- **Backend classification rederivation (every row).** Beyond
-  `resolver-complete-v2`'s enum/arithmetic checks, the endpoint independently rederives
-  each row's classification from the best/played root-relative scores using a dedicated
-  root-alternative classifier and rejects any disagreement (`classification_mismatch`).
-  g-v21l extracts the FULL rule into one shared validator,
-  `validate_root_alternative_classification`, used at ingress AND at read time inside
-  the coherent-tuple resolver (§14.7), so a row that cannot be submitted can never be
-  read back either. Calling `classify_root_alternative` alone is NOT validation — it
-  short-circuits to `best` whenever the UCIs match — so the validator additionally
-  requires exact CP equality, exact mate equality and a REAL `eval_delta == 0` (never a
-  null-coalesced zero) for a matching-UCI row, and rejects a stored `best` on
-  non-matching UCIs.
-  Lower lines and mate transitions are as client-supplied as line 1. The root
-  classifier (`classify_root_alternative` / `classifyRootAlternative`) takes a truthful
-  ROOT side-to-move contract — NOT the post-move opponent-to-move argument order of
-  `classify_move_advanced` — while sharing the win-chance / mate thresholds; the two
-  classifiers are pinned across TS and Python by
-  `backend/tests/fixtures/root_classification_vectors.json`.
-- **Capabilities / overlay.** `display_upgrade_eligible` is now
-  `has_capability(row, DISPLAY_OVERLAY)` AND the profile's `OVERLAY_MODE == ALWAYS`
-  (truth-table-identical to the old `dominates(browser-game-v1)` test for the profiles
-  that existed before, now additionally admitting `browser-analysis-multipv-v2`).
-  Canonical holds all eight capabilities. g-v21l grants
-  `browser-analysis-multipv-v2` five more — `POSITION_READ`, `MOVE_READ`,
-  `INTERACTIVE_ANALYSIS_REUSE`, `GAME_ANALYSIS_REUSE`, `OPENING_EVIDENCE` — every one
-  of them SUBMITTER-SCOPED (§14.7); `DRILL_GRADE` and `TREE_EVAL` stay ungranted. The
-  retired `browser-analysis-v1` holds only `DISPLAY_OVERLAY`; `browser-game-v1` /
-  jeffml hold none. g-mk1d adds `browser-game-v2`, which holds `DISPLAY_OVERLAY` under
-  the third mode `REQUIRES_COMPARISON` (below) — the ALWAYS-only
-  `display_upgrade_eligible` predicate the one-row seam uses still excludes it.
-  A registry-load assertion states the grant precondition PROTOCOL-side rather than
-  per-profile: **holding any active-required (non-`RETIREMENT_SURVIVING`) capability
-  requires an internally consistent protocol.** So `browser-game-v1`,
-  `browser-game-v2` and the retired `browser-analysis-v1` (all `browser-analyzer-v1`
-  or no declared protocol) are capped at `DISPLAY_OVERLAY` whether active or retired,
-  while the internally consistent `browser-analysis-multipv-v2` may receive
-  read/reuse grants (the seam g-v21l needs); an unregistered
-  `analyzer_protocol_version` fails closed. Lifecycle is deliberately NOT part of
-  that rule — retirement is enforced at USE time by `has_capability`
-  (`profile.active` or capability ∈ `RETIREMENT_SURVIVING`).
-  A second load assertion pins the two overlay tables to agree: every `OVERLAY_MODE`
-  entry names a registered profile and is a real `OverlayMode`, and **a non-`NEVER`
-  mode holds if and only if the profile is granted `DISPLAY_OVERLAY`.** Either half
-  alone is inert — a mode without the grant never runs (`has_capability` rejects the
-  row first), and a grant without a non-`NEVER` entry never runs either
-  (`overlay_mode` defaults an unlisted profile to `NEVER`) — and both read downstream
-  as "this profile does not overlay", indistinguishable from an intended `NEVER`, so
-  the drift is silent everywhere except at load. WHICH non-`NEVER` mode a profile
-  takes stays a policy choice.
-- **Exact-key model.** `SessionAnalysisMove` carries `fen_before` and `move_uci`.
-  The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
-  wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove
-  has no stored UCI). Evidence writes key on those exact values so a depth-21 row
-  lands on the existing depth-17 `browser-game-v1` row. A derivation mismatch degrades
-  gracefully to a near-duplicate `NEW_KEY` insert beside the old row, never
-  corruption. Display helpers (`buildMainLineMoveDetails`, `projectExactBest`) prefer
-  the wire fields with a legacy-only reconstruction fallback; the evidence driver has
-  NO fallback (a null wire field skips the move).
-- **Eval storage.** Evals are stored white-relative; mate is stored both as a finite
-  mate-to-CP `*_eval` and a raw `*_eval_mate` count. The client recomputes `eval_delta`
-  from the white-relative evals and clamps it at `>= 0` (never forwarding the worker's
-  raw mover-relative delta), making each row self-consistent with `resolver-complete-v2`.
-- **Mate fields never veto dominance.** Rule 5's completeness (superset) check strips
-  the optional `played_eval_mate`/`best_eval_mate` before comparing, so a stronger
-  CP-only row replaces a weaker row that merely stored a raw mate count. The exclusion
-  is symmetric and global to Rule 5 (a CP-only canonical write also replaces a browser
-  row that stored mate counts). Same-profile MERGE (Rule 2) is unchanged: there mate
-  fields are genuinely additive and still participate in agreement/superset checks.
-- **A REPLACE stores the incoming evidence, never a union.** `_apply_update(full=True)`
-  CLEARS every evidence column the incoming row does not carry, so absence and an
-  explicit `None` mean the same thing on the replace path (unlike INSERT, where an
-  absent key must fall through to a column server default). Without it a replacement
-  would inherit whatever the replaced producer wrote in the columns it left out — a
-  mate count no CP-only canonical row ever claimed, or (since the cross-grain rule
-  below) a browser row's best-move facts stranded under a canonical stamp and a
-  move-grain contract id. Identity, `source` and `move_san` are untouched when absent:
-  they describe the producer and the key, and every write path stamps identity whole.
-- **Network identity.** `browser-analysis-v1` pins the lite-single net
-  `nn-9067e33176e8.nnue` (full SHA-256 …993f314d), distinct from canonical SF18's big
-  net `nn-c288c895ea92.nnue`, so browser-analysis is network-incompatible with
-  canonical and can never dominate it. `engine_build` is the SHA-256 of the compiled
-  `stockfish-18-lite-single.wasm` artifact; the JS loader hash, npm package version
-  (`stockfish@18.0.7`), and npm integrity are surrounding provenance only.
-  `engine_version="18"` is the UCI `id name` token (npm `18.0.7` is provenance only).
-- **Canonical replacement is guaranteed** for current canonical `resolver-complete-v2`
-  writes replacing browser-analysis, and — since g-6xc3 — for post-split canonical
-  `move-complete-v1` writes too, via the cross-grain authority rule below.
-- **Cross-grain authority (Rules 4b/5b, `cross_grain_authority_replaces`).** The
-  completeness (superset) gate measures the wrong thing for a post-split write:
-  `move-complete-v1` is deliberately not a superset/successor of
-  `resolver-complete-v2` (a move-only row cannot satisfy v2's cross-grain
-  `eval_delta == f(best_eval, played_eval)` invariant) and populates no position
-  fields, so BOTH halves fail and an authoritative canonical move write would lose to
-  a NON-authoritative browser v2 row. The position facts are not dropped but
-  RELOCATED — the same producer run wrote them to `position_analysis` — so the rule is
-  keyed on AUTHORITY instead, and consulted at both `incoming_less_complete_keep`
-  vetoes (Rule 4 legacy reclamation, Rule 5 cross-family dominance). It fires only
-  when: the incoming row is effectively authoritative; the existing row is NOT; the
-  incoming contract is `grain_split` (`position-complete-v1` / `move-complete-v1` —
-  a legacy `minimal-*` shape is equally narrow but narrow because nobody produced the
-  rest, and does not qualify); every grain it drops is `POSITION` (nothing relocates
-  the MOVE grain — `analysis_cache` *is* that table); and it sheds nothing within the
-  grain it retains (mate fields stripped symmetrically, as in Rule 5). Verdict:
-  `cross_grain_authority_replace`. An unknown/absent contract on either side has no
-  grain and fails the rule closed. Rule 2 (same effective profile) has a separate,
-  narrow migration branch for the canonical v2-to-move case. An active authoritative
-  `move-complete-v1` row may replace the same profile's
-  active authoritative row only when the stored contract is exactly
-  `resolver-complete-v2`, the transition relocates only the `POSITION` grain, and all
-  populated non-optional move-grain facts are retained and agree (`played_eval` and
-  `classification`; mate annotations remain optional). The incoming row must populate no
-  `POSITION`-grain fields: contract satisfaction requires move fields but does not reject
-  out-of-contract extras, and a full-row replacement would otherwise restore duplicated
-  position columns. Stored position facts are not compared because their durable owner is
-  now `position_analysis`; `eval_delta` is likewise not an agreement gate because it is a
-  cross-grain canonical-run snapshot. The stored v2 row need not satisfy its combined
-  invariant, so an agreeing valid move row can heal a malformed position/delta half.
-  Verdict: `same_profile_grain_transition_replace`.
-  This is a storage transition, not contract supersession, and has a required producer
-  precondition: commit and verify the position winner first, then replace the move row,
-  then verify both grains. The comparator cannot query `position_analysis`, so callers
-  must enforce that order. The reverse (`move-complete-v1` stored, v2 incoming), a
-  different profile, a non-authoritative pair, any other contract pair, retained move
-  loss, or retained move disagreement remains refused; in particular, a stale combined
-  writer can never restore duplicated position columns after cutover.
-- **Not read-trusted.** Browser-analysis rows are never `/lookup` trusted hits or
-  frontend trusted publications; read-time trust for stronger browser rows is the
-  follow-up `g-v21l`.
-- **Source ranking** is `precomputed < analysis < game < other`. Rows written by the
-  evidence endpoint stamp `source="analysis"`. Its only functional effect is in
-  `tree_eval.lookup_move_evals` tier 4 (the normalized untrusted transposition
-  fallback): a normalized `analysis` row outranks a normalized `game` row there ONLY
-  when no exact untrusted row exists (tier-3 exact rows win first). Position-grain
-  resolution is unaffected (browser-analysis is non-authoritative and
-  `resolve_trusted_positions` pre-filters to trusted rows). Accepted cross-user blast
-  radius: a client-supplied `source="analysis"` row from one user's owned session can
-  outrank a `source="game"` row in other users' tier-4 untrusted fallback — the same
-  broad trust tier as existing browser-game rows, with stricter full-PV legality
-  validation, never crossing into trusted paths.
-- **Endpoint.** `POST /api/session/{session_id}/analysis-evidence` is session-scoped,
-  owner-only, gated on `_should_run_session_move_evidence` (hidden/abandoned drills
-  rejected with `session_not_evidence_eligible`), and guarded by exact mainline
-  membership. SAN is server-derived from validated UCI and never trusted from the
-  client; the backend stamps all profile/authority/source identity. FEN, move,
-  best-move, and full-PV legality are validated (stricter than the browser-game upload,
-  so it may drop otherwise-uploadable rows as a missed upgrade). The response is one
-  entry per submitted row in request order, including `duplicate_request_key` handling.
-  Owned-session client evals are accepted unverified (matching browser-game); server
-  eval re-verification is out of scope. Evidence-writing surfaces are the saved-game
-  `GameAnalysisPage`, `HistoryPage`, and `BlundersPage` boards; `DrillAnalysisPage` and
-  ephemeral boards never write.
-- **Reuse layer (no second worker).** The evidence layer (`src/services/analysisEvidence.ts`)
-  owns NO Stockfish worker and runs NO extra search. `stockfishWorker.ts` builds an
-  immutable completed-root snapshot atomically at its `bestmove` boundary (associating
-  every info line with the request id, accumulating PV-bearing slots by one-based
-  multipv index); the snapshot is deep-frozen on the MAIN THREAD in
-  `useStockfishEngine` (a structured-clone across `postMessage` strips a worker-side
-  freeze) and both the UI and the reuse layer observe that one frozen value. On each
-  visible-search completion `AnalysisBoard` feeds the snapshot to
-  `considerCompletedSearch` with the current next-mainline-move context read via a ref,
-  so a stale search that settles after navigation is ignored (its `fen` no longer
-  matches the current `fenBefore`). The layer's eligibility gate requires a saved
-  session, `showEngineArrows`, the mainline (not a variation), exact non-null wire
-  `fen_before`/`move_uci`, an unrestricted depth-21 MultiPV-3 shape, `min(3, legalMoves)`
-  dense depth-21 slots, and the played move present as `pv[0]` of a complete line;
-  submission is deduped by a content signature over the evidence-bearing snapshot/row
-  with disjoint in-flight and terminal sets (a network failure clears in-flight and may
-  retry; any HTTP 200 is terminal; a session change clears both). With visible engine
-  analysis disabled, no analysis-board evidence computation or submission occurs.
-  Read-time skip logic for stronger browser rows is deferred to `g-v21l`.
-
-**Per-device in-game evidence (g-mk1d).** In-game browser evidence used to be a
-single undifferentiated tier: every device searched to depth 17 and every uploaded
-row carried all-`None` engine metadata, so the first row for a `(fen_before,
-move_uci)` key won regardless of what a later, stronger run found. g-mk1d makes the
-in-game producer honest about what it actually ran, and makes browser rows
-comparable *within* the browser tier — without changing the authority barrier.
-
-- **Per-device depth selector (`src/workers/deviceAnalysisTier.ts`).**
-  `computeDeviceAnalysisDepth` picks a depth from deterministic `navigator` signals
-  (`hardwareConcurrency`, and Chromium's `deviceMemory` treated as UNKNOWN rather
-  than "small" when absent, so non-Chromium devices are not pinned to the floor
-  forever). No timing probe: a benchmark would make provenance a function of
-  measurement noise. `BASELINE_DEPTH = 17` is a FLOOR — any missing signal, unknown
-  browser, or thrown lookup returns it, so the change can only be neutral-or-better.
-  `sessionAnalysisDepth()` memoizes the result for the whole page session; that
-  homogeneity is load-bearing, because every row a session uploads then claims the
-  SAME `search_limit_value` and per-slot upload coalescing can never pair one
-  upload's numbers with another's depth claim. Both in-game callers
-  (`GameAnalysisCoordinator`, `useMoveAnalysis`) now send it as
-  `AnalyzeMoveMessage.depth`; the analysis-board reuse path is unaffected.
-- **`MAX_DEVICE_DEPTH` ships AT the baseline (parity), gated on a latency
-  benchmark.** A depth ceiling does NOT bound latency — `go depth N` has no time
-  limit — so raising it requires a per-move p95/p99 acceptance target measured on the
-  WEAKEST device each tier admits, explicitly including the adversarial 8-core /
-  `deviceMemory`-unavailable cell (mobile Safari) that the signal heuristic routes to
-  the high tier. The ceiling raise and the wall-clock cap below are enabled together,
-  under that one gate.
-- **Shared per-move wall-clock cap, DORMANT at parity.** `analyzeMove` establishes ONE
-  `MAX_ANALYSIS_MS` deadline covering the engine reset and all three sequential
-  searches — not a per-search timer, which would let one move consume ~3x the budget.
-  It ships `null` (disabled). That is deliberate, not timidity: a healthy depth-17
-  analyze-move can legitimately run many seconds (g-f2mg recorded a single depth-14
-  iteration at 8.7s), so ANY finite value small enough to bound live-play latency
-  would truncate healthy searches and change their classifications. At depth 17,
-  bounding latency IS the behavior change. The cap is a TOTAL-DURATION bound and is
-  ORTHOGONAL to the ~8s inactivity watchdog (an inactivity window continuously reset
-  by the 1s heartbeat); there is no ordering constraint between them, and a ratified
-  `MAX_ANALYSIS_MS` may sit well above 8s. A reset that hits the deadline takes the
-  FATAL path — terminate + recreate the engine and clear `resetAckQueue` — because the
-  usual leave-in-queue absorber assumes the `readyok` is still coming; against a hung
-  engine an orphaned placeholder would swallow the NEXT request's ack and deadlock
-  every later reset. That move rejects scoped to its own id with no partial result.
-- **The deadline needs a post-stop grace to actually BE a bound.** `stop` is a request
-  to the nested engine, not a guarantee, so the deadline alone bounds only when the
-  stop is *sent*. An engine that never answers it would leave the search pending
-  forever — and worse than an ordinary hang, because `activeSearch` stays set and the
-  unconditional liveness heartbeat keeps vouching for the request, so the coordinator's
-  inactivity watchdog never trips either and the queue wedges with no bound anywhere.
-  A `STOP_GRACE_MS` (2s) timer armed alongside the `stop` closes this: answered in
-  time ⇒ the normal truncated-but-usable result; expired ⇒ the same fatal
-  terminate + recreate path as the reset timeout, rejecting that move scoped to its
-  own id. Every abandonment path (`terminate`, a mid-search cancel/error) clears both
-  timers, since an orphaned grace timer would otherwise destroy a healthy engine
-  mid-way through a LATER request. The grace is ONE PER MOVE, not one per search:
-  the deadline and the grace are two fields of a single `AnalysisBudget` object
-  threaded through the reset and all three searches, and the clock starts at the
-  move's FIRST deadline `stop`, so later searches inherit what is LEFT of it. A
-  per-search grace would let a move run `MAX_ANALYSIS_MS + 3x STOP_GRACE_MS` —
-  every search entered after the deadline stops immediately, so all three would arm
-  their own — reintroducing one level down the ~3x overshoot the shared deadline
-  exists to prevent. The move's total wall-clock bound is therefore
-  `MAX_ANALYSIS_MS + STOP_GRACE_MS`, which is what the latency gate measures against.
-- **Provenance honesty.** A truncated search reports an explicit `capFired` /
-  `stopReason`, never an inferred `reachedDepth < depth` (wrong in both directions: a
-  stop can land just after `info depth N`, and a forced mate finishes below N with no
-  cap — there the configured limit WAS honestly satisfied). Provenance survives only
-  for a tuple that is untruncated, CANONICALLY GRADED, and unrewritten:
-  `reconcileTrustedBest` clears it on both of its rewrite branches, since a
-  canonically corrected tuple's best-ness came from the position grain, not from a
-  stronger search. Cache-sourced results (someone else's search) carry none. A
-  cleared claim simply falls back to `browser-game-v1` with no strength claim. The
-  `analysis` response carries a REQUIRED `evidenceEligible` / `protocol` pair
-  (g-two-search-grade §9.1): the worker builds no provenance, so eligibility has to
-  be stated rather than inferred from omission. The shipping arm reports
-  `!capFired && canonical` / `'legacy'`, and candidate arms hardcode ineligible.
-  All three worker-result consumers (the coordinator's `buildWorkerResult` and both
-  `useMoveAnalysis` builders) stamp through the one shared gate
-  `workerTupleProvenance`, which reads `evidenceEligible` and nothing else
-  (g-coord-noncanon-prov). Gating on `capFired` alone is a mislabel, not a
-  simplification: a completed search whose grading fell back to the delta-band
-  `classifyMove` never used the protocol the profile describes, so it uploads
-  claimless and is stamped `browser-game-v1` — which, since that profile retired
-  (g-bgv1-cutover), means the cache writer refuses the row (`INACTIVE_PROFILE_KEEP`)
-  rather than storing evidence under a strength it cannot support. The move's own
-  `session_moves` row is written either way, so nothing the player sees changes.
-  Because provenance labels BY OMISSION — absent means v1, present means v2 with a
-  depth claim — the rule lives in exactly one place, or a consumer that forgets a
-  condition mislabels silently.
-- **`browser-game-v2` — the first DECLARED-DYNAMIC profile.** Its FIXED half
-  (`engine_name`, no small net, `multipv=1`, `browser-analyzer-v1`, manifest digest) is
-  exact-equality verified and always server-stamped; its DYNAMIC half
-  (`engine_version`, `engine_build`, `eval_file_id`, `search_limit_type`,
-  `search_limit_value`, `threads`, `hash_mb`) is per-field validated by
-  `DYNAMIC_FIELD_VALIDATORS` instead — the `dynamic_fields` seam g-reuse-d21-search
-  reserved. No client ever sends a profile id. NON-authoritative,
-  `replacement_eligible`, with NO `dominates` edge. These are self-reported
-  diagnostics by design: forging them can only reorder non-authoritative rows within
-  the browser tier, never cross the authority barrier, earn a capability, or touch
-  `position_analysis`.
-- **Identity constants are artifact-derived, not hand-copied.**
-  `src/workers/browserEngineIdentity.ts` is GENERATED (`npm run gen:engine-identity`)
-  by hashing the actually-bundled `stockfish-18-lite-single.wasm`; because that build
-  EMBEDS its net, the WASM hash pins the network transitively, and
-  `scripts/browser-engine-manifest.json` records WHICH network (there is no standalone
-  `.nnue` to hash). A CI test re-hashes the artifact and cross-checks both values
-  against the backend registry, which loads the same binary. This closes REPOSITORY
-  drift — a stale constant that no longer describes the shipped artifact would
-  identity-verify fine and silently mislabel every uploaded row. It cannot stop a
-  modified client self-reporting a valid-looking identity; see the threat model above.
-- **Measured strength (`compare_row_strength`, D4 steps 4-5).** Reads the ROW's stored
-  identity columns, not the profile's (a dynamic profile's registry values are all
-  `None`). Step 4 is a semantic compatibility guard — same engine, net(s), MultiPV,
-  analyzer protocol, and search-limit TYPE, plus compatible builds; step 5 compares
-  `engine_version` (leading int) then `search_limit_value`. Differing self-reported
-  builds are INCOMPARABLE: `BUILD_EQUIVALENCE` is keyed by profile id and meaningless
-  when every device shares one id. An all-`None` `browser-game-v1` row is UNKNOWN
-  strength, never weak, so it is INCOMPARABLE to every v2 row and a deeper v2 search
-  can NEVER reclaim it by depth. `browser-game-v2` vs `browser-analysis-multipv-v2` is
-  INCOMPARABLE (MultiPV 1 vs 3); the multipv-v2 → browser-analysis-v1 corrective edge
-  is untouched.
-- **Rule 2a — same-profile replacement.** For a declared-dynamic profile, two rows at
-  one key are NOT interchangeable. Stronger comparable ⇒ `strength_replace` (guarded
-  by the same completeness check as Rule 5, else `incoming_less_complete_keep`);
-  weaker ⇒ `strength_weaker_keep`; incomparable ⇒ `strength_incomparable_keep`;
-  identical provenance ⇒ the historical idempotent/merge path. There is NO
-  cross-provenance MERGE: a merged row carries exactly ONE provenance tuple, so
-  unioning evidence produced under different settings would attribute one device's
-  numbers to another device's identity — equal-strength-but-different-provenance rows
-  are therefore idempotent, not merged. `_dedupe_batch` resolves same-key dynamic rows
-  by simulating the decision in BOTH orders, so the batch survivor is
-  permutation-independent and matches what sequential writes would produce; no
-  agreeing strict winner ⇒ `duplicate_conflict`.
-- **Per-row provenance wire, fully permissive.** Provenance rides INSIDE each move
-  payload, not at request level: the deferred scheduler coalesces per `(move_number,
-  color)` slot with last-write-wins, so a request-level value would have no defined
-  merge rule and could mis-stamp rows — per-row needs ZERO scheduler change.
-  `SessionMoveInput.provenance` is typed `Any` on purpose; a constrained shape (even
-  `dict[str, object]`) makes Pydantic reject non-object JSON during request parsing and
-  422 the ENTIRE batch. All checking — starting with "is this even a mapping?" — moves
-  into `validate_browser_provenance`, run per row, with strict numeric typing that
-  rejects JSON booleans (`isinstance(True, int)` would otherwise accept `true` as a
-  depth-1 claim) and per-type `search_limit_value` bounds. VALID ⇒ v2 with the seven
-  dynamic columns; ABSENT ⇒ v1 as before; MALFORMED ⇒ the cache row is DROPPED, never
-  laundered into a silent v1 downgrade, while the `session_moves` row still persists
-  (with NULL provenance) and the batch stays HTTP 200.
-- **Two-grain observability.** The `analysis_cache_write` summary log — emitted once
-  per COALESCED SCHEDULER RUN per session, NOT per request — carries row-weighted
-  `provenance_valid` / `provenance_absent` / `provenance_malformed` (the operational
-  health signal) plus a length-independent per-run `session_provenance` bit
-  (`v2` | `legacy` | `mixed_malformed` | `none`, malformed dominating). The
-  session-grain adoption measurement reads only the latter, rolled up by
-  `app/browser_provenance_metrics.session_v2_adoption` to ONE verdict per DISTINCT
-  session (its latest FINAL run) — never the row counts, which a few long
-  legacy-client games would dominate, and never per-run counts, which would re-weight
-  by upload frequency. That rollup was built to be the `browser-game-v1` retirement
-  criterion; it never became one — the retirement below needed no adoption gate at all,
-  so this measures the fleet without authorizing anything. The Railway log adapter
-  that read this bit for the gate was DELETED with the gate (g-bgv1-report-fate); its
-  hard part — how completely Railway logs can be retrieved, which loss modes are
-  detectable and which two are irreducibly fail-open — is preserved in
-  [`docs/railway-log-query-completeness.md`](docs/railway-log-query-completeness.md)
-  and applies to any future log-based measurement. Finality comes from a
-  dedicated `session_final` field that OR-folds the client's `terminal_action` through
-  the scheduler entry, NOT from `run_opportunity`: the revert upload also sets
-  `recompute_opportunity=True`, and a client predating g-y90g sets it on every mid-game
-  upload, so reusing it would score abandoned and reverted sessions as complete. The
-  pre-existing `final`/`kind` fields on the same log line keep their `run_opportunity`
-  meaning — they are g-dckw's LATENCY cohort, and redefining them would silently
-  re-cohort a live metric.
-  Sessions with no final run are excluded from the ratio but COUNTED into
-  `sessions_without_final`, because that exclusion is not neutral: a client too old to
-  send `terminal_action` is also too old to send provenance, so silently dropping
-  those sessions inflates the adoption fraction toward 1.0 exactly when the legacy
-  fleet is largest. A large `sessions_without_final` invalidates the fraction.
-- **`browser-game-v1` is RETIRED for writes (`active=False`, g-bgv1-cutover).** v2
-  shipped purely additively first; v1 was then flipped unconditionally, with NO adoption
-  gate. A gate looked necessary by analogy with `browser-analysis-v1`, whose ENDPOINT
-  producer discriminator fails a stale client closed — but v1 is written from a
-  different path, `upsert_session_moves` → `_upsert_analysis_cache`, which has no
-  producer discriminator at all. There an inactive declared profile is refused by the
-  batch writer (`declared_profile_inactive` ⇒ `INACTIVE_PROFILE_KEEP`) WITHOUT raising:
-  a legacy client's upload still returns 200, its `session_moves` rows still persist,
-  and its own eval/classification display is unaffected. Nothing fails closed, so
-  retirement was never gated on fleet adoption. The cost is a deliberate trade, not
-  free: a refused row carried a real played eval that `tree_eval` tiers 3-4 could have
-  shown, but an all-`None` v1 row is UNKNOWN strength and therefore INCOMPARABLE to
-  every v2 row (D7.1), so every one it wrote would occupy its key against every future
-  v2 upload forever. A blank card today beats a key no browser game can improve.
-- **The stranded v1 rows are KEPT, not purged.** Rows already stored keep
-  `identity_verified` (the manifest digest excludes `active`/`dominates`), and the
-  `tree_eval` tier 3-4 fallback is trust-based rather than active-based — so retirement
-  does not stop stored v1 evals from being read. Nor are they permanently unimprovable:
-  `browser-analysis-multipv-v2` is active and DOES dominate v1, so an authoritative run
-  correctively replaces such a row in place, at its own key, whenever it reaches the
-  position. A purge would therefore delete live evidence to free keys that are already
-  reclaimable — D7.2's opportunistic-only stance holds for these rows. Identity backfill
-  stays rejected: their provenance was never recorded, so stamping one would fabricate
-  it.
-- **REQUIRES_COMPARISON overlay.** `browser-game-v2` holds `DISPLAY_OVERLAY` under a
-  third `OVERLAY_MODE`: it re-labels a played move only when provably STRONGER than a
-  LIVE operand, via the SAME `compare_row_strength` that governs storage — so what the
-  writer calls stronger and what the reader will display cannot drift apart. The
-  one-row Part-B seam supplies no operand and therefore never overlays such a row.
-  Part C (`GET /{session_id}/analysis`) builds the operand from
-  `session_moves.browser_provenance`, a nullable JSON `Text` column holding only the
-  DYNAMIC subset — the fixed half is reconstructed from the server registry at read
-  time, so a hand-edited row cannot claim an identity it did not earn. It is written
-  through the SAME validator as the cache write and refuses the same rows: absent,
-  malformed, AND synthetic-terminal all persist NULL. The synthetic case matters
-  because the two gates are separate code paths — a fabricated game-ending eval that
-  the cache correctly declines would otherwise re-enter here as the overlay's
-  supposedly-live search operand and suppress a genuine stored row. It is the only
-  operand available at GET for a saved game (request-side provenance exists only at
-  upload time; a reloaded page holds no client-side analysis — precisely when a
-  stronger cross-user row matters most). NULL/legacy/tampered ⇒ no operand ⇒ no
-  overlay, and the player keeps their own label. ALWAYS-mode profiles (canonical,
-  browser-analysis-v1/-multipv-v2) ignore the operand entirely — exact parity.
-
-**Position-truth foundation (g-position-analysis).** `analysis_cache` conflates two
-grains on one row — *position* facts (the position's best move / best line / best
-eval, properties of the normalized FEN) and *move* evidence (a played move's eval /
-loss / classification, keyed by `(fen_before, move_uci)`). Because mixed-provenance
-sibling rows for different played moves at the same FEN could disagree about a
-position's best move (a canonical row and a browser row carrying opposite
-`best_move_uci`), a consumer reading position facts off an untrusted move row could
-surface a wrong "best move" for the whole position. The split is now implemented:
-position truth lives in its own normalized-FEN-keyed storage, and `tree_eval.py`, the
-session drill-review export, and `/api/analysis/lookup` all read it (with a legacy-v2
-projection fallback during migration). The two storage tables are:
-- `position_analysis` — one trusted winner per `normalized_fen` (`best_move_uci` NOT
-  NULL; first-class `best_eval` / `best_eval_mate`; `best_line_uci`; full profile
-  identity + `evidence_contract_id`; representative `fen` and `source_cache_id` as
-  provenance only; `updated_at` since winners are replaced over time).
-  `UniqueConstraint("normalized_fen")`. Deliberately distinct from the full-FEN-keyed
-  `position_analysis: dict[str, PositionAnalysis]` session-wire field — a storage row
-  is never returned as the session map directly.
-- `position_analysis_conflicts` — append-only audit sink (indexed on `normalized_fen`,
-  not unique) recording the disagreeing candidate cache rows and per-axis disagreement
-  (`best_move`, `pv`, `best_eval`, `best_eval_mate`) plus a `policy_reason` when a
-  position has no clean winner.
-
-See **§14.6** for the full grain-ownership, trust-contract, write-policy, eval-loss,
-legacy-v2-transition, and migration model.
-
-### 5.7 Opening Score Tables
-
-The opening score system computes and stores per-user 0-100 mastery scores for opening lines (higher = better). Three tables work together: batches group computation runs, cursors track the latest batch per user/color, and scores hold the actual per-opening metrics.
-
-#### 5.7.1 `opening_score_batches` (Computation Runs)
-
-Each row represents a single batch computation of opening scores for a user/color pair.
-
-```sql
-CREATE TABLE opening_score_batches (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
-    generation INTEGER NOT NULL,            -- Monotonic counter per (user_id, player_color)
-    registry_fingerprint TEXT,              -- Hash of the opening registry used, to detect staleness
-    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    UNIQUE (user_id, player_color, generation)
-);
-
-CREATE INDEX idx_opening_score_batches_user_color ON opening_score_batches(user_id, player_color, generation);
-```
-
-#### 5.7.2 `opening_score_cursors` (Latest Batch Tracking)
-
-Tracks the latest generation per user/color so the system can quickly find the current scores without scanning the batches table.
-
-```sql
-CREATE TABLE opening_score_cursors (
-    user_id BIGINT NOT NULL,
-    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
-    latest_generation INTEGER NOT NULL DEFAULT 0,
-
-    PRIMARY KEY (user_id, player_color),
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black'))
-);
-```
-
-#### 5.7.3 `user_opening_scores` (Per-Opening Metrics)
-
-Stores the actual mastery metrics for each opening line, computed within a batch.
-
-```sql
-CREATE TABLE user_opening_scores (
-    id BIGSERIAL PRIMARY KEY,
-    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
-    user_id BIGINT NOT NULL,
-    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
-    opening_key TEXT NOT NULL,             -- ECO-style key identifying the opening line
-    opening_name TEXT NOT NULL,            -- Human-readable opening name
-    opening_family TEXT NOT NULL,          -- Broader family grouping (e.g., "Sicilian Defense")
-    opening_score FLOAT NOT NULL,          -- Mastery score (0-100, higher = better) computed directly per root
-    confidence FLOAT NOT NULL,             -- Statistical confidence in the score
-    coverage FLOAT NOT NULL,               -- Fraction of moves in this line that have been played
-    weighted_depth FLOAT NOT NULL,         -- Average depth of user's games in this opening
-    sample_size INTEGER NOT NULL,          -- Number of data points used for this score
-    last_practiced_at TIMESTAMP,           -- When the user last played this opening
-    strongest_branch_name TEXT,            -- Name of the user's best sub-line
-    strongest_branch_key TEXT,             -- Key of the user's best sub-line
-    strongest_branch_score FLOAT,          -- Score of the user's best sub-line
-    weakest_branch_name TEXT,              -- Name of the user's worst sub-line
-    weakest_branch_key TEXT,               -- Key of the user's worst sub-line
-    weakest_branch_score FLOAT,            -- Score of the user's worst sub-line
-    underexposed_branch_name TEXT,         -- Name of a sub-line the user hasn't practiced enough
-    underexposed_branch_key TEXT,          -- Key of an underexposed sub-line
-    underexposed_branch_value FLOAT,       -- Coverage gap value for the underexposed branch
-    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    UNIQUE (batch_id, opening_key)
-);
-
-CREATE INDEX idx_user_opening_scores_batch ON user_opening_scores(batch_id);
-CREATE INDEX idx_user_opening_scores_user_color ON user_opening_scores(user_id, player_color);
-```
-
-**Key semantics:**
-- `opening_score` is a **0-100 mastery** score (higher = better), computed **directly per root** from the shared scoring DAG. There is no confidence-weighted descendant rollup: a card shows its own root row, and the top-level hero shows a synthetic initial-position ("whole repertoire") row persisted under the normalized initial FEN with `opening_family = "__repertoire__"`.
-- `confidence` and `sample_size` quantify how sparse the evidence behind a score is. They remain backend/API metrics but are **no longer surfaced in the opening UI** (`g-9dph` removed the Confidence tile from the cards and the `/openings` legend); the API response still carries them
-- Branch fields (strongest/weakest/underexposed) are persisted from the same shared calculation and read directly by the drill-down (no per-request recompute)
-- Batches are replaced atomically: a new batch is computed, then the cursor is updated to point to it; old batches are pruned
-- `registry_fingerprint` includes the score-model, phase-divider, and quality-curve versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`, `TAU_CP`), so any model/divider/curve change invalidates all prior snapshots on the next read.
-- `inputs_fingerprint` is the **optional full raw-input audit/release digest** (`opening_score_raw_inputs_fingerprint`): it hashes a canonical, order-independent projection of exactly the raw DB rows the evidence overlay consumes — session_moves; the cache-fallback's **two trusted grains** (the exact `(fen_before, move_uci)` `analysis_cache` move rows plus their move-trust columns, AND the trusted position sources the fallback pairs them with: `position_analysis` storage winners and the legacy `analysis_cache` position-fallback rows at the candidate **normalized** FENs, including their grouping key `normalized_fen_before`); ghost-target blunders/positions; and blunder_reviews — **without any python-chess board replay or overlay build**, folded together with `registry_fingerprint` and an explicit `OPENING_EVIDENCE_INPUTS_VERSION`. Explicit/direct snapshots and the release-calibration capture fence retain this content identity. Ordinary scheduler-built batches leave the field NULL because serving-time freshness is proved independently by the partitioned signal below; NULL no longer means stale when that complete signal is present.
-- `recompute_opening_scores_if_needed()` is the single recompute-decision function, run on the scheduler's serialized worker. Its warm decision is O(1) while the shared cache is quiescent: `registry_fingerprint`, the per-`(user, color)` `evidence_seq`, the global `cache_epoch`, and (only after an epoch drift) the batch's stored `scoped_shared_digest` prove whether the cached batch is reusable **without building the expensive overlay or scanning all session moves**. An actual rebuild samples the two counters before evidence, builds the overlay, hashes the overlay's exact shared fallback scope, requires identical `analysis_cache` move-row identities plus unchanged post-read counters, and stamps that operational proof without running the redundant full raw digest. A missing epoch, identity mismatch, or counter race falls back to the conservative full-snapshot-before-overlay sequence. Every rebuild event carries `freshness_capture = operational | fallback_null_epoch | fallback_identity | fallback_counter`, and fallbacks also log that same reason at INFO, so the extra full digest/discarded-overlay cost is attributable in production. This nullable/exact-scope capture is freshness contract `fresh-v2`, so rollout invalidates older registry fingerprints once without a schema migration. The overlay (per-session board reconstruction + Lichess phase divider) is rebuilt only on a cache miss, registry drift, stale branch keys, an evidence-signal change, or decay-staleness. Reads are stale-while-revalidate, and the reader paths differ by how much latency they can spend:
-  - **Warm** (batch present, any reader): calls `request_recompute()` to schedule a coalesced background convergence and serves the cached batch immediately — never blocking. The unconditional warm enqueue is load-bearing: it is the only trigger that catches evidence changes with no write-path enqueue (out-of-process scripts, post-restart first read).
-  - **Cold session-lineage reader** (`load_cached_rows_nonblocking`, behind `GET /api/session/:id/openings` — g-a5v3): never blocks. With evidence it returns the full lineage with **pending** scores and issues a *guarded* normal enqueue (skipped when the key is already pending/in-flight, so the client's ~3s reconciliation poll cannot postpone the very rebuild it awaits).
-  - **Cold with no evidence:** settles as unscored with **no enqueue at all** — the worker writes no batch for such a user, so waiting or re-scheduling could never produce one.
-  - **Cold blocking readers** (`load_cached_rows` for the `/openings` family endpoints, and the `/tree` registry/schema bootstrap in `ensure_tree_cache`): still block on `refresh_now()` for the one-time initial compute, which enqueues an *immediate* recompute for that one key and awaits a covering run.
-- **The recompute decision is an explicit contract, not an inference.** `recompute_opening_scores_if_needed()` returns an `OpeningScoreRecomputeResult` carrying a closed `RecomputeDisposition` — `rebuilt` (with the dominant rebuild reason), `cached` (existing batch served unchanged), or `no_evidence` (no batch, none possible) — because a bare `OpeningScoreBatch | None` cannot distinguish a cached fast return from a real rebuild. An exception is the scheduler's fourth operational outcome, `failed`; it is never fabricated as a result. All three normal dispositions are successful *covering* runs for `refresh_now()`, whose contract is "a covering run completed and the key is quiescent", not "a batch was written".
-- **Queue vs. worker cost is measured, not assumed (g-score-queue-timing).** Every enqueue names its producer from the closed `OpeningScoreTrigger` vocabulary, validated at the enqueue boundary before any queue mutation so an unvalidated value can never reach a log or analytics event. Each pending entry preserves both ends of its coalescing burst (`first_seen`/`last_seen`), the first/last/complete **set** of folded triggers, and whether dispatch was forced (shutdown drain or explicit flush). `_run_one` samples worker start as its first instruction — per run, after any earlier due key finished — so post-deadline **dispatch lag** (single-worker head-of-line blocking) is separated from intentional **policy delay** (debounce/max-wait). The decomposition rides on the existing `opening_scores_recomputed` event (stamped `scheduler_timed`, timing version 1); a separate all-outcome completion log record covers `rebuilt`/`cached`/`no_evidence`/`failed`. See `docs/posthog-opening-score-queue-timing.md`.
-- **The overlay replay cache is a two-tier read-through cache (g-25mp, g-overlay-cold-bootstrap).** The bounded, process-local per-`session_id` LRU remains L1. `opening_session_replay_cache` is the durable L2, with one replaceable row per source session: `session_id UUID PRIMARY KEY REFERENCES game_sessions(id) ON DELETE CASCADE`, `content_hash VARCHAR(40)`, explicit `divider_version` / `inputs_version`, `payload_version SMALLINT`, `move_count INTEGER CHECK (move_count >= 0)`, canonical JSON `payload TEXT`, and statement-time `updated_at`. The logical key is `(session_id, content_hash, DIVIDER_VERSION, OPENING_EVIDENCE_INPUTS_VERSION, SESSION_REPLAY_PAYLOAD_VERSION)`. After the grouped digest probe, resolution is L1 -> batched L2 -> authoritative `session_moves` replay; raw move rows, board reconstruction, and the Lichess divider run only for misses in both tiers. A first build after rollout may populate L2 from raw evidence, but a later process restart clears only L1 and hydrates unchanged replay products from L2.
-  - L2 stores only the raw per-session replay product: the canonical session timestamp, excluded verdict/message, optional phase sample, and opening-premove fields. It never stores quality, shared analysis fallbacks, overlay nodes/edges, scores, grades, or whole-game plies. JSON decoding is strict and fail-closed on unknown/missing fields, scalar types, move counts, version mismatch, and excluded/included invariants. A malformed or stale row is a cache miss, is replaced from authoritative evidence, and cannot change scoring. Move quality and shared fallbacks are recomputed after every L1/L2 resolution, so `QUALITY_VERSION` / `TAU_WC` / `TAU_CP` changes do not invalidate replay rows.
-  - PostgreSQL L2 reads and batched upserts use short, independent cache-only transactions on the caller's engine, because real evidence callers intentionally roll back their read transaction. The chunked PostgreSQL lookup compares the UUID primary-key column directly to a cast UUID-array parameter (`session_id = ANY(CAST(:sids AS UUID[]))`); it never casts the indexed column to text. Concurrent upserts sort session IDs first so overlapping rebuilds acquire row locks in a deterministic order. Connection acquisition, decode, FK-race, or write failure is best-effort: the current build continues through raw replay/L1. Shared in-memory SQLite uses the caller connection and transaction instead, with each L2 statement isolated by a savepoint so a real adapter error cannot poison later authoritative/shared-evidence reads; therefore a recompute's intentional rollback also discards its SQLite L2 writes, and persisted-bootstrap tests populate via direct `overlay_evidence` plus an explicit commit.
-  - Divider changes invalidate through `DIVIDER_VERSION`, replay-input changes through `OPENING_EVIDENCE_INPUTS_VERSION`, and serialization-only changes through `SESSION_REPLAY_PAYLOAD_VERSION`; the storage-only introduction of L2 changes none of the score/freshness semantic versions. Previously-excluded broken sessions are persisted too, with their warning emitted once per content in each new process. **Budget caveat:** L1 remains bounded by cached move-row count (`_SESSION_CACHE_MAX_ROWS`), not session count. Eviction can now cause an L2 transfer rather than a board replay; only an L2 miss/failure forces re-derivation. Correctness remains unaffected, and L1 churn plus L2/raw outcomes are reported separately.
-  - **The cache key is derived in the DATABASE, not from fetched rows (g-overlay-evidence-reuse).** A warm rebuild used to fetch every historical `session_moves` row purely to hash it in python, so "incremental" saved the board replay but not the transfer. One grouped statement (`_probe_sql(dialect)`) now returns one fixed-size row per eligible session — row count, `max(started_at)`, and a content digest `string_agg`-ed over exactly the columns the overlay consumes — and raw rows are fetched only for the sessions that miss. **A fully warm rebuild transfers no move rows at all** (asserted end-to-end on PostgreSQL). Two consequences follow. First, the digest body is **folded server-side** so the probe's payload stays O(sessions) rather than O(evidence bytes); a hash function is the one thing Postgres 18 and SQLite 3.51 do not share, so this is the module's single dialect fork (`md5` on PostgreSQL, identity elsewhere) with python applying the matching fold — the pair's agreement is provable only on real Postgres and is pinned in the `@pg_required` gate, because a divergence is silent and merely slow (every build re-replays), never wrong. Second, the freshness digest (`_sm_line`) and the replay digest are now separate formatters over one column set instead of sharing a function, so "same rows → same key" holds by *test* rather than by construction: `test_every_consumed_column_busts_the_replay_cache` mutates each consumed column in turn. Eligibility is enforced by the probe's `WHERE`, not by the content digest, so a session that leaves and re-enters eligibility unchanged is legitimately reused without re-derivation. Stored entries are keyed on a digest of the rows **actually fetched**, not the probe's, so a concurrent write between probe and fetch under READ COMMITTED cannot cache a torn read under a stale key. Measured on a restored production copy (1118 sessions, 131,676 move rows): warm 1664 ms → 304 ms, incremental-at-finalize 348 ms, output bit-identical to a clean full rebuild.
-- **Batch `computed_at` is an evidence-read upper bound.** `recompute_opening_scores` samples `computed_at` (via the `_utcnow()` seam) **after** the freshness-proof and overlay evidence reads, not before, so the timestamp bounds — from above — everything the batch reflects. It remains useful temporal/audit metadata, but async opening-baseline correctness no longer depends on wall-clock ordering: the session-start watermark contract below proves the exact relevant evidence boundary.
-- **Immediate terminal delta lane (g-delta-commit-decouple, g-delta-priority-lane).** After a supported normal-game or drill terminal transition commits, the cache-only terminal helper makes two independent best-effort submissions: the authoritative session ID goes to a dedicated immediate scoped lane, and an ordinary payload-free `SCORE_DELTA` request goes to the debounced whole-graph scheduler for eventual dashboard/tree convergence. The scoped lane has one worker and no quiet window; it never calls `refresh_now` or a whole recompute, and a whole-graph job already in flight cannot queue it. Pending work is keyed by `(user, color)`: multiple terminal sessions share one overlay and one union-of-played-roots calculation with branch summaries disabled, while duplicate session IDs keep only their newest monotonic request generation. Reservation and pending replacement are atomic under the lane lock; a request arriving during an in-flight key invalidates that older publication by CAS and creates an immediate follow-up. Fixed pending-key/per-key-session capacities and bounded retry backoff fail safely: even a capacity-rejected request reserves the newest generation, so an old result cannot become current and the poll falls back to the ordinary batch. Each result is published separately in the bounded process-local cache. A publication binds the reloaded session identity/state/played chain, the full registry fingerprint, and a lower-bound `(evidence_seq, cache_epoch)` sampled before the overlay read. It also stores and hashes the exact raw/normalized fallback FEN scope, enforcing that the `AnalysisCache` row IDs hashed are exactly those passed to the viewer-association lookup. Sequence or registry drift rejects the publication. Epoch drift re-hashes only that stored shared scope: equal content CAS-rearms the publication to the sampled epoch, while an in-scope mutation rejects it. The poll reader reloads the session, prefers a provably-fresh persisted batch, otherwise accepts a valid scoped publication even when no batch exists, and finally serves a warm batch as unverified fallback. Queue state is observability, not freshness, so the scoped result is readable while the independent whole-graph worker remains in CPU scoring or persistence. The lane, cache, and generations intentionally share the deployment's **one uvicorn worker, one replica** assumption; adding either requires a shared queue and shared generation/publication store. Restart, cancellation, or eviction is a safe miss.
-- **Large whole-batch rows use id-free Core executemany.** `opening_position_scores` and `opening_position_edges` are inserted from mappings without `RETURNING`; neither path consumes generated IDs. They remain inside the same batch transaction and retain identical values, constraints, rollback, logging, and retention semantics. On the PostgreSQL 18 production-dump copy this reduced full persistence from 3996 ms to 2645/2475 ms in repeat runs; the terminal scoped publication does not wait for either insert.
-
-**In-process schedulers (single-process, one-worker, best-effort — no durable outbox).** Four daemon-thread schedulers defer expensive work off request paths; all assume the single-worker/single-replica deployment and degrade to best-effort no-ops on failure. `OpeningScoreScheduler` (keyed by `(user_id, player_color)`, debounced) runs `recompute_opening_scores_if_needed`; `OpeningScoreDeltaLane` (the same key, immediate first attempt) publishes only the terminal session-scoped result described above; `SessionEvidenceScheduler` (keyed by `session_id`, debounced) runs the `/moves` graph/opportunity/analysis-cache side effects. `OpeningBaselineScheduler` is the fourth: **session-keyed, immediate first attempt, bounded retry, best-effort, one worker**. It exists to move `GameSession.opening_score_baseline` capture off the `/start` hot path (proving the cached batch fresh costs an O(all-evidence) digest — g-mxeo). `/api/game/start` and `/api/drills/start` capture the durable start watermark, insert the session, enqueue the job, and return 201 immediately.
-
-The baseline watermark and acceptance rules are a fail-closed historical proof (g-f3m4):
-
-- `game_sessions` stores `(baseline_watermark_seq, baseline_watermark_epoch, baseline_watermark_fingerprint)`, with a CHECK requiring all three values or none. The two counters are sampled in one SQL statement before the INSERT; the fingerprint is the current opening registry/model identity. Failure or missing singleton state stores the all-NULL legacy/missing-watermark state, which can never authorize an async baseline.
-- `shared_evidence_scope_versions(kind, fen, last_changed_epoch)` records the latest committed exact-scope change for `raw` and normalized (`norm`) FEN identities. `shared_evidence_scope_invalidations(kind, last_changed_epoch)` records events, such as PostgreSQL table truncation, whose deleted identities cannot be enumerated. Statement triggers on `analysis_cache`, `position_analysis`, and `analysis_cache_submission` increment the same `evidence_epoch` singleton and touch every affected old/new raw and normalized key; association writes resolve keys through their `analysis_cache` parent. Multi-row keys are locked/upserted in deterministic `(kind, fen)` order. SQLite implements the equivalent row-trigger contract. Rollback rolls back both the source write and its version marks.
-- The singleton is infrastructure, not optional cache state. Its value may only increase; deleting or truncating it is rejected. Source triggers require the row to exist before accepting a shared-evidence write. Startup may seed zero only on a provably new empty schema; an established schema with missing epoch or invalidation rows fails closed instead of silently healing history.
-- **Proof 1 (current batch):** the exact cursor batch must satisfy the ordinary full freshness contract now — registry, per-`(user, color)` sequence, shared epoch/scoped digest, branch keys, and current score rows. **Proof 2 (unchanged since start):** the batch and live per-user sequence must equal the stored start sequence, the batch registry must equal the stored start fingerprint, the live epoch must not precede the start epoch, and no exact scope row or relevant per-kind invalidation may have advanced after that start epoch. An equal epoch is an immediate shared-state proof. A later batch is therefore valid when it represents the same relevant start state; an earlier timestamp is neither required nor sufficient. Because both counters are lower bounds captured before evidence reads, Proof 1 remains mandatory even when their values equal the start watermark.
-- The final conditional UPDATE is the linearization point and re-checks exact session id, `status='active'`, user, color, NULL baseline, and the unchanged three watermark values. The former wall-clock guard and three session-table `NOT EXISTS` predicates are deliberately absent: relevant post-start writes are represented by the per-user sequence or shared scope versions, while digest-ineligible rows must not invalidate a correct baseline.
-- Cold, stale, recompute-inflight, and conditional-race outcomes retry on the same session entry with `1, 2, 4, 8, 16, 30` second capped backoff, at most eight attempts and 120 seconds from the first enqueue. Duplicate enqueues do not reset that budget. Cold/stale/inflight attempts request one ordinary `baseline_recovery` whole-score recompute when none is already scheduled. Separately, every successful cached/rebuilt whole-score run push-fills eligible active sessions from its exact durable `batch_id` after the recompute transaction closes; fill failure cannot relabel that recompute's disposition. Shutdown does not create new retries.
-
-Baselines use the envelope `{"schema_version":1,"model_version":"sm-v2-5","root_calc_config_fingerprint":"…","scores":{...}}`; session-end subtraction is allowed only for the current schema, exact `SCORE_MODEL_VERSION`, and exact `root_calc_config_fingerprint()`. The model version protects non-config scoring changes, while the config fingerprint independently protects config-only retunes. A legacy bare map, malformed envelope, cross-model baseline, or cross-config baseline suppresses `before`, `delta`, and `is_new` while still allowing the current `after` score to render and the freshness poll to converge. Any missing watermark, proof mismatch, dropped job on hard kill, or exhausted retry budget degrades to **NULL / no-delta**, never a wrong post-session baseline. Shutdown drains the baseline scheduler before the ordinary score scheduler; already-running jobs may finish, but shutdown never schedules recovery work.
-
-#### 5.7.4 `opening_position_scores` (Direct Tree Position Metrics)
-
-Sibling read model to `user_opening_scores`, persisted under the **same** `opening_score_batches` generation but keyed by `(batch_id, normalized_fen)` instead of a named-root key. It supplies direct per-position metrics for the horizontal opening tree (`/openings`), so the tree read path serves intermediate move nodes — not only the named boundary roots — **without running a full root calculation per visible card**.
-
-```sql
-CREATE TABLE opening_position_scores (
-    id BIGSERIAL PRIMARY KEY,
-    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
-    user_id BIGINT NOT NULL,
-    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
-    normalized_fen TEXT NOT NULL,          -- Normalized 4-field FEN — the position identity
-    in_book BOOLEAN NOT NULL,              -- True when the FEN is a reference OpeningGraph position
-    has_evidence BOOLEAN NOT NULL,         -- True when mastery evidence exists at/below the FEN
-    opening_score FLOAT,                   -- 0-100 mastery (NULL when has_evidence is false: no-data)
-    confidence FLOAT,                      -- NULL when no-data
-    coverage FLOAT,                        -- NULL when no-data
-    weighted_depth FLOAT,                  -- NULL when no-data
-    sample_size INTEGER NOT NULL DEFAULT 0,-- Move-observation count over the reachable subtree
-    game_count INTEGER NOT NULL DEFAULT 0, -- Distinct games over the reachable subtree
-    last_practiced_at TIMESTAMP,           -- Max live/review touch over the reachable subtree (NULL no-data)
-    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    CONSTRAINT uq_opening_position_scores_batch_fen UNIQUE (batch_id, normalized_fen)
-);
-
-CREATE INDEX idx_opening_position_scores_user_color ON opening_position_scores(user_id, player_color);
-```
-
-**Read-model contract:**
-- **One shared traversal.** All rows for a batch are produced by a single `_SharedCalculator` pass (`opening_rootcalc.compute_all_scores` → `compute_position_scores`). The named-root rows, the synthetic repertoire row, and every direct position row reuse the same memoized `_metrics`, SCC cut, weights, and reachable caches — so named and direct metrics can never disagree, and the cost is at most two metric records (natural + perfect) per reachable FEN, never one root walk per card. The metric formulas are identical to the named-root path (`_base_root_score`).
-- **Sparse persistence (no full structural materialization).** Only rows the database actually needs are written: in-book positions with mastery evidence at/below the FEN, plus connected observed off-book positions. **Static in-book positions with no evidence below are intentionally not materialized** — they are already represented by `OpeningGraph`, so the read path returns no-data for an in-graph FEN absent from the batch. (Full per-book-FEN materialization is deferred pending a separate row-volume/write/storage benchmark; ~15.5k book nodes per batch per color is not written by default.)
-- **No-data gating.** A row exists for a connected observed off-book node even without evidence so the API can tell a navigable observed off-book node from an arbitrary unknown FEN, but its four metric columns are NULL and its counts are zero. Visibility is gated purely by evidence at/below the FEN regardless of side to move: a no-evidence user-turn row never surfaces the alpha/beta prior, and a no-evidence opponent-turn leaf never surfaces `_calc`'s perfect-looking `(1.0, 1.0, 1.0, 0.0)` result.
-- **Observed off-book domain.** Off-book positions enter the scorer only by reachable observed `overlay.edges` (book-boundary exit → observed continuation), matching the tree's navigable data; disconnected off-book blunders/reviews are not seeded. `opening_evidence.observed_off_book_fens()` is the explicit contract for the candidate off-book endpoints.
-- **Transposition-safe identity.** The key is the normalized 4-field FEN, so transposed routes reached through different UCI lines share one row. `opening_cache.lookup_position_scores()` **normalizes every incoming (possibly raw, clock-bearing) FEN before lookup**, so halfmove/fullmove differences and transpositions hit the same row instead of silently missing.
-- **No duplicate identity index.** The unique index backing `uq_opening_position_scores_batch_fen` already has the exact `(batch_id, normalized_fen)` lookup shape, so no separate non-unique index is declared for those columns.
-- **Distinct game count.** `game_count` is the number of distinct sessions reaching the scored subtree (union of per-node `session_ids`), never `sample_size` (move-observations) relabeled.
-- **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `user_opening_scores`, so `prune_old_opening_score_batches` removes direct rows through the same generation-retention path (keep=2) — no unbounded leak across recomputes. Rows are written in the same transaction as the named rows of the batch.
-
-#### 5.7.5 `opening_position_edges` (Observed Tree Edges)
-
-Sibling read model to `opening_position_scores`, persisted under the **same** `opening_score_batches` generation but keyed by `(batch_id, parent_fen, child_fen)` — mirroring the `EvidenceOverlay` edge key. It supplies the **observed move edges** (structural shape plus the `traversal_count` / `live_attempts` / `live_passes` counters) the `/api/openings/tree` builder needs, so the tree read path **no longer rebuilds `overlay_evidence` on the request thread** (that rebuild — a full replay of every session board line through the Lichess phase divider — previously dominated warm-read latency, scaling with total game count rather than visible nodes).
-
-```sql
-CREATE TABLE opening_position_edges (
-    id BIGSERIAL PRIMARY KEY,
-    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
-    user_id BIGINT NOT NULL,
-    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
-    parent_fen TEXT NOT NULL,              -- Normalized 4-field FEN — observed edge parent
-    child_fen TEXT NOT NULL,               -- Normalized 4-field FEN — observed edge child
-    uci TEXT NOT NULL,                     -- The move connecting parent_fen -> child_fen
-    traversal_count INTEGER NOT NULL DEFAULT 0,  -- Times the edge was observed (encounter_count)
-    live_attempts INTEGER NOT NULL DEFAULT 0,    -- User-choice live attempts on this edge
-    live_passes INTEGER NOT NULL DEFAULT 0,      -- Live passes (drives is_prepared)
-    live_fails INTEGER NOT NULL DEFAULT 0,       -- EdgeEvidence parity; not read by the tree
-    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    CONSTRAINT uq_opening_position_edges_batch_parent_child UNIQUE (batch_id, parent_fen, child_fen)
-);
-
-CREATE INDEX idx_opening_position_edges_user_color ON opening_position_edges(user_id, player_color);
-```
-
-**Read-model contract:**
-- **Bounded batched reads.** During `build()`, the tree builder prefetches observed edges through `opening_cache.lookup_observed_edges_for_parents(db, batch_id, parent_fens)` in two bounded waves: the visible line positions first, then their rendered column children/frontier. Each wave is normally one `parent_fen IN (...)` query (an oversized wave is chunked at the parameter cap), so warm reads fetch only the visible subset rather than total session history. The singular `lookup_observed_edges_for_parent` helper is a correctness fallback for an unexpected prefetched-cache straggler. The unique index backing `uq_opening_position_edges_batch_parent_child` supplies the required `(batch_id, parent_fen)` left prefix for both lookup shapes; no separate non-unique prefix index is declared. The reconstructed `EdgeEvidence` carries `quality_sum=0.0, quality_count=0` because the tree never reads quality.
-- **Quality columns omitted.** `quality_sum` / `quality_count` are deliberately not persisted: the tree never reads them, and the scorer builds its own in-memory overlay during recompute. If the scorer is ever changed to read scores from this table, the two quality columns must be added.
-- **Same write transaction.** One `OpeningPositionEdge` per `overlay.edges` value is written in the same transaction as the named and direct position rows of the batch.
-- **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `opening_position_scores`, so `prune_old_opening_score_batches` removes edge rows through the same keep=2 generation-retention path.
-- **Schema-version self-healing.** The set of persisted read-model tables is versioned by `OPENING_SCORE_CACHE_SCHEMA_VERSION` (`edges-v1`), folded into the **registry fingerprint**. A batch built before this read model existed therefore reports registry drift and recomputes once per `(user, color)` on first read, materializing its edge rows. On the `/api/openings/tree` path this drift forces a **blocking one-time bootstrap** (`ensure_tree_cache` → `refresh_now`) rather than a background revalidate, because serving a registry-stale (edgeless) batch would render a book-only tree that silently hides the user's observed moves; warm-fresh batches serve immediately while a background recompute revalidates evidence/decay. The families/score read path keeps its existing background revalidate (stale scores are tolerable there).
-
-### 5.8 Authentication
-
-**Method:** Anonymous-first with stateless JWT tokens
-
-**Token Structure:**
-```json
-{
-  "sub": "<user_id>",
-  "username": "<username>",
-  "is_anonymous": "<boolean>",
-  "exp": "<expiry_timestamp>"
-}
-```
-
-**Anonymous-First Flow:**
-
-1. **First Visit (Automatic):**
-   - Frontend generates random username (e.g., `ghost_a3b5c7d9`) and password
-   - Stores credentials in localStorage
-   - Calls `POST /api/auth/register` with auto-generated credentials
-   - Receives JWT token, stores in localStorage
-   - User can immediately start playing without manual registration
-
-2. **Subsequent Visits:**
-   - Frontend checks localStorage for credentials
-   - Auto-login with stored username/password via `POST /api/auth/login`
-   - User experience is seamless - no login prompt
-
-3. **Account Claiming (Optional):**
-   - User can upgrade anonymous account to permanent account
-   - Calls `POST /api/auth/claim` with new username/password
-   - Updates `is_anonymous` flag to FALSE
-   - Preserves all user data and progress
-
-4. **Cross-Device Access (Optional):**
-   - Users who claimed their account can log in from new devices
-   - Traditional login flow via `POST /api/auth/login`
-   - Anonymous users are device-specific (localStorage-bound)
-
-**Token Lifetime:** 7 days (MVP). Refresh tokens deferred to post-MVP.
-
-**Design Rationale:**
-- Removes friction for new users - no sign-up barrier
-- Users build progress before deciding to commit to an account
-- Anonymous users can experiment risk-free
-- Claimed accounts enable cross-device access and data security
-
----
+## 5. Domain and data ownership
+
+The data model is organized around a player’s training record, plus two
+deliberately shared sources: the Ghost Move Library graph and reusable analysis
+evidence. The model layer and Alembic migrations are authoritative for columns,
+constraints, retention, and upgrades.
+
+| Domain | Ownership and relationship |
+| --- | --- |
+| Identity | A user can begin anonymously and later claim the same account. User identity scopes every private training record and API read. |
+| Sessions and moves | A game session owns its lifecycle, result, mode, and persisted move history. A completed rated session can produce one rating-history snapshot. Normal play and drills share the session boundary while retaining their distinct product state. |
+| Ghost Move Library | Normalized positions and directed moves form a reusable graph. A blunder target belongs to one user at one decision position; review events are separate, append-only encounters with that target. |
+| Analysis evidence | Session history records what occurred in a game. Reusable move evidence and trusted position truth are separate grains, with explicit trust, publication, and fallback rules. See [Analysis evidence](docs/architecture/analysis-evidence.md). |
+| Opening scores | Per-user, per-color opening-score batches are published snapshots of the graph and eligible evidence. Cursors and freshness proofs prevent a partial or stale rebuild from replacing a valid result. |
+| Operations and audit | Receipts, evidence-boundary records, conflicts, and related audit data make retries and background work observable without changing the player-facing domain model. |
+
+The durable ownership boundaries are intentional:
+
+- Global graph nodes and edges describe chess positions; user-owned targets,
+  reviews, sessions, ratings, and score snapshots describe a player’s training
+  progress.
+- A target and its reviews are different things: the target selects what to
+  practise, while review history records each outcome.
+- A session is the durability boundary for played moves, resulting analysis,
+  game outcome, and downstream training effects. Routes must authorize the
+  caller before reading or changing that record.
+- Position truth is not inferred from an arbitrary played-move row. Trusted
+  position and move evidence have separate storage and read gates; consumers
+  degrade safely when either is unavailable.
+- Opening-score publication is atomic at the snapshot level. Readers see a
+  verified published batch, not a partially recomputed tree.
+
+For exact relationships, fields, constraints, and migrations, use
+[`backend/app/models.py`](backend/app/models.py) and
+[`backend/alembic/versions/`](backend/alembic/versions/). The cross-cutting
+analysis rules are maintained in
+[Analysis evidence](docs/architecture/analysis-evidence.md).
 
 ## 6. Data & Logic Flow
 
@@ -1890,7 +828,7 @@ CREATE INDEX idx_game_sessions_drill_state ON game_sessions(drill_state);
 
 ### 7.3.1 Cached session accuracy (Release A)
 
-Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. **Through Release A** the `game-review` stats and history surfaces still computed accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch that ended that (§7.3.1.3). See §5.5 for the parallel `rating_history` durable-head work shipped alongside.
+Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. **Through Release A** the `game-review` stats and history surfaces still computed accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch that ended that (§7.3.1.3). See the [Release A runbook](docs/release_a_runbook.md) for the parallel `rating_history` durable-head work shipped alongside.
 
 **Frozen algorithm.** The scoring surface (`expected_total_moves_from_pgn`, `win_percent_from_cp`, `accuracy_from_win_percents`, `AccuracyMove`, `compute_game_accuracy`) is frozen in `app/accuracy_v1.py` and pinned to `python-chess`; `app/accuracy.py` re-exports it and defines `ACCURACY_ALGO_VERSION = 1`. Freezing v1 lets a future v2 coexist and lets a cached value be interpreted against the exact algorithm that produced it.
 
@@ -2156,503 +1094,32 @@ POST /api/blunder called
 
 ---
 
-## 8. API Specification
-
-All endpoints use JSON request/response bodies. The API is RESTful.
-
-### 8.1 Base URL
-
-```
-/api
-```
-
-### 8.2 Authentication
-
-All endpoints except `/api/auth/*` require authentication via Bearer token.
-
-**Header:** `Authorization: Bearer <jwt_token>`
-
-**Endpoints:**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/auth/register` | Create anonymous account (auto-generated credentials) |
-| POST | `/api/auth/login` | Authenticate and get token (optional, cross-device) |
-| POST | `/api/auth/claim` | Upgrade anonymous account to claimed account |
-
-#### POST /api/auth/register
-
-Creates an anonymous user account with auto-generated credentials. Called automatically by frontend on first visit.
-
-**Request:**
-```json
-{
-  "username": "string (3-50 chars, auto-generated by frontend)",
-  "password": "string (auto-generated by frontend)"
-}
-```
-
-**Response (201):**
-```json
-{
-  "user_id": "integer",
-  "username": "string",
-  "token": "string (JWT)"
-}
-```
-
-**Implementation Notes:**
-- Creates user with `is_anonymous = TRUE` (not returned in response)
-- Username should be auto-generated format (e.g., `ghost_<random>`)
-- No email validation or CAPTCHA for MVP
-
-#### POST /api/auth/login
-
-Authenticates existing user and returns JWT. Optional endpoint - mainly for cross-device access.
-
-**Request:**
-```json
-{
-  "username": "string",
-  "password": "string"
-}
-```
-
-**Response (200):**
-```json
-{
-  "user_id": "integer",
-  "username": "string",
-  "token": "string (JWT)"
-}
-```
-
-**Implementation Notes:**
-- Works for both anonymous and claimed accounts
-- Frontend auto-calls this on subsequent visits using localStorage credentials
-- Most users never manually use this endpoint
-
-#### POST /api/auth/claim
-
-Upgrades an anonymous account to a claimed (permanent) account. Allows user to choose custom username and password.
-
-**Request:**
-```json
-{
-  "new_username": "string (3-50 chars, alphanumeric + underscore)",
-  "new_password": "string (min 6 chars)"
-}
-```
-
-**Headers:**
-- `Authorization: Bearer <jwt_token>` (current anonymous user's token)
-
-**Response (200):**
-```json
-{
-  "user_id": "integer",
-  "username": "string (new username)",
-  "is_anonymous": false,
-  "token": "string (new JWT with updated claims)"
-}
-```
-
-**Error Responses:**
-
-| Status | Condition |
-|--------|-----------|
-| 400 | User already claimed (`is_anonymous = FALSE`) |
-| 409 | New username already taken |
-| 422 | Invalid username/password format |
-
-**Implementation Notes:**
-- Verify current user `is_anonymous = TRUE`
-- Check new username availability
-- Update user record: `username`, `password_hash`, `is_anonymous = FALSE`, `updated_at`
-- Return new JWT with updated claims
-- Frontend updates localStorage with new credentials
-
-### 8.3 Game Flow
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/game/start` | Start new game session |
-| POST | `/api/game/next-opponent-move` | Get next opponent move (ghost-first, engine fallback) |
-| POST | `/api/game/end` | End game session |
-| POST | `/api/session/:id/moves` | Upload full move analysis for a session |
-
-#### POST /api/game/start
-
-Creates a new game session. The session tracks which game the blunders belong to.
-
-**Request:**
-```json
-{
-  "engine_elo": "integer",
-  "player_color": "white | black"
-}
-```
-
-**Response (201):**
-```json
-{
-  "session_id": "uuid",
-  "engine_elo": "integer",
-  "player_color": "white | black"
-}
-```
-
-**Implementation Notes:**
-- Session is created with `status = 'active'`
-- `session_mode` defaults to `'normal'`
-
-#### POST /api/game/next-opponent-move
-
-Given a position, returns the next opponent move from Ghost-path traversal if available, otherwise from the remote Maia3 API.
-
-**Request:**
-```json
-{
-  "session_id": "uuid",
-  "fen": "string",
-  "moves": ["string (UCI)", "..."]
-}
-```
-
-- `moves`: Full game move history as UCI strings from the starting position (e.g. `["e2e4", "e7e5", "g1f3"]`). Required for engine fallback — the Maia3 API accepts move history rather than FEN. The frontend tracks these alongside its existing `moveHistory` state.
-
-**Response (200):**
-```json
-{
-  "mode": "ghost | engine",
-  "move": {
-    "uci": "string",
-    "san": "string"
-  },
-  "target_blunder_id": "integer | null",
-  "target_fen": "string | null",
-  "target_blunder_srs": {
-    "last_reviewed_at": "timestamp | null",
-    "created_at": "timestamp | null",
-    "pass_count": "integer",
-    "fail_count": "integer",
-    "pass_streak": "integer",
-    "opportunities_since_review": "integer",
-    "opportunities_30d": "integer",
-    "reached_30d": "integer",
-    "targeted_30d": "integer",
-    "targeted_reached_30d": "integer",
-    "p_reach": "float"
-  },
-  "decision_source": "ghost_path | backend_engine",
-  "decision_id": "uuid"
-}
-```
-
-- `mode: "ghost"` - Ghost is steering toward a blunder; `move` contains the next move.
-- `mode: "engine"` - No blunder path found; `move` is produced by the remote Maia3 API.
-- `target_blunder_id` - ID of the blunder being targeted, or `null` in engine mode.
-- `target_fen` - FEN of the blunder position the ghost is steering toward (ghost mode only), or `null`.
-- `target_blunder_srs` - SRS metadata for the targeted blunder (ghost mode only), or `null`.
-- `decision_source` - Backend decision branch used to produce the move.
-- `decision_id` - Opaque id of the `opponent_decisions` row that recorded this decision (see below). Present on every served response, including replays.
-
-**Opponent-decision log (g-ghost-target-server-record).** Every served decision is written to `opponent_decisions` and **committed before the response is returned**; a write failure fails the request closed rather than serving a move nothing recorded. Previously the decision was computed, returned and forgotten — the only server-side trace was a fire-and-forget `opponent_move_served` event, and `session_moves.target_blunder_id` reached the database solely as a **client echo**, which is unusable as the denominator of a targeted p_reach (a session that never uploads silently drops a failed steer).
-
-The row is an **envelope**, not the response: `decision_id` and `served_at` are envelope-level, `response_payload` is the serialized `NextOpponentMoveResponse`, and `target_blunder_id` / `resulting_fen` / `reaches_drill_root` are extracted off that payload for indexing and validation. The payload is stored rather than reconstructed because UCI + SAN + resulting FEN cannot replay a response verbatim: `target_blunder_id IS NULL` cannot distinguish a pre-root route ghost move from an engine move, and `target_blunder_srs` snapshots counters that move between the original request and its retry.
-
-- **Grain.** Opaque `decision_id` PK with `UNIQUE (session_id, request_fingerprint)` as the replay key. The fingerprint covers the normalized request FEN **and** the full UCI history — Maia consumes the history, and two transpositions can share a FEN and a ply while being different inputs. `(session_id, ply_before)` is deliberately not the grain: a revert continues on the same session, so a new branch legitimately asks at the same ply from a different position, and replaying the old row could return a move that is illegal there.
-- **Replay, not recompute.** `getNextOpponentMove` sets `retries: 2`, so one decision can arrive as three requests. A duplicate fingerprint returns the stored payload — including the stored `decision_id` — which makes the endpoint idempotent at the source rather than deduplicating downstream. The lookup runs **before** the pre-root drill branch. Since the cutover that branch writes no drill state at all (§17.4.1), so replay is what keeps the *decision* stable: without it, a lost `root_pending` response would make the retry recompute from the same pre-root FEN and can answer with a **different** route move, leaving the client to confirm a position no decision row records.
-- **The unique constraint is the arbiter, not a lock.** The normal ghost/engine path holds no row lock (the pre-root branch rolls it back before falling through) and `find_ghost_move` is randomized, so two concurrent identical requests can both compute and disagree. The insert is `ON CONFLICT DO NOTHING RETURNING`; a loser **discards its own move** and re-reads the winner's payload. Serving its own would serve a move no row records, and root confirmation would then fail its `resulting_fen` check against the winner's row.
-- **`served_at` is the targeted timeline.** `blunder_opportunity_events` stamps `session.started_at` instead, which would assign a late-session decision the session's opening time and drop targeting of any blunder created during that same session. Indexed as `(target_blunder_id, served_at)`.
-- **Retention** is session-lifetime via `ON DELETE CASCADE`, with no independent TTL: the 30-day p_reach window is a query concern, not a storage boundary, and this log is the authoritative source for rebuilding targeted evidence.
-
-#### POST /api/game/end
-
-Ends the current game session.
-
-**Request:**
-```json
-{
-  "session_id": "uuid",
-  "result": "checkmate_win | checkmate_loss | resign | draw | abandon",
-  "pgn": "string (full game PGN)",
-  "is_rated": "boolean (default: true)"
-}
-```
-
-**Response (200):**
-```json
-{
-  "session_id": "uuid",
-  "result": "string",
-  "ended_at": "timestamp",
-  "rating": {
-    "rating_before": "integer",
-    "rating_after": "integer",
-    "is_provisional": "boolean"
-  }
-}
-```
-
-- `rating` is `null` when the game is unrated or the result has no rating impact (e.g., `abandon`).
-
-`result` values match `game_sessions.result` exactly:
-- `checkmate_win` – user delivered mate
-- `checkmate_loss` – user was checkmated
-- `resign` – user resigned
-- `draw` – draw by stalemate/agreement/repetition/etc.
-- `abandon` – client disconnected and timeout elapsed
-
-Frontend helpers may expose simplified UI strings (e.g., "Win"), but the payload must send the canonical enum for consistency across storage and analytics.
-
-#### POST /api/session/:id/moves
-
-Bulk-ingests the analyzed move data collected during the session. The request mirrors the `session_moves` schema so the backend can persist evaluations without parsing PGN annotations.
-
-**Request:**
-```json
-{
-  "moves": [
-    {
-      "move_number": 1,
-      "color": "white",
-      "move_san": "e4",
-      "fen_after": "string",
-      "eval_cp": 20,
-      "eval_mate": null,
-      "best_move_san": "e4",
-      "best_move_eval_cp": 20,
-      "eval_delta": 0,
-      "classification": "best",
-      "fen_before": "string | null",
-      "move_uci": "string | null",
-      "best_move_uci": "string | null",
-      "best_line_uci": ["string"] ,
-      "decision_source": "ghost_path | backend_engine | local_fallback | null",
-      "target_blunder_id": "integer | null"
-    }
-  ]
-}
-```
-
-- `session_id` comes from the path parameter.
-- `eval_cp` / `best_move_eval_cp` use the normalized centipawn scale described in §7.4.
-- `classification` must be one of `best|excellent|good|inaccuracy|mistake|blunder`.
-- `decision_source` applies to opponent moves only; use `null` for player moves.
-- `target_blunder_id` links the move to the blunder being targeted in ghost mode.
-
-**Response (200):**
-```json
-{
-  "moves_inserted": "integer"
-}
-```
-
-**Rules:**
-- Endpoint is called once per completed game; repeat calls replace the existing move set for idempotency.
-- Any PGN string is still sent to `/api/game/end` (stored in `game_sessions.pgn`), while this endpoint remains JSON so downstream analytics don't need to re-parse PGN comments.
-
-### 8.4 Blunders / Ghost Move Library Targets
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/blunder` | Record an auto-detected blunder (analysis-triggered) |
-| POST | `/api/blunder/manual` | Manually add a MoveList decision to the Ghost Move Library |
-| GET | `/api/blunders` | List user's Ghost Move Library targets |
-
-#### POST /api/blunder
-
-Records a mistake detected by the client-side engine (delta >= 50cp, within first 10 moves). Stores the full path from game start to the target position in the Ghost Move Library.
-This endpoint enforces the first-auto-blunder-per-session rule and the 10-move recording cap.
-
-**First-move exemption:** When the PGN contains only a single move (`len(moves_data) == 1`), the blunder is silently skipped and a no-op response is returned. Ghost mode cannot steer back to the starting position, so recording this case is pointless.
-
-**Request:**
-```json
-{
-  "session_id": "uuid",
-  "pgn": "string (full game history, e.g. '1. e4 e5 2. Nf3 Nc6 3. Bb5 a6')",
-  "fen": "string (position BEFORE bad move - used as sanity check)",
-  "user_move": "string (SAN of bad move, should match last move in PGN)",
-  "best_move": "string (SAN of engine's best move)",
-  "eval_before": "integer (centipawns, eval of best move)",
-  "eval_after": "integer (centipawns, eval after user's move)"
-}
-```
-
-**Backend Processing:**
-1. Parse PGN and replay to generate all intermediate positions
-2. Verify position before final move matches `fen` (reject with 422 if mismatch)
-3. Upsert all positions into the Ghost Move Library (deduplicated by `fen_hash`)
-4. Upsert all edges connecting consecutive positions
-5. Create blunder record referencing the pre-move position (decision point)
-
-**Response (201):**
-```json
-{
-  "blunder_id": "integer",
-  "position_id": "integer",
-  "positions_created": "integer",
-  "is_new": "boolean"
-}
-```
-
-- `positions_created`: Number of new positions added to the Ghost Move Library (0 if path already existed)
-- `is_new: false` means this position already has a Ghost Move Library target (frontend message: "already in library")
-
-#### POST /api/blunder/manual
-
-Manually adds a MoveList decision point to the Ghost Move Library. This endpoint is allowed for both active and ended sessions.
-
-**Request:**
-```json
-{
-  "session_id": "uuid",
-  "pgn": "string (game history up to and including the selected move)",
-  "fen": "string (position BEFORE selected move - used as sanity check)",
-  "user_move": "string (SAN of selected move)",
-  "best_move": "string | null (engine best move if available)",
-  "eval_before": "integer | null (centipawns, optional metadata)",
-  "eval_after": "integer | null (centipawns, optional metadata)"
-}
-```
-
-**Rules:**
-1. No 50cp threshold is applied; any eligible player move can be added.
-2. Backend replays PGN and upserts positions/moves exactly like automatic capture.
-3. Backend inserts/reuses `(user_id, position_id)` target row in `blunders`.
-4. Duplicate capture returns `is_new=false` so UI can show "already in library".
-5. This endpoint does not set or check `game_sessions.blunder_recorded`.
-
-**Response (201):**
-```json
-{
-  "blunder_id": "integer",
-  "position_id": "integer",
-  "positions_created": "integer",
-  "is_new": "boolean"
-}
-```
-
-#### GET /api/blunders
-
-Lists the user's recorded Ghost Move Library targets (auto blunders + manual MoveList selections).
-
-**Query Parameters:**
-- `due` (boolean, optional) - Only return blunders with srs_priority > 1.0 (overdue for review)
-- `limit` (integer, optional, default 50, max 100)
-
-**Response (200):**
-```json
-{
-  "blunders": [
-    {
-      "id": "integer",
-      "position_id": "integer",
-      "fen": "string (the decision point position)",
-      "bad_move": "string (SAN captured when target was added)",
-      "best_move": "string (SAN of engine's recommendation)",
-      "eval_loss_cp": "integer",
-      "pass_streak": "integer",
-      "priority": "float",
-      "last_reviewed_at": "timestamp | null",
-      "last_session_id": "uuid | null",
-      "last_played_at": "timestamp | null",
-      "created_at": "timestamp"
-    }
-  ]
-}
-```
-
-- Results are sorted by `last_played_at` DESC (nulls last).
-- `last_played_at` is the most recent timestamp at which the blunder position was reached in a game session.
-- `last_session_id` is the session UUID for the most recent play.
-
-### 8.5 SRS (Spaced Repetition)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/srs/review` | Record a review result |
-
-#### POST /api/srs/review
-
-Records whether the user passed or failed a blunder review.
-
-**Request:**
-```json
-{
-  "session_id": "uuid",
-  "blunder_id": "integer",
-  "passed": "boolean",
-  "user_move": "string (SAN)",
-  "eval_delta": "integer (centipawns)"
-}
-```
-
-**Response (200):**
-```json
-{
-  "blunder_id": "integer",
-  "pass_streak": "integer",
-  "priority": "float",
-  "next_expected_review": "timestamp"
-}
-```
-
-**Side effects:**
-- Insert a row into `blunder_reviews` capturing `{blunder_id, session_id, reviewed_at, passed, move_played_san, eval_delta_cp}`
-- Update the parent `blunders` row: `pass_streak` (reset or increment) and `last_reviewed_at = reviewed_at`
-- Recalculate priority / due logic using the updated SRS state
-- Call `recompute_opening_scores_if_needed()` for the blunder's player color to keep opening score cache fresh
-
-### 8.6 Error Responses
-
-All errors follow a consistent format:
-
-```json
-{
-  "error": {
-    "code": "string",
-    "message": "string",
-    "details": "object | null"
-  }
-}
-```
-
-**Standard Error Codes:**
-
-| HTTP Status | Code | Description |
-|-------------|------|-------------|
-| 400 | `invalid_request` | Malformed request body or parameters |
-| 401 | `unauthorized` | Missing or invalid auth token |
-| 403 | `forbidden` | Valid token but insufficient permissions |
-| 404 | `not_found` | Resource does not exist |
-| 409 | `conflict` | Resource already exists (e.g., duplicate username) |
-| 422 | `validation_error` | Request valid but data constraints violated |
-| 500 | `internal_error` | Server error |
-
-**Example (401):**
-```json
-{
-  "error": {
-    "code": "unauthorized",
-    "message": "Token expired",
-    "details": null
-  }
-}
-```
-
-### 8.7 Design Decisions
-
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| API Style | REST | Simpler than GraphQL for MVP; FastAPI excels at REST |
-| Pagination | Deferred | MVP uses simple limit; cursor-based pagination post-MVP |
-| Auth | Stateless JWT | No session storage needed; simple horizontal scaling |
-| Error Format | Structured JSON | Consistent parsing for frontend error handling |
-
----
+## 8. Endpoint families
+
+FastAPI route modules own endpoint handlers and their current request/response
+models, validation, and status codes. The application-level
+[`backend/app/main.py`](backend/app/main.py) error handler owns the standard
+error envelope, including the retryability signal consumed by
+[`src/utils/api.ts`](src/utils/api.ts); its behavior is pinned by
+[`backend/test_error_envelope.py`](backend/test_error_envelope.py). Generated
+OpenAPI is the exact public contract. This overview groups endpoints by player
+workflow rather than repeating payload schemas.
+
+| Family | Responsibility | Authority |
+| --- | --- | --- |
+| Authentication | Create an anonymous account, authenticate it, and claim it for cross-device use. | [`backend/app/api/auth.py`](backend/app/api/auth.py) |
+| Game and session | Start and end games, serve opponent decisions, persist moves, and return saved-session analysis/opening views. | [`backend/app/api/game.py`](backend/app/api/game.py), [`backend/app/api/session.py`](backend/app/api/session.py) |
+| Ghost targets and review | Capture automatic or manual training targets, list the library, and record spaced-repetition review outcomes. | [`backend/app/api/blunder.py`](backend/app/api/blunder.py), [`backend/app/api/srs.py`](backend/app/api/srs.py) |
+| Analysis evidence | Resolve reusable analysis and accept approved session/analysis-board evidence through the trust policy. | [`backend/app/api/analysis.py`](backend/app/api/analysis.py), [`backend/app/api/session.py`](backend/app/api/session.py), [Analysis evidence](docs/architecture/analysis-evidence.md) |
+| Openings and drills | Serve published opening scores and trees, calculate score changes, and run drill lifecycle and route checks. | [`backend/app/api/openings.py`](backend/app/api/openings.py), [`backend/app/api/drills.py`](backend/app/api/drills.py) |
+| History and progress | Return saved games, ratings, achievements, and aggregate statistics for the authenticated player. | [`backend/app/api/history.py`](backend/app/api/history.py), [`backend/app/api/stats.py`](backend/app/api/stats.py) |
+| Health | Report service, database, and opening-cache readiness for operations. | [`backend/app/api/health.py`](backend/app/api/health.py) |
+
+Feature routes resolve the caller’s identity before operating on account-scoped
+records. Domain rules stay with their route/service/model owners so a payload
+copy here cannot become stale. See [Engineering map](#engineering-map) for the
+application boundary and the generated OpenAPI document from the running
+FastAPI application for exact endpoint details.
 
 ## 9. After-Game Analysis Display
 
@@ -2839,7 +1306,7 @@ are player-only: only moves whose `color` matches `player_color` contribute.
 Average centipawn loss is nonnegative; negative `eval_delta` values are treated
 as `0` for display/summary purposes. `average_centipawn_loss` is rounded
 **half-up** to an integer (an exact `.5` rounds up), matching the frontend's
-`Math.round` — see §5.2.2.
+`Math.round` — see [Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations).
 
 `average_centipawn_loss` is `null` if and only if no player move has an
 `eval_delta` — an unanalyzed game reports `null`, not `0`. It is deliberately
@@ -2883,7 +1350,7 @@ on that bound:
   summary mean, and the projected class counts cannot exceed the summary counts.
   The displayed integers now inherit that bound: both sides round half-up — the
   frontend's `Math.round` (`gameStats.ts`) and the backend's `round_half_up_cpl`
-  (§5.2.2) — and half-up rounding is monotone, so it cannot reorder two means
+  ([Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations)) — and half-up rounding is monotone, so it cannot reorder two means
   that are already ordered. This was previously conditional: while the backend
   still used Python's banker's rounding, an exact-half mean could display one
   point HIGHER than the summary (unrounded `2.5` → displayed `3` vs. summary
@@ -3067,7 +1534,7 @@ Returns list of user's completed games (newest first).
 History summaries follow the same player-only rule as session analysis for
 blunder/mistake/inaccuracy counts and `average_centipawn_loss`. ACPL also clamps
 negative eval deltas to zero, including legacy stored rows, and uses the same
-half-up rounding rule as session analysis — see §5.2.2.
+half-up rounding rule as session analysis — see [Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations).
 
 `average_centipawn_loss` carries the same null semantics as session analysis: it
 is `null` if and only if no player move has an `eval_delta` (an unanalyzed game,
@@ -3216,7 +1683,7 @@ The end-game banner uses these values to show the rating change. When `is_provis
 
 `rating` is `null` when the game is unrated or the result is `abandon`.
 
-DB reference: §5.5
+DB reference: [`backend/app/models.py`](backend/app/models.py)
 
 ---
 
@@ -3234,14 +1701,14 @@ The opening score system computes per-user 0-100 mastery scores (higher = better
   - a **cold read with no evidence** settles as unscored and enqueues nothing, because the worker declines to write a batch for such a user;
   - the remaining **cold blocking readers** — the `/openings` family endpoints and the `/tree` registry/schema bootstrap — still block on `refresh_now()` for the one-time initial compute.
 
-  All recompute decisions — cache miss, registry drift, stale branch keys, evidence change, decay-staleness — are consolidated in `recompute_opening_scores_if_needed()` run on the single serialized worker, which returns an explicit `rebuilt`/`cached`/`no_evidence` disposition rather than a bare batch (§5.7.3). The worker first computes a **cheap raw-input freshness digest** (pure SQL, no python-chess) and, when nothing has changed, serves the cached batch **without building the evidence overlay** — the per-session board reconstruction + Lichess phase divider only run on the non-fast paths. This keeps unchanged loads at ~10ms instead of paying the full overlay rebuild. Every enqueue on all of these paths names its producer (`OpeningScoreTrigger`), which is what makes the queue-vs-worker timing report segmentable by reader (§5.7.3, `docs/posthog-opening-score-queue-timing.md`).
+  All recompute decisions — cache miss, registry drift, stale branch keys, evidence change, decay-staleness — are consolidated in [`recompute_opening_scores_if_needed()`](backend/app/opening_cache.py), run on the single serialized worker, which returns an explicit `rebuilt`/`cached`/`no_evidence` disposition rather than a bare batch. The worker first computes a **cheap raw-input freshness digest** (pure SQL, no python-chess) and, when nothing has changed, serves the cached batch **without building the evidence overlay** — the per-session board reconstruction + Lichess phase divider only run on the non-fast paths. This keeps unchanged loads at ~10ms instead of paying the full overlay rebuild. Every enqueue on all of these paths names its producer (`OpeningScoreTrigger`), which is what makes the queue-vs-worker timing report segmentable by reader ([`backend/app/opening_cache.py`](backend/app/opening_cache.py), `docs/posthog-opening-score-queue-timing.md`).
 
 ### 13.2 Batch/Cursor Pattern
 
 Computation runs are not overwritten in-place. Instead:
 
 1. A new `opening_score_batches` row is created with a monotonically increasing `generation`.
-2. `user_opening_scores` (named-root) rows and `opening_position_scores` (direct tree-position) rows for the new batch are written from one shared calculation, in the same transaction (see §5.7.4).
+2. `user_opening_scores` (named-root) rows and `opening_position_scores` (direct tree-position) rows for the new batch are written from one shared calculation, in the same transaction (see [`backend/app/opening_cache.py`](backend/app/opening_cache.py)).
 3. The `opening_score_cursors` row for `(user_id, player_color)` is updated to point to the new generation.
 4. Stale batches are pruned (cascading both score tables through `batch_id ON DELETE CASCADE`).
 
@@ -3309,7 +1776,7 @@ The display scale remains the frozen g-xnv7 scale (`A≥44`, `B≥29`, `C≥8`, 
 
 The `NodeDebug`/`NodeDebugResponse` debug surface exposes this truthfully via four report-stage fields: `pre_fold_quality` (the base actually selected), `reported_score` (`pre_fold_quality × report_fold_multiplier`, i.e. the returned `opening_score`), `report_fold_multiplier` (`coverage_fraction ** report_fold_p` for an active in-scope row, else `1.0`), and `report_self_term_effective` — a shared `Literal["keep","drop_user","keep_fallback"]` the API rejects out-of-vocabulary spellings against. `keep_fallback` marks a `drop_user` user-turn row that could not take the child ratio (leaf, empty prepared-child set, or non-positive child denominator) and fell back to the ordinary ratio; opponent rows report `keep`. These fields are **null until the FEN is reported as its own row** and are back-filled idempotently on one shared mutable per-FEN object, so a descendant later reported on its own becomes non-null through the earlier root snapshots that reference it; a FEN only ever visited as a descendant stays null.
 
-DB reference: §5.7
+DB reference: [`backend/app/models.py`](backend/app/models.py)
 
 ### 13.4 Opening card contract (all surfaces, g-d65n)
 
@@ -3373,7 +1840,7 @@ During live play the cards are derived **client-side from local move history**, 
 
 ### 13.5 Opening Tree API (`GET /api/openings/tree`)
 
-The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree`. One request returns one hydrated **column** per position along a canonical move line, so a deep link or refresh renders in a single round trip. The endpoint does **zero per-request scoring** and **no per-request overlay rebuild**: structural shape comes from the opening graph + the persisted observed-edge read model (§5.7.5, read by bounded per-parent indexed lookups), direct metrics from the persisted batch (§5.7.4), and engine evals from `analysis_cache` (§14, via `app/tree_eval.py`). A warm read therefore scales with the rendered line/frontier size and indexed DB lookups, not with the user's total session history. The single stale-while-revalidate trigger (`ensure_tree_cache`) serves a warm-fresh batch immediately while scheduling a background recompute, and **blocks** for a one-time bootstrap only when the latest batch is cold or registry/schema-stale (predating the §5.7.5 read model) so observed moves are never hidden.
+The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree`. One request returns one hydrated **column** per position along a canonical move line, so a deep link or refresh renders in a single round trip. The endpoint does **zero per-request scoring** and **no per-request overlay rebuild**: structural shape comes from the opening graph + the persisted observed-edge read model (bounded per-parent indexed lookups), direct metrics from the persisted batch, and engine evals from `analysis_cache` (§14, via `app/tree_eval.py`). A warm read therefore scales with the rendered line/frontier size and indexed DB lookups, not with the user's total session history. The single stale-while-revalidate trigger ([`ensure_tree_cache`](backend/app/opening_cache.py)) serves a warm-fresh batch immediately while scheduling a background recompute, and **blocks** for a one-time bootstrap only when the latest batch is cold or registry/schema-stale (predating the persisted observed-edge read model) so observed moves are never hidden.
 
 **Request.** `player_color=white|black` (required; bad color → 422). The selected line is given either as a repeated UCI param `move=e2e4&move=c7c5`, or — legacy, only when `move` is empty — as `opening=<normalized FEN>`. With neither, the line is empty (root).
 
@@ -3402,7 +1869,7 @@ The card resolves the overlap into **exactly one** move-type chip, by a total or
 
 **Color specificity.** The reference book skeleton and the white-relative eval values are color-independent; the observed node set, counts, and metrics are color-specific (the overlay filters by user **and** color), so the **primary** play-frequency sort key still differs by color. The **secondary** eval tie-break, by contrast, is keyed to the column's side to move — a position property — so it is color-independent: the same column sorts its evals identically for a white and a black repertoire. The backend holds no cross-color cache.
 
-**Cache resolution + batched lookups** (per request, no overlay rebuild): `ensure_tree_cache` resolves the batch to serve from and fires the single stale-while-revalidate trigger (warm-fresh schedules a background recompute and serves immediately; cold or registry/schema-stale blocks once on `refresh_now` so observed edges are materialized before serving — §5.7.5); observed move edges come from `lookup_observed_edges_for_parent` via bounded per-parent indexed point queries over `opening_position_edges`; the persisted direct metrics from `lookup_position_scores_for_batch` (the same resolved `batch_id`, §5.7.4); the move-eval batch; and one root-eval for the column-0 start position. `ensure_tree_cache` captures `batch_id` / `batch_computed_at` as plain scalars **before** the request's `db.rollback()`, so the builder reads no ORM batch field afterward. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
+**Cache resolution + batched lookups** (per request, no overlay rebuild): [`ensure_tree_cache`](backend/app/opening_cache.py) resolves the batch to serve from and fires the single stale-while-revalidate trigger (warm-fresh schedules a background recompute and serves immediately; cold or registry/schema-stale blocks once on `refresh_now` so observed edges are materialized before serving); observed move edges come from `lookup_observed_edges_for_parent` via bounded per-parent indexed point queries over `opening_position_edges`; the persisted direct metrics from `lookup_position_scores_for_batch` for that resolved `batch_id`; the move-eval batch; and one root-eval for the column-0 start position. `ensure_tree_cache` captures `batch_id` / `batch_computed_at` as plain scalars **before** the request's `db.rollback()`, so the builder reads no ORM batch field afterward. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
 
 **Frontend `/openings` URL contract.** The canonical frontend URL is
 `/openings?color=white|black` plus a repeated UCI param `move=<uci>` (one per
@@ -3460,7 +1927,7 @@ Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish anal
 
 ### 14.3 Staleness & Quality-Aware Replacement
 
-There is no time-based invalidation, but entries are **not** immutable: a higher-quality analysis of the same `(fen_before, move_uci)` can replace or merge into an existing row. All writers go through the shared quality-aware writer and deterministic replacement policy described in §5.6. The governing rules:
+There is no time-based invalidation, but entries are **not** immutable: a higher-quality analysis of the same `(fen_before, move_uci)` can replace or merge into an existing row. All writers go through the shared quality-aware writer and deterministic replacement policy described in [Analysis evidence](docs/architecture/analysis-evidence.md#replacement-and-publication). The governing rules:
 
 - A row's trust comes from its **profile** (engine/search identity, verified against the in-code registry) and its **evidence contract** (data-shape, with per-contract semantic validation) — never from raw numeric depth.
 - Browser `game` uploads are non-authoritative: they fill keys with no evidence but never downgrade a canonical or legacy row.
@@ -3479,13 +1946,13 @@ Writes are concurrency-safe: PostgreSQL uses insert-first + `SELECT … FOR UPDA
 | `precomputed` | Entry written by the opening precompute pass |
 | `jeffml-scores` | Entry ingested from the JeffML scores dataset (eval-only) |
 
-Quality/trust is carried by the metadata columns (`analysis_profile_id`, engine identity, `evidence_contract_id`) and surfaced on the lookup response via an `authoritative` flag. See §5.6 for the full model.
+Quality/trust is carried by the metadata columns (`analysis_profile_id`, engine identity, `evidence_contract_id`) and surfaced on the lookup response via an `authoritative` flag. See [Analysis evidence](docs/architecture/analysis-evidence.md#trust-capability-and-user-scope) for the cross-cutting model.
 
-DB reference: §5.6
+DB reference: [`backend/app/models.py`](backend/app/models.py)
 
 ### 14.5 Cache Repair & Invalidation
 
-The write guard (§5.6) only protects *new* writes. Rows that predate it —
+The [write guard](docs/architecture/analysis-evidence.md#replacement-and-publication) only protects *new* writes. Rows that predate it —
 game-overwritten depth-17 results, partial legacy precompute rows, or rows that
 claim a profile they cannot back up — can still preserve unstable best moves,
 deltas, and classifications, which feed the eval-delta / win-chance fallbacks
@@ -3540,8 +2007,8 @@ the *position*; everything about the played move stays move-grain.
 | `best_move_uci`, `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate` | **position** | `normalized_fen` | `position_analysis` |
 | `move_san`, `played_eval`, `played_eval_mate`, `classification`, `eval_delta` | **move** | `(fen_before, move_uci)` | `analysis_cache` |
 
-**Storage & trust.** `position_analysis` holds one winner per `normalized_fen` (storage
-tables in §5.6). Trust is computed per grain via two evidence contracts —
+**Storage & trust.** `position_analysis` holds one winner per `normalized_fen` (see
+[`backend/app/models.py`](backend/app/models.py)). Trust is computed per grain via two evidence contracts —
 `position-complete-v1` (best move + multi-move PV + a CP or mate eval) and
 `move-complete-v1` (played eval + classification) — surfaced as independent
 `position_trusted` / `move_trusted` flags that replaced the removed `trusted_for_resolution` flag.
@@ -4177,7 +2644,8 @@ each goes on to request and apply an opponent reply through its own `Chess` inst
 appending twice to the one shared history; ownership discards the loser whole.
 `NULL` means "no confirmed root" and is a real, expected residue — legacy sessions and
 drills abandoned mid-route. A NULL-boundary session contributes no reach evidence, while
-its targeted attempts survive independently in the `opponent_decisions` log (§8.3).
+its targeted attempts survive independently in the `opponent_decisions` log
+([`backend/app/models.py`](backend/app/models.py)).
 
 **Which proof is owed is derived, never inferred from the request.** A FEN's active-colour
 field fixes who made the last move into it, so the route target alone decides whether the

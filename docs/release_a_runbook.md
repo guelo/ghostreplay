@@ -119,8 +119,9 @@ Rehearsed sequence (on the same disposable DB):
 
 If `20260709_02` leaves an invalid `idx_rating_history_user_chain` in production,
 `DROP INDEX CONCURRENTLY idx_rating_history_user_chain;` then re-run the migration
-(or `CREATE INDEX CONCURRENTLY` by hand with the exact definition in §5.5 of
-SPEC.md). Do **not** `VALIDATE`.
+(or `CREATE INDEX CONCURRENTLY` by hand with the exact definition in
+`backend/alembic/versions/20260709_02_add_rating_history_user_chain_index.py`).
+Do **not** `VALIDATE`.
 
 ---
 

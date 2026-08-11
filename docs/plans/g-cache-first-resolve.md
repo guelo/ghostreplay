@@ -115,7 +115,7 @@ NOT actually bound resolution, for two reasons:
 - **Finding 2 (a stalled worker must still terminate, not hang forever).** `releaseFallback`
   with no buffered worker and no worker error leaves the entry `released` and
   `waitForAnalysis` pending **forever** if the worker never emits — contradicting the
-  no-hang contract and SPEC.md:1011 ("Worker crash/timeout → skip evaluation for that move").
+  no-hang contract (worker crash/timeout skips evaluation for that move).
   So add a **separate total-analysis deadline** `ANALYSIS_TOTAL_DEADLINE_MS` (propose
   **8000ms**, started in `analyzeMove`) that, when it fires for a still-unresolved index,
   **terminates the request as `failed`**: rejects its `analysisWaiters` ("analysis timed
@@ -127,7 +127,7 @@ NOT actually bound resolution, for two reasons:
     "evaluations queue; moves are processed in order"), so the 8s deadline **includes time
     spent waiting in the worker queue** — a deep backlog could cancel a still-queued request
     as `failed` before the engine ever starts it. We **accept this**: a `failed` outcome for
-    a buried request is consistent with SPEC.md:1011 ("worker timeout → skip evaluation; do
+    a buried request is consistent with the coordinator contract (worker timeout skips evaluation; do
     not flag as blunder"), and `failed` advances the frontier rather than mis-recording. The
     8s value is chosen to comfortably exceed a normal backlog at realistic move cadence. Add
     a **backlog test** (test 10d): enqueue many moves so later indices sit in the queue past
@@ -249,7 +249,7 @@ before the worker finishes simply does nothing; the worker result resolves per r
    its `analysisWaiters` with `errorText ?? "analysis timed out"`, emit a `failed` outcome
    (frontier advances — never deadlocks),
    `cancelWorkerAnalysis(id)`/`clearActiveAnalysisStateIfCurrent(id)`, and delete entry +
-   meta + both timers. Mirrors SPEC.md:1011 (worker timeout → skip evaluation; do not flag).
+   meta + both timers. Mirrors the coordinator contract (worker timeout skips evaluation; do not flag).
 
 **Finding R5 — gate late `analysis-started`/`analysis-streaming` by request state.**
 After a trusted cache hit cancels a worker, an already-queued `analysis-started`
@@ -443,7 +443,7 @@ Add tests that drive both completion orders by controlling when the mocked
     misses (releaseFallback, `released`) AND the worker NEVER emits → at
     `ANALYSIS_TOTAL_DEADLINE_MS`, `failRequest` rejects `waitForAnalysis` ("analysis timed
     out"), emits a `failed` outcome (frontier advances), and clears state — no hang
-    (SPEC.md:1011). Assert the deadline timer also clears on normal terminal resolution.
+    (the coordinator's timeout contract). Assert the deadline timer also clears on normal terminal resolution.
 10c. **Cache-response timer starts at dispatch (Finding 5):** under a sustained burst where
     the trailing debounce keeps resetting, an older request is NOT released before its batch
     is dispatched; the cache-response window begins when `flushCacheLookups` sends the lookup.

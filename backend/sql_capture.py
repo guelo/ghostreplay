@@ -1,12 +1,11 @@
 """Ordered SQL statement + COMMIT capture, and the cursor-is-last assertions.
 
-The serving write paths that touch opening-evidence share one invariant
-(SPEC.md:1460): ``bump_evidence_seq`` — an ``INSERT ... ON CONFLICT DO UPDATE``
-on the shared per-(user,color) ``opening_score_cursors`` row, the most contended
-row in the transaction — must be the transaction's FINAL blocking statement
-before commit, and must fire exactly once. The row lock is held from the bump
-until COMMIT, so anything appended after it (a write *or* a read) widens that
-lock window.
+The serving write paths that touch opening evidence share one invariant:
+``app.opening_cache.bump_evidence_seq`` updates the shared per-(user,color)
+``opening_score_cursors`` row with ``INSERT ... ON CONFLICT DO UPDATE`` as the
+transaction's final blocking statement before commit, and exactly once. The
+row is the transaction's most contended lock; anything appended after its bump
+(a write *or* a read) widens that lock window.
 
 ``before_cursor_execute`` alone cannot pin this: it never sees the COMMIT, so it
 cannot tell "last statement of the transaction" from "last statement observed".

@@ -217,7 +217,7 @@ export const failsDrill = (
 /**
  * Determines if a move is a recordable failure (for blunder recording and SRS
  * review pass/fail). Inclusive boundary (>= 50) matching the backend contract
- * (SPEC.md:1012) — the boundary value FAILS. No context-aware scaling.
+ * — the boundary value FAILS. No context-aware scaling.
  */
 export const isRecordableFailure = (delta: number | null | undefined): boolean => {
   const loss = evalLoss(delta)
