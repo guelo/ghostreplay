@@ -132,6 +132,19 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.queryByLabelText("No data")).toBeNull();
   });
 
+  it("keeps an ordinary fractional score integer-formatted", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, score: 72.4 }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("72")).toBeInTheDocument();
+    expect(screen.queryByText("72.4")).toBeNull();
+  });
+
   it("falls back to 'Unclassified' for a non-root null name", () => {
     render(
       <OpeningTreeNodeCard
@@ -351,6 +364,18 @@ describe("OpeningTreeNodeCard — compact", () => {
 });
 
 describe("OpeningTreeNodeCard — expanded", () => {
+  it("keeps an ordinary fractional score integer-formatted", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        node={{ ...childView, score: 72.4 }}
+      />,
+    );
+
+    expect(screen.getByText("72")).toBeInTheDocument();
+    expect(screen.queryByText("72.4")).toBeNull();
+  });
+
   it("is not a button and renders the name header, move list, score+grade, eval, and metrics", () => {
     render(<OpeningTreeNodeCard variant="expanded" node={childView} />);
 

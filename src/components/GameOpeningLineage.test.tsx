@@ -337,21 +337,25 @@ describe("GameOpeningLineage", () => {
         renderLineage(
           [makeItem({ opening_key: "k1", opening_name: "Italian Game" })],
           {
-            scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+            scoreChanges: [
+              makeChange({ opening_key: "k1", before: 41.6, after: 42.1 }),
+            ],
           },
         );
 
         const card = screen.getByRole("button", { name: /Italian Game/ });
-        expect(within(card).getByText("41")).toBeInTheDocument();
-        expect(card).toHaveAccessibleName(/Score increased by 3, now 44/);
+        expect(within(card).getByText("41.6")).toBeInTheDocument();
+        expect(card).toHaveAccessibleName(/Score increased by 0.5, now 42.1/);
 
         act(() => vi.advanceTimersByTime(150));
 
-        expect(within(card).queryByText("41")).not.toBeInTheDocument();
-        expect(within(card).getByText("44")).toBeInTheDocument();
+        expect(within(card).queryByText("41.6")).not.toBeInTheDocument();
+        expect(within(card).getByText("42.1")).toBeInTheDocument();
         expect(
-          within(card).getByRole("img", { name: "Score increased by 3, now 44" }),
-        ).toBeInTheDocument();
+          within(card).getByRole("img", {
+            name: "Score increased by 0.5, now 42.1",
+          }),
+        ).toHaveTextContent("▲ +0.5");
 
         // Finish the outcome animation, then replace compact -> expanded -> compact.
         act(() => vi.advanceTimersByTime(600));
@@ -361,8 +365,8 @@ describe("GameOpeningLineage", () => {
         );
 
         const remountedCard = screen.getByRole("button", { name: /Italian Game/ });
-        expect(within(remountedCard).getByText("44")).toBeInTheDocument();
-        expect(within(remountedCard).queryByText("41")).not.toBeInTheDocument();
+        expect(within(remountedCard).getByText("42.1")).toBeInTheDocument();
+        expect(within(remountedCard).queryByText("41.6")).not.toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }
@@ -373,35 +377,42 @@ describe("GameOpeningLineage", () => {
       try {
         renderLineage([makeItem({ opening_key: "k1" })], {
           scoreChanges: [
-            makeChange({ opening_key: "k1", before: 64, after: 62, delta: -2 }),
+            makeChange({
+              opening_key: "k1",
+              before: 64.4,
+              after: 63.9,
+              delta: -0.5,
+            }),
           ],
         });
 
         act(() => vi.advanceTimersByTime(150));
         const card = screen.getByRole("button", { name: /Opening/ });
         expect(
-          within(card).getByRole("img", { name: "Score decreased by 2, now 62" }),
-        ).toBeInTheDocument();
+          within(card).getByRole("img", {
+            name: "Score decreased by 0.5, now 63.9",
+          }),
+        ).toHaveTextContent("▼ -0.5");
       } finally {
         vi.useRealTimers();
       }
     });
 
-    it("suppresses score-change treatment when rounded scores do not change", () => {
-      // raw delta +0.5, but round(42.1)=42 === round(41.6)=42 -> no visible change.
+    it("suppresses score-change treatment when endpoints resolve to the same tenth", () => {
       renderLineage([makeItem({ opening_key: "k1" })], {
         scoreChanges: [
-          makeChange({ opening_key: "k1", before: 41.6, after: 42.1, delta: 0.5 }),
+          makeChange({ opening_key: "k1", before: 41.61, after: 41.64, delta: 0.03 }),
         ],
       });
 
       expect(
         screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
       ).not.toBeInTheDocument();
+      expect(screen.queryByText("<0.1")).not.toBeInTheDocument();
+      expect(screen.queryByText("Practice recorded")).not.toBeInTheDocument();
     });
 
-    it("uses the rounded score change for the capsule", () => {
-      // round(41.6)=42, round(41.4)=41 -> displayed +1 -> 42.
+    it("uses the tenth-quantized score change for the capsule", () => {
       vi.useFakeTimers();
       try {
         renderLineage([makeItem({ opening_key: "k1" })], {
@@ -411,9 +422,9 @@ describe("GameOpeningLineage", () => {
         });
 
         act(() => vi.advanceTimersByTime(150));
-        expect(screen.getByText("42")).toBeInTheDocument();
+        expect(screen.getByText("41.6")).toBeInTheDocument();
         expect(
-          screen.getByRole("img", { name: "Score increased by 1, now 42" }),
+          screen.getByRole("img", { name: "Score increased by 0.2, now 41.6" }),
         ).toBeInTheDocument();
       } finally {
         vi.useRealTimers();
@@ -444,19 +455,21 @@ describe("GameOpeningLineage", () => {
                 is_new: true,
                 before: null,
                 delta: null,
-                after: 30,
+                after: 30.4,
               }),
             ],
           },
         );
 
         const card = screen.getByRole("button", { name: /New Opening/ });
-        expect(within(card).getByText("0")).toBeInTheDocument();
+        expect(within(card).getByText("0.0")).toBeInTheDocument();
         expect(card).not.toHaveTextContent("60");
         act(() => vi.advanceTimersByTime(150));
-        expect(within(card).getByText("30")).toBeInTheDocument();
+        expect(within(card).getByText("30.4")).toBeInTheDocument();
         expect(
-          within(card).getByRole("img", { name: "Score increased by 30, now 30" }),
+          within(card).getByRole("img", {
+            name: "Score increased by 30.4, now 30.4",
+          }),
         ).toBeInTheDocument();
       } finally {
         vi.useRealTimers();
@@ -495,7 +508,7 @@ describe("GameOpeningLineage", () => {
               is_new: true,
               before: null,
               delta: null,
-              after: 0.4,
+              after: 0.04,
             }),
           ],
         },
@@ -526,21 +539,24 @@ describe("GameOpeningLineage", () => {
         },
       );
 
-      await screen.findByRole("img", { name: "Score increased by 3, now 44" });
+      await screen.findByRole("img", {
+        name: "Score increased by 3.0, now 44.0",
+      });
       const compact = screen.getByRole("button", { name: /Select Ruy Lopez/ });
 
       await user.click(compact);
 
       expect(
-        screen.getByRole("img", { name: "Score increased by 3, now 44" }),
+        screen.getByRole("img", { name: "Score increased by 3.0, now 44.0" }),
       ).toBeInTheDocument();
+      expect(screen.getByText("44.0")).toBeInTheDocument();
     });
   });
 
   describe("score-change data resolution", () => {
     it("starts the card from the delta's pre-game `before`, not the refetched post-game score", () => {
       // At game end the lineage refetch loads the POST-game item.score (44), but
-      // the score reveal must begin at the delta's pre-game value (41).
+      // the score reveal must begin at the delta's pre-game value (41.0).
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "Italian Game", score: 44 })],
         {
@@ -549,8 +565,8 @@ describe("GameOpeningLineage", () => {
       );
 
       const card = screen.getByRole("button", { name: /Italian Game/ });
-      expect(within(card).getByText("41")).toBeInTheDocument();
-      expect(within(card).queryByText("44")).not.toBeInTheDocument();
+      expect(within(card).getByText("41.0")).toBeInTheDocument();
+      expect(within(card).queryByText("44.0")).not.toBeInTheDocument();
       expect(
         within(card).queryByRole("img", { name: /^Score (increased|decreased)/ }),
       ).not.toBeInTheDocument();
@@ -603,10 +619,10 @@ describe("GameOpeningLineage", () => {
       const openGame = screen.getByRole("button", { name: /Open Game/ });
       expect(within(openGame).getByText("50")).toBeInTheDocument();
 
-      // k2 has a delta → starts on pre-game before (41), not post-game 44.
+      // k2 has a delta → starts on pre-game before (41.0), not post-game 44.0.
       const ruyLopez = screen.getByRole("button", { name: /Ruy Lopez/ });
-      expect(within(ruyLopez).getByText("41")).toBeInTheDocument();
-      expect(within(ruyLopez).queryByText("44")).not.toBeInTheDocument();
+      expect(within(ruyLopez).getByText("41.0")).toBeInTheDocument();
+      expect(within(ruyLopez).queryByText("44.0")).not.toBeInTheDocument();
     });
   });
 
@@ -676,7 +692,7 @@ describe("GameOpeningLineage", () => {
       );
 
       const card = screen.getByRole("button", { name: /Ruy Lopez/ });
-      expect(within(card).getByText("41")).toBeInTheDocument();
+      expect(within(card).getByText("41.0")).toBeInTheDocument();
       expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
     });
 
@@ -691,7 +707,7 @@ describe("GameOpeningLineage", () => {
       );
 
       const card = screen.getByRole("button", { name: /Ruy Lopez/ });
-      expect(within(card).getByText("41")).toBeInTheDocument();
+      expect(within(card).getByText("41.0")).toBeInTheDocument();
       expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
     });
 

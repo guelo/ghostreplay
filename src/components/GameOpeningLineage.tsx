@@ -275,10 +275,10 @@ function GameOpeningLineage({
           const scoreChangePhase = changeKey
             ? scoreChangePhases[changeKey] ?? "reveal"
             : "settled";
-          // A visible rounded delta makes its resolved `after` score the card's
+          // A visible tenth-precision delta makes its resolved `after` score the card's
           // canonical value. Compact cards reveal it from `badge.before`; a new
           // opening therefore gets a real score hero instead of a dash. A new
-          // opening whose score rounds to zero has no visible delta, so it stays
+          // opening whose score rounds to zero tenths has no visible delta, so it stays
           // unscored rather than presenting an unexplained F grade. For other
           // unrenderable deltas retain the most reliable wire value, then fall
           // back to the lineage score.

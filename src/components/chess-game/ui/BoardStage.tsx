@@ -9,6 +9,7 @@ import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
 import ReturnToLiveButton from "./ReturnToLiveButton";
 import type { BoardNotice, CopyPositionNotice } from "../types";
 import type { LastDrillDeltaToast } from "../../../hooks/useLastDrillDeltaToast";
+import { formatOpeningDeltaValue } from "../../../utils/openingDeltaBadge";
 
 type BoardOrientation = "white" | "black";
 
@@ -256,7 +257,8 @@ const BoardStage = ({
                     </span>
                     <span className="last-drill-delta-toast__delta">
                       {badge.diff > 0 ? "+" : ""}
-                      {badge.diff} → {badge.after}
+                      {formatOpeningDeltaValue(badge.diff)} →{" "}
+                      {formatOpeningDeltaValue(badge.after)}
                     </span>
                   </li>
                 ))}

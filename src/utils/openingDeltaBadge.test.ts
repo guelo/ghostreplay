@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { badgeFor, hasRenderableBadge } from "./openingDeltaBadge";
+import {
+  badgeFor,
+  describeOpeningDeltaBadge,
+  formatOpeningDeltaValue,
+  hasRenderableBadge,
+} from "./openingDeltaBadge";
 import type { OpeningScoreDeltaItem } from "./api";
 
 const item = (
@@ -18,26 +23,26 @@ const item = (
 });
 
 describe("badgeFor", () => {
-  it("renders the rounded diff and direction", () => {
-    expect(badgeFor(item({ before: 41, after: 44 }))).toEqual({
-      before: 41,
-      diff: 3,
-      after: 44,
+  it("renders positive and negative changes from quantized tenths", () => {
+    expect(badgeFor(item({ before: 41.6, after: 42.1 }))).toEqual({
+      before: 41.6,
+      diff: 0.5,
+      after: 42.1,
       dir: "up",
     });
-    expect(badgeFor(item({ before: 44, after: 41 }))).toEqual({
-      before: 44,
-      diff: -3,
-      after: 41,
+    expect(badgeFor(item({ before: 42.1, after: 41.6 }))).toEqual({
+      before: 42.1,
+      diff: -0.5,
+      after: 41.6,
       dir: "down",
     });
   });
 
   it("quantifies a brand-new opening against zero", () => {
-    expect(badgeFor(item({ is_new: true, before: null, after: 37 }))).toEqual({
+    expect(badgeFor(item({ is_new: true, before: null, after: 37.4 }))).toEqual({
       before: 0,
-      diff: 37,
-      after: 37,
+      diff: 37.4,
+      after: 37.4,
       dir: "up",
     });
   });
@@ -57,11 +62,32 @@ describe("badgeFor", () => {
     expect(badgeFor(item({ is_new: false, before: null }))).toBeNull();
   });
 
-  it("suppresses a sub-1.0 wobble that rounds to no change", () => {
-    // The cards display ROUNDED scores, so a 0.4-point drift must never render
-    // a misleading `+0` / `+1`.
-    expect(badgeFor(item({ before: 44.1, after: 44.4 }))).toBeNull();
+  it("suppresses endpoints that quantize to the same tenth", () => {
+    expect(badgeFor(item({ before: 44.11, after: 44.14 }))).toBeNull();
     expect(badgeFor(item({ before: 44, after: 44 }))).toBeNull();
+  });
+
+  it("derives the delta from integer tenths without floating-point drift", () => {
+    expect(badgeFor(item({ before: 41.4, after: 41.6 }))).toMatchObject({
+      before: 41.4,
+      diff: 0.2,
+      after: 41.6,
+    });
+  });
+});
+
+describe("terminal delta formatting", () => {
+  it("always renders scores, deltas, and descriptions to one decimal place", () => {
+    expect(formatOpeningDeltaValue(42)).toBe("42.0");
+    expect(formatOpeningDeltaValue(-0.5)).toBe("-0.5");
+    expect(
+      describeOpeningDeltaBadge({
+        before: 41.6,
+        diff: 0.5,
+        after: 42.1,
+        dir: "up",
+      }),
+    ).toBe("Score increased by 0.5, now 42.1");
   });
 });
 

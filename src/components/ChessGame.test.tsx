@@ -1542,7 +1542,7 @@ describe("ChessGame characterization safeguards", () => {
       name: "Openings played",
     });
     await within(region).findByRole("img", {
-      name: "Score increased by 3, now 44",
+      name: "Score increased by 3.0, now 44.0",
     });
 
     // ...and NOT inside the (now delta-less) drill-stopped actions.
@@ -1551,7 +1551,7 @@ describe("ChessGame characterization safeguards", () => {
     });
     expect(
       within(drillRegion).queryByRole("img", {
-        name: "Score increased by 3, now 44",
+        name: "Score increased by 3.0, now 44.0",
       }),
     ).not.toBeInTheDocument();
   });
@@ -5382,7 +5382,7 @@ describe("ChessGame opening lineage", () => {
       callsBeforeResign,
     );
     await within(region).findByRole("img", {
-      name: "Score increased by 3, now 44",
+      name: "Score increased by 3.0, now 44.0",
     });
   });
 

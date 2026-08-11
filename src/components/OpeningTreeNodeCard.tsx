@@ -13,6 +13,7 @@ import {
 import { formatWhiteEval } from "./MoveRow.helpers";
 import {
   describeOpeningDeltaBadge,
+  formatOpeningDeltaValue,
   type OpeningDeltaBadge,
 } from "../utils/openingDeltaBadge";
 
@@ -170,7 +171,7 @@ function ScoreChangeBadge({
     >
       <span aria-hidden="true">
         {arrow} {sign}
-        {scoreChange.diff}
+        {formatOpeningDeltaValue(scoreChange.diff)}
       </span>
     </span>
   );
@@ -205,7 +206,7 @@ function CompactScoreChange({
           animateArrival ? "tree-node-card__score--changed" : "",
         ].join(" ")}
       >
-        {formatScore(score)}
+        {formatOpeningDeltaValue(score)}
       </span>
       {!showingPreviousScore && (
         <ScoreChangeBadge scoreChange={scoreChange} animated={animateArrival} />
@@ -583,7 +584,9 @@ function ExpandedBody({
               <ScorePlaceholder />
             ) : (
               <>
-                {formatScore(node.score)}
+                {scoreChange
+                  ? formatOpeningDeltaValue(scoreChange.after)
+                  : formatScore(node.score)}
                 {scoreChange && (
                   <ScoreChangeBadge
                     scoreChange={scoreChange}
