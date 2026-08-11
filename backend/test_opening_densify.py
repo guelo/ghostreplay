@@ -6,7 +6,7 @@ The load-bearing properties, in order of what would hurt most if they broke:
    as valid, so a cycle would let a player shuffle pieces forever and still
    "reach" the target.
 2. `graph.fingerprint` is UNCHANGED. It gates the opening score cache and the
-   frozen release-calibration artifact, which fails closed on mismatch.
+   frozen calibration-analysis artifact, which is invalidated on mismatch.
 3. `--check` catches an INCOMPLETE artifact. Provenance proves origin, not
    completeness; only exact recomputation proves the latter.
 """
@@ -282,7 +282,7 @@ class TestForwardProgressFilter:
             assert uci not in real_graph._nodes[parent_fen].children
 
 
-# -- The fingerprint that protects opening scores and release calibration --
+# -- The fingerprint that protects opening scores and calibration analysis --
 
 
 class TestGraphIsUntouched:

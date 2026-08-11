@@ -44,15 +44,8 @@ from app.opening_rootcalc import (
 from app.opening_roots import OpeningRoot, OpeningRoots
 
 import scripts.calibrate_opening_scores_v2 as cal
-# The g-p4ih-selection fixture builders (hand-built SelectionInputs with honestly copied
-# stamps). Reused rather than duplicated: the release CLI is a thin driver over
-# select_candidate, so its tests need exactly the inputs that bead's tests already build.
+# The selection fixture builders are reused rather than duplicated by the CLI tests.
 import test_calibrate_selection as selfix
-# Those builders stamp scorer_source_verified_preexec=True, which after
-# g-release-os-boundary means "this run was sealed inside an OS boundary" — and the binding
-# checks compare that claim against THIS interpreter's constants. Imported rather than
-# redefined so there is one place saying how the synthetic suite pretends to be sealed.
-from test_calibrate_selection import _pretend_this_process_is_sealed  # noqa: F401
 
 
 # --- in-memory fixtures (mirrors test_opening_rootcalc helpers) -------------
@@ -942,7 +935,7 @@ class TestDiagnostics:
 
     def test_fold_mirror_scenario_is_coverage_symmetric(self):
         # The turn-symmetry fixture: EQUAL, NONZERO coverage on both turns for EVERY cell
-        # the release path scores, so "the two multipliers are equal" is assertable at all.
+        # candidate selection scores, so "the two multipliers are equal" is assertable at all.
         mirror = cal._fold_mirror_scenario()
         cells = cal._required_cells(cal.RELEASE_ARMS) | set(cal.DEMO_CELLS)
         assert cells
@@ -1485,8 +1478,8 @@ def _fz_assert_self_check_parity(artifact_bytes, provenance_bytes, expected):
     the capture tests — so every row of this module's malformation corpus is a parity row by
     construction, and a row added tomorrow is covered the day it lands. The failure mode it
     exists to prevent is a self-check that keeps header/provenance validation but skips pair
-    semantics: capture would then publish an artifact the release path fails closed on, and
-    the operator would discover it at release time with no artifact to fall back to."""
+    semantics: capture would then publish an artifact the candidate selector rejects, and
+    the operator would discover it during analysis with no artifact to fall back to."""
     try:
         cal.validate_capture_candidate(
             artifact_bytes, provenance_bytes,
@@ -1498,7 +1491,7 @@ def _fz_assert_self_check_parity(artifact_bytes, provenance_bytes, expected):
         raise AssertionError(
             "validate_capture_candidate ACCEPTED bytes the load guard rejected with "
             f"{expected[0].__name__}: {expected[1]!r} — capture would publish an artifact "
-            "the release path refuses to load"
+            "the candidate selector refuses to load"
         )
     assert actual == expected, (
         "the producer self-check and the consumer load guard disagree on the same bytes:\n"
@@ -2735,21 +2728,6 @@ def _bsi_artifact(tmp_path, *, as_of=_FZ_AS_OF, graph=None, roots=None, inputs=N
 
 _BACKEND_ROOT = Path(cal.__file__).resolve().parents[1]
 
-_CHILD_BUILD = """
-import json, sys
-import test_calibrate_opening_scores as t
-import scripts.calibrate_opening_scores_v2 as cal
-try:
-    si = cal._build_selection_inputs(
-        sys.argv[1], provenance_path=sys.argv[2],
-        graph=t._bsi_graph(), roots=t._bsi_roots(),
-    )
-    out = {"preexec": si.cohort.scorer_source_verified_preexec}
-except cal.ScorerSourceUnstableError as e:
-    out = {"error": type(e).__name__}
-print(json.dumps(out))
-"""
-
 # A module whose two revisions are the SAME SIZE, so a timestamp-validated .pyc compiled
 # from the first stays "valid" for the second once the mtime is restored.
 _STALE_V1 = 'VALUE = "AAA"\n'
@@ -2775,32 +2753,6 @@ def _bytecode_fixture_env(**overrides) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in _BYTECODE_ENV_VARS}
     env.update(overrides)
     return env
-
-
-def _run_child_build(artifact_path, provenance_path, *, env_digest,
-                     pycache_prefix=None, write_bytecode=False):
-    """Build selection inputs in a FRESH interpreter launched with (or without)
-    SCORER_SOURCE_DIGEST_ENV already in its environment. The flag only means anything for
-    an INHERITED digest, so it cannot be exercised by setenv inside this process — that is
-    the very promotion the flag must refuse (see test_late_setenv_cannot_upgrade_the_flag).
-
-    ``pycache_prefix`` / ``write_bytecode`` model what a launcher controls: a verified run
-    needs an empty/fresh bytecode cache and no .pyc writing, or CPython can serve the
-    scorer from bytecode it never checked against the source the digest hashes."""
-    env = _bytecode_fixture_env()
-    env.pop(cal.SCORER_SOURCE_DIGEST_ENV, None)
-    if env_digest is not None:
-        env[cal.SCORER_SOURCE_DIGEST_ENV] = env_digest
-    if pycache_prefix is not None:
-        env["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
-    if not write_bytecode:
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-    proc = subprocess.run(
-        [sys.executable, "-c", _CHILD_BUILD, str(artifact_path), str(provenance_path)],
-        capture_output=True, text=True, cwd=str(_BACKEND_ROOT), env=env, timeout=180,
-    )
-    assert proc.returncode == 0, proc.stderr
-    return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 def _clock_class(now_value=None, *, raise_on_now=False):
@@ -2959,120 +2911,45 @@ class TestScorerSourceDigest:
 
 
 class TestSourceStabilityFence:
-    """The digest must describe the code that ACTUALLY produced the scores. Python keeps
-    running the modules it imported even after their files change, so a digest read at
-    stamp time can name code that never ran. Every run is fenced: import snapshot ==
-    open read == close read, or nothing is stamped."""
+    """The in-process fence rejects manifest movement during selection."""
 
     def test_import_snapshot_matches_the_bytes_on_disk(self):
         assert cal._SCORER_SOURCE_DIGEST_AT_IMPORT == cal.scorer_source_digest()
 
     def test_fails_closed_when_source_moved_since_import(self, tmp_path, monkeypatch):
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        ap.unlink()  # the fence must reject BEFORE anything is loaded or scored
+        graph, roots, artifact, provenance, _as_of, _record = _bsi_artifact(tmp_path)
+        artifact.unlink()
         monkeypatch.setattr(cal, "_SCORER_SOURCE_DIGEST_AT_IMPORT", "0" * 64)
-        with pytest.raises(cal.ScorerSourceUnstableError):  # not FileNotFoundError
-            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        with pytest.raises(cal.ScorerSourceUnstableError):
+            cal._build_selection_inputs(artifact, provenance_path=provenance, graph=graph, roots=roots)
 
     def test_fails_closed_when_source_changes_mid_run(self, tmp_path, monkeypatch):
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        snap = cal._SCORER_SOURCE_DIGEST_AT_IMPORT
-        # Open read matches the import snapshot; a manifest file is edited while the run
-        # scores, so the close read differs -> the whole run is discarded.
-        digest = MagicMock(side_effect=[snap, "f" * 64])
+        graph, roots, artifact, provenance, _as_of, _record = _bsi_artifact(tmp_path)
+        digest = MagicMock(side_effect=[cal._SCORER_SOURCE_DIGEST_AT_IMPORT, "f" * 64])
         monkeypatch.setattr(cal, "scorer_source_digest", digest)
         with pytest.raises(cal.ScorerSourceUnstableError):
-            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        assert digest.call_count == 2  # fence opened and closed
+            cal._build_selection_inputs(artifact, provenance_path=provenance, graph=graph, roots=roots)
+        assert digest.call_count == 2
 
-    def test_stamps_the_fenced_digest_and_reads_it_exactly_twice(self, tmp_path, monkeypatch):
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        snap = cal._SCORER_SOURCE_DIGEST_AT_IMPORT
-        digest = MagicMock(side_effect=[snap, snap])  # a 3rd read would raise StopIteration
-        monkeypatch.setattr(cal, "scorer_source_digest", digest)
-        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        assert si.cohort.scorer_source_digest == snap
-        assert digest.call_count == 2  # the stamp reuses the fenced read, never a fresh one
-
-    def test_late_setenv_cannot_upgrade_the_flag(self, tmp_path, monkeypatch):
-        """THE regression test. scorer_source_verified_preexec means "a digest computed
-        before this interpreter existed agreed with mine". If the env were read at scoring
-        time, code running in THIS process — after the scorer was already compiled — could
-        set the matching digest and mint that proof for itself. It must not be able to."""
-        monkeypatch.setenv(cal.SCORER_SOURCE_DIGEST_ENV, cal.scorer_source_digest())
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        assert si.cohort.scorer_source_verified_preexec is False  # NOT promoted
-        assert cal.build_winner_binding(
-            si.cohort, cal.CURRENT_SM_V2_3_CELL
-        ).scorer_source_verified_preexec is False
-
-    # The env var is only meaningful when INHERITED, so the three cases below have to be
-    # exercised in a fresh interpreter that was launched with it already set.
-
-    def test_no_launcher_digest_stamps_unverified(self, tmp_path):
-        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        assert _run_child_build(ap, pp, env_digest=None) == {"preexec": False}
-
-    def test_an_inherited_matching_digest_is_accepted_but_does_not_verify_alone(self, tmp_path):
-        """A digest computed BEFORE the interpreter started predates the compilation of every
-        manifest file, so agreeing with it is what closes the compile window — and this run
-        does agree: it gets past the fence, and a disagreeing digest (next test) does not.
-
-        It stamps False all the same, and that is g-release-os-boundary. The digest says the
-        bytes were the same at two moments; it never held them still, and it says nothing at
-        all about the interpreter and the installed dependencies that execute them. Only a
-        run measuring itself onto a read-only volume stamps True — see
-        test_release_calibration_launcher.py::TestSealedCheckout, which does exactly this
-        against a real sealed volume and gets True.
-        """
-        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+    def test_an_inherited_matching_source_fence_digest_checks_bytecode_and_origins(
+            self, tmp_path, monkeypatch):
+        graph, roots, artifact, provenance, _as_of, _record = _bsi_artifact(tmp_path)
         digest = cal.scorer_source_digest()
-        assert _run_child_build(
-            ap, pp, env_digest=digest.upper() + " ", pycache_prefix=tmp_path / "pyc",
-        ) == {"preexec": False}
+        monkeypatch.setattr(cal, "_LAUNCHER_SCORER_DIGEST", digest)
+        bytecode = MagicMock()
+        origins = MagicMock()
+        monkeypatch.setattr(cal, "check_scorer_bytecode", bytecode)
+        monkeypatch.setattr(cal, "check_scorer_import_origins", origins)
+        inputs = cal._build_selection_inputs(artifact, provenance_path=provenance, graph=graph, roots=roots)
+        assert inputs.cohort.scorer_source_digest == digest
+        bytecode.assert_called_once_with()
+        origins.assert_called_once_with()
 
-    def test_inherited_disagreeing_digest_fails_closed(self, tmp_path):
-        # The scorer moved while Python was compiling it: old code runs, new bytes hash,
-        # and BOTH in-process fence reads agree. Only the inherited digest catches this.
-        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        assert _run_child_build(ap, pp, env_digest="a" * 64) == {
-            "error": "ScorerSourceUnstableError"
-        }
-
-    def test_verified_run_needs_a_fresh_bytecode_cache(self, tmp_path):
-        # Same inherited digest as the passing case above, but the child is allowed to write
-        # .pyc files. CPython caches the scorer module before its body runs, after which a
-        # stale .pyc and a freshly compiled one are indistinguishable — so the run must
-        # refuse to certify rather than stamp a flag it cannot back.
-        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        assert _run_child_build(
-            ap, pp, env_digest=cal.scorer_source_digest(),
-            pycache_prefix=tmp_path / "pyc", write_bytecode=True,
-        ) == {"error": "StaleBytecodeError"}
-
-    def test_verified_run_refuses_a_populated_bytecode_cache(self, tmp_path):
-        # Populate the cache (this child fails, but not before CPython writes the .pyc
-        # files), then run verified against that now-populated cache: the timestamp .pyc
-        # files are exactly what a same-size, mtime-preserving edit exploits.
-        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        prefix = tmp_path / "pyc"
-        digest = cal.scorer_source_digest()
-        _run_child_build(ap, pp, env_digest=digest, pycache_prefix=prefix,
-                         write_bytecode=True)
-        assert any(prefix.rglob("*.pyc"))  # the cache is now populated
-        assert _run_child_build(
-            ap, pp, env_digest=digest, pycache_prefix=prefix, write_bytecode=False,
-        ) == {"error": "StaleBytecodeError"}
-
-    def test_manifest_completeness_gates_the_release_path(self, tmp_path, monkeypatch):
-        # An unbound scoring import makes the digest incomplete, so the fence checks
-        # manifest coverage before it trusts a digest at all.
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        monkeypatch.setattr(cal, "check_scorer_source_manifest", MagicMock(
-            side_effect=cal.ScorerSourceManifestError("uncovered import")))
-        with pytest.raises(cal.ScorerSourceManifestError):
-            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+    def test_an_inherited_disagreeing_digest_fails_closed(self, tmp_path, monkeypatch):
+        graph, roots, artifact, provenance, _as_of, _record = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(cal, "_LAUNCHER_SCORER_DIGEST", "a" * 64)
+        with pytest.raises(cal.ScorerSourceUnstableError):
+            cal._build_selection_inputs(artifact, provenance_path=provenance, graph=graph, roots=roots)
 
 
 class TestScorerImportOrigins:
@@ -3130,60 +3007,11 @@ class TestScorerImportOrigins:
             cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
 
 
-class TestReleaseSourceGate:
-    """The gate that spends the flag (g-p4ih-srcfence). build_selection_inputs deliberately
-    does NOT refuse an unverified run — dev runs have no launcher and must still work — so
-    the refusal has to happen where the digest is actually relied on: select-release and
-    the Phase-3 preflight, before an approved winner is applied."""
-
-    def test_refuses_an_unverified_cohort_and_winner(self, tmp_path):
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        assert si.cohort.scorer_source_verified_preexec is False  # no launcher: the test path
-        for bound in (si.cohort, cal.build_winner_binding(si.cohort, cal.CURRENT_SM_V2_3_CELL)):
-            with pytest.raises(cal.UnverifiedScorerSourceError, match="not proven to name"):
-                cal.require_preexec_verified_source(bound)
-
-    def test_admits_a_verified_cohort(self, tmp_path):
-        # The launcher path is exercised for real in test_release_calibration_launcher.py;
-        # here the flag is set directly, so the gate is tested rather than the launcher.
-        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
-        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        verified = dataclasses.replace(si.cohort, scorer_source_verified_preexec=True)
-        cal.require_preexec_verified_source(verified)  # does not raise
-        cal.require_preexec_verified_source(
-            cal.build_winner_binding(verified, cal.CURRENT_SM_V2_3_CELL)
-        )
-
-    def test_an_unstamped_object_fails_closed(self):
-        # Reading the flag by attribute, not .get()/getattr-with-default: a shape that was
-        # never stamped must raise, not read as falsy-and-therefore-refused for the wrong
-        # reason — or, worse, be duck-typed into passing.
-        with pytest.raises(AttributeError):
-            cal.require_preexec_verified_source(object())
-
-    def test_a_truthy_non_true_flag_is_refused(self):
-        # `is not True`, not `if not flag`: the gate certifies a specific proof, so anything
-        # that merely looks true (a "false" string, a 1 from a JSON round-trip) is refused.
-        class _Fake:
-            scorer_source_verified_preexec = "yes"
-
-        with pytest.raises(cal.UnverifiedScorerSourceError):
-            cal.require_preexec_verified_source(_Fake())
-
-    def test_is_not_a_source_instability_error(self):
-        # An unverified run is not a BROKEN run — nothing is known to be wrong, the proof
-        # was simply never established. A caller catching ScorerSourceUnstableError (a tree
-        # that moved) must not silently swallow "this run never claimed anything".
-        assert not issubclass(cal.UnverifiedScorerSourceError, cal.ScorerSourceUnstableError)
-
-
 class TestBytecodeFreshness:
     """A source digest binds .py bytes; the interpreter runs .pyc. Under CPython's default
     timestamp invalidation a cached .pyc is accepted whenever the source's (mtime, size)
     match its header — so a same-size edit with a preserved mtime executes the OLD bytecode
-    while every source digest hashes the NEW file. scorer_source_verified_preexec would
-    then certify code that never ran."""
+    while every source digest hashes the NEW file. The source fence must reject it."""
 
     def _stale_tree(self, tmp_path, monkeypatch):
         """A package whose .pyc is compiled from v1, then a same-size v2 written over the
@@ -3721,12 +3549,7 @@ class TestSelectionInputsDeeplyImmutable:
 class TestWinnerBinding:
     _EXPECTED_FIELDS = {
         "config_fingerprint", "scorer_contract_id", "scorer_source_digest",
-        "scorer_source_verified_preexec",
         "provenance_record_sha256", "runtime_python", "runtime_chess_version",
-        # The runtime attestation (g-release-os-boundary). runtime_python and
-        # runtime_chess_version are version STRINGS; runtime_image_sha256 is the digest of
-        # the read-only volume the run actually executed from.
-        "execution_boundary", "runtime_image_sha256", "os_build", "sealed_revision",
         "source_revision", "source_dirty_paths", "model_version", "artifact_sha256",
         "graph_fingerprint", "roots_fingerprint", "evidence_derivation_fingerprint",
         "release_guard_opening_key", "release_guard_child_opening_key",
@@ -3745,7 +3568,6 @@ class TestWinnerBinding:
         assert wb.config_fingerprint == c.config_fingerprints[cell]
         assert wb.scorer_contract_id == c.scorer_contract_id
         assert wb.scorer_source_digest == c.scorer_source_digest
-        assert wb.scorer_source_verified_preexec == c.scorer_source_verified_preexec
         assert wb.provenance_record_sha256 == c.provenance_record_sha256
         assert wb.runtime_python == c.runtime_python
         assert wb.runtime_chess_version == c.runtime_chess_version
@@ -3818,15 +3640,15 @@ class TestSubcommandGrammar:
 
     @pytest.mark.parametrize("argv", [
         ["--limit", "5", "capture-cohort"],
-        ["--min-observations", "5", "select-release"],
+        ["--min-observations", "5", "select-candidates"],
         ["capture-cohort", "--limit", "5"],
-        ["select-release", "--min-observations", "5"],
-        ["select-release", "--output", "/abs/x"],
+        ["select-candidates", "--min-observations", "5"],
+        ["select-candidates", "--output", "/abs/x"],
         ["capture-cohort", "--result-output", "/abs/x"],
         ["capture-cohort", "--artifact", "/abs/x"],
         ["report", "--result-output", "/abs/x"],
-        ["select-release", "--artifact", "/abs/x"],          # --result-output required
-        ["select-release", "--result-output", "/abs/x"],      # --artifact required
+        ["select-candidates", "--artifact", "/abs/x"],          # --result-output required
+        ["select-candidates", "--result-output", "/abs/x"],      # --artifact required
         ["capture-cohort"],                                    # --output required
     ])
     def test_incompatible_or_missing_options_exit_two(self, argv):
@@ -3842,11 +3664,11 @@ class TestSubcommandGrammar:
             cal._parse_args(["capture-cohort", "--output", "/abs/x", "--max-attempts", "0"])
         assert exc.value.code == 2
 
-    def test_release_paths_take_absolute_option_values_not_positionals(self):
+    def test_candidate_selector_takes_absolute_option_values_not_positionals(self):
         args = cal._parse_args([
-            "select-release", "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
+            "select-candidates", "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
         ])
-        assert args.mode == "select-release"
+        assert args.mode == "select-candidates"
         assert args.artifact == Path("/abs/a.json")
         assert args.result_output == Path("/abs/r.json")
 
@@ -3858,7 +3680,7 @@ class TestSubcommandGrammar:
 
     @pytest.mark.parametrize("argv", [
         ["--help"], ["report", "--help"], ["capture-cohort", "--help"],
-        ["select-release", "--help"],
+        ["select-candidates", "--help"],
     ])
     def test_help_never_offers_a_release_guard_option(self, argv, capsys, monkeypatch):
         monkeypatch.setenv("GHOSTREPLAY_RELEASE_GUARD_USER", "987654")
@@ -3869,6 +3691,12 @@ class TestSubcommandGrammar:
         text = captured.out + captured.err
         assert "release-guard-user" not in text
         assert "987654" not in text  # the guard value never reaches any stream
+
+    def test_retired_select_release_fails_loudly(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(["select-release"])
+        assert exc.value.code == 2
+        assert "select-release is retired" in capsys.readouterr().err
 
     def test_root_help_lists_all_subcommands(self, capsys):
         with pytest.raises(SystemExit):
@@ -4017,114 +3845,11 @@ class TestPrivatePathRule:
         assert "identified on disk" in str(exc.value)
 
 
-class TestSealedForbiddenRootFloor:
-    """The private-path rule asks GIT, and git answers through a directory that stays writable.
-
-    Round 4 of g-release-os-boundary bound the sealed `tree/.git` to this run's administrative
-    entry by (st_dev, st_ino). That closes the gitfile REDIRECT and nothing else: the
-    administrative directory itself is in the origin's mutable `.git`, so editing
-    `<admin>/commondir` makes `git rev-parse --git-common-dir` name a different repository
-    while the sealed `.git` file and the admin inode are both untouched. `git worktree list`
-    then names the other repository's trees and the ORIGIN CHECKOUT LEAVES THE FORBIDDEN SET —
-    so a production-derived result may be written into the real working tree, one `git add .`
-    from being committed. Reproduced before this was written.
-
-    The floor is measured on the host before the volume exists and carried to the child, and
-    the child takes the UNION of it and whatever git says: a mid-run edit can only ever add.
-    """
-
-    @pytest.fixture
-    def redirected(self, tmp_path, monkeypatch):
-        """An origin, a linked worktree executing the run, and a second repository the
-        administrative directory has been repointed at."""
-        origin = _git_repo_with_commit(tmp_path / "origin")
-        other = _git_repo_with_commit(tmp_path / "other")
-        linked = tmp_path / "linked"
-        subprocess.run(["git", "-C", str(origin), "worktree", "add", "-q", "--detach",
-                        str(linked)], check=True, capture_output=True)
-        admin = Path(subprocess.run(
-            ["git", "-C", str(linked), "rev-parse", "--path-format=absolute", "--git-dir"],
-            check=True, capture_output=True, text=True).stdout.strip())
-        gitfile_before = (linked / ".git").read_bytes()
-        admin_ino_before = admin.stat().st_ino
-        floor = [[origin.stat().st_dev, origin.stat().st_ino]]
-
-        (admin / "commondir").write_text(f"{other / '.git'}\n")   # THE EDIT
-
-        # What round 4 checks, unchanged by the edit — which is why it cannot see it.
-        assert (linked / ".git").read_bytes() == gitfile_before
-        assert admin.stat().st_ino == admin_ino_before
-        monkeypatch.setattr(cal, "_REPO_ROOT", linked)
-        monkeypatch.chdir(linked)
-        return SimpleNamespace(origin=origin, other=other, linked=linked, floor=floor,
-                               admin=admin)
-
-    def test_git_alone_no_longer_names_the_origin(self, redirected):
-        """The premise, asserted rather than assumed: without a floor the set really has lost
-        the origin, so the next test is measuring the fix and not a coincidence."""
-        roots = {root.resolve() for root in cal._private_path_forbidden_roots()}
-        assert redirected.origin.resolve() not in roots
-        assert redirected.other.resolve() in roots
-
-    def test_the_floor_keeps_the_origin_forbidden(self, redirected, monkeypatch):
-        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", json.dumps(redirected.floor))
-        with pytest.raises(cal.CaptureGovernanceError):
-            cal._refuse_repo_interior_path(redirected.origin / "result.json",
-                                           option="--result-output")
-
-    def test_without_the_floor_the_redirect_wins(self, redirected, monkeypatch):
-        """The finding itself, kept as a test so the floor cannot quietly stop being consulted:
-        with git redirected and nothing else to go on, the origin checkout is ACCEPTED."""
-        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", None)
-        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", None)     # an unsealed dev run
-        target = redirected.origin / "result.json"
-        assert cal._refuse_repo_interior_path(target, option="--result-output") == target.resolve()
-
-    def test_a_boundary_run_without_a_floor_refuses(self, redirected, monkeypatch):
-        """Under the boundary the floor is not optional: deciding this with only the thing that
-        can be edited is exactly the hole, so the run stops instead."""
-        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", None)
-        monkeypatch.setattr(cal, "_RELEASE_BOUNDARY", "macos-hdiutil-udro")
-        with pytest.raises(cal.CaptureGovernanceError) as exc:
-            cal._refuse_repo_interior_path(redirected.origin.parent / "r.json",
-                                           option="--result-output")
-        assert "sealed forbidden-root" in str(exc.value)
-
-    @pytest.mark.parametrize("raw", ['{"not": "a list"}', "[[1]]", "not json at all", "[]"])
-    def test_an_unreadable_floor_refuses_rather_than_being_ignored(
-            self, redirected, monkeypatch, raw):
-        """'I could not read the floor' is not 'there is no floor'."""
-        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", raw)
-        with pytest.raises(cal.CaptureGovernanceError):
-            cal._refuse_repo_interior_path(redirected.origin.parent / "r.json",
-                                           option="--result-output")
-
-    def test_the_union_still_catches_a_worktree_git_knows_about(self, redirected, monkeypatch):
-        """The other direction, and why this is a union rather than a replacement: a tree the
-        frozen floor never saw is still refused, because git is still asked."""
-        monkeypatch.setattr(cal, "_SEALED_FORBIDDEN_ROOTS_RAW", json.dumps(redirected.floor))
-        fresh = redirected.other.parent / "registered-later"
-        subprocess.run(["git", "-C", str(redirected.other), "worktree", "add", "-q", "--detach",
-                        str(fresh)], check=True, capture_output=True)
-        with pytest.raises(cal.CaptureGovernanceError):
-            cal._refuse_repo_interior_path(fresh / "result.json", option="--result-output")
-
-
-# --- select-release: the CLI harness ---------------------------------------
-
-
-def _run_select_release(
-    monkeypatch, capsys, tmp_path, inputs, *,
-    mount=True, mounted_digest=None, artifact=None, result=None, artifact_exists=True,
+def _run_select_candidates(
+    monkeypatch, capsys, tmp_path, inputs, *, artifact=None, result=None, artifact_exists=True,
     make_result_parent=True, select=None, build=None,
 ):
-    """Drive `main(["select-release", ...])` end to end against a temp repo.
-
-    The private store lives OUTSIDE the temp checkout (`tmp_path/store` vs `tmp_path/repo`),
-    so the real git-derived private-path rule runs unstubbed. `_MOUNTED_PROVENANCE_DIGEST`
-    is patched to what a launcher would have handed the child: patching it to None is
-    exactly the state a BARE invocation is in.
-    """
+    """Drive the analysis-only candidate CLI against a private temp store."""
     monkeypatch.setattr(cal, "_REPO_ROOT", _git_init(tmp_path / "repo"))
     store = tmp_path / "store"
     store.mkdir(exist_ok=True)
@@ -4132,10 +3857,6 @@ def _run_select_release(
     record.write_bytes(b'{"candidate": "provenance record"}')
     digest = hashlib.sha256(record.read_bytes()).hexdigest()
     monkeypatch.setattr(cal, "COHORT_PROVENANCE_PATH", record)
-    monkeypatch.setattr(
-        cal, "_MOUNTED_PROVENANCE_DIGEST",
-        (mounted_digest if mounted_digest is not None else digest) if mount else None,
-    )
     if build is not None:
         monkeypatch.setattr(cal, "build_selection_inputs", build)
     elif inputs is not None:
@@ -4150,17 +3871,15 @@ def _run_select_release(
     artifact_path = Path(artifact) if artifact is not None else store / "cohort.json"
     if artifact is None and artifact_exists:
         artifact_path.write_bytes(b"{}")
-    if result is not None:
-        result_path = Path(result)
-    else:
-        parent = store / ("out" if make_result_parent else "missing-dir")
-        if make_result_parent:
-            parent.mkdir(exist_ok=True)
-        result_path = parent / "result.json"
+    result_path = Path(result) if result is not None else (
+        store / ("out" if make_result_parent else "missing-dir") / "result.json"
+    )
+    if make_result_parent:
+        result_path.parent.mkdir(exist_ok=True)
 
     capsys.readouterr()
     code = cal.main([
-        "select-release", "--artifact", str(artifact_path),
+        "select-candidates", "--artifact", str(artifact_path),
         "--result-output", str(result_path),
     ])
     captured = capsys.readouterr()
@@ -4171,52 +3890,9 @@ def _run_select_release(
 
 
 def _ship(monkeypatch, capsys, tmp_path, **kwargs):
-    return _run_select_release(
+    return _run_select_candidates(
         monkeypatch, capsys, tmp_path, selfix._arm1_winner_inputs(), **kwargs
     )
-
-
-class TestTrustGates:
-    def test_missing_mount_refuses_before_anything_is_written(self, monkeypatch, capsys, tmp_path):
-        spy = MagicMock(side_effect=AssertionError("select_candidate must not be reached"))
-        run = _ship(monkeypatch, capsys, tmp_path, mount=False, select=spy)
-        assert run.code == 3
-        assert run.out == ""              # stdout carries ONLY a validated summary
-        assert not run.result.exists()
-        spy.assert_not_called()
-
-    def test_a_mount_that_disagrees_with_the_record_refuses(self, monkeypatch, capsys, tmp_path):
-        run = _ship(monkeypatch, capsys, tmp_path, mounted_digest="a" * 64)
-        assert run.code == 3
-        assert run.out == ""
-        assert not run.result.exists()
-
-    def test_unverified_scorer_source_refuses_before_select_candidate(self, monkeypatch, capsys, tmp_path):
-        inputs = selfix._arm1_winner_inputs()
-        unverified = cal.SelectionInputs(
-            cohort=dataclasses.replace(inputs.cohort, scorer_source_verified_preexec=False),
-            diagnostics=inputs.diagnostics,
-        )
-        spy = MagicMock(side_effect=AssertionError("select_candidate must not be reached"))
-        run = _run_select_release(monkeypatch, capsys, tmp_path, unverified, select=spy)
-        assert run.code == 3
-        assert run.out == ""
-        assert not run.result.exists()
-        spy.assert_not_called()
-
-    def test_the_load_guards_own_digest_must_agree_with_the_mount(self, monkeypatch, capsys, tmp_path):
-        # The record moved between require_mounted_provenance's read and the load guard's.
-        inputs = selfix._arm1_winner_inputs()
-
-        def build(path):
-            return cal.SelectionInputs(
-                cohort=dataclasses.replace(inputs.cohort, provenance_record_sha256="b" * 64),
-                diagnostics=inputs.diagnostics,
-            )
-
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
-        assert run.code == 3
-        assert not run.result.exists()
 
 
 class TestArtifactInput:
@@ -4339,22 +4015,24 @@ class TestSerialization:
         run = _ship(monkeypatch, capsys, tmp_path)
         assert run.code == 0
         obj = json.loads(run.result.read_text())
-        assert isinstance(obj, dict)
-        assert set(obj) >= {
+        assert set(obj) == {"format_version", "selection"}
+        assert obj["format_version"] == cal.SELECTION_RESULT_FORMAT_VERSION
+        selection = obj["selection"]
+        assert set(selection) >= {
             "candidates", "winner", "winner_cutoffs", "no_ship", "no_ship_reason",
             "cohort_provenance", "winner_binding", "b1_reference",
         }
-        assert obj["winner"]["role"] == "arm1"
-        b1 = obj["b1_reference"]
+        assert selection["winner"]["role"] == "arm1"
+        b1 = selection["b1_reference"]
         assert b1["role"] == "b1"
         assert isinstance(b1["real_black_1e4_raw"], float)
         assert set(b1["distribution"]) == {"p05", "p25", "p50", "p75", "p95"}
-        assert isinstance(obj["winner_binding"]["config_fingerprint"], str)
-        assert obj["winner_binding"]["config_fingerprint"]
+        assert isinstance(selection["winner_binding"]["config_fingerprint"], str)
+        assert selection["winner_binding"]["config_fingerprint"]
         # A COMPOUND gate's operands stay individually addressable — the whole reason the
         # naive json.dumps(result, default=str) form is broken.
         gate = next(
-            g for g in obj["winner"]["raw_gates"] if g["name"] == "coverage_consistent_raw_3a"
+            g for g in selection["winner"]["raw_gates"] if g["name"] == "coverage_consistent_raw_3a"
         )
         assert gate["checks"][0]["name"] == "coverage_consistent_raw_3a_parent_le_child"
         assert gate["checks"][1]["name"] == "coverage_consistent_raw_3a_parent_le_cov"
@@ -4443,7 +4121,7 @@ class TestRedactedStdout:
             assert banned not in run.out
         # real_black_1e4_grade is a legitimate GATE NAME; what must not appear is B1's own
         # grade/raw/distribution, which the exact key set on b1_reference forecloses.
-        full_b1 = json.loads(run.result.read_text())["b1_reference"]
+        full_b1 = json.loads(run.result.read_text())["selection"]["b1_reference"]
         assert set(summary["b1_reference"]) == {"role", "cutoffs_collided"}
         assert f'"{full_b1["real_black_1e4_grade"]}"' not in run.out
         # ...while the private file DOES carry every redacted-away field.
@@ -4457,7 +4135,7 @@ class TestRedactedStdout:
         shapes = (selfix._arm1_winner_inputs(), selfix._arm2_winner_inputs(),
                   selfix._no_ship_inputs(), selfix._collision_inputs())
         for index, inputs in enumerate(shapes):
-            run = _run_select_release(monkeypatch, capsys, tmp_path, inputs,
+            run = _run_select_candidates(monkeypatch, capsys, tmp_path, inputs,
                                       result=tmp_path / "store" / f"result-{index}.json")
             assert run.code in (0, 1)
             summary = json.loads(run.out)
@@ -4466,7 +4144,7 @@ class TestRedactedStdout:
         assert seen == {0, 7, 8, 13}
 
     def test_no_ship_summary_still_carries_the_record_digest(self, monkeypatch, capsys, tmp_path):
-        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
         assert run.code == 1
         summary = json.loads(run.out)
         assert summary["no_ship"] is True
@@ -4476,7 +4154,7 @@ class TestRedactedStdout:
         assert summary["provenance_record_sha256"] == run.digest
 
     def test_b1_collision_is_reported_as_a_bit_never_a_grade(self, monkeypatch, capsys, tmp_path):
-        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._collision_inputs())
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, selfix._collision_inputs())
         summary = json.loads(run.out)
         assert summary["b1_reference"] == {"role": "b1", "cutoffs_collided": True}
         assert "grade" not in run.out
@@ -4491,9 +4169,6 @@ class TestRedactedStdout:
         allowed = {str(c["p"]) for c in summary["candidates"]}
         binding = summary["winner_binding"]
         for pinned in (binding["runtime_python"], binding["runtime_chess_version"],
-                       # os_build is a pinned VERSION string in exactly the sense the two
-                       # above are — "macOS 26.0 (25C56)" — and is None on an unsealed run.
-                       binding["os_build"] or "",
                        binding["evidence_derivation_fingerprint"],
                        summary["cohort_provenance"]["evidence_derivation_fingerprint"]):
             allowed.update(re.findall(r"-?\d+\.\d+", pinned))
@@ -4562,7 +4237,7 @@ class TestSentinelLeak:
 
     def test_the_file_carries_the_sentinel_and_neither_stream_does(self, monkeypatch, capsys, tmp_path):
         self._planted(monkeypatch)
-        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
         assert run.code == 1
         assert SENTINEL_TEXT in run.result.read_text()
         assert SENTINEL_TEXT not in run.out
@@ -4634,7 +4309,7 @@ class TestExitCodeTable:
         assert run.result.exists()
 
     def test_one_is_no_ship_and_publishes_the_full_record(self, monkeypatch, capsys, tmp_path):
-        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
         assert run.code == 1
         assert json.loads(run.out)["no_ship"] is True
         assert run.result.exists()
@@ -4642,14 +4317,11 @@ class TestExitCodeTable:
     def test_two_is_the_cli_contract(self, monkeypatch, capsys, tmp_path):
         assert _ship(monkeypatch, capsys, tmp_path, artifact="relative.json").code == 2
 
-    def test_three_is_a_release_trust_refusal(self, monkeypatch, capsys, tmp_path):
-        assert _ship(monkeypatch, capsys, tmp_path, mount=False).code == 3
-
     def test_four_is_an_input_rejection(self, monkeypatch, capsys, tmp_path):
         def rejects(path):
             raise cal.ArtifactIntegrityError("artifact vs record mismatch")
 
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=rejects)
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, None, build=rejects)
         assert run.code == 4
         assert not run.result.exists()
 
@@ -4657,7 +4329,7 @@ class TestExitCodeTable:
         def rejects(path):
             raise OSError(5, "Input/output error")
 
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=rejects)
+        run = _run_select_candidates(monkeypatch, capsys, tmp_path, None, build=rejects)
         assert run.code == 4
 
     def test_five_is_an_output_failure(self, monkeypatch, capsys, tmp_path):
@@ -4706,8 +4378,7 @@ class TestExitCodeTable:
     def test_no_failure_path_ever_returns_one(self, monkeypatch, capsys, tmp_path):
         cases = [
             lambda: _ship(monkeypatch, capsys, tmp_path, artifact="relative.json"),
-            lambda: _ship(monkeypatch, capsys, tmp_path, mount=False),
-            lambda: _run_select_release(
+            lambda: _run_select_candidates(
                 monkeypatch, capsys, tmp_path, None,
                 build=lambda p: (_ for _ in ()).throw(cal.ArtifactIntegrityError("x")),
             ),
@@ -4731,7 +4402,7 @@ class TestParserErrorRedaction:
     @pytest.mark.parametrize("argv", [
         ["--release-guard-user", GUARD],                       # the retired flag
         ["capture-cohort", "--output", "/abs/x", "--release-guard-user", GUARD],
-        ["select-release", "--artifact", "/abs/a", "--result-output", "/abs/r",
+        ["select-candidates", "--artifact", "/abs/a", "--result-output", "/abs/r",
          "--release-guard-user", GUARD],
     ])
     def test_a_rejected_guard_user_is_never_echoed(self, argv, capsys):
@@ -4746,7 +4417,7 @@ class TestParserErrorRedaction:
         assert "GHOSTREPLAY_RELEASE_GUARD_USER" in streams
 
     @pytest.mark.parametrize("argv", [
-        ["select-release", "--artifact", "/abs/a", "--result-output", "/abs/r",
+        ["select-candidates", "--artifact", "/abs/a", "--result-output", "/abs/r",
          "--output", PRIVATE],
         ["report", "--result-output", PRIVATE],
         ["capture-cohort", "--output", "/abs/x", "--artifact", PRIVATE],
@@ -4823,7 +4494,7 @@ class TestParserErrorRedaction:
         # The rebuild path must stay USEFUL: these names are source literals, so the
         # data-free rule costs the operator nothing here.
         with pytest.raises(SystemExit):
-            cal._parse_args(["select-release"])
+            cal._parse_args(["select-candidates"])
         streams = "".join(capsys.readouterr())
         assert "--artifact" in streams and "--result-output" in streams
 
@@ -4839,12 +4510,12 @@ class TestParserErrorRedaction:
         assert "details withheld" in streams
 
     @pytest.mark.parametrize("argv", [
-        ["select-release"],                                  # missing-required, via a subparser
+        ["select-candidates"],                                # missing-required, via a subparser
         ["--release-guard-user", GUARD],                     # unrecognized, via the root
         ["report", "--report-fold-grid", GUARD],             # the vetted custom message
         ["capture-cohort", "--output", "/abs/x", "--max-attempts", "x"],  # a rebuilt message
         ["--help"],                                          # help, not an error at all
-        ["select-release", "--help"],
+        ["select-candidates", "--help"],
     ])
     def test_a_hostile_argv0_never_reaches_a_stream(self, argv, capsys, monkeypatch):
         # sys.argv[0] is PROCESS-CONTROLLED (`exec -a`, or a copy of this script parked in
@@ -4878,43 +4549,9 @@ class TestGovernanceMessageIsDataFree:
         assert "ABSOLUTE" in run.err and "not echoed" in run.err
 
     def test_the_capture_path_keeps_its_landed_basename_message(self, monkeypatch, tmp_path):
-        # The widened rule is unchanged in TYPE and message SHAPE for --output, which the
-        # landed capture tests pin; only the select-release BOUNDARY withholds it.
+        # The widened rule leaves TYPE and message SHAPE unchanged for --output; the
+        # landed capture tests pin that stable error contract.
         monkeypatch.setattr(cal, "_REPO_ROOT", _git_init(tmp_path / "repo"))
         with pytest.raises(cal.CaptureGovernanceError) as exc:
             cal._refuse_repo_interior_output(tmp_path / "repo" / "captured.json")
         assert "captured.json" in str(exc.value)
-
-
-class TestProvenanceMovementIsATrustRefusal:
-    """The gate's read and the load guard's read are two INDEPENDENT reads. A record that
-    moves between them is a release-trust refusal (3), not an input rejection (4)."""
-
-    def test_a_record_deleted_between_the_two_reads_exits_three(self, monkeypatch, capsys, tmp_path):
-        def build(path):
-            cal.COHORT_PROVENANCE_PATH.unlink()
-            raise OSError(2, "No such file or directory")
-
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
-        assert run.code == 3
-        assert "No such file" not in run.err   # and it does not describe the wrong input
-        assert run.out == ""
-        assert not run.result.exists()
-
-    def test_a_record_rewritten_between_the_two_reads_exits_three(self, monkeypatch, capsys, tmp_path):
-        def build(path):
-            cal.COHORT_PROVENANCE_PATH.write_bytes(b'{"different": "record"}')
-            raise cal.ProvenanceRecordError("record does not validate")
-
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
-        assert run.code == 3
-        assert not run.result.exists()
-
-    def test_a_genuinely_bad_artifact_still_exits_four(self, monkeypatch, capsys, tmp_path):
-        # The record is untouched, so the recheck passes and the ORIGINAL classification
-        # stands — the recheck must not swallow real input rejections.
-        def build(path):
-            raise cal.ArtifactIntegrityError("artifact sha256 disagrees with the record")
-
-        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
-        assert run.code == 4

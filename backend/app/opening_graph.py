@@ -6,7 +6,7 @@ and optional ECO label. The graph is frozen after construction (children are
 MappingProxyType, parents are frozenset).
 
 A pickle-based disk cache avoids the ~27-30s replay cost on subsequent loads.
-A sealed release run turns that cache OFF — see DISABLE_DISK_CACHE_ENV.
+Analysis tooling can turn that cache off — see DISABLE_DISK_CACHE_ENV.
 """
 
 from __future__ import annotations
@@ -30,24 +30,12 @@ CACHE_VERSION = 1
 
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / ".opening_graph_cache"
 
-# Set by release_calibration_launcher.py to take the disk cache out of a SEALED run
-# (g-release-os-boundary).
+# Set by analysis tooling when a run must avoid the local disk cache. The cache is a pickle
+# validated only by (cache_version, eco mtime, bypos mtime), so mtime checks do not establish
+# a source-fence or artifact-provenance claim. A caller that needs all inputs rebuilt from the
+# current ECO files can bypass both the cache read and cache write.
 #
-# The cache is a pickle validated by (cache_version, eco mtime, bypos mtime) and nothing
-# else. Under a run whose entire premise is that every byte of executable input is on a
-# read-only volume, that file would be the one mutable scoring input left — and
-# `pickle.loads` on it is not merely a stale-data risk but a writable path to arbitrary code
-# execution INSIDE the boundary. Mtimes do not fix that: they are trivially preserved, which
-# is the same forgery `check_scorer_bytecode` refuses to accept for .pyc files.
-#
-# The release path therefore rebuilds from the eco*.json in the read-only checkout, which the
-# volume seals along with everything else. It costs nothing that was not already being paid:
-# a release run checks out a fresh worktree and .opening_graph_cache is gitignored, so the
-# cache was always absent there and the ~30s build always happened.
-#
-# Read at CALL time, not import: this is a behaviour switch, not an attestation, and nothing
-# rests on when it is read. A late write cannot re-enable anything dangerous either — inside
-# the boundary the cache path does not exist and could not be written if it did.
+# Read at CALL time: this is an operational behaviour switch, not an attestation.
 DISABLE_DISK_CACHE_ENV = "GHOSTREPLAY_OPENING_GRAPH_NO_DISK_CACHE"
 
 
@@ -350,11 +338,9 @@ def build_opening_graph(
     if eco is None or bypos is None:
         raise RuntimeError("Opening graph paths were not resolved")
 
-    # Custom paths bypass cache (used for testing with synthetic data). A sealed release run
-    # bypasses it for a different reason (DISABLE_DISK_CACHE_ENV): not that the cache would be
-    # wrong, but that a pickle nothing hashes has no business being an input to a run whose
-    # point is that every executable input is sealed. Both land here — never touching the
-    # cache file at all, on the read side or the write side.
+    # Custom paths bypass cache (used for testing with synthetic data). Analysis tooling can
+    # also bypass it through DISABLE_DISK_CACHE_ENV when it needs to rebuild from the ECO
+    # files. Both land here — never touching the cache file on either the read or write side.
     if eco_path is not None or by_position_path is not None or _disk_cache_disabled():
         graph = _build_from_scratch(eco, bypos)
         graph.freeze()

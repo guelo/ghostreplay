@@ -641,9 +641,9 @@ def test_first_rename_failure_leaves_the_prior_pair_untouched(capenv, monkeypatc
 
 # The fence tests above stub the self-check, because a fully-scorable cohort is not what
 # they exercise. This section does not: it seeds evidence rich enough to satisfy BOTH
-# release-path shape asserts and lets validate_capture_candidate score the candidate bytes
-# for real. That is the only way to prove the producer's self-check is the SAME gate the
-# release path applies — a stub can only prove it was called.
+# candidate-selector shape assertions and lets validate_capture_candidate score the candidate
+# bytes for real. That is the only way to prove the producer's self-check is the SAME gate
+# candidate selection applies — a stub can only prove it was called.
 #
 # Requirements the seed has to meet, and why each one is what it is:
 #   * >= 2 quantile pairs clearing DEFAULT_MIN_OBSERVATIONS (20), so every required arm-grid
@@ -716,12 +716,12 @@ def test_self_check_runs_real_scoring_and_publishes(capenv):
 
 
 @pg_required
-def test_self_check_rejects_a_cohort_the_release_path_would_reject(capenv):
+def test_self_check_rejects_a_cohort_the_candidate_selector_would_reject(capenv):
     """The producer refuses to publish an artifact the CONSUMER would refuse to load.
 
     Dropping the black guard's Caro-Kann evidence leaves a cohort that freezes perfectly
     well and fails assert_release_guard_score_shape at load time. Capture must discover
-    that BEFORE publication, not leave it for the release run."""
+    that BEFORE publication, not leave it for candidate selection."""
     with capenv.session_factory() as db:
         _seed_scorable_pair(db, GUARD_USER, "white")
         _seed_scorable_pair(db, GUARD_USER, "black")     # no CARO_KANN line

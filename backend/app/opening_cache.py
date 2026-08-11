@@ -544,7 +544,7 @@ def capture_freshness_snapshot(
     """One evidence read → the full raw freshness bundle.
 
     O(evidence): pays the full raw-input digest. Explicit/direct batch builds and
-    release calibration call this; the ordinary scheduler rebuild path uses
+    offline calibration analysis calls this; the ordinary scheduler rebuild path uses
     ``_capture_operational_rebuild_inputs`` and falls back here only on drift or
     an unavailable shared epoch. Warm freshness verdicts never call either.
     """
@@ -575,7 +575,7 @@ def _capture_operational_rebuild_inputs(
     """Capture one scheduler rebuild's overlay + cheap freshness proof.
 
     The full raw-input digest is retained for explicit/direct callers and the
-    release-calibration fence, but it is redundant for an ordinary whole-graph
+    calibration-analysis fence, but it is redundant for an ordinary whole-graph
     rebuild: the serving verdict is already proved by ``evidence_seq`` plus the
     shared-cache epoch/scoped digest. This is the batch analogue of the terminal
     scoped publisher's capture discipline:

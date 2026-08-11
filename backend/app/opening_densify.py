@@ -11,9 +11,10 @@ that drill steering reads INSTEAD of the graph. The edges are deliberately NOT
 merged into `OpeningGraphNode.children`:
 
     `graph.fingerprint` is computed from node children and gates the opening
-    score cache and the frozen release-calibration artifact. Merging would
-    mass-invalidate score caches and fail calibration closed to fix a drill
-    routing bug. A routing-only overlay leaves `graph.fingerprint` untouched.
+    score cache and the frozen calibration-analysis artifact. Merging would
+    mass-invalidate score caches and invalidate a calibration analysis merely to
+    fix a drill-routing bug. A routing-only overlay leaves
+    `graph.fingerprint` untouched.
 
 Cycle safety: an edge is retained only when it strictly increases LONGEST-PATH
 depth over the base DAG. Every base edge strictly increases that depth by
@@ -73,9 +74,8 @@ def graph_topology_fingerprint(graph: OpeningGraph) -> str:
     spurious ~40s regeneration on any label-only byPosition edit.
 
     Lives here rather than in opening_graph.py on purpose: opening_graph.py is
-    pinned in the release calibration's SCORER_SOURCE_FILES manifest, which
-    hashes file BYTES, so even adding a pure function there would churn the
-    scorer-source digest.
+    pinned in the calibration source manifest, which hashes file BYTES, so even
+    adding a pure function there would churn the scorer-source digest.
     """
     payload = "|".join(
         f"{fen}\t{','.join(f'{uci}:{child_fen}' for uci, child_fen in sorted(node.children.items()))}"

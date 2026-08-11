@@ -29,25 +29,6 @@ from app.opening_cache import evidence_derivation_fingerprint
 UTC = timezone.utc
 AS_OF = datetime(2025, 6, 1, tzinfo=UTC)
 HEX = "abcdef0123456789" * 4  # 64-char lowercase hex
-SEALED_REV = "0123456789abcdef" * 2 + "01234567"  # 40-char lowercase hex
-BOUNDARY = "macos-hdiutil-udro"
-OS_BUILD = "macOS 26.0 (25C56)"
-
-
-@pytest.fixture(autouse=True)
-def _pretend_this_process_is_sealed(monkeypatch):
-    """Every cohort here carries scorer_source_verified_preexec=True, which after
-    g-release-os-boundary means "this run was sealed inside an OS boundary".
-
-    The binding checks re-derive that from module constants rather than trusting the object
-    — cohort.runtime_image_sha256 must equal the digest of the volume THIS interpreter is
-    running from, exactly as runtime_python must equal this interpreter's version. A
-    synthetic cohort therefore needs a synthetic process to be consistent with, and stubbing
-    the constant is how the suite says "assume the sealed case" without building a 900MB
-    volume for arithmetic tests. The real thing is exercised in
-    test_release_calibration_launcher.py::TestSealedCheckout.
-    """
-    monkeypatch.setattr(cal, "_RUNTIME_IMAGE_SHA256", HEX)
 
 
 @pytest.fixture
@@ -237,29 +218,15 @@ def _cohort(pairs=None, **overrides):
         source_revision=None,
         source_dirty_paths=(),
         scorer_source_digest=HEX,
-        scorer_source_verified_preexec=True,
         provenance_record_sha256=HEX,
         runtime_python=platform.python_version(),
         runtime_chess_version=chess.__version__,
-        execution_boundary=BOUNDARY,
-        runtime_image_sha256=HEX,
-        os_build=OS_BUILD,
-        sealed_revision=SEALED_REV,
         config_fingerprints={cell: cal._cfg_fp(cell) for cell in REQUIRED},
         required_cells=frozenset(REQUIRED),
         manifest_pair_ids=frozenset(p.pair_id for p in pairs),
         pairs=tuple(pairs),
     )
     base.update(overrides)
-    # The runtime attestation is all-or-nothing with the verified flag, and the binding checks
-    # enforce that pairing (g-release-os-boundary). Derive it here so a test that flips the
-    # flag gets a COHERENT cohort rather than one that could not come out of a real run —
-    # unless it named the field itself, which is how the validator's own tests reach the
-    # inconsistent shapes on purpose.
-    if not base["scorer_source_verified_preexec"]:
-        for name in ("execution_boundary", "runtime_image_sha256", "os_build", "sealed_revision"):
-            if name not in overrides:
-                base[name] = None
     return cal.ScoredCalibrationCohort(**base)
 
 
@@ -1603,18 +1570,11 @@ class TestTolerances:
 
 
 # ---------------------------------------------------------------------------
-# Bounded security claim: preexec echoed, not gated
+# Source digest remains part of the selection binding
 # ---------------------------------------------------------------------------
 
 
-class TestBoundedSecurityClaim:
-    def test_preexec_echoed_not_gated(self):
-        # A False verified-preexec flag still SELECTS (not gated here), and travels onto
-        # winner_binding for Phase 3 to refuse.
-        r = cal.select_candidate(_inputs(cohort=_cohort(scorer_source_verified_preexec=False)))
-        assert r.winner is not None
-        assert r.winner_binding.scorer_source_verified_preexec is False
-
+class TestSourceBinding:
     def test_winner_distribution_matches_recompute(self):
         r = cal.select_candidate(_arm1_winner_inputs())
         pool = cal._pool_for(r.winner.cell,
@@ -1659,10 +1619,6 @@ _RUNNER = """
 import json, sys
 import test_calibrate_selection as t
 import scripts.calibrate_opening_scores_v2 as cal
-# What the autouse _pretend_this_process_is_sealed fixture does, restated for a process
-# pytest never touches: the synthetic cohorts claim a sealed run, and the binding checks
-# compare that claim against THIS interpreter's constants.
-cal._RUNTIME_IMAGE_SHA256 = t.HEX
 kind = sys.argv[1]
 if kind == "binding":
     try:
@@ -1718,7 +1674,7 @@ class TestSummaryAllowlist:
         assert list(cal._SUMMARY_BINDING_KEYS) == [
             f.name for f in dataclasses.fields(cal.WinnerBinding)
         ]
-        assert len(cal._SUMMARY_BINDING_KEYS) == 20
+        assert len(cal._SUMMARY_BINDING_KEYS) == 15
 
     def test_fitness_key_sets_match_their_dataclasses(self):
         # Same tripwire as the binding keys: a field added to CohortFitness must be

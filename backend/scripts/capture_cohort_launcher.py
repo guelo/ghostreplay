@@ -1,28 +1,10 @@
 #!/usr/bin/env python3
-"""OUTER -I -S launcher for the capture-cohort producer (g-p4ih-capture).
+"""OUTER ``-I -S`` launcher for the frozen-cohort capture producer.
 
-Capture manufactures the frozen overlay the whole release path later treats as ground
-truth, so a reproducible-source guarantee matters MORE on the producer side than on the
-consumer side, not less. This launcher gives capture the SAME two-process startup isolation
-the release path already proves — ``python -I -S`` launcher -> ``-S`` child with a pre-exec
-source digest computed BEFORE the child interpreter exists (closing the compile window) —
-by REUSING ``release_calibration_launcher.launch`` verbatim, not forking a second copy.
-
-The ONE deliberate difference from the release launcher: capture does NOT relocate to a
-throwaway exclusive worktree. It runs the child in the MAIN worktree so the reviewable
-``cohort_provenance.json`` diff lands where a human commits it (``COHORT_PROVENANCE_PATH``
-resolves relative to the executing checkout — a launcher-hosted capture would write it into
-a directory destroyed on exit). The child's clean-tree refusal over ``SCORER_SOURCE_FILES``
-is capture's (honestly weaker) substitute for the launcher's read-only exclusive checkout.
-
-AND THEREFORE NO OS BOUNDARY EITHER (g-release-os-boundary). ``launch()`` is reused without a
-``SealedRun``, because the boundary is a READ-ONLY VOLUME and the whole point of capture
-running here is that this tree must stay writable for the record it is about to produce. The
-asymmetry is real and worth stating plainly: capture's source guarantee is the pre-exec
-digest plus a clean-tree refusal, not the sealed-volume guarantee the consuming release run
-gets. What limits the damage is that capture's product is DATA — an artifact and a record,
-both hashed, both re-verified by the release run, which does run inside the boundary and
-which refuses a record whose bytes moved.
+The source-fence handoff hashes the scorer manifest before a fresh ``-S`` child exists.
+Capture deliberately runs in its main worktree so the reviewable provenance record is
+published there; its clean-tree and digest checks are producer guarantees, not release
+authority.
 
 USAGE
 -----
@@ -57,7 +39,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from release_calibration_launcher import (  # noqa: E402
+from source_fence_launcher import (  # noqa: E402
     LauncherError,
     launch,
     require_isolated_launcher,
@@ -69,9 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     # compromised (a startup hook could rebind hashlib in THIS process).
     require_isolated_launcher()
     script_args = sys.argv[1:] if argv is None else argv
-    # The MAIN worktree (origin checkout) — NOT an exclusive_checkout. launch() computes
-    # manifest_digest(main_worktree) and exports it via child_env BEFORE exec'ing the -S
-    # child, so the child inherits the pre-exec digest as _LAUNCHER_SCORER_DIGEST.
+    # launch() computes the pre-exec manifest digest and hands it to the fresh -S child.
     main_worktree = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="ghostreplay-capture-pycache-") as pycache:
         return launch(

@@ -25,8 +25,8 @@ INTERPRETER. Capture derives the child's dependency paths from the interpreter i
 (GHOSTREPLAY_PYTHON), so that interpreter's environment must carry the scorer's deps. Locally
 that is the repo venv (backend/.venv). On CI there is no repo venv — dependencies are
 installed into the interpreter running pytest — so we fall back to sys.executable, which is
-exactly that interpreter. The launcher already supports a non-venv interpreter (see
-release_calibration_launcher._audited_dep_paths: venv is None -> the base install IS the env).
+exactly that interpreter. The source-fence launcher supports a non-venv interpreter: the
+base install is the selected environment in that case.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ GUARD_USER = 14
 _EXTRA_SYNC = (
     "backend/scripts/capture_cohort.sh",
     "backend/scripts/capture_cohort_launcher.py",
-    "backend/scripts/release_calibration_launcher.py",
+    "backend/scripts/source_fence_launcher.py",
     # Canonical profile manifests are data files (not in the .py import closure of
     # SCORER_SOURCE_FILES) that analysis_profiles.py reads at import time. Their
     # ``dominates`` sets must stay consistent with evidence_policy.EDGES, so sync

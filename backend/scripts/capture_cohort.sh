@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The capture-cohort entrypoint (g-p4ih-capture), mirroring release_calibration.sh.
+# The capture-cohort entrypoint.
 #
 # This wrapper exists for one reason: the launcher's flags cannot be its own responsibility.
 # `site.py` runs every .pth in site-packages and imports sitecustomize BEFORE the launcher's
@@ -10,10 +10,9 @@
 #   -I  isolated: implies -E (PYTHONPATH cannot shadow the stdlib the launcher imports,
 #       PYTHONHOME cannot relocate it) and -s (no user site).
 #
-# UNLIKE release_calibration.sh, capture runs the child in the MAIN worktree (no throwaway
-# exclusive checkout), so the reviewable cohort_provenance.json diff lands where a human
-# commits it. The launcher still computes the pre-exec source digest over the main worktree
-# and hands it to the -S child, and the child refuses a dirty derivation tree.
+# Capture runs the child in the main worktree so the reviewable cohort_provenance.json diff
+# lands where a human commits it. The launcher computes a pre-exec source digest over that
+# tree and the child refuses a dirty derivation tree.
 #
 # The interpreter matters as much as the flags: the launcher execs the scorer with its OWN
 # sys.executable and derives the child's dependency paths from that interpreter's venv, so
