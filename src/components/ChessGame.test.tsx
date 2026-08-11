@@ -1537,18 +1537,23 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillState).toBe("failed");
     });
 
-    // The badge renders next to the played-opening chip in the lineage...
+    // The resolved opening outcome is available from the played-opening lineage...
     const region = await screen.findByRole("region", {
       name: "Openings played",
     });
-    const badge = within(region).getByText("+3 → 44");
-    expect(badge).toHaveClass("game-opening-lineage__delta--up");
+    await within(region).findByRole("img", {
+      name: "Score increased by 3, now 44",
+    });
 
     // ...and NOT inside the (now delta-less) drill-stopped actions.
     const drillRegion = screen.getByRole("region", {
       name: /Drill stopped/i,
     });
-    expect(within(drillRegion).queryByText("+3 → 44")).not.toBeInTheDocument();
+    expect(
+      within(drillRegion).queryByRole("img", {
+        name: "Score increased by 3, now 44",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("passes a post-root drill move whose loss exactly equals strictness (boundary passes)", async () => {
@@ -5300,7 +5305,7 @@ describe("ChessGame opening lineage", () => {
     ).toBeInTheDocument();
   });
 
-  it("refetches the lineage at terminal and shows the inline score-diff badge after resign (g-3gmc)", async () => {
+  it("refetches the lineage at terminal and reveals its in-card score change after resign (g-ptea)", async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: "session-postgame-delta",
       engine_elo: 1500,
@@ -5369,15 +5374,16 @@ describe("ChessGame opening lineage", () => {
     fireEvent.click(screen.getByText("Resign"));
 
     // The terminal openingScoreChanges bumps refetchKey -> one more fetch, which
-    // loads the card; the inline badge then renders next to the chip.
+    // loads the card; the in-card score outcome then renders with the lineage.
     const region = await screen.findByRole("region", {
       name: "Openings played",
     });
     expect(fetchSessionOpeningsMock.mock.calls.length).toBeGreaterThan(
       callsBeforeResign,
     );
-    const badge = within(region).getByText("+3 → 44");
-    expect(badge).toHaveClass("game-opening-lineage__delta--up");
+    await within(region).findByRole("img", {
+      name: "Score increased by 3, now 44",
+    });
   });
 
   it("updates a same-session card to the reconciled after-score when no baseline exists", async () => {
@@ -5437,7 +5443,9 @@ describe("ChessGame opening lineage", () => {
       ),
     );
     expect(within(region).getByText("61")).toBeInTheDocument();
-    expect(within(region).queryByText(/→/)).not.toBeInTheDocument();
+    expect(
+      within(region).queryByRole("img", { name: /^Score (increased|decreased)/ }),
+    ).not.toBeInTheDocument();
 
     const callsAfterTerminalRefetch = fetchSessionOpeningsMock.mock.calls.length;
     const stateBeforeReconcile = useGameStore.getState();
@@ -5468,7 +5476,9 @@ describe("ChessGame opening lineage", () => {
     );
     expect(within(region).queryByText("60")).not.toBeInTheDocument();
     expect(within(region).queryByText("61")).not.toBeInTheDocument();
-    expect(within(region).queryByText(/→/)).not.toBeInTheDocument();
+    expect(
+      within(region).queryByRole("img", { name: /^Score (increased|decreased)/ }),
+    ).not.toBeInTheDocument();
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(
       callsAfterTerminalRefetch,
     );

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import GameOpeningLineage from "./GameOpeningLineage";
@@ -330,31 +330,64 @@ describe("GameOpeningLineage", () => {
     ).toBeInTheDocument();
   });
 
-  describe("score-diff badge (g-3gmc)", () => {
-    it("renders a positive diff in green to the right of the chip", () => {
-      renderLineage(
-        [makeItem({ opening_key: "k1", opening_name: "Italian Game" })],
-        {
-          scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
-        },
-      );
+  describe("score-change reveal (g-ptea)", () => {
+    it("announces the resolved outcome and does not replay it after a compact-card remount", () => {
+      vi.useFakeTimers();
+      try {
+        renderLineage(
+          [makeItem({ opening_key: "k1", opening_name: "Italian Game" })],
+          {
+            scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+          },
+        );
 
-      const badge = screen.getByText("+3 → 44");
-      expect(badge).toHaveClass("game-opening-lineage__delta--up");
+        const card = screen.getByRole("button", { name: /Italian Game/ });
+        expect(within(card).getByText("41")).toBeInTheDocument();
+        expect(card).toHaveAccessibleName(/Score increased by 3, now 44/);
+
+        act(() => vi.advanceTimersByTime(150));
+
+        expect(within(card).queryByText("41")).not.toBeInTheDocument();
+        expect(within(card).getByText("44")).toBeInTheDocument();
+        expect(
+          within(card).getByRole("img", { name: "Score increased by 3, now 44" }),
+        ).toBeInTheDocument();
+
+        // Finish the outcome animation, then replace compact -> expanded -> compact.
+        act(() => vi.advanceTimersByTime(600));
+        fireEvent.click(card);
+        fireEvent.click(
+          screen.getByRole("button", { name: "Collapse Italian Game details" }),
+        );
+
+        const remountedCard = screen.getByRole("button", { name: /Italian Game/ });
+        expect(within(remountedCard).getByText("44")).toBeInTheDocument();
+        expect(within(remountedCard).queryByText("41")).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it("renders a negative diff in red", () => {
-      renderLineage([makeItem({ opening_key: "k1" })], {
-        scoreChanges: [
-          makeChange({ opening_key: "k1", before: 64, after: 62, delta: -2 }),
-        ],
-      });
+    it("announces a downward outcome", () => {
+      vi.useFakeTimers();
+      try {
+        renderLineage([makeItem({ opening_key: "k1" })], {
+          scoreChanges: [
+            makeChange({ opening_key: "k1", before: 64, after: 62, delta: -2 }),
+          ],
+        });
 
-      const badge = screen.getByText("-2 → 62");
-      expect(badge).toHaveClass("game-opening-lineage__delta--down");
+        act(() => vi.advanceTimersByTime(150));
+        const card = screen.getByRole("button", { name: /Opening/ });
+        expect(
+          within(card).getByRole("img", { name: "Score decreased by 2, now 62" }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it("hides the badge when the rounded scores don't change (sub-1.0 wobble)", () => {
+    it("suppresses score-change treatment when rounded scores do not change", () => {
       // raw delta +0.5, but round(42.1)=42 === round(41.6)=42 -> no visible change.
       renderLineage([makeItem({ opening_key: "k1" })], {
         scoreChanges: [
@@ -362,59 +395,75 @@ describe("GameOpeningLineage", () => {
         ],
       });
 
-      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
     });
 
-    it("follows the rounded scores across a boundary cross", () => {
+    it("uses the rounded score change for the capsule", () => {
       // round(41.6)=42, round(41.4)=41 -> displayed +1 -> 42.
-      renderLineage([makeItem({ opening_key: "k1" })], {
-        scoreChanges: [
-          makeChange({ opening_key: "k1", before: 41.4, after: 41.6, delta: 0.2 }),
-        ],
-      });
+      vi.useFakeTimers();
+      try {
+        renderLineage([makeItem({ opening_key: "k1" })], {
+          scoreChanges: [
+            makeChange({ opening_key: "k1", before: 41.4, after: 41.6, delta: 0.2 }),
+          ],
+        });
 
-      const badge = screen.getByText("+1 → 42");
-      expect(badge).toHaveClass("game-opening-lineage__delta--up");
+        act(() => vi.advanceTimersByTime(150));
+        expect(screen.getByText("42")).toBeInTheDocument();
+        expect(
+          screen.getByRole("img", { name: "Score increased by 1, now 42" }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it("renders no badge when no change matches the opening key", () => {
+    it("renders no score-change treatment when no change matches the opening key", () => {
       renderLineage([makeItem({ opening_key: "k1" })], {
         scoreChanges: [
           makeChange({ opening_key: "other", before: 41, after: 44 }),
         ],
       });
 
-      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
     });
 
-    it("shows a from-zero badge for a brand-new opening while its card stays em-dash (g-gkkn)", () => {
-      // is_new has no pre-game baseline: the badge quantifies the gain against 0
-      // (+30 → 30), but the card itself keeps "—" — never the refetched post-game
-      // score (60 here).
-      renderLineage(
-        [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
-        {
-          scoreChanges: [
-            makeChange({
-              opening_key: "k1",
-              is_new: true,
-              before: null,
-              delta: null,
-              after: 30,
-            }),
-          ],
-        },
-      );
+    it("reveals a brand-new opening from zero to its real score", () => {
+      vi.useFakeTimers();
+      try {
+        renderLineage(
+          [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
+          {
+            scoreChanges: [
+              makeChange({
+                opening_key: "k1",
+                is_new: true,
+                before: null,
+                delta: null,
+                after: 30,
+              }),
+            ],
+          },
+        );
 
-      const badge = screen.getByText("+30 → 30");
-      expect(badge).toHaveClass("game-opening-lineage__delta--up");
-
-      const card = screen.getByRole("button", { name: /New Opening/ });
-      expect(card).not.toHaveTextContent("60");
-      expect(within(card).getAllByText("—").length).toBeGreaterThanOrEqual(1);
+        const card = screen.getByRole("button", { name: /New Opening/ });
+        expect(within(card).getByText("0")).toBeInTheDocument();
+        expect(card).not.toHaveTextContent("60");
+        act(() => vi.advanceTimersByTime(150));
+        expect(within(card).getByText("30")).toBeInTheDocument();
+        expect(
+          within(card).getByRole("img", { name: "Score increased by 30, now 30" }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
-    it("renders no badge for a brand-new opening with no after-score, card stays em-dash", () => {
+    it("keeps a new opening unscored when its after-score is unavailable", () => {
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
         {
@@ -429,12 +478,39 @@ describe("GameOpeningLineage", () => {
           ],
         },
       );
-      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
       const card = screen.getByRole("button", { name: /New Opening/ });
       expect(card).not.toHaveTextContent("60");
     });
 
-    it("shows the badge in both collapsed and expanded states, as a sibling of the card", async () => {
+    it("keeps a new opening unscored when its after-score rounds to zero", () => {
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
+        {
+          scoreChanges: [
+            makeChange({
+              opening_key: "k1",
+              is_new: true,
+              before: null,
+              delta: null,
+              after: 0.4,
+            }),
+          ],
+        },
+      );
+
+      const card = screen.getByRole("button", { name: /New Opening/ });
+      expect(
+        screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
+      expect(card).not.toHaveTextContent("60");
+      expect(card).not.toHaveTextContent("F");
+      expect(card).toHaveTextContent("—");
+    });
+
+    it("keeps the score outcome available when details are expanded", async () => {
       const user = userEvent.setup();
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })],
@@ -450,24 +526,21 @@ describe("GameOpeningLineage", () => {
         },
       );
 
-      // Collapsed: badge present next to the card.
-      expect(screen.getByText("+3 → 44")).toBeInTheDocument();
+      await screen.findByRole("img", { name: "Score increased by 3, now 44" });
+      const compact = screen.getByRole("button", { name: /Select Ruy Lopez/ });
 
-      await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
+      await user.click(compact);
 
-      // Still present once expanded, and NOT inside the card body — it is a
-      // direct child of the <li>, a sibling of the expanded card.
-      const badge = screen.getByText("+3 → 44");
-      expect(badge).toBeInTheDocument();
-      expect(badge.parentElement?.tagName).toBe("LI");
+      expect(
+        screen.getByRole("img", { name: "Score increased by 3, now 44" }),
+      ).toBeInTheDocument();
     });
   });
 
-  describe("pre-game score pin (g-gkkn)", () => {
-    it("pins the card score to the delta's pre-game `before`, not the refetched post-game score", () => {
+  describe("score-change data resolution", () => {
+    it("starts the card from the delta's pre-game `before`, not the refetched post-game score", () => {
       // At game end the lineage refetch loads the POST-game item.score (44), but
-      // the card must keep showing the PRE-game value (41); the badge alone signals
-      // the change.
+      // the score reveal must begin at the delta's pre-game value (41).
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "Italian Game", score: 44 })],
         {
@@ -478,8 +551,9 @@ describe("GameOpeningLineage", () => {
       const card = screen.getByRole("button", { name: /Italian Game/ });
       expect(within(card).getByText("41")).toBeInTheDocument();
       expect(within(card).queryByText("44")).not.toBeInTheDocument();
-      // The badge (a sibling of the card) still shows the diff and the new value.
-      expect(screen.getByText("+3 → 44")).toBeInTheDocument();
+      expect(
+        within(card).queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
     });
 
     it("shows the available after-score without a baseline and suppresses the badge", () => {
@@ -501,13 +575,15 @@ describe("GameOpeningLineage", () => {
       const card = screen.getByRole("button", { name: /Italian Game/ });
       expect(within(card).getByText("72")).toBeInTheDocument();
       expect(within(card).queryByText("60")).not.toBeInTheDocument();
-      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("img", { name: /^Score (increased|decreased)/ }),
+      ).not.toBeInTheDocument();
     });
 
-    it("resign/empty-lineage first paint: changed cards show `before`, unchanged cards keep item.score", () => {
+    it("resign/empty-lineage first paint: changed cards begin at `before`, unchanged cards keep item.score", () => {
       // Resign loads the lineage for the first time with POST-game item.scores.
-      // A card with a matching delta renders its pre-game `before`; a card with no
-      // delta entry renders item.score exactly as today.
+      // A card with a matching delta begins at its pre-game `before`; a card with
+      // no delta entry renders item.score exactly as today.
       renderLineage(
         [
           makeItem({ opening_key: "k1", opening_name: "Open Game", score: 50 }),
@@ -527,7 +603,7 @@ describe("GameOpeningLineage", () => {
       const openGame = screen.getByRole("button", { name: /Open Game/ });
       expect(within(openGame).getByText("50")).toBeInTheDocument();
 
-      // k2 has a delta → shows pre-game before (41), not post-game 44.
+      // k2 has a delta → starts on pre-game before (41), not post-game 44.
       const ruyLopez = screen.getByRole("button", { name: /Ruy Lopez/ });
       expect(within(ruyLopez).getByText("41")).toBeInTheDocument();
       expect(within(ruyLopez).queryByText("44")).not.toBeInTheDocument();
@@ -588,10 +664,9 @@ describe("GameOpeningLineage", () => {
       expect(within(card).getByText("72")).toBeInTheDocument();
     });
 
-    it("keeps the pinned pre-game number when cache status is pending", () => {
-      // The terminal pin wins over the spinner: the badge quotes a diff against
-      // this number, so replacing it with a placeholder would leave the badge
-      // referring to a value that is no longer on screen.
+    it("keeps the score-reveal baseline when cache status is pending", () => {
+      // The terminal outcome wins over the spinner: the reveal begins from this
+      // number, so replacing it with a placeholder would hide its starting point.
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 44 })],
         {
@@ -605,7 +680,7 @@ describe("GameOpeningLineage", () => {
       expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
     });
 
-    it("keeps the pinned pre-game number when the live occurrence is pending", () => {
+    it("keeps the score-reveal baseline when the live occurrence is pending", () => {
       renderLineage(
         [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 44 })],
         {

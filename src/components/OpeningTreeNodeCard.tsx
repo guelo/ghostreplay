@@ -11,6 +11,10 @@ import {
   getPriorityLabel,
 } from "../openings/format";
 import { formatWhiteEval } from "./MoveRow.helpers";
+import {
+  describeOpeningDeltaBadge,
+  type OpeningDeltaBadge,
+} from "../utils/openingDeltaBadge";
 
 /**
  * Presentational view-model for a single opening-tree node. Built by
@@ -63,6 +67,8 @@ export interface OpeningTreeNodeView {
   moveListStartPly: number;
 }
 
+type ScoreChangePhase = "reveal" | "animate" | "settled";
+
 interface OpeningTreeNodeCardProps {
   variant: "compact" | "expanded";
   node: OpeningTreeNodeView;
@@ -103,6 +109,13 @@ interface OpeningTreeNodeCardProps {
    *  null score already has a distinct, legitimate meaning ("no score for this
    *  opening") that must stay visually different from "still loading". */
   scorePending?: boolean;
+
+  /** A settled score change for this card. Compact cards briefly show `before`,
+   * then reveal `after` as the score hero with a directional delta capsule. */
+  scoreChange?: OpeningDeltaBadge | null;
+  /** Owned by the lineage so a compact-card remount cannot replay a completed
+   * score outcome from its stale pre-game value. */
+  scoreChangePhase?: ScoreChangePhase;
 }
 
 /**
@@ -131,6 +144,74 @@ function GradeTag({ score }: { score: number | null }) {
     <span className="tree-node-card__grade" aria-label={getGradeText(score)}>
       {visible}
     </span>
+  );
+}
+
+function ScoreChangeBadge({
+  scoreChange,
+  animated = false,
+}: {
+  scoreChange: OpeningDeltaBadge;
+  animated?: boolean;
+}) {
+  const arrow = scoreChange.dir === "up" ? "▲" : "▼";
+  const sign = scoreChange.diff > 0 ? "+" : "";
+
+  return (
+    <span
+      className={[
+        "tree-node-card__score-change-badge",
+        animated ? "tree-node-card__score-change-badge--animated" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      role="img"
+      aria-label={describeOpeningDeltaBadge(scoreChange)}
+    >
+      <span aria-hidden="true">
+        {arrow} {sign}
+        {scoreChange.diff}
+      </span>
+    </span>
+  );
+}
+
+/**
+ * The lineage owns the reveal phase because compact cards can unmount while a
+ * user expands a card. This makes the score transition a one-time outcome,
+ * rather than an effect that restarts whenever this presentational component
+ * mounts again.
+ */
+function CompactScoreChange({
+  scoreChange,
+  phase,
+}: {
+  scoreChange: OpeningDeltaBadge;
+  phase: ScoreChangePhase;
+}) {
+  const showingPreviousScore = phase === "reveal";
+  const animateArrival = phase === "animate";
+  const score = showingPreviousScore ? scoreChange.before : scoreChange.after;
+
+  return (
+    <>
+      <span
+        className={[
+          "tree-node-card__score",
+          "tree-node-card__score--hero",
+          showingPreviousScore
+            ? "tree-node-card__score--previous"
+            : "tree-node-card__score--resolved",
+          animateArrival ? "tree-node-card__score--changed" : "",
+        ].join(" ")}
+      >
+        {formatScore(score)}
+      </span>
+      {!showingPreviousScore && (
+        <ScoreChangeBadge scoreChange={scoreChange} animated={animateArrival} />
+      )}
+      <GradeTag score={scoreChange.after} />
+    </>
   );
 }
 
@@ -397,10 +478,14 @@ function CompactBody({
   node,
   kind,
   scorePending,
+  scoreChange,
+  scoreChangePhase = "settled",
 }: {
   node: OpeningTreeNodeView;
   kind: "move" | "family";
   scorePending?: boolean;
+  scoreChange?: OpeningDeltaBadge | null;
+  scoreChangePhase?: ScoreChangePhase;
 }) {
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
@@ -419,6 +504,11 @@ function CompactBody({
         <span className="tree-node-card__primary-right">
           {scorePending ? (
             <ScorePlaceholder />
+          ) : scoreChange ? (
+            <CompactScoreChange
+              scoreChange={scoreChange}
+              phase={scoreChangePhase}
+            />
           ) : (
             <>
               <span className="tree-node-card__score">{formatScore(node.score)}</span>
@@ -451,10 +541,14 @@ function ExpandedBody({
   node,
   kind,
   scorePending,
+  scoreChange,
+  scoreChangePhase = "settled",
 }: {
   node: OpeningTreeNodeView;
   kind: "move" | "family";
   scorePending?: boolean;
+  scoreChange?: OpeningDeltaBadge | null;
+  scoreChangePhase?: ScoreChangePhase;
 }) {
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
@@ -490,6 +584,12 @@ function ExpandedBody({
             ) : (
               <>
                 {formatScore(node.score)}
+                {scoreChange && (
+                  <ScoreChangeBadge
+                    scoreChange={scoreChange}
+                    animated={scoreChangePhase === "animate"}
+                  />
+                )}
                 <GradeTag score={node.score} />
               </>
             )}
@@ -543,6 +643,8 @@ function OpeningTreeNodeCard({
   onCollapse,
   footerAction,
   scorePending,
+  scoreChange,
+  scoreChangePhase,
 }: OpeningTreeNodeCardProps) {
   const className = [
     "tree-node-card",
@@ -550,6 +652,8 @@ function OpeningTreeNodeCard({
     `tree-node-card--grade-${getGradeToken(node.score)}`,
     kind === "family" ? "tree-node-card--family" : "",
     isSelected ? "tree-node-card--selected" : "",
+    scoreChange ? `tree-node-card--score-change-${scoreChange.dir}` : "",
+    scoreChangePhase === "animate" ? "tree-node-card--score-change-animate" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -566,14 +670,26 @@ function OpeningTreeNodeCard({
           aria-expanded={isExpanded === undefined ? undefined : isExpanded}
           aria-controls={controlsId}
         >
-          <CompactBody node={node} kind={kind} scorePending={scorePending} />
+          <CompactBody
+            node={node}
+            kind={kind}
+            scorePending={scorePending}
+            scoreChange={scoreChange}
+            scoreChangePhase={scoreChangePhase}
+          />
         </button>
       );
     }
 
     return (
       <div className={className}>
-        <CompactBody node={node} kind={kind} scorePending={scorePending} />
+        <CompactBody
+          node={node}
+          kind={kind}
+          scorePending={scorePending}
+          scoreChange={scoreChange}
+          scoreChangePhase={scoreChangePhase}
+        />
       </div>
     );
   }
@@ -594,6 +710,8 @@ function OpeningTreeNodeCard({
         node={node}
         kind={kind}
         scorePending={scorePending}
+        scoreChange={scoreChange}
+        scoreChangePhase={scoreChangePhase}
       />
       {footerAction && (
         // Raised above the collapse overlay (z-index) so it stays clickable; its

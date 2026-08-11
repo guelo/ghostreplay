@@ -20,11 +20,13 @@ const item = (
 describe("badgeFor", () => {
   it("renders the rounded diff and direction", () => {
     expect(badgeFor(item({ before: 41, after: 44 }))).toEqual({
+      before: 41,
       diff: 3,
       after: 44,
       dir: "up",
     });
     expect(badgeFor(item({ before: 44, after: 41 }))).toEqual({
+      before: 44,
       diff: -3,
       after: 41,
       dir: "down",
@@ -33,6 +35,7 @@ describe("badgeFor", () => {
 
   it("quantifies a brand-new opening against zero", () => {
     expect(badgeFor(item({ is_new: true, before: null, after: 37 }))).toEqual({
+      before: 0,
       diff: 37,
       after: 37,
       dir: "up",

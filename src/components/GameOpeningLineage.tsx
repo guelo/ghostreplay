@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import OpeningTreeNodeCard, {
   type OpeningTreeNodeView,
@@ -12,7 +12,10 @@ import type {
 } from "../utils/api";
 // Shared with the last-drill toast (g-f3m4) so both surfaces agree on exactly
 // what counts as a change.
-import { badgeFor } from "../utils/openingDeltaBadge";
+import {
+  badgeFor,
+  describeOpeningDeltaBadge,
+} from "../utils/openingDeltaBadge";
 
 interface GameOpeningLineageProps {
   playerColor: OpeningPlayerColor;
@@ -21,8 +24,8 @@ interface GameOpeningLineageProps {
    *  numbering on the cards. From the session-openings response. */
   startPly: number;
   /** Post-game/drill opening-score changes (g-xanz), keyed by opening_key. When
-   *  provided, a changed opening shows an inline diff badge to the right of its
-   *  card (g-3gmc). Null during live play -> no badges. */
+   *  provided, a changed opening reveals its new score and an inline diff badge
+   *  inside its card. Null during live play -> no score-change treatment. */
   scoreChanges?: OpeningScoreDeltaItem[] | null;
   /** When provided, tapping a chip selects that opening's root on the
    *  board/MoveList/graph (history parity). Omit for the live game panel, where
@@ -90,8 +93,10 @@ function matchCard(
  * (name as header, played move list as the secondary line, no Eval tile /
  * move-type chips). `depth` feeds `ply` for completeness only — family mode
  * never reads it. `moveListSan` is the player's actual SAN prefix, numbered from
- * `startPly`. `score` is the resolved card score — usually `item.score`, but
- * pinned to the delta's pre-game `before` at game end (g-gkkn).
+ * `startPly`. `score` is the resolved card score — usually `item.score`, with
+ * a changed card resolved to its post-game `after` score. Its compact
+ * presentation briefly shows the paired pre-game score before revealing that
+ * value (g-ptea).
  */
 function toNodeView(
   item: OpeningLineageItem,
@@ -117,6 +122,15 @@ function toNodeView(
     moveListSan: item.moves,
     moveListStartPly: startPly,
   };
+}
+
+type ScoreChangePhase = "reveal" | "animate" | "settled";
+
+function scoreChangeKey(
+  cardKey: string,
+  badge: NonNullable<ReturnType<typeof badgeFor>>,
+) {
+  return `${cardKey}:${badge.before}:${badge.after}:${badge.diff}`;
 }
 
 /**
@@ -159,6 +173,55 @@ function GameOpeningLineage({
     () => new Map((scoreChanges ?? []).map((c) => [c.opening_key, c])),
     [scoreChanges],
   );
+
+  // Keep the score outcome phase above the compact/expanded branch. A compact
+  // card can unmount as the player opens details, but an already revealed
+  // outcome must never return to its stale pre-game score when it remounts.
+  const [scoreChangePhases, setScoreChangePhases] = useState<
+    Record<string, ScoreChangePhase>
+  >({});
+  const activeScoreChangeKeys = useMemo(
+    () =>
+      lineage.flatMap((item, index) => {
+        const badge = badgeFor(changeByKey.get(item.opening_key));
+        return badge ? [scoreChangeKey(`${item.opening_key}:${index}`, badge)] : [];
+      }),
+    [lineage, changeByKey],
+  );
+
+  useEffect(() => {
+    const revealing = activeScoreChangeKeys.filter(
+      (key) => (scoreChangePhases[key] ?? "reveal") === "reveal",
+    );
+    if (revealing.length === 0) return;
+    const timer = window.setTimeout(() => {
+      setScoreChangePhases((current) => {
+        const next = { ...current };
+        for (const key of revealing) {
+          if ((next[key] ?? "reveal") === "reveal") next[key] = "animate";
+        }
+        return next;
+      });
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [activeScoreChangeKeys, scoreChangePhases]);
+
+  useEffect(() => {
+    const animating = activeScoreChangeKeys.filter(
+      (key) => scoreChangePhases[key] === "animate",
+    );
+    if (animating.length === 0) return;
+    const timer = window.setTimeout(() => {
+      setScoreChangePhases((current) => {
+        const next = { ...current };
+        for (const key of animating) {
+          if (next[key] === "animate") next[key] = "settled";
+        }
+        return next;
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [activeScoreChangeKeys, scoreChangePhases]);
 
   const matchedKey = useMemo(
     () =>
@@ -208,24 +271,25 @@ function GameOpeningLineage({
           })}`;
           const change = changeByKey.get(item.opening_key);
           const badge = badgeFor(change);
-          const badgeSign = badge && badge.diff > 0 ? "+" : "";
-          // Pre-game score pin (g-gkkn): a known `before` overrides the
-          // refetched post-game item.score, while a truly new opening keeps
-          // "—" because it has no baseline. For a non-new opening whose baseline
-          // is unavailable or incompatible, use the delta's available `after`
-          // instead of a stale lineage score. That branch deliberately applies
-          // to both the warm terminal envelope and its reconciled replacement;
-          // during the warm phase its `after` agrees with the same persisted
-          // batch read by the lineage refetch. item.score remains the defensive
-          // fallback only when neither delta value is available.
-          const cardScore = !change
-            ? item.score
-            : change.is_new
+          const changeKey = badge ? scoreChangeKey(cardKey, badge) : null;
+          const scoreChangePhase = changeKey
+            ? scoreChangePhases[changeKey] ?? "reveal"
+            : "settled";
+          // A visible rounded delta makes its resolved `after` score the card's
+          // canonical value. Compact cards reveal it from `badge.before`; a new
+          // opening therefore gets a real score hero instead of a dash. A new
+          // opening whose score rounds to zero has no visible delta, so it stays
+          // unscored rather than presenting an unexplained F grade. For other
+          // unrenderable deltas retain the most reliable wire value, then fall
+          // back to the lineage score.
+          const cardScore =
+            badge?.after ??
+            (change?.is_new && !badge
               ? null
-              : change.before ?? change.after ?? item.score;
+              : change?.after ?? change?.before ?? item.score);
           // A settled delta display wins over the pending spinner: once `change`
-          // is present the card shows the selected baseline/after value, and a
-          // spinner would hide the number that the terminal state established.
+          // is present the card owns a resolved outcome, and a spinner would
+          // hide the transition that terminal state established.
           const scorePending =
             !change &&
             (scoreStatus === "pending" || pendingScoreIndices?.has(index) === true);
@@ -249,6 +313,8 @@ function GameOpeningLineage({
                     kind="family"
                     node={view}
                     scorePending={scorePending}
+                    scoreChange={badge}
+                    scoreChangePhase={scoreChangePhase}
                     onCollapse={() => setManual({ token: syncToken, key: null })}
                     footerAction={
                       <>
@@ -277,13 +343,15 @@ function GameOpeningLineage({
                   kind="family"
                   node={view}
                   scorePending={scorePending}
+                  scoreChange={badge}
+                  scoreChangePhase={scoreChangePhase}
                   // Wording reflects the action: history selects a root + toggles
                   // details; the live panel only expands the card in place.
-                  ariaLabel={
+                  ariaLabel={`${
                     onSelectRoot
                       ? `Select ${item.opening_name} and toggle details`
                       : `Show ${item.opening_name} details`
-                  }
+                  }${badge ? `. ${describeOpeningDeltaBadge(badge)}.` : ""}`}
                   onSelect={() => {
                     setManual({ token: syncToken, key: cardKey });
                     onSelectRoot?.(item);
@@ -292,17 +360,6 @@ function GameOpeningLineage({
                   isExpanded={isExpanded}
                   controlsId={cardId}
                 />
-              )}
-              {/* Inline score-diff badge (g-3gmc): sibling of the card, to its
-                  right, shown in both collapsed and expanded states. */}
-              {badge && (
-                <span
-                  className={`game-opening-lineage__delta game-opening-lineage__delta--${badge.dir}`}
-                  aria-label={`${item.opening_name} score ${badgeSign}${badge.diff}, now ${badge.after}`}
-                >
-                  {badgeSign}
-                  {badge.diff} → {badge.after}
-                </span>
               )}
             </li>
           );

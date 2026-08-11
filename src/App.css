@@ -9324,11 +9324,10 @@
 }
 
 .game-opening-lineage__item {
-    /* Flex row: the chip-or-card block flexes to fill, the score-diff badge
-       (g-3gmc) pins to the right and the card shrinks to make room. */
+    /* The card now owns its score-change treatment, so it gets the full row
+       width rather than making space for a sibling diff annotation. */
     display: flex;
     align-items: center;
-    gap: 0.4rem;
     padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
 }
 
@@ -9336,23 +9335,6 @@
 .game-opening-lineage__item > .opening-lineage-card {
     flex: 1 1 auto;
     min-width: 0;
-}
-
-/* Inline post-game score-diff badge: "+3 → 44" green / "-2 → 62" red (g-3gmc). */
-.game-opening-lineage__delta {
-    flex: 0 0 auto;
-    font-size: 0.72rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
-
-.game-opening-lineage__delta--up {
-    color: var(--success);
-}
-
-.game-opening-lineage__delta--down {
-    color: var(--error);
 }
 
 /* Expanded lineage entry: the tree-node card plus a re-homed "View in Openings"
@@ -11065,6 +11047,18 @@
     --grade-accent: var(--text-tertiary);
 }
 
+/* A fresh score outcome belongs to the card, not beside it. Keep the outcome
+   colour separate from the grade accent: an A can fall and an F can improve. */
+.tree-node-card--score-change-up {
+    --score-change-accent: var(--success);
+    --score-change-tint: color-mix(in srgb, var(--success) 15%, transparent);
+}
+
+.tree-node-card--score-change-down {
+    --score-change-accent: var(--error);
+    --score-change-tint: color-mix(in srgb, var(--error) 14%, transparent);
+}
+
 /* --- Compact variant: two-line selection button -------------------------- */
 .tree-node-card--compact {
     display: flex;
@@ -11082,6 +11076,27 @@
 
 button.tree-node-card--compact {
     cursor: pointer;
+}
+
+/* The score's arrival is intentionally brief: it is feedback for this opening,
+   not a reward-screen animation. The tint and glow call attention to the whole
+   active card while preserving its ordinary grade border. */
+.tree-node-card--compact.tree-node-card--score-change-animate {
+    animation: opening-score-card-glow 600ms ease-out;
+}
+
+@keyframes opening-score-card-glow {
+    0% {
+        box-shadow: inset 0 0 0 0 var(--score-change-tint);
+    }
+    35% {
+        box-shadow:
+            inset 0 0 0 1px var(--score-change-tint),
+            0 0 0.7rem var(--score-change-tint);
+    }
+    100% {
+        box-shadow: inset 0 0 0 0 transparent;
+    }
 }
 
 /* Selected highlight via background + inset ring so the grade accent border
@@ -11124,6 +11139,77 @@ button.tree-node-card--compact {
     font-variant-numeric: tabular-nums;
     font-weight: 600;
     font-size: 0.78rem;
+}
+
+/* The resolved score becomes the headline of a newly known outcome. It grows
+   roughly 28% over the standard compact score, then the tinted capsule confirms
+   the signed change without competing with the new value. */
+.tree-node-card__score--hero {
+    font-size: 1rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+
+.tree-node-card__score--previous {
+    color: var(--text-primary);
+}
+
+.tree-node-card__score--resolved {
+    color: var(--score-change-accent);
+}
+
+.tree-node-card__score--changed {
+    animation: opening-score-number-arrive 300ms cubic-bezier(0.18, 0.8, 0.28, 1.16) both;
+}
+
+@keyframes opening-score-number-arrive {
+    from {
+        opacity: 0.35;
+        transform: translateY(0.32em) scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.tree-node-card__score-change-badge {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    padding: 0.1rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--score-change-accent) 38%, transparent);
+    border-radius: 999px;
+    background: var(--score-change-tint);
+    color: var(--score-change-accent);
+    font-size: 0.68rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+
+.tree-node-card__score-change-badge--animated {
+    animation: opening-score-badge-pop 220ms ease-out both;
+}
+
+@keyframes opening-score-badge-pop {
+    from {
+        opacity: 0;
+        transform: scale(0.72);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card--compact.tree-node-card--score-change-animate,
+    .tree-node-card__score--changed,
+    .tree-node-card__score-change-badge--animated {
+        animation: none;
+    }
 }
 
 /* Score loading placeholder (g-a5v3): occupies the score + grade slot while a

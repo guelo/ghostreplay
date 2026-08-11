@@ -8,6 +8,8 @@ export type LastDrillDeltaToast = {
   /** Identity of the notification. Acknowledgement is BY NONCE — acking by
    *  session could remove a later duplicate that was never shown. */
   nonce: number;
+  /** `before` travels with the shared badge data; the toast renders its signed
+   * diff and resolved score. */
   badges: Array<OpeningDeltaBadge & { openingName: string }>;
 };
 
@@ -41,7 +43,8 @@ export function useLastDrillDeltaToast(): {
           nonce: head.nonce,
           badges: (head.items ?? []).flatMap((item) => {
             const badge = badgeFor(item);
-            return badge ? [{ ...badge, openingName: item.opening_name }] : [];
+            if (!badge) return [];
+            return [{ ...badge, openingName: item.opening_name }];
           }),
         }
       : null;

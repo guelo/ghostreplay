@@ -48,7 +48,7 @@ describe("useLastDrillDeltaToast", () => {
     const { result } = renderHook(() => useLastDrillDeltaToast());
 
     // The zero-diff entry is suppressed by the shared badge rule.
-    expect(result.current.toast?.badges).toEqual([
+    expect(result.current.toast?.badges).toMatchObject([
       { diff: 6, after: 47, dir: "up", openingName: "Italian Game" },
     ]);
   });
