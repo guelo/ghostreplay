@@ -1,5 +1,10 @@
 # Opening Score Final Specification
 
+> **Status:** detailed score-model and calibration reference. The product overview is
+> in [SPEC.md](../SPEC.md); implementation, API, and test contracts are authoritative
+> for the current behavior. The player-facing surface includes the readiness score and
+> Coverage; Confidence remains a companion diagnostic in the API and scorer.
+
 ## Recommendation
 
 Adopt a side-specific, repertoire-aware readiness score with companion diagnostics:
@@ -19,8 +24,8 @@ That avoids the main failure mode in v8's draft weighting: a weak but frequently
 
 ### Keep from v7
 
-- companion `Opening Score`, `Confidence`, and `Coverage` surfaces, with score
-  now carrying the readiness-critical confidence/coverage signals
+- companion Opening Score, Confidence, and Coverage diagnostics, with score now carrying
+  the readiness-critical confidence/coverage signals
 - opponent-turn breadth weighting
 - normalized recursive scoring with a stable `0-100` output
 - `weighted_depth` as a concrete companion to the abstract score

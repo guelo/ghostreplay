@@ -96,6 +96,51 @@ identity, capability, and scope rules;
 [`backend/app/analysis_trust.py`](../../backend/app/analysis_trust.py) applies
 the grain-specific read gates.
 
+## Browser-submitted evidence and scoped reuse
+
+Browser evidence is authenticated but not attested: a user can submit a coherent-looking
+claim without proving that the declared search ran. The policy therefore distinguishes a
+claim that may affect its submitter's own experience from canonical evidence that may
+affect every player. A non-authoritative row can never become canonical simply because it
+looks complete or strong.
+
+An analysis-cache submission association means only that one user independently submitted
+a tuple consistent with that row. It is neither ownership nor a write right, and it is not
+returned or exposed as product telemetry. For non-authoritative rows, every capability
+except the purely presentational display overlay is owner-scoped by default. The policy
+denies tree evaluation to non-canonical evidence because that shared consumer cannot safely
+express a per-viewer result; it denies drill grading because fabricated evidence must never
+grade a drill. A missing viewer admits only effectively authoritative evidence for an
+owner-scoped capability; display overlay remains the deliberate exception.
+
+Claims are made inside the cache writer's transaction, after the replacement decision.
+A replacement clears stale associations before any eligible incoming claim is recorded;
+a keep or merge can associate a submitter only when the stored facts agree with, and are
+covered by, the facts they submitted. This prevents an old or partial agreement from granting a user
+fields it did not provide, while allowing independent users to establish their own
+eligibility for the same shared row.
+
+## Capability-specific reads and coherent publication
+
+Readers name both their consumer capability and viewer. Generic lookup, interactive/game
+publication, opening evidence, and drill grading are distinct grants; a read grant is not
+permission to publish a durable game-analysis result. Canonical evidence remains globally
+available only through its authoritative capabilities.
+
+Position and move evidence may be combined for reusable publication only by the
+coherent-evidence resolver. For a pair containing non-authoritative evidence, it requires both
+grains to satisfy the same requested capability for the viewer, compatible settings and facts, a
+finite loss value, and validation of the move classification. Both effectively authoritative
+grains retain their legacy pairing behavior; its known factual-coherence exception is documented
+below.
+A consumer that has only one usable grain degrades to that grain or to no reusable result;
+it must not assemble a seemingly canonical answer from unrelated rows.
+
+Opening-score freshness includes this eligibility. The shared evidence digest represents
+the full deterministic association set and every move attribute that can affect coherence,
+rather than one requesting user's membership. Therefore an association or trust-relevant
+change invalidates a snapshot whose opening evidence selection could have changed.
+
 ## Replacement and publication
 
 Move-cache writers use the shared replacement policy. Replacement compares
@@ -173,5 +218,7 @@ the opening/session routes. Their tests are the authority for edge cases.
   generated FastAPI OpenAPI document for the exact wire contract.
 - Current position-grain population and conflict audit:
   [`backend/app/position_analysis_backfill.py`](../../backend/app/position_analysis_backfill.py).
+- Operational cache repair:
+  [`backend/scripts/REPAIR_ANALYSIS_CACHE.md`](../../backend/scripts/REPAIR_ANALYSIS_CACHE.md).
 - Behavioral proof: the evidence, cache, position, session, and opening tests
   under [`backend/`](../../backend/).
