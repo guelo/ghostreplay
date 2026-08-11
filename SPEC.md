@@ -1,3 +1,5 @@
+# Ghost Replay
+
 > **Scope of this guide.** `SPEC.md` is the project overview: stable product
 > capabilities, system boundaries, and paths to authoritative detail. Exact
 > schemas, request and response contracts, formulas, operational procedures,
@@ -8,8 +10,6 @@
 > system boundary changes, and keep its links limited to source-checked,
 > current authorities. Do not duplicate implementation contracts here or use
 > it to preserve planned, retired, or historical designs.
-
-# Ghost Replay
 
 ## Table of contents
 
@@ -31,16 +31,16 @@ the same player needs to practice.
 
 1. **Play.** Start a game against an opponent.
 2. **Analyze.** The browser analyzes the player’s moves during play.
-3. **Capture.** An automatic opening mistake or a manually selected decision
-   can become a personal training target.
+3. **Capture.** An automatically detected opening mistake or a manually
+   selected decision can become a personal training target.
 4. **Replay.** A later game can steer toward that target when it is due and
    reachable.
-5. **Review.** The player receives a binary pass/fail result, which updates the
-   target’s review history and future priority.
+5. **Review.** The repeated decision receives a binary pass/fail result, which
+   updates the target’s review history and future priority.
 
 ## Feature map and user journeys
 
-### Play and Ghost replay
+### Play and Ghost Replay
 
 Players start a session as White or Black. When a due, reachable personal
 target exists, the Ghost can steer its side of the game toward it; otherwise
@@ -48,12 +48,12 @@ the backend serves an engine move. Reaching a stored position through a
 transposition can make its downstream target reachable again.
 
 A browser-resident Stockfish worker analyzes player moves during play. Automatic
-target capture records a player move that loses at least 50cp, only in the first
-10 full moves and only once per session. Players can also add a selected move to
-the Ghost Move Library manually; this is separate from automatic first-target
-capture and does not count against its one-target limit. When Ghost play
-revisits a target, the player receives a binary pass/fail review: a pass
-advances its streak and a failure resets it.
+target capture records a player move that loses at least 50 centipawns, only in
+the first 10 full moves and only once per session. Players can also add a
+selected move to the Ghost Move Library manually; this is separate from
+automatic first-target capture and does not count against the one-target limit.
+When a later Ghost-guided game revisits a target, the player receives a binary
+pass/fail review: a pass advances its streak and a failure resets it.
 
 ### Review and progress
 
@@ -74,9 +74,9 @@ convert it to rated normal play.
 
 The browser owns the board experience, legal local move application, and live
 analysis orchestration. FastAPI validates session and account boundaries,
-chooses Ghost-versus-engine opponent moves, and delegates engine inference to
-the remote Maia3 service. PostgreSQL holds the durable, account-scoped training
-record.
+uses Ghost steering when a target is available, and delegates other opponent
+moves to the remote Maia3 service. PostgreSQL holds the durable, account-scoped
+training record.
 
 ```mermaid
 flowchart LR
@@ -99,15 +99,15 @@ steering is unavailable for that move.
 
 ## Core domain model
 
-A session records one played game; its moves can contribute reusable graph
-evidence. The Ghost Move Library represents normalized positions and directed
-moves, while a target marks a user decision at one of those positions. Each
-later review is recorded separately from the target itself.
+A session owns one played game and its analyzed move records. Selected paths can
+also contribute to the Ghost Move Library, which stores normalized positions
+and directed moves as a graph. A target marks a player decision at one of those
+positions, while each later review is recorded separately from the target.
 
-PostgreSQL also holds session and analysis evidence, rating history, and
-side-scoped opening-score snapshots. The exact relational schema, constraints,
-and migration history remain authoritative in the backend model and migration
-layer, not in this overview.
+Alongside this game and training data, PostgreSQL holds reusable analysis
+evidence, rating history, and side-scoped opening-score snapshots. The exact
+relational schema, constraints, and migration history remain authoritative in
+the backend model and migration layer, not in this overview.
 
 ## Major end-to-end flows
 
@@ -136,11 +136,12 @@ a capture or review outcome.
 ### Persist, finish, and revisit
 
 During play, the browser uploads analyzed move records as structured JSON to
-`POST /api/session/{session_id}/moves`. At completion it sends the terminal
-result and PGN separately to `POST /api/game/end`. This split lets analytics
-consume structured move fields directly instead of reparsing PGN comments. The
-service keeps both records under the session and account boundary, and game
-completion makes the saved game available for later review.
+`POST /api/session/{session_id}/moves`. In a separate completion request, it
+sends the terminal result and PGN to `POST /api/game/end`. This split lets
+analytics consume structured move fields directly instead of reparsing PGN
+comments. The service keeps both forms of the game record under the session and
+account boundary, and game completion makes the saved game available for later
+review.
 
 The post-game view reads that account-owned saved session and its persisted
 move analysis. History lists ended sessions visible to that account, and
@@ -162,12 +163,12 @@ Ghost steering is not available for that move.
 
 A player who rewinds a rated game first confirms a resignation of that game.
 The board can then continue locally as unrated practice: it does not upload
-moves or create Ghost, drill, review, or rating effects. Starting another
-session clears that local practice state.
+moves or create Ghost targets, drill progress, reviews, or rating effects.
+Starting another session clears that local practice state.
 
 ## Cross-cutting contracts
 
-- **Identity and visibility.** On first visit, the browser auto-registers an
+- **Identity and recovery.** On first visit, the browser auto-registers an
   anonymous user and keeps its generated credentials and bearer token in
   origin-scoped `localStorage`; until claimed, account recovery is bound to
   that browser profile and device storage. Claiming updates the same `users`
@@ -175,13 +176,15 @@ session clears that local practice state.
   account-owned training data stay in place rather than being migrated. Issued
   access tokens have a seven-day lifetime. When one expires, the browser
   discards it and signs in again with the stored credentials; a separate
-  refresh-token flow is intentionally deferred. FastAPI authorizes every
-  account-scoped game, target, review, history, and progress read or write. A
-  saved game becomes a history/review surface only when it meets the
-  session-visibility rule. The exact lifecycle is owned by the browser
+  refresh-token flow is intentionally deferred. The exact lifecycle is owned by
+  the browser
   [auth context](src/contexts/AuthContext.tsx), the backend
   [auth routes](backend/app/api/auth.py), and
   [token security](backend/app/security.py).
+- **Authorization and visibility.** FastAPI authorizes every account-scoped
+  game, target, review, history, and progress read or write. A saved game becomes
+  a history/review surface only when it meets the
+  [session-visibility rule](backend/app/session_contracts.py).
 - **Evidence boundaries.** Reusable analysis is not assumed trustworthy merely
   because it exists. Position and played-move evidence have separate grains and
   read gates; consumers degrade to permitted evidence or an unavailable result.
@@ -189,22 +192,23 @@ session clears that local practice state.
   contract.
 - **Metrics population.** Session review, history, and progress metrics report
   only the population their owning endpoint defines. The versioned
-  session-accuracy contract is linked from the flow above; exact calculation
-  and API shapes remain with code and tests.
+  session-accuracy contract is linked from the flow above, and
+  [Stats and metrics](docs/features/stats-metrics.md) defines the other
+  population boundaries. Exact calculations and API shapes remain with code and
+  tests.
 
 ## Engineering map
 
-| Layer | Principal responsibility |
-| --- | --- |
-| Browser | React UI, local chess state, live analysis coordination, session uploads, and a local-engine fallback |
-| Services | FastAPI account/session coordination, Ghost and review decisions, and remote Maia3 inference |
-| Data | PostgreSQL account-scoped training records, graph targets, reviews, evidence, ratings, and opening snapshots |
+The frontend is React 19 with Vite and TypeScript. The backend is a Python
+FastAPI service backed by PostgreSQL through SQLAlchemy and Alembic.
 
-The browser seams are [components](src/components/),
-[hooks](src/hooks/), and [services](src/services/). FastAPI route families and
-their policy/model collaborators are under
-[backend/app/api](backend/app/api/) and [backend/app](backend/app/); models and
-migrations are the exact storage authority.
+| Concern | Code authority |
+| --- | --- |
+| Frontend surfaces and workflows | [Pages](src/pages/), [components](src/components/), and [hooks](src/hooks/) |
+| Browser orchestration and state | [Services](src/services/), [workers](src/workers/), [stores](src/stores/), and [contexts](src/contexts/) |
+| FastAPI routes and policy | [Route modules](backend/app/api/) and their collaborators in [backend/app](backend/app/) |
+| Persistence | [Models](backend/app/models.py) and [Alembic migrations](backend/alembic/) |
+| Behavioral coverage | [Frontend tests](src/), [backend tests](backend/tests/), and [end-to-end tests](e2e/) |
 
 Behavioral tests at those browser workflow and backend route/policy seams
 protect the training loop, rather than a duplicate specification of every
@@ -213,21 +217,20 @@ tests remain authoritative for exact contracts.
 
 ## Further reading
 
-These source-checked references provide the detailed contract for one subject;
-they supplement, rather than duplicate, the implementation authorities named
-in the engineering map.
+These source-checked references supplement, rather than duplicate, the
+implementation authorities named in the engineering map.
 
-- **Architecture and evidence policy:**
-  [analysis evidence](docs/architecture/analysis-evidence.md).
-- **Feature contracts:** [drill mode](docs/features/drill-mode.md) and
-  [stats and metrics](docs/features/stats-metrics.md).
-- **Opening data and scoring:** [opening-book loader](docs/opening-book.md) and
-  [opening-score model and calibration](docs/openingscore_final.md).
-- **Session accuracy:** [versioning policy](docs/session-accuracy-versioning.md).
-- **Operational history:** [Release A](docs/release_a_runbook.md) and
-  [Release B](docs/release_b_runbook.md) runbooks. These are deployment records,
-  not product or API specifications.
-
-For exact API and storage contracts, start with the
-[FastAPI routes](backend/app/api/), [models](backend/app/models.py),
-[migrations](backend/alembic/), and generated OpenAPI from the running service.
+- **Product and feature contracts:** [drill mode](docs/features/drill-mode.md)
+  and [stats and metrics](docs/features/stats-metrics.md).
+- **Architecture, data, and policy:**
+  [analysis evidence](docs/architecture/analysis-evidence.md), the
+  [opening-book loader](docs/opening-book.md), the
+  [opening-score model and calibration](docs/openingscore_final.md), and
+  [session-accuracy versioning](docs/session-accuracy-versioning.md).
+- **Code-authoritative contracts:** [FastAPI routes](backend/app/api/),
+  [models](backend/app/models.py), [migrations](backend/alembic/),
+  [frontend API types and callers](src/utils/api.ts), tests, and generated
+  OpenAPI from the running service.
+- **Operational runbooks:** [Release A](docs/release_a_runbook.md) and
+  [Release B](docs/release_b_runbook.md). These are deployment records, not
+  product or API specifications.
