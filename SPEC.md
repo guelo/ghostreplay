@@ -135,10 +135,12 @@ a capture or review outcome.
 
 ### Persist, finish, and revisit
 
-During play, the browser sends move and analysis records to the session service.
-The service keeps the durable game record under the session and account
-boundary; game completion records its terminal outcome and makes the saved game
-available for later review.
+During play, the browser uploads analyzed move records as structured JSON to
+`POST /api/session/{session_id}/moves`. At completion it sends the terminal
+result and PGN separately to `POST /api/game/end`. This split lets analytics
+consume structured move fields directly instead of reparsing PGN comments. The
+service keeps both records under the session and account boundary, and game
+completion makes the saved game available for later review.
 
 The post-game view reads that account-owned saved session and its persisted
 move analysis. History lists ended sessions visible to that account, and
