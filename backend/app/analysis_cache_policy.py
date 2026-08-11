@@ -174,6 +174,92 @@ class Reason(str, Enum):
     RECOVERY_ABORTED_KEEP = "recovery_aborted_keep"
 
 
+# Central acceptance triage for every shared-writer verdict. Keep these groups
+# exhaustive and disjoint: adding a Reason without deciding whether it is rejected,
+# accepted by both consumers, or accepted by exactly one producer is a maintenance
+# error. The browser-analysis endpoint and canonical precompute script derive their
+# allowlists here, so their intentional differences live at one seam.
+# Do not demote an accepted verdict merely because a current consumer cannot earn it:
+# STRENGTH_REPLACE (g-mk1d) and CROSS_GRAIN_AUTHORITY_REPLACE (g-6xc3) are latent by design.
+SHARED_PRODUCER_ACCEPTED_REASONS = frozenset(
+    {
+        Reason.NEW_KEY,
+        Reason.DOMINATES_REPLACE,
+        Reason.SAME_PROFILE_IDEMPOTENT,
+        Reason.SAME_PROFILE_SUPERSET_MERGE,
+        Reason.SAME_PROFILE_CONTRACT_UPGRADE,
+        Reason.STRENGTH_REPLACE,
+    }
+)
+CANONICAL_ONLY_ACCEPTED_REASONS = frozenset(
+    {
+        Reason.LEGACY_REPLACED_BY_AUTH,
+        Reason.CROSS_GRAIN_AUTHORITY_REPLACE,
+        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE,
+    }
+)
+BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS = frozenset(
+    {Reason.PROTOCOL_CORRECTED_REPLACE}
+)
+STORED_ROW_REJECTS_INCOMING_REASONS = frozenset(
+    {
+        Reason.INVALID_INCOMING_KEEP,
+        Reason.NON_AUTHORITATIVE_KEEP,
+        Reason.INACTIVE_PROFILE_KEEP,
+        Reason.LEGACY_KEEP_NON_AUTH,
+        Reason.MERGE_CONFLICT_KEEP,
+        Reason.MERGE_OWNER_MISMATCH_KEEP,
+        Reason.STRENGTH_WEAKER_KEEP,
+        Reason.STRENGTH_INCOMPARABLE_KEEP,
+        Reason.INCOMPATIBLE_KEEP,
+        Reason.INCOMING_LESS_COMPLETE_KEEP,
+        Reason.DUPLICATE_CONFLICT,
+        Reason.RECOVERY_ABORTED_KEEP,
+    }
+)
+
+_REASON_TRIAGE_GROUPS = (
+    SHARED_PRODUCER_ACCEPTED_REASONS,
+    CANONICAL_ONLY_ACCEPTED_REASONS,
+    BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS,
+    STORED_ROW_REJECTS_INCOMING_REASONS,
+)
+_MISCLASSIFIED_REASONS = frozenset(
+    reason
+    for reason in Reason
+    if sum(reason in group for group in _REASON_TRIAGE_GROUPS) != 1
+)
+if _MISCLASSIFIED_REASONS:
+    raise RuntimeError(
+        "analysis-cache Reasons require exactly one stored-row acceptance "
+        f"classification; misclassified={_MISCLASSIFIED_REASONS!r}"
+    )
+
+STORED_ROW_MATCHES_INCOMING_REASONS = (
+    SHARED_PRODUCER_ACCEPTED_REASONS
+    | CANONICAL_ONLY_ACCEPTED_REASONS
+    | BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS
+)
+
+# Idempotence is accepted because the stored row already is the incoming evidence,
+# but it is the one accepted verdict that performs no database mutation.
+ROW_MUTATING_REASONS = STORED_ROW_MATCHES_INCOMING_REASONS - {
+    Reason.SAME_PROFILE_IDEMPOTENT
+}
+
+# Producer-specific impossible verdicts stay fail-closed. The canonical writer's
+# authority barrier resolves canonical-vs-browser before a protocol-correction edge;
+# the fixed non-authoritative browser producer cannot earn authority-only replacement
+# or the canonical same-profile grain transition.
+CANONICAL_PRECOMPUTE_ACCEPTED_REASONS = (
+    SHARED_PRODUCER_ACCEPTED_REASONS | CANONICAL_ONLY_ACCEPTED_REASONS
+)
+BROWSER_ANALYSIS_ACCEPTED_REASONS = (
+    SHARED_PRODUCER_ACCEPTED_REASONS
+    | BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS
+)
+
+
 @dataclass(frozen=True)
 class CacheRow:
     """Minimal projection used for the replacement decision."""

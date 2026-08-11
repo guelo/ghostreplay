@@ -5,11 +5,15 @@ import dataclasses
 import pytest
 
 from app.analysis_cache_policy import (
+    BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS,
+    CANONICAL_ONLY_ACCEPTED_REASONS,
     CROSS_GRAIN_DERIVED_FIELDS,
     EVIDENCE_FIELDS,
     MOVE_GRAIN_FIELDS,
     POSITION_GRAIN_FIELDS,
     RELOCATABLE_GRAINS,
+    SHARED_PRODUCER_ACCEPTED_REASONS,
+    STORED_ROW_REJECTS_INCOMING_REASONS,
     CacheRow,
     Decision,
     Reason,
@@ -30,6 +34,21 @@ from app.evidence_contracts import (
     RESOLVER_COMPLETE_V2,
     Grain,
 )
+
+
+def test_reason_acceptance_triage_group_sizes_are_stable():
+    """Catch an unnoticed verdict migration; earnability tests pin behavior."""
+    assert {
+        "shared": len(SHARED_PRODUCER_ACCEPTED_REASONS),
+        "canonical_only": len(CANONICAL_ONLY_ACCEPTED_REASONS),
+        "browser_analysis_only": len(BROWSER_ANALYSIS_ONLY_ACCEPTED_REASONS),
+        "rejected": len(STORED_ROW_REJECTS_INCOMING_REASONS),
+    } == {
+        "shared": 6,
+        "canonical_only": 3,
+        "browser_analysis_only": 1,
+        "rejected": 12,
+    }
 
 
 def _row(

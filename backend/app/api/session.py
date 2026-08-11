@@ -18,7 +18,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.analysis_cache_policy import Reason, browser_live_descriptor
+from app.analysis_cache_policy import (
+    BROWSER_ANALYSIS_ACCEPTED_REASONS,
+    ROW_MUTATING_REASONS,
+    browser_live_descriptor,
+)
 from app.analysis_cache_repo import write_analysis_cache_rows
 from app.browser_provenance_metrics import session_provenance_verdict
 from app.analysis_profiles import (
@@ -862,9 +866,10 @@ def _encoded_browser_provenance(move: SessionMoveInput) -> str | None:
 
 
 # Writer verdicts that actually TOUCHED the stored row — every Reason returned with
-# a ``Decision`` of INSERT / REPLACE / MERGE. Used for the ``cache_rows_written``
-# log field, which answers "how many rows did this upload write", NOT the endpoint's
-# "is the stored row now this evidence" (``_EVIDENCE_ACCEPTED_REASONS``).
+# a ``Decision`` of INSERT / REPLACE / MERGE. Derived beside the shared acceptance
+# triage in analysis_cache_policy.py. Used for the ``cache_rows_written`` log field,
+# which answers "how many rows did this upload write", NOT the endpoint's "is the
+# stored row now this evidence" (``_EVIDENCE_ACCEPTED_REASONS``).
 #
 # `same_profile_idempotent` is deliberately ABSENT: it is a ``Decision.KEEP`` and the
 # writer's replace/merge branch ends at "KEEP: nothing to write"
@@ -872,21 +877,7 @@ def _encoded_browser_provenance(move: SessionMoveInput) -> str | None:
 # changed nothing — exactly the overcount this field exists to remove.
 # `merge_conflict_keep` is likewise absent: it is reached INSIDE the MERGE branch
 # when the merge is refused, and stores nothing.
-_ROW_MUTATING_REASONS = frozenset(
-    {
-        Reason.NEW_KEY.value,  # INSERT
-        Reason.DOMINATES_REPLACE.value,  # REPLACE
-        Reason.PROTOCOL_CORRECTED_REPLACE.value,  # REPLACE
-        Reason.STRENGTH_REPLACE.value,  # REPLACE
-        # REPLACE, unreachable from a non-authoritative producer like this one, but
-        # included because the set is defined by DECISION, not by today's callers.
-        Reason.LEGACY_REPLACED_BY_AUTH.value,
-        Reason.CROSS_GRAIN_AUTHORITY_REPLACE.value,
-        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE.value,
-        Reason.SAME_PROFILE_SUPERSET_MERGE.value,  # MERGE
-        Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,  # MERGE
-    }
-)
+_ROW_MUTATING_REASONS = frozenset(reason.value for reason in ROW_MUTATING_REASONS)
 
 
 def _upsert_analysis_cache(
@@ -1970,37 +1961,19 @@ _EVIDENCE_PRODUCER_PROFILE = {
 }
 
 # Writer verdicts under which the STORED row is now THIS browser-analysis evidence,
-# so the endpoint emits a MoveUpgrade for the open MoveList (g-xox0 Part B). Every
-# other verdict — the `*_keep` families, `duplicate_conflict`, `recovery_aborted_keep`,
-# and the endpoint pre-writer reasons — leaves the stored row unchanged / unwritten,
-# so it yields no upgrade. `legacy_replaced_by_auth`, `cross_grain_authority_replace`,
-# and `same_profile_grain_transition_replace` cannot occur for a non-authoritative
-# profile and are therefore not accepted here — accepting an unearnable verdict would
-# mask a writer regression rather than catch one.
+# so the endpoint emits a MoveUpgrade for the open MoveList (g-xox0 Part B). The
+# exhaustive shared triage and this producer's authority-only exclusions live in
+# analysis_cache_policy.py; this string projection is only for the response path.
+# Every other verdict — the `*_keep` families, `duplicate_conflict`,
+# `recovery_aborted_keep`, and the endpoint pre-writer reasons — leaves the stored
+# row unchanged / unwritten, so it yields no upgrade.
 #
 # NOT the same question as ``_ROW_MUTATING_REASONS`` (which counts DB writes), and
 # the difference is deliberate: `same_profile_idempotent` belongs HERE, because the
 # stored row already IS this evidence and the endpoint can return it, but it is a
 # ``Decision.KEEP`` that writes nothing.
 _EVIDENCE_ACCEPTED_REASONS = frozenset(
-    {
-        Reason.NEW_KEY.value,
-        Reason.DOMINATES_REPLACE.value,
-        # The corrective replacement of a defective retired browser-analysis-v1 row
-        # by the visible-MultiPV successor is an accepted write (g-reuse-d21-search).
-        Reason.PROTOCOL_CORRECTED_REPLACE.value,
-        # A MEASURED replacement (D4 steps 4-5) is a replacement like any other: the
-        # stored row IS now this evidence, so it must emit its MoveUpgrade. Today's
-        # producer cannot generate it — this endpoint stamps the FIXED multipv-v2
-        # profile, which Rule 2a skips and which meets every other profile across an
-        # explicit edge or the authority barrier before the measured steps run — but
-        # omitting it would fail SILENTLY the moment that changes: the write would
-        # succeed and the open MoveList would simply never be told (g-mk1d review).
-        Reason.STRENGTH_REPLACE.value,
-        Reason.SAME_PROFILE_SUPERSET_MERGE.value,
-        Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,
-        Reason.SAME_PROFILE_IDEMPOTENT.value,
-    }
+    reason.value for reason in BROWSER_ANALYSIS_ACCEPTED_REASONS
 )
 
 

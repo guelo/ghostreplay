@@ -54,7 +54,11 @@ from app.analysis_cache_repo import (
     _row_to_dict,
 )
 # _identity_verified moved to the policy module (g-xox0: single projector home).
-from app.analysis_cache_policy import Reason, _identity_verified
+from app.analysis_cache_policy import (
+    CANONICAL_PRECOMPUTE_ACCEPTED_REASONS,
+    Reason,
+    _identity_verified,
+)
 from app.analysis_profiles import (
     ANALYZER_PROTOCOL_VERSION,
     get_profile,
@@ -99,38 +103,11 @@ OK = "ok"
 SKIPPED_NO_CONTINUATION = "skipped-no-continuation"
 ERROR = "error"
 
-_ACCEPTED_REASONS = frozenset(
-    {
-        Reason.NEW_KEY,
-        Reason.DOMINATES_REPLACE,
-        Reason.LEGACY_REPLACED_BY_AUTH,
-        # A MEASURED replacement (D4 steps 4-5) is a successful write like any other.
-        # Latent today — the two canonical manifests compare EQUAL, so no canonical
-        # pair ranks — but a future deeper canonical profile with no explicit edge
-        # would rank, and without this entry that successful upgrade would land in
-        # `write_failures` and exit the run unsuccessfully (g-mk1d review).
-        Reason.STRENGTH_REPLACE,
-        # A cross-grain authority replacement (Rules 4b/5b) is likewise a successful
-        # write. Latent today — this script targets resolver-complete-v2, which is not
-        # a grain-split contract, so the rule cannot fire — but once the canonical
-        # writer emits move-complete-v1 (g-v2-deprecation.2) every stored browser-v2
-        # row it relocates earns this verdict, and without this entry a whole run of
-        # correct replacements would land in `write_failures` (g-6xc3).
-        Reason.CROSS_GRAIN_AUTHORITY_REPLACE,
-        # The same canonical profile's legacy combined v2 row may transition in
-        # place after this producer has durably committed its position winner.
-        # This is a successful REPLACE during the g-v2-deprecation.2 cutover.
-        Reason.SAME_PROFILE_GRAIN_TRANSITION_REPLACE,
-        # PROTOCOL_CORRECTED_REPLACE stays out: this producer is authoritative, and
-        # the authority barrier resolves canonical-vs-browser before explicit edges,
-        # so a canonical write can never earn a protocol-correction verdict.
-        Reason.SAME_PROFILE_SUPERSET_MERGE,
-        Reason.SAME_PROFILE_CONTRACT_UPGRADE,
-        # Accepted ONLY when post-write verification confirms the stored row is
-        # the wanted authoritative v2 evidence (an exact re-run is idempotent).
-        Reason.SAME_PROFILE_IDEMPOTENT,
-    }
-)
+# The exhaustive stored-row acceptance triage is shared with the browser-analysis
+# endpoint in analysis_cache_policy.py.  This producer-specific view excludes the
+# protocol-correction verdict that an authoritative canonical writer cannot earn.
+# SAME_PROFILE_IDEMPOTENT remains subject to the post-write verification below.
+_ACCEPTED_REASONS = CANONICAL_PRECOMPUTE_ACCEPTED_REASONS
 
 _verbose = False
 
