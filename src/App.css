@@ -11523,14 +11523,22 @@ button.tree-node-card--compact {
 }
 
 /* --- Name-led header + played move list (all surfaces, g-d65n) ------------ */
-/* The primary line leads with the opening NAME on every surface; it truncates as
-   the lead so the score/grade always stay visible. */
+/* The primary line leads with the opening NAME on every surface. Collapsed
+   cards give it two lines before truncating, while the score/grade keeps its
+   fixed slot at the right; expanded cards continue to wrap without a limit. */
 .tree-node-card__move--name {
     flex: 1;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.tree-node-card--compact .tree-node-card__move--name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
 }
 
 /* The played move list ("1.e4 c6 2.Bc4") is the secondary line; the last
