@@ -1,171 +1,186 @@
-This began as the initial **SPEC** for the "Ghost Replay" Chess Application. It has since been updated to track the current codebase and is now maintained as the **living design document** — describing the ideas, architecture, and behavior as actually implemented. Some forward-looking notes remain (marked "post-MVP" / "deferred") to capture roadmap intent.
+> **Scope of this guide.** `SPEC.md` is the project overview: stable product
+> capabilities, system boundaries, and the paths to the authoritative detail.
+> Exact schemas, request and response contracts, formulas, operational
+> procedures, and design history belong in code, generated OpenAPI, migrations,
+> focused documents, and tests. The detailed reference retained below is being
+> reduced in sequential, reviewable passes.
+>
+> Within the retained detailed reference, **post-MVP** and **deferred** mark
+> postponed or forward-looking work, not implemented behavior.
 
----
+# Ghost Replay
 
-# SPEC.md - Ghost Replay Chess App
+## Table of contents
 
-## Table of Contents
+- [Purpose and core training loop](#purpose-and-core-training-loop)
+- [Feature map and user journeys](#feature-map-and-user-journeys)
+- [System architecture](#system-architecture)
+- [Core domain model](#core-domain-model)
+- [Major end-to-end flows](#major-end-to-end-flows) *(pending Pass 2/3)*
+- [Cross-cutting contracts](#cross-cutting-contracts) *(pending Pass 2/3)*
+- [Engineering map](#engineering-map) *(pending Pass 2/3)*
+- [Further reading](#further-reading)
+- [Retained detailed reference](#retained-detailed-reference)
+  - [5. Database schema](#5-database-schema)
+  - [6. Data and logic flow](#6-data--logic-flow)
+  - [7. Game sessions and lifecycle](#7-game-sessions--lifecycle)
+  - [8. API specification](#8-api-specification)
+  - [9. After-game analysis display](#9-after-game-analysis-display)
+  - [10. Game history view](#10-game-history-view)
+  - [11. Testing strategy](#11-testing-strategy)
+  - [12. Rating system](#12-rating-system)
+  - [13. Opening weakness tracking](#13-opening-weakness-tracking)
+  - [14. Analysis cache](#14-analysis-cache)
+  - [15. Local fallback](#15-local-fallback)
+  - [16. Practice continuation](#16-practice-continuation)
+  - [17. Drill mode](#17-drill-mode)
+  - [18. Stats summary populations](#18-stats-summary-populations)
 
-1. Product Description
-2. User Stories & Features
-3. High-Level Architecture
-4. Tech Stack
-5. Database Schema
-6. Data & Logic Flow
-7. Game Sessions & Lifecycle
-8. API Specification
-9. After-Game Analysis Display
-10. Game History View
-11. Testing Strategy
-12. Rating System
-13. Opening Weakness Tracking
-14. Analysis Cache
-15. Local Fallback
-16. Practice Continuation
-17. Drill Mode
-18. Stats Summary Populations
+## Purpose and core training loop
 
----
+Ghost Replay is a chess-training application that turns a player’s earlier
+mistakes into future decision points. Rather than only presenting a completed
+analysis, it can guide a future opponent move sequence toward a position that
+the same player needs to practice.
 
-## 1. Product Description
+1. **Play.** Start a game against an opponent.
+2. **Analyze.** The browser analyzes the player’s moves during play.
+3. **Capture.** An automatic opening mistake or a manually selected decision
+   can become a personal training target.
+4. **Replay.** A later game can steer toward that target when it is due and
+   reachable.
+5. **Review.** The player receives a binary pass/fail result, which updates the
+   target’s review history and future priority.
 
-**Ghost Replay** is a chess training web application designed to fix a player's leaks by forcing them to confront their past mistakes. Unlike standard analysis tools that passively show what went wrong, Ghost Replay uses an active "Ghost" opponent mechanism.
+## Feature map and user journeys
 
-### The Core Loop
+### Play and Ghost replay
 
-1. **Play:** The user plays a game against a bot.
-2. **Analyze:** The client-side engine detects blunders in real-time.
-3. **Store:** Blunders are saved to a personal Ghost Move Library database.
-4. **Replay (The Ghost):** In future games, the bot prioritizes move sequences that steer the user back into positions where they previously blundered.
-5. **Spaced Repetition:** If the user repeats the mistake, the game pauses for immediate correction. The interval for reviewing that specific blunder resets. If the user plays the correct move, the blunder is pushed further into the future (SRS).
+Players start a session as White or Black. When a due, reachable personal
+target exists, the Ghost can steer its side of the game toward it; otherwise
+the backend serves an engine move. Reaching a stored position through a
+transposition can make its downstream target reachable again.
 
----
+A browser-resident Stockfish worker analyzes player moves during play. Automatic
+target capture records a player move that loses at least 50cp, only in the first
+10 full moves and only once per session. Players can also add a selected move to
+the Ghost Move Library manually; this is separate from automatic first-target
+capture and does not count against its one-target limit. When Ghost play
+revisits a target, the player receives a binary pass/fail review: a pass
+advances its streak and a failure resets it.
 
-## 2. User Stories & Features
+### Review and progress
 
-### 2.1 Gameplay & Ghost Mode
+After a game, players can review the game, revisit saved history, and follow
+their Elo rating and summary statistics. Authentication establishes the account
+boundary for games, targets, reviews, and progress.
 
-* **Dynamic Opening:** As the user plays opening moves (e.g., `e4`), the system checks if this path leads to any "Due" blunders.
-* **The Ghost Opponent:** If a path is found, the bot plays the exact moves required to reach the blunder position.
-* **Seamless Deviation:** If the user plays a move that deviates from all known blunder paths, the backend automatically switches to engine-generated opponent moves for continuity.
-* **Re-Hooking:** If a user deviates but later transposes back into a known position with a downstream blunder, the Ghost reactivates.
-* **Player Side:** The user can play as **White or Black** per session; Ghost targeting only considers blunders made as that side.
-* **Game Settings:** A gear menu in the game panel header exposes persisted settings: **sound** (mute toggle + 0–100% volume slider, applied to all clips — move, capture, buzzer, best-move bling, end-game, and blunder audio) and **rating display** (Elo/Chess.com/Lichess). Both persist across sessions via localStorage.
+### Openings and drills
 
-### 2.2 Analysis & Blunder Detection
+The openings area separates White and Black repertoires, lets a player explore
+a scored opening tree, and can start a drill from a selected branch. A drill is
+initially unrated; after its opening objective is reached, the player may
+convert it to rated normal play.
 
-* **Client-Side Analysis:** Blunders are detected in the browser using a secondary Web Worker to save server costs.
-* **Recording Threshold:** A move is recorded as a Ghost Move Library target if the evaluation drops by ≥50 centipawns compared to the engine's best move (inaccuracy level and above).
-* **Opening Moves Only:** Only mistakes in the first 10 moves of the game are eligible for automatic recording. Opening positions have low branching factor and are the most likely to recur in future games, making them viable Ghost steering targets.
-* **First Mistake Only:** To prevent exponential data growth, only the *first* recorded mistake of any single game session is saved into the Ghost Move Library.
+## System architecture
 
-### 2.3 Spaced Repetition System (SRS)
-
-* **Probability-Based Scheduling:** Instead of strict "due dates," each blunder has a **replay priority score** that determines how likely it is to appear. This allows natural spacing without arbitrary caps.
-* **Priority Factors:**
-  * `pass_streak` — Consecutive correct responses (higher = lower priority)
-  * `time_since_last_review` — Time elapsed since last encounter (longer = higher priority)
-  * `eval_loss_cp` — Severity of the original mistake (larger = higher priority). Severity is normalized to a **decisive-mistake ceiling** (0..1000cp): raw values above the ceiling do not increase priority further (a mate pseudo-cp ~10000 and a real −1200 blunder are equally severe), though the other factors still differentiate them. Larger-*below*-cap still means higher priority.
-  * `distance` — Moves to reach the blunder from the current position (closer = higher priority)
-* **Steering Radius:** The Ghost only targets blunders reachable within 5 moves of the current position. Anything beyond 5 moves is ignored — the branching factor makes deeper steering unreliable.
-* **Binary Grading:** Pass or fail only. No easy/good/hard ratings — chess moves are unambiguous.
-* **Instant Feedback:** When a user reaches a stored blunder position:
-  * **Failure:** If they play a move ≥50cp worse than the best move, the game pauses. "You made this blunder again." → `pass_streak` resets to 0.
-  * **Success:** If they play any move within 50cp of the engine's best, the system notifies "Correct!" → `pass_streak` increments.
-
-
-
----
-
-## 3. High-Level Architecture
-
-The system uses a **Client-Coordinator-Memory** architecture. Opponent move selection is centralized in the backend, while tactical blunder analysis remains client-side.
+The browser owns the board experience, legal local move application, and live
+analysis orchestration. FastAPI validates session and account boundaries,
+chooses Ghost-versus-engine opponent moves, and delegates engine inference to
+the remote Maia3 service. PostgreSQL holds the durable, account-scoped training
+record.
 
 ```mermaid
-graph TD
-    User[User Browser]
-
-    subgraph "Frontend (React)"
-        WorkerB[Stockfish B<br/>(The Analyst)]
-        GameUI[Board UI]
-    end
-
-    subgraph "Backend (Python FastAPI)"
-        API[API Coordinator]
-    end
-
-    subgraph "Database (PostgreSQL)"
-        DB[(Ghost Move Library & SRS)]
-    end
-
-    Maia3[Maia3 API<br/>maiachess.com]
-
-    User --> GameUI
-    GameUI --> WorkerB
-    GameUI --> API
-    API --> DB
-    API --> Maia3
-
+flowchart LR
+    Player[Player] --> Browser[React browser]
+    Browser --> Worker[Browser Stockfish worker]
+    Browser --> API[FastAPI coordinator]
+    API --> Maia[Remote Maia3 service]
+    API --> DB[(PostgreSQL)]
 ```
 
-### 3.1 Frontend (The Smart Client)
+| Boundary | Owns |
+| --- | --- |
+| Browser | Game UI, local move application, live analysis orchestration, and a local-engine fallback when FastAPI is unreachable |
+| FastAPI | Account/session validation, Ghost selection, opponent decisions, and durable-write coordination |
+| Maia3 | Remote engine inference when the Ghost does not supply a move |
+| PostgreSQL | Per-account sessions, training evidence, and derived progress records |
 
-* **Responsibility:** UI, move validation, and analysis orchestration.
-* **State management:** Two Zustand stores per game:
-  * `useGameStore` — session/game state (FEN, move history, player color, ratings, drill state)
-  * `createAnalysisStore` — per-game analysis results (analysisMap, streaming evals, worker status)
-* **Analysis worker:** `analysisWorker.ts` runs Stockfish-18-lite in a dedicated Web Worker. Managed by `GameAnalysisCoordinator`, a singleton service that survives route navigation so in-flight analysis is never lost.
-* **Opponent engine:** `useStockfishEngine` drives a second Stockfish instance for ghost/engine move selection during play.
-* **Analysis cache:** The coordinator dispatches worker analysis and batches `POST /api/analysis/lookup` (`lookupAnalysisCache`) in parallel. A cache hit resolves the move only when it has classification data, a `best_move_uci`, and a multi-move `best_line_uci` beginning with that best move; incomplete hits fall through to the worker result.
-* **Forced-move exemption:** When the position has ≤ 2 legal moves, the move is never classified as a blunder and never auto-recorded, regardless of eval delta.
-* **Sound settings:** `utils/soundSettings.ts` holds a three-layer source of truth — an in-memory snapshot (authoritative for playback, read by `applyAudioSettings` before every clip), localStorage (persistence only, seeded once at init, best-effort writes), and a `useGameStore` mirror (`soundMuted`/`soundVolume`) for the settings UI. Store setters store the canonical clamped value the snapshot setter returns, so storage failures can never desync playback from the UI.
-* **Key hooks:** `useChessGameController` (move application, promotion), `useChessGameLifecycle` (session lifecycle), `useOpponentMove` (ghost/engine reply), `useMoveAnalysis` (wraps coordinator for hook consumers).
-* **Routes** (`AppRoutes.tsx`):
+During local fallback, the browser marks the move as locally sourced and Ghost
+steering is unavailable for that move.
 
-| Path | Component | Purpose |
-|------|-----------|---------|
-| `/` | `App` | Landing / home |
-| `/play` | `GamePage` | Live game |
-| `/game` | `GameAnalysisPage` | Post-game analysis |
-| `/history` | `HistoryPage` | Game history list |
-| `/blunders` | `BlundersPage` | Ghost Move Library (due blunders) |
-| `/openings` | `OpeningsPage` | Opening performance stats |
-| `/stats` | `StatsPage` | Overall stats / rating graph |
-| `/login` | `AuthForm` | Login |
-| `/register` | `AuthForm` | Registration |
+## Core domain model
 
-The landing page is a route-driven product tour of the full training loop:
-play a ghost game, identify mistakes through background analysis, revisit due
-blunders with spaced repetition, drill weak opening branches, review completed
-games, and track progress. Its hero training board is illustrative only and does
-not fetch or display account data.
+A session records one played game; its moves can contribute reusable graph
+evidence. The Ghost Move Library represents normalized positions and directed
+moves, while a target marks a user decision at one of those positions. Each
+later review is recorded separately from the target itself.
 
-### 3.2 Backend (The Coordinator)
+PostgreSQL also holds session and analysis evidence, rating history, and
+side-scoped opening-score snapshots. The exact relational schema, constraints,
+and migration history remain authoritative in the backend model and migration
+layer, not in this overview.
 
-* **Responsibility:** Ghost-path traversal, opponent move selection (via remote Maia3 API), and SRS updates.
-* **Stateless:** The API does not hold game state. It receives the current FEN and move history, then answers: *"What is the next opponent move (ghost or engine)?"*
+## Major end-to-end flows
 
-### 3.3 Database (The Memory)
+> **Scaffold (pending Pass 2/3).**
 
-* **Responsibility:** Storing the Ghost Move Library graph (`positions` + `moves`), plus the user decision targets that are practiced later.
-* **Graph Structure:** Moves are not stored as linear games, but as a **directed graph** of unique FEN positions. Note: While games progress forward in time, the Ghost Move Library can contain cycles (e.g., threefold repetition, perpetual checks, transpositions that revisit the same FEN). Recursive queries must include cycle detection and depth bounds.
-* **Ghost Move Library Semantics:** The Ghost Move Library is the move graph itself (`positions` + `moves`); auto-identified blunders and manually selected MoveList decisions are stored as target rows in `blunders`.
+This section will condense session lifecycle, Ghost targeting and re-hooking,
+blunder capture and review, analysis persistence, opening/drill play, and
+graceful degradation in a later pass. Its current detailed source remains below
+until each retained rule has a verified home.
 
----
+## Cross-cutting contracts
 
-## 4. Tech Stack
+> **Scaffold (pending Pass 2/3).**
 
-| Component | Choice | Justification |
-| --- | --- | --- |
-| **Frontend** | React 19 + Vite + TypeScript | Fast development, type safety. |
-| **State management** | Zustand | Lightweight, minimal boilerplate; narrow stores per concern. |
-| **Chess UI** | `react-chessboard` | Robust wrapper for chessboard.js. |
-| **Chess Logic** | `chess.js` | Standard library for move generation/validation. |
-| **Charts** | `recharts` | Rating history graph and score visualizations. |
-| **Opponent Engine** | Maia3 (remote API via maiachess.com) | Backend proxies move requests to the Maia3 API, selecting the appropriate ELO model (600–2600). No local model files or GPU required. |
-| **Analysis Engine** | `stockfish.js` (WASM) | Browser-side analyst worker for blunder detection/SRS grading. |
-| **Backend** | Python (FastAPI) | High performance, excellent libraries (`python-chess`). |
-| **Database** | PostgreSQL | Required for Recursive CTEs (Graph traversal queries). |
+A later pass will collect the overview-level contracts for identity and
+per-account scope, session visibility, evidence trust, cache freshness, and
+metrics populations. Exact API and storage contracts remain with their route,
+model, migration, and test owners.
+
+## Engineering map
+
+> **Scaffold (pending Pass 2/3).** The stack and route map below are the
+> current orientation; later passes will add the tested subsystem seams and
+> operational boundaries.
+
+| Layer | Principal tools and responsibility |
+| --- | --- |
+| Browser | React 19, Vite, and TypeScript; `react-chessboard` and `chess.js` for play; Zustand for UI state; Recharts for progress visualizations; a Stockfish worker for analysis |
+| Services | Python/FastAPI coordinates authenticated game and training workflows; Maia3 provides remote opponent inference |
+| Data | PostgreSQL stores the relational training record and supports Ghost graph traversal |
+
+| Route | User journey |
+| --- | --- |
+| `/` | An illustrative product tour of the training loop; it does not display account data |
+| `/play` | Live games and starting drills |
+| `/game`, `/drill-analysis`, `/history` | Post-game/drill review and saved-game history |
+| `/blunders`, `/openings`, `/stats` | Target library, opening exploration and drills, and progress |
+| `/login`, `/register` | Account access |
+
+Exact dependency versions, build configuration, API payloads, and deployment
+details belong to their implementation owners.
+
+## Further reading
+
+The following sources were audited in Pass 0 and are current for their narrow
+purposes:
+
+- [Session-accuracy versioning](docs/session-accuracy-versioning.md) covers its
+  release/versioning contract.
+- [Opening book](docs/opening-book.md) covers the maintained opening-book input.
+- [Release A runbook](docs/release_a_runbook.md) and [Release B runbook](docs/release_b_runbook.md)
+  are operational reading, not product or API specifications.
+
+Additional focused references will be added only after their implementation and
+authority are verified.
+
+## Retained detailed reference
+
+The detailed sections below are intentionally unchanged in this pass. Later
+passes will replace them only after a verified condensed or focused destination
+exists; they remain source material rather than a second, competing overview.
 
 ---
 
