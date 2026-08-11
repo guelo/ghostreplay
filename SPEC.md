@@ -16,23 +16,14 @@
 - [Feature map and user journeys](#feature-map-and-user-journeys)
 - [System architecture](#system-architecture)
 - [Core domain model](#core-domain-model)
-- [Major end-to-end flows](#major-end-to-end-flows) *(pending Pass 3)*
-- [Cross-cutting contracts](#cross-cutting-contracts) *(pending Pass 3)*
-- [Engineering map](#engineering-map) *(pending Pass 3)*
+- [Major end-to-end flows](#major-end-to-end-flows)
+- [Cross-cutting contracts](#cross-cutting-contracts)
+- [Engineering map](#engineering-map)
 - [Further reading](#further-reading)
 - [Retained detailed reference](#retained-detailed-reference)
-  - [5. Domain and data ownership](#5-domain-and-data-ownership)
-  - [6. Data and logic flow](#6-data--logic-flow)
-  - [7. Game sessions and lifecycle](#7-game-sessions--lifecycle)
   - [8. Endpoint families](#8-endpoint-families)
-  - [9. After-game analysis display](#9-after-game-analysis-display)
-  - [10. Game history view](#10-game-history-view)
-  - [11. Testing strategy](#11-testing-strategy)
-  - [12. Rating system](#12-rating-system)
   - [13. Opening weakness tracking](#13-opening-weakness-tracking)
   - [14. Analysis cache](#14-analysis-cache)
-  - [15. Local fallback](#15-local-fallback)
-  - [16. Practice continuation](#16-practice-continuation)
   - [17. Drill mode](#17-drill-mode)
   - [18. Stats summary populations](#18-stats-summary-populations)
 
@@ -121,50 +112,93 @@ side-scoped opening-score snapshots. The exact relational schema, constraints,
 and migration history remain authoritative in the backend model and migration
 layer, not in this overview.
 
-> **Temporary bridge.** [Domain and data ownership](#5-domain-and-data-ownership)
-> expands this domain summary while detailed reference is being retired. Pass 3
-> will merge them into one overview section.
-
 ## Major end-to-end flows
 
-> **Scaffold (pending Pass 3).**
+### Play, steer, and review
 
-This section will condense session lifecycle, Ghost targeting and re-hooking,
-blunder capture and review, analysis persistence, opening/drill play, and
-graceful degradation in a later pass. Its current detailed source remains below
-until each retained rule has a verified home.
+Starting a game creates an account-scoped session. The browser applies legal
+moves locally and asks FastAPI for every opponent decision. FastAPI first looks
+for a reachable, due target in that player's Ghost Move Library; when none is
+available, it asks Maia3 for an engine move. The same check on every player
+move means Ghost steering can resume when a transposition returns to a known
+position.
+
+The browser's analysis coordinator evaluates player moves for two decisions:
+whether the first eligible early-game mistake becomes a target, and whether an
+armed target review passes or fails. Automatic capture stores the pre-move
+decision point and its path in the personal graph; the server enforces the
+one automatic capture per session. A player can also add a selected move
+manually without consuming that automatic capture.
+
+When a Ghost move reaches its selected target, the browser arms that target for
+review. The next analyzed player move records a binary pass or failure through
+the review service, so later Ghost selection sees the target's updated review
+history. Analysis that is absent or unusable stays ungraded; it never invents
+a capture or review outcome.
+
+### Persist, finish, and revisit
+
+During play, the browser sends move and analysis records to the session service.
+The service keeps the durable game record under the session and account
+boundary; game completion records its terminal outcome and makes the saved game
+available for later review.
+
+The post-game view reads that account-owned saved session and its persisted
+move analysis. History lists ended sessions visible to that account, and
+selecting an item opens the same review journey. A rated terminal outcome also
+persists an Elo result and returns its change for the post-game experience;
+unrated and abandoned games have no rating result.
+
+Session accuracy is a cached terminal result with a versioned population
+contract. Its detailed release and operational mechanics live in
+[Session-accuracy versioning](docs/session-accuracy-versioning.md) and the
+[Release A runbook](docs/release_a_runbook.md) and
+[Release B runbook](docs/release_b_runbook.md).
+
+### Continue safely through disruption
+
+If FastAPI cannot provide an opponent decision, the browser may continue with a
+local-engine move labeled as a local fallback. The board remains playable, but
+Ghost steering is not available for that move.
+
+A player who rewinds a rated game first confirms a resignation of that game.
+The board can then continue locally as unrated practice: it does not upload
+moves or create Ghost, drill, review, or rating effects. Starting another
+session clears that local practice state.
 
 ## Cross-cutting contracts
 
-> **Scaffold (pending Pass 3).**
-
-A later pass will collect the overview-level contracts for identity and
-per-account scope, session visibility, evidence trust, cache freshness, and
-metrics populations. Exact API and storage contracts remain with their route,
-model, migration, and test owners.
+- **Identity and visibility.** FastAPI authorizes every account-scoped game,
+  target, review, history, and progress read or write. A saved game becomes a
+  history/review surface only when it meets the session-visibility rule.
+- **Evidence boundaries.** Reusable analysis is not assumed trustworthy merely
+  because it exists. Position and played-move evidence have separate grains and
+  read gates; consumers degrade to permitted evidence or an unavailable result.
+  [Analysis evidence](docs/architecture/analysis-evidence.md) is the focused
+  contract.
+- **Metrics population.** Session review, history, and progress metrics report
+  only the population their owning endpoint defines. The versioned
+  session-accuracy contract is linked from the flow above; exact calculation
+  and API shapes remain with code and tests.
 
 ## Engineering map
 
-> **Scaffold (pending Pass 3).** The stack and route map below are the
-> current orientation; later passes will add the tested subsystem seams and
-> operational boundaries.
-
-| Layer | Principal tools and responsibility |
+| Layer | Principal responsibility |
 | --- | --- |
-| Browser | React 19, Vite, and TypeScript; `react-chessboard` and `chess.js` for play; Zustand for UI state; Recharts for progress visualizations; a Stockfish worker for analysis |
-| Services | Python/FastAPI coordinates authenticated game and training workflows; Maia3 provides remote opponent inference |
-| Data | PostgreSQL stores the relational training record and supports Ghost graph traversal |
+| Browser | React UI, local chess state, live analysis coordination, session uploads, and a local-engine fallback |
+| Services | FastAPI account/session coordination, Ghost and review decisions, and remote Maia3 inference |
+| Data | PostgreSQL account-scoped training records, graph targets, reviews, evidence, ratings, and opening snapshots |
 
-| Route | User journey |
-| --- | --- |
-| `/` | An illustrative product tour of the training loop; it does not display account data |
-| `/play` | Live games and starting drills |
-| `/game`, `/drill-analysis`, `/history` | Post-game/drill review and saved-game history |
-| `/blunders`, `/openings`, `/stats` | Target library, opening exploration and drills, and progress |
-| `/login`, `/register` | Account access |
+The browser seams are [components](src/components/),
+[hooks](src/hooks/), and [services](src/services/). FastAPI route families and
+their policy/model collaborators are under
+[backend/app/api](backend/app/api/) and [backend/app](backend/app/); models and
+migrations are the exact storage authority.
 
-Exact dependency versions, build configuration, API payloads, and deployment
-details belong to their implementation owners.
+Behavioral tests at those browser workflow and backend route/policy seams
+protect the training loop, rather than a duplicate specification of every
+layout or payload. The generated FastAPI OpenAPI document, source types, and
+tests remain authoritative for exact contracts.
 
 ## Further reading
 
@@ -184,913 +218,10 @@ authority are verified.
 
 ## Retained detailed reference
 
-Most remaining sections below are detailed source material that later passes
-will replace only after a verified condensed or focused destination exists.
-Section 5 and Section 8 are already compact overview material from Pass 2;
-Pass 3 will merge the temporary Core domain model/Section 5 overlap. The
-remaining detailed sections are source material rather than a second,
-competing overview.
-
----
-
-## 5. Domain and data ownership
-
-The data model is organized around a player’s training record, plus two
-deliberately shared sources: the Ghost Move Library graph and reusable analysis
-evidence. The model layer and Alembic migrations are authoritative for columns,
-constraints, retention, and upgrades.
-
-| Domain | Ownership and relationship |
-| --- | --- |
-| Identity | A user can begin anonymously and later claim the same account. User identity scopes every private training record and API read. |
-| Sessions and moves | A game session owns its lifecycle, result, mode, and persisted move history. A completed rated session can produce one rating-history snapshot. Normal play and drills share the session boundary while retaining their distinct product state. |
-| Ghost Move Library | Normalized positions and directed moves form a reusable graph. A blunder target belongs to one user at one decision position; review events are separate, append-only encounters with that target. |
-| Analysis evidence | Session history records what occurred in a game. Reusable move evidence and trusted position truth are separate grains, with explicit trust, publication, and fallback rules. See [Analysis evidence](docs/architecture/analysis-evidence.md). |
-| Opening scores | Per-user, per-color opening-score batches are published snapshots of the graph and eligible evidence. Cursors and freshness proofs prevent a partial or stale rebuild from replacing a valid result. |
-| Operations and audit | Receipts, evidence-boundary records, conflicts, and related audit data make retries and background work observable without changing the player-facing domain model. |
-
-The durable ownership boundaries are intentional:
-
-- Global graph nodes and edges describe chess positions; user-owned targets,
-  reviews, sessions, ratings, and score snapshots describe a player’s training
-  progress.
-- A target and its reviews are different things: the target selects what to
-  practise, while review history records each outcome.
-- A session is the durability boundary for played moves, resulting analysis,
-  game outcome, and downstream training effects. Routes must authorize the
-  caller before reading or changing that record.
-- Position truth is not inferred from an arbitrary played-move row. Trusted
-  position and move evidence have separate storage and read gates; consumers
-  degrade safely when either is unavailable.
-- Opening-score publication is atomic at the snapshot level. Readers see a
-  verified published batch, not a partially recomputed tree.
-
-For exact relationships, fields, constraints, and migrations, use
-[`backend/app/models.py`](backend/app/models.py) and
-[`backend/alembic/versions/`](backend/alembic/versions/). The cross-cutting
-analysis rules are maintained in
-[Analysis evidence](docs/architecture/analysis-evidence.md).
-
-## 6. Data & Logic Flow
-
-### 6.1 The "Scent" Logic (Next Move Selection)
-
-When the user plays a move, the API must decide: *Continue Ghost path OR Switch to Engine?*
-
-**Query Logic (Recursive CTE with Safeguards):**
-
-The Ghost Move Library can contain cycles (threefold repetition, transpositions). Recursive queries **must** include:
-- **Depth bounds:** Hard cap at 5 moves. Beyond 5 moves the branching factor makes steering unreliable, so deeper blunders are not considered.
-- **Cycle detection:** Track visited positions to prevent infinite loops
-
-1. **Input:** Current FEN Hash + `session_id` (to scope to `player_color`).
-2. **Search:** Find all downstream positions connected to this FEN (up to 5 moves, avoiding cycles).
-3. **Filter:** Join with `blunders` table to find positions where user has a recorded target.
-4. **Eligibility:** A blunder is eligible (due) when `srs_priority > 1.0`:
-   ```
-   expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)   -- hours
-   srs_priority = hours_since_review / expected_interval
-   ```
-5. **Scoring:** For each eligible blunder, compute a composite score in Python after the SQL fetch:
-   ```
-   urgency       = 1 + log2(1 + overdue)
-                   where overdue = hours_since_review / expected_interval
-
-   severity      = log1p(min(max(eval_loss_cp, 0), 1000) / 50)   -- logarithmic; 200cp ≈ 1.61, 50cp ≈ 0.69
-
-   distance_weight = exp(-0.35 * depth)               -- exponential decay; depth=1 → 0.70, depth=5 → 0.17
-
-   score = urgency × severity × distance_weight
-   ```
-   `eval_loss_cp` is stored uncapped; it is normalized 0..1000 (`centipawn_loss`) at decision (Ghost/SRS severity) and display (/stats, Blunder Library) time — `CENTIPAWN_LOSS_CAP_CP = 1000` (decisive-mistake ceiling). Only the **severity** factor saturates; urgency, distance, reach, and opening-family weight still fully differentiate two equally-severe blunders.
-6. **Selection:** Weighted random from top-5 first-move groups (see §6.1.2).
-7. **Output:** The immediate next move (SAN) on the chosen path.
-
-**Color Scope Rule:** Only consider blunders where the **position side-to-move** equals the session's `player_color`. This prevents mixing blunders made as White with those made as Black. Use `positions.active_color` for efficient filtering.
-
-**Reference Implementation (SQLite-compatible):**
-
-```sql
-WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
-    -- Base case: current position (depth 0, no first_move yet)
-    SELECT
-        CAST(:start_position_id AS BIGINT),
-        0,
-        ',' || :start_position_id || ',',
-        CAST(NULL AS TEXT)
-
-    UNION ALL
-
-    -- Recursive case: follow moves up to steering radius
-    SELECT
-        m.to_position_id,
-        r.depth + 1,
-        r.path || m.to_position_id || ',',
-        COALESCE(r.first_move, m.move_san)
-    FROM reachable r
-    JOIN moves m ON m.from_position_id = r.position_id
-    WHERE r.depth < :steering_radius                                    -- Depth limit: 5-move steering radius
-      AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'  -- Cycle detection
-)
-SELECT
-    r.first_move,
-    b.id AS blunder_id,
-    r.depth,
-    b.eval_loss_cp,
-    b.pass_streak,
-    b.last_reviewed_at,
-    b.created_at,
-    b.opening_family
-FROM reachable r
-JOIN positions p ON p.id = r.position_id
-JOIN blunders b ON b.position_id = r.position_id
-WHERE b.user_id = :user_id
-  AND p.active_color = :player_color
-  AND r.first_move IS NOT NULL;
-```
-
-Scoring and selection are computed in Python after this query returns (see `GhostMoveCandidate.score()` in `backend/app/api/game.py`).
-
-**Key Safeguards:**
-- `depth < 5`: Steering radius—only considers blunders reachable within 5 moves, where the Ghost can reliably steer
-- `path` string: Accumulates visited position IDs as a comma-delimited string along each traversal path
-- `path NOT LIKE '%,<id>,%'`: SQLite-compatible cycle guard; prevents following edges that revisit a position already in the current path
-
-### 6.1.1 Re-Hooking Logic (Transposition Detection)
-
-When the user deviates from the Ghost path, backend engine mode takes over. However, the user may later transpose into a known position that has a due blunder downstream. The Ghost reactivates automatically on every move.
-
-**When to Check:** Every user move. The `POST /api/game/next-opponent-move` endpoint is called after each move regardless of current mode.
-
-**Re-Hook Trigger:** The Ghost reactivates when:
-1. The current position exists in the user's Ghost Move Library (matched by normalized FEN hash)
-2. At least one blunder target with `srs_priority > 1.0` is reachable within 5 moves downstream (via the `blunders` table)
-
-**Backend Logic:**
-
-```
-POST /api/game/next-opponent-move
-After a user move, backend returns exactly one opponent move. It first tries Ghost steering; if no due path exists, it falls back to the remote Maia3 API.
-
-1. Validate session ownership and that it's the opponent's turn for `fen`.
-1b. Look up `opponent_decisions` by (session_id, request fingerprint over normalized FEN + full UCI history).
-   → hit: return the stored response payload verbatim (idempotent replay of a retry), done.
-2. Compute normalized FEN hash.
-3. Look up position by `fen_hash` in `positions` table (for this user).
-4. If found:
-   → Run downstream blunder query (recursive CTE, depth ≤ 5).
-   → Filter for blunders with srs_priority > 1.0.
-5. If due blunder(s) reachable:
-   → Score candidates; select via weighted random from top-5 first-move groups.
-   → Return:
-     { "mode": "ghost", "move": { "uci": "...", "san": "..." },
-       "target_blunder_id": <id>, "decision_source": "ghost_path" }
-6. If no due blunders reachable:
-   → Call remote Maia3 API for engine move.
-   → Return:
-     { "mode": "engine", "move": { "uci": "...", "san": "..." },
-       "target_blunder_id": null, "decision_source": "backend_engine" }
-7. Before returning (5 or 6): allocate a decision_id, stamp it into the response, and
-   INSERT ... ON CONFLICT DO NOTHING into opponent_decisions, then COMMIT. A lost
-   insert discards the local move and returns the winner's stored payload instead.
-```
-
-**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200–500ms network latency per engine fallback call. The backend must release the request DB transaction before waiting on the remote Maia fallback, so DNS/network stalls do not hold a database connection or read transaction. Slow-path logs are thresholded around ghost search, Maia fallback, analytics capture, and `/api/analysis/lookup` to distinguish DB time from remote-engine and request-lifecycle stalls.
-
-**Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
-- FEN hash → position existence (simple boolean)
-- Position ID → downstream blunder count (invalidate on new blunder insertion)
-
-### 6.1.2 First-Move Group Selection
-
-After scoring all eligible candidates, the Ghost selects its move via a two-stage weighted random process to add natural variety and avoid mechanical repetition.
-
-**Stage 1 — Group by first move:**
-Candidates are grouped by `first_move` (the immediate opponent move the Ghost would play). Each group gets an aggregate score:
-```
-aggregate_score = best_candidate_score + 0.15 × sum(remaining_candidate_scores)
-```
-
-**Stage 2 — Top-K weighted random:**
-1. Sort groups by `penalized_score` (aggregate × repeat penalty, see below).
-2. Keep top `TOP_K = 5` groups.
-3. Weight each group by `penalized_score ^ 0.5` (square-root flattening reduces winner-take-all dominance).
-4. Sample one group using `random.choices` seeded by a stable, deterministic seed.
-5. Within the chosen group, sample one candidate using the same weight formula.
-
-**Stable seeding:**
-```
-seed = SHA-256(user_id | fen_hash | session_id)[:8]   -- big-endian int
-```
-The seed is stable across Python restarts and equivalent FENs (normalized by `fen_hash`), producing consistent results for the same position within a session while varying across sessions.
-
-**Repeat penalties:**
-To avoid showing the same ghost move repeatedly from the same position, the Ghost looks back at the 3 most recent ghost moves played from this FEN and penalizes their first moves:
-```
-factors = (0.35, 0.60, 0.80)   -- most-recent to least-recent
-```
-A move seen twice incurs both factors multiplicatively.
-
-### 6.2 Ghost Move Library Capture Logic
-
-Ghost Move Library targets enter the system through two capture paths.
-
-#### 6.2.1 Automatic Capture (analysis-triggered blunder)
-
-1. User plays move M from position P_before, resulting in position P_after.
-2. **Forced-move exemption:** If P_before has ≤ 2 legal moves, the move is never classified as a blunder and auto-capture is skipped entirely, regardless of eval delta.
-3. **Worker B** (Frontend) calculates (using two independent post-move searches to avoid depth-mismatch inflation):
-   * E_best (Eval of post-best-move position, from opponent's perspective)
-   * E_user (Eval of post-played-move position, from opponent's perspective)
-   * delta = E_best − E_user (player-perspective centipawns)
-4. If delta ≥ 50cp (recording threshold) **and** the move is within the first 10 full moves of the game:
-   * Frontend sends `POST /api/blunder` with:
-     * `pgn`: Full game history up to and including the bad move (e.g., `"1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"`)
-     * `fen`: The position BEFORE the bad move (P_before) — used as sanity check
-     * `user_move`: The bad move played (SAN)
-     * `best_move`: Engine's recommended move (SAN)
-     * `eval_before` / `eval_after`: Centipawn evaluations
-   * Backend builds the full Ghost Move Library path:
-     1. **Replay PGN** using `python-chess` to generate all intermediate positions
-     2. **Sanity check:** Verify position before final move matches provided `fen`. Reject with 422 if mismatch.
-     3. **Insert positions:** For each position in the replay (including start), upsert into `positions` table (deduplicated by `fen_hash`)
-     4. **Insert edges:** For each move in the PGN, upsert into `moves` table connecting consecutive positions
-     5. **Create ghost-library target:** Insert/reuse row in `blunders` referencing P_before (the decision point)
-4. This path enforces the session's first-auto-blunder rule via `game_sessions.blunder_recorded`.
-
-#### 6.2.2 Manual Capture (MoveList-selected move)
-
-1. User selects a move in MoveList and clicks **Add to Ghost Move Library**.
-2. The client may call this flow during both active and ended games.
-3. There is no capture threshold for this path: any eligible player move can be added.
-4. Frontend sends `POST /api/blunder/manual` with PGN history through the selected move plus the selected pre-move FEN.
-5. Backend replays that PGN history and upserts positions/moves exactly as in automatic capture.
-6. Backend inserts/reuses the same `blunders` table keyed by `(user_id, position_id)`, then returns `is_new`.
-7. If `is_new=false`, frontend shows duplicate UX: **"already in library"**.
-8. Manual capture does not mutate `game_sessions.blunder_recorded`.
-
-**Why store the full path:** The Ghost's scent query (Section 6.1) traverses from the current board position downstream to find reachable targets. Without intermediate positions in the Ghost Move Library, there's no path to traverse — Ghost would always fall back to engine mode.
-
-**Critical semantic:** Every target references the **pre-move position** (P_before), because that's where the user faced the decision and will be tested again during SRS review.
-
-
-
-
-
-### 6.3 The SRS Update Logic
-
-#### 6.3.1 Replay Priority Score
-
-Each blunder record has an SRS priority that tracks how overdue it is. A blunder is **due** when `srs_priority > 1.0`:
-
-```
-expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)   -- hours, capped at MAX_INTERVAL
-srs_priority      = hours_since_review / expected_interval
-```
-
-`last_reviewed_at` falls back to `created_at` when the blunder has never been reviewed.
-
-When selecting which blunder to steer toward, the Ghost uses a composite score that combines urgency (saturating), severity (logarithmic), and distance (exponential decay):
-
-```
-overdue         = hours_since_review / expected_interval
-urgency         = 1 + log2(1 + overdue)            -- saturating; grows slowly once very overdue
-
-severity        = log1p(min(max(eval_loss_cp, 0), 1000) / 50)   -- 50cp → 0.69, 100cp → 1.10, 200cp → 1.61; saturates at 1000cp → 3.04
-
-distance_weight = exp(-0.35 × depth)                -- depth=1 → 0.70, depth=3 → 0.35, depth=5 → 0.17
-
-reach_weight    = p_reach ^ 1.5                     -- targeted-session reach rate, see below
-
-score = urgency × severity × distance_weight × reach_weight × opening_weight
-```
-
-**Targeted-session reach rate (g-targeted-reach-rate).** `p_reach` is a Laplace-smoothed
-`(reached + 2) / (targeted + 4)` over the last 30 days, where the denominator counts **sessions in
-which the ghost actually steered at this blunder** — read directly from the `opponent_decisions`
-log, grouped by `(session_id, target_blunder_id)` so re-hooking the same target within one game
-counts once. The numerator joins broad `blunder_opportunity_events` for whole-session `reached`
-membership; no event row means not reached. "Whole-session" is scoped by the drill's evidence
-boundary (§17.4.2): a drill contributes reaches only from its confirmed root / rated conversion
-onward, and a drill with no boundary contributes none while its targeted attempts still count in
-the denominator.
-
-It is deliberately **not** derived from `blunder_opportunity_events`, whose `opportunity` flag is an
-8-ply forward neighbourhood of everything a session touched. That denominator is structurally ~1/N
-in a dense opening: one game credited ~168 blunders with an opportunity while only a handful could
-be steered to, which put the *average* blunder at the exclusion floor regardless of how the user
-played. The two counters stay separate — broad evidence drives SRS **dueness**
-(`opportunities_since_review`), targeted evidence drives **reach**.
-
-- **Exclusion floor.** A blunder with `targeted_30d ≥ 30` and `p_reach < 0.03` is not ghost
-  eligible. Against the broad denominator this was **absorbing**: exclusion stopped the blunder
-  being served, freezing the numerator, while ordinary play kept growing the denominator, so
-  nothing could climb back out — steering collapsed onto whichever target was newest. Against the
-  targeted denominator exclusion freezes both sides, so the 30-day window drains it and lockout is
-  bounded at 30 days.
-- **Upload-independent.** The decision log is written server-side at serve time, so a session that
-  is served a target and never uploads still counts as a **failed** steer. Targeting is
-  deliberately not materialized into `blunder_opportunity_events`, which the client upload path
-  writes: that would relocate the client-controlled-denominator hole rather than close it. A broad
-  recompute or backfill therefore cannot move `p_reach`'s denominator at all.
-- **Reach weight is ungated.** A blunder with no targeted samples takes the prior (0.5 → 0.354),
-  not a free 1.0 — uniform across the no-data cohort, so intra-cohort ordering is unchanged, but a
-  well-reached target now outranks a never-tried one.
-- **The served snapshot IS the scoring read.** `target_blunder_srs` on a `next-opponent-move`
-  response carries the counters `find_ghost_move` scored, returned on `GhostSelection` rather than
-  re-queried by the endpoint. That read uses `exclude_session_id = session_id`, so the decision the
-  payload ships with — and any earlier steer in the same game — is outside the counts by
-  construction. The payload is frozen at serve time and replayed verbatim on retry, so a second
-  read would permanently store drift: under READ COMMITTED it takes a later clock (moving the
-  30-day cutoff) and can see decisions other sessions committed in between.
-
-`eval_loss_cp` is stored RAW/uncapped; severity normalizes it 0..1000 (`centipawn_loss`, `CENTIPAWN_LOSS_CAP_CP = 1000`) so a mate pseudo-cp (~10000) and a real −1200 blunder saturate to the same severity. Only severity saturates — urgency, distance, reach, and opening-family weight still differentiate two equally-severe blunders.
-
-**Constants:**
-| Constant | Value | Purpose |
-|----------|-------|---------|
-| `BASE_INTERVAL` | 4 hours | Minimum review interval (first attempt) |
-| `BACKOFF_FACTOR` | 2.0 | Exponential interval growth per pass |
-| `MAX_INTERVAL` | 4320 hours (180 days) | Interval cap |
-| `STEERING_RADIUS` | 5 moves | Max depth for ghost path traversal |
-| `SEVERITY_NORMALIZER_CP` | 50 cp | Denominator in log1p severity formula |
-| `CENTIPAWN_LOSS_CAP_CP` | 1000 cp | Decisive-mistake ceiling: floor 0 + cap on the per-move CPL / severity input (`centipawn_loss`), applied at read/decision |
-| `DISTANCE_DECAY_RATE` | 0.35 | Exponential decay rate for distance weight |
-| `TOP_K` | 5 | Number of first-move groups considered for weighted random selection |
-| `RECORDING_MOVE_CAP` | 10 | Only record blunders in the first 10 moves |
-
-**SRS Priority Examples (before severity/distance weighting):**
-| pass_streak | expected_interval | After 4hr | After 24hr | After 7 days |
-|-------------|-------------------|-----------|------------|--------------|
-| 0 (new)     | 4 hr              | 1.0       | 6.0        | 42.0         |
-| 1           | 8 hr              | 0.5       | 3.0        | 21.0         |
-| 3           | 32 hr             | 0.125     | 0.75       | 5.25         |
-| 5           | 128 hr            | 0.03      | 0.19       | 1.31         |
-| 10          | 4096 hr (~171 days, capped at 4320) | 0.001 | 0.006 | 0.04 |
-
-**Urgency vs. overdue:**
-| overdue (hours_since / expected) | urgency = 1 + log2(1 + overdue) |
-|----------------------------------|----------------------------------|
-| 0.5 (half-due)                   | 1.58                             |
-| 1.0 (exactly due)                | 2.00                             |
-| 3.0                              | 3.00                             |
-| 7.0                              | 4.00                             |
-| 15.0                             | 5.00                             |
-
-**Severity examples (log1p scale, saturating at the 1000cp decisive-mistake ceiling):**
-| eval_loss_cp | severity = log1p(min(max(cp, 0), 1000)/50) |
-|--------------|--------------------------------------------|
-| ≤0cp (floored) | 0.00                                     |
-| 50cp         | 0.69                                       |
-| 100cp        | 1.10                                       |
-| 200cp        | 1.61                                       |
-| 400cp        | 2.20                                       |
-| 1000cp (cap) | 3.04                                       |
-| 10000cp (mate, saturated) | 3.04                          |
-
-Higher composite score = more likely to be selected when Ghost chooses a path.
-
-#### 6.3.2 Update Rules
-
-1. User arrives at a position that has an associated blunder record (i.e., `blunders.position_id` matches current position).
-2. User plays a move from this position.
-3. **Worker B** (Frontend) evaluates the move in real-time.
-
-4. **Scenario A (Fail - Suboptimal move):**
-   * Move drops eval by ≥50cp compared to best move
-   * Result: `Fail`
-   * Backend updates `blunders` record: `pass_streak = 0`, `last_reviewed_at = NOW`
-   * Note: Any move outside the 50cp threshold fails, whether it's a minor inaccuracy or a major blunder. This is the same threshold used for recording.
-
-5. **Scenario B (Pass - Good move):**
-   * Move is within 50cp of best move's eval
-   * Result: `Pass`
-   * Backend updates `blunders` record: `pass_streak += 1`, `last_reviewed_at = NOW`
-
-#### 6.3.3 Evaluation Thresholds
-
-The system uses a single 50cp threshold for both recording and review:
-
-| Threshold | Value | Purpose |
-|-----------|-------|---------|
-| **SRS Pass** | 50cp | Move must be within 50cp of best to pass review |
-| **Recording** | 50cp | Move must lose ≥50cp to be recorded as Ghost Move Library target |
-
-**SRS Pass Criteria:**
-A move passes review if the **real-time engine evaluation** shows:
-- Eval drop < 50cp compared to engine's best move
-
-This means:
-- User doesn't have to play *the* engine's top move
-- Any move within 50cp of optimal passes (multiple solutions accepted)
-- The stored `bad_move_san` is for display only, not for pass/fail logic
-
-**Recording Criteria:**
-A move is recorded as a new Ghost Move Library target if:
-- Eval drop ≥ 50cp compared to engine's best move
-- The move is within the first 10 moves of the game
-
-**Design Rationale:**
-- 50cp threshold catches inaccuracies, not just major blunders — opening inaccuracies are worth drilling because the positions recur frequently
-- The first-10-moves cap keeps the target pool focused on reachable positions (low branching factor in openings) and prevents the library from filling with unreachable middlegame/endgame positions
-- Severity weighting in the priority formula ensures major blunders still surface before minor inaccuracies
-
-### 6.4 Engine Evaluation Protocol
-
-Worker B (the Analyst) produces all engine evaluations used for blunder detection, SRS grading, and post-game analysis. To ensure consistent, reproducible results, the following protocol applies.
-
-#### 6.4.1 Search Parameters
-
-| Parameter | Value | Rationale |
-|-----------|-------|-----------|
-| Depth | 17 | Sufficient tactical accuracy; diminishing returns beyond |
-| Time limit | None | Search runs until depth 17 is reached |
-| MultiPV | 1 | Only the best move needed for delta calculation |
-| Hash | 128 MB | Transposition table |
-| Threads | 1 | Web Worker constraint; WASM single-threaded |
-
-**Stopping condition:** Search terminates when depth 17 is reached. The evaluation from the final `info` line before `bestmove` is used.
-
-**Dual-search protocol:** The delta is computed from two independent **post-move** searches (played-move position and best-move position). Using post-move positions for both avoids depth-mismatch inflation that occurs when comparing pre-move minimax against post-move searches.
-
-**Search count per move:** Up to **three** depth-17 searches run, not two — the two compared post-move searches are preceded by a root search that identifies the best move:
-
-1. **Root search** on the pre-move position → yields `bestMove`.
-2. **Post-played search** (`position fen <fen> moves <playedMove>`) → E_user.
-3. **Post-best search** (`position fen <fen> moves <bestMove>`) → E_best. Skipped when `playedMove === bestMove`, since search 2 already evaluated that position.
-
-Searches 2 and 3 are each skipped when the resulting position is terminal (checkmate/stalemate), where the score is assigned deterministically instead of searched. A non-terminal move where the player did not find the best move therefore costs the full three searches.
-
-**Implementation (JavaScript):**
-```javascript
-// Send to Stockfish worker (on uciok)
-worker.postMessage('setoption name Hash value 128');
-worker.postMessage('setoption name MultiPV value 1');
-
-// Per-move analysis: up to three searches.
-// 1. Root search on the pre-move position to find bestMove.
-worker.postMessage(`position fen ${fen}`);
-worker.postMessage('go depth 17');
-// ... after `bestmove <bestMove>` is received:
-
-// 2. Post-played position (skipped if terminal — score assigned directly).
-worker.postMessage(`position fen ${fen} moves ${playedMove}`);
-worker.postMessage('go depth 17');
-
-// 3. Post-best position — only when playedMove !== bestMove
-//    (and likewise skipped if that position is terminal).
-worker.postMessage(`position fen ${fen} moves ${bestMove}`);
-worker.postMessage('go depth 17');
-```
-
-#### 6.4.2 Evaluation Perspective (Sign Convention)
-
-Stockfish reports evaluations from **White's perspective** by default. All evaluations are **normalized to side-to-move perspective** before storage and delta comparison.
-
-**Normalization rule:**
-```
-normalized_eval = raw_eval * (1 if white_to_move else -1)
-```
-
-**Example:**
-| Position | Stockfish Raw | Side to Move | Normalized |
-|----------|---------------|--------------|------------|
-| After 1.e4 | +30 | Black | -30 |
-| After 1.e4 e5 | +25 | White | +25 |
-| After 1.e4 e5 2.Qh5 | +45 | Black | -45 |
-
-**Delta calculation:** Always computed as `best_move_eval - played_move_eval` using player-perspective values. A positive delta means the played move was worse.
-
-**Move classification:** Delta is used only for the recording threshold (≥ 50cp → recordable). The quality label (blunder/mistake/inaccuracy/good/excellent/best) is produced by `classifyMoveAdvanced`, which uses a Lichess-style logistic win-chance model instead of raw cp (see §9.2.2).
-
-**Storage:** The `session_moves.eval_cp` column stores the **normalized** (side-to-move) value.
-
-#### 6.4.3 Mate Score Conversion
-
-When Stockfish reports mate scores (`score mate N`), they are converted to centipawn equivalents for threshold comparison.
-
-**Conversion formula:**
-```
-eval_cp = sign * (MATE_BASE - abs(moves_to_mate) * MATE_DECAY)
-
-Constants:
-  MATE_BASE  = 10000
-  MATE_DECAY = 10
-  sign       = +1 if winning (positive N), -1 if losing (negative N)
-```
-
-**Conversion table:**
-| Stockfish Output | Meaning | Centipawn Equivalent |
-|------------------|---------|---------------------|
-| `score mate 1` | Side-to-move mates in 1 | +9990 |
-| `score mate 5` | Side-to-move mates in 5 | +9950 |
-| `score mate 20` | Side-to-move mates in 20 | +9800 |
-| `score mate -1` | Side-to-move gets mated in 1 | -9990 |
-| `score mate -3` | Side-to-move gets mated in 3 | -9970 |
-
-**Threshold application:** Mate scores use converted centipawn values for all comparisons:
-
-| Scenario | Calculation | Result |
-|----------|-------------|--------|
-| Had M3, played move keeps M5 | `9970 - 9950 = 20cp` | Pass (< 50cp) |
-| Had M3, played move loses to +500 | `9970 - 500 = 9470cp` | Recorded (≥ 50cp) |
-| Had +200, blundered into M-5 | `200 - (-9950) = 10150cp` | Recorded (≥ 50cp) |
-| Had M-10, delayed to M-15 | `-9900 - (-9850) = -50cp` → abs = 50cp | Borderline pass |
-
-**Database storage:** When eval is a mate score, the mate count travels
-**alongside** the converted cp sibling rather than replacing it:
-- `eval_cp` = the mate-converted centipawn value (`mateToCp(N)`, e.g. ±~10000),
-  so cp-only consumers and delta math keep working unchanged
-- `eval_mate` = N (positive = winning, negative = losing)
-- The analysis cache mirrors this: `played_eval` (white-relative cp) plus
-  `played_eval_mate` (white-relative mate count, NULL when not a mate)
-- Delta calculations use the converted cp value at comparison time
-
-#### 6.4.4 Evaluation Stability
-
-Engine evaluations fluctuate during iterative deepening. The protocol uses **depth-gated snapshots** rather than convergence detection.
-
-**Rule:** Use the evaluation reported when depth 17 is reached. Do not wait for successive identical evaluations.
-
-**Rationale:**
-- Convergence detection adds latency and implementation complexity
-- Depth 17 provides sufficient stability for tactically critical positions
-- Positions with high eval variance at depth 17 are typically near-equal (within ±50cp of 0.00)
-
-**Known limitation:** In rare positions (e.g., deep sacrificial lines, fortress detection), depth 17 may not capture the full picture. This is acceptable for MVP; users experiencing systematic false blunders can be addressed post-MVP with configurable depth.
-
-#### 6.4.5 Edge Cases
-
-| Scenario | Handling |
-|----------|----------|
-| **Tablebase position** | Stockfish handles internally; reports mate distance or draw |
-| **Book opening moves** | Evaluate normally; no special-casing for theory |
-| **Threefold repetition claim available** | Engine may report 0cp; user's non-draw move compared to 0 |
-| **50-move rule proximity** | Engine accounts internally; may report draw |
-| **Worker crash/timeout** | Skip evaluation for that move; log error; do not flag as blunder |
-| **Eval exactly at threshold** | ≥50cp = recorded and fails review (inclusive boundary) |
-| **Forced move (≤ 2 legal moves)** | Move is never classified as blunder and never auto-recorded, regardless of delta |
-
-#### 6.4.6 Frontend Implementation Notes
-
-**Coordinator:** Analysis is managed by `GameAnalysisCoordinator` (`src/services/GameAnalysisCoordinator.ts`), a singleton that outlives individual route renders. This ensures in-flight analysis is not lost when the user navigates between `/play` and `/game`.
-
-**Analysis cache race:** On each move the coordinator dispatches to the analysis worker and, in parallel, batches a `POST /api/analysis/lookup` query (`src/utils/api.ts`). Two consumers read the result on separate paths:
-
-- **Published path** (the `AnalysisResult` consumed by recording / SRS / blunder display): a cache hit pre-empts the worker only when it passes the grain-specific trust gate — `isTrustedMoveHit` for played-move facts, `isTrustedPositionHit` for best-move / PV. Untrusted rows are treated as misses so the worker produces the authoritative result. Mere presence of `classification` / `eval_delta` no longer short-circuits: a post-split move row can be CP-trusted yet carry no publishable `eval_delta`, and an untrusted browser row must never drive the verdict.
-- **Drill-truth side channel** (`waitForDrillGrade`, g-position-analysis Phase 6): a separate, drill-only channel that records trusted exact-best *position* truth (`best_move_uci` plus the backend-derived `position_eval_loss_cp`) *beside* the published result. Strictness-0 grades by comparing the played move to the trusted `best_move_uci` with no eval needed; strictness > 0 grades from `position_eval_loss_cp` when present (both grains trusted, pure-CP, equal search strength), else falls back to the worker. Every terminal cache path settles the channel (to truth or `null`) so a drill grade waiter can never hang. See §14.6.
-
-**Classification model:** The worker uses `classifyMoveAdvanced` (Lichess logistic win-chance model, see §6.4.2) as the primary classifier. `classifyMove` (cp-based thresholds) is deprecated and used only as a fallback when a cache entry has `eval_delta` but no explicit `classification`.
-
-**Batching:** Worker B evaluates moves asynchronously. During fast play, evaluations queue; moves are processed in order. Each move index tracks its latest request ID so that stale results from retried analysis are discarded.
-
-**Memory:** Each evaluation result is stored in `createAnalysisStore.analysisMap` during the game and uploaded through the coordinator's incremental session-move uploader, with a final best-effort flush on game end (see Section 7.4).
-
-**Error recovery:** If Worker B fails to initialize (WASM load failure), the game continues without analysis. The `session_moves` table will be empty for that game, and no automatic blunders can be recorded (manual MoveList capture is still available).
-
----
-
-## 7. Game Sessions & Lifecycle
-
-A **game session** represents a single game from start to termination. Sessions enforce the "first auto-blunder only" rule for analysis-triggered capture, track game outcomes, and store game history with analysis.
-
-### 7.1 Session Definition
-
-A session begins when the user clicks "New Game" and ends when the game terminates (checkmate, resignation, draw, or abandonment). Each session has a unique identifier.
-
-### 7.2 Game States
-
-```
- ┌─────────┐     New Game     ┌─────────┐     Terminal Event     ┌─────────┐
- │  IDLE   │ ───────────────► │  ACTIVE │ ─────────────────────► │  ENDED  │
- └─────────┘                  └─────────┘                        └─────────┘
-```
-
-**State Transitions:**
-| From | To | Trigger |
-|------|------|---------|
-| IDLE | ACTIVE | User clicks "New Game" |
-| ACTIVE | ENDED | Checkmate, stalemate, resignation, draw, or explicit abandon |
-
-There is no background-job abandonment or `abandoned` status. If the user closes the browser without calling `/api/game/end`, the session remains `active` indefinitely.
-
-### 7.3 Session Schema
-
-```sql
-CREATE TABLE game_sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id BIGINT NOT NULL REFERENCES users(id),
-    started_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    ended_at TIMESTAMP,
-    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active', 'ended'
-    result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon', 'drill_abandon'
-    engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
-    player_color VARCHAR(5) NOT NULL DEFAULT 'white', -- 'white' or 'black' (user side for this session)
-    blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First auto-blunder rule flag (manual captures bypass)
-    is_rated BOOLEAN NOT NULL DEFAULT TRUE,  -- Whether this game affects the user's rating
-    pgn TEXT,                     -- Full game in PGN format
-
-    -- Drill mode columns (NULL for normal sessions)
-    session_mode VARCHAR(10) NOT NULL DEFAULT 'normal',  -- 'normal' or 'drill'
-    drill_state VARCHAR(12),      -- 'active', 'root_reached', 'failed', 'abandoned', 'converted'
-    drill_opening_key TEXT,       -- Opening key for drill target (e.g. "e4_e5_Nf3")
-    drill_strictness VARCHAR(12), -- 'lenient', 'standard', 'strict'
-    drill_strictness_cp INTEGER,  -- Custom centipawn threshold override (0–50)
-    drill_terminal_reason VARCHAR(20),  -- 'off_route', 'accuracy', 'natural_end'
-    normal_started_at TIMESTAMP,  -- When conversion to rated play occurred
-    converted_at TIMESTAMP,       -- Timestamp of the drill→normal conversion
-    rated_start_ply INTEGER,      -- Ply number where rated play began (post-conversion)
-    drill_root_reached_ply INTEGER,  -- EVIDENCE BOUNDARY: ply at which the root was CONFIRMED reached (§17.4.1)
-
-    -- Cached whole-game accuracy (Release A, g-accuracy-schema). Maintained by the
-    -- serving write hooks; see §7.3.1. NULL means "not (yet) computed / not eligible".
-    player_accuracy INTEGER,                -- 0..100 or NULL (a computed-None is stored as NULL)
-    player_accuracy_algo_version SMALLINT,  -- ACCURACY_ALGO_VERSION stamped when the session was scored
-
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
-    CONSTRAINT valid_session_mode CHECK (session_mode IN ('normal', 'drill')),
-    CONSTRAINT valid_drill_state CHECK (drill_state IS NULL OR drill_state IN ('active', 'root_reached', 'failed', 'abandoned', 'converted')),
-    -- NOT VALID in Release A: enforced for every new/updated row but existing rows
-    -- are NOT scanned (no validation lock). Release B validates it once clean.
-    CONSTRAINT ck_game_sessions_player_accuracy CHECK (player_accuracy IS NULL OR (player_accuracy >= 0 AND player_accuracy <= 100)),
-    CONSTRAINT ck_game_sessions_drill_root_reached_ply CHECK (drill_root_reached_ply IS NULL OR drill_root_reached_ply >= 0),
-    -- A normal session has no route and no root, so a ply there could only be a write-path bug.
-    CONSTRAINT ck_game_sessions_root_ply_requires_drill CHECK (drill_root_reached_ply IS NULL OR session_mode = 'drill')
-);
-
-CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
-CREATE INDEX idx_game_sessions_status ON game_sessions(status);
-CREATE INDEX idx_game_sessions_user_started ON game_sessions(user_id, started_at);
-CREATE INDEX idx_game_sessions_drill_state ON game_sessions(drill_state);
-```
-
-**`is_rated` flag:** Passed by the client in `POST /api/game/end`. When `true` and the result is `checkmate_win`, `checkmate_loss`, `resign`, or `draw`, the server computes a rating change and appends a `rating_history` row. Results of `abandon` never affect rating regardless of `is_rated`. The flag defaults to `true`; clients set it to `false` for practice games.
-
-### 7.3.1 Cached session accuracy (Release A)
-
-Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. **Through Release A** the `game-review` stats and history surfaces still computed accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch that ended that (§7.3.1.3). See the [Release A runbook](docs/release_a_runbook.md) for the parallel `rating_history` durable-head work shipped alongside.
-
-**Frozen algorithm.** The scoring surface (`expected_total_moves_from_pgn`, `win_percent_from_cp`, `accuracy_from_win_percents`, `AccuracyMove`, `compute_game_accuracy`) is frozen in `app/accuracy_v1.py` and pinned to `python-chess`; `app/accuracy.py` re-exports it and defines `ACCURACY_ALGO_VERSION = 1`. Freezing v1 lets a future v2 coexist and lets a cached value be interpreted against the exact algorithm that produced it.
-
-**Cached population (exact).** A session is scored **iff**
-
-```
-status == "ended" AND (session_mode == "normal" OR drill_state == "converted")
-```
-
-evaluated by the shared `is_visible_game_session` / `visible_session_filter` predicate from `app/session_contracts.py` (never re-spelled). Active sessions and ended **failed/abandoned** drills are left wholly unstamped — both columns stay NULL and invisible to both consumers.
-
-**`recompute_session_accuracy(db, session)`** is the bounded write hook. It reads the **in-memory** session (so it sees the caller's not-yet-committed terminal status/PGN), and:
-
-- returns before touching either column unless the in-memory session is ended-and-visible — an ineligible session costs no move query and no PGN parse;
-- issues exactly one `session_moves` eval query for this session, ordered by move number with white before black (the ply order `compute_game_accuracy` requires);
-- **stamps a computed NULL:** it assigns `player_accuracy` even when the computation legitimately yields `None` (e.g. insufficient resolved evals) and **always** sets `player_accuracy_algo_version` once an eligible computation runs, so an eligible session is never left half-stamped. A NULL `player_accuracy` with a **non-NULL** version means "scored, but no accuracy was derivable"; both NULL means "never scored";
-- never commits or flushes — the caller owns the transaction, so the dirty accuracy assignment drains in the caller's own pre-cursor flush (keeping the cursor bump last, §7.4).
-
-**Dual-hook lifecycle.** The normal terminal flow awaits the full `/moves` upload **before** `POST /api/game/end`, so the game-end hook computes the **first** terminal value. A later `POST /api/session/{id}/moves` can add, change, or clear evaluations after end, so it **recomputes** (self-healing: a game-end value computed before the last evals arrived is corrected on the next post-end upload). Both hooks call `recompute_session_accuracy` while holding that session's `FOR NO KEY UPDATE` lock (§7.4). Non-converted drills remain unstamped and invisible to both consumers.
-
-**Terminal row reconcile (`g-short-move-rows`, `g-broken-ply-grids`).** The terminal PGN and move rows travel in separate transactions, so a final upload that never commits can end a session describing more plies than it stores. Two historical shapes establish the writer failure: 47 coordinate-intact short prefixes (2026-04-06 … 2026-07-21), plus 10 grids with 1–5 interior holes (2026-04-01 … 2026-06-17) left by the pre-2026-06-25 resolved-analysis-only uploader. `end_game` therefore calls `app/terminal_row_reconcile.reconcile_terminal_move_rows(..., allow_sparse=True)` after assigning the terminal PGN and before the accuracy recompute. When the canonical key comparison finds a missing coordinate, every surviving row must bind to its **declared** PGN coordinate by `(move_number, color)`, SAN move identity, and normalized FEN chain; then every absent coordinate—tail or interior—is derived from the PGN inside the terminal transaction with SAN/FEN only, NULL evals, and `segment_for_move`. An exact canonical key set returns complete before this identity replay because there is nothing to derive; identity-only divergence at intact coordinates remains the separately measured `g-discard-branch-rows` limit described below. Existing evaluations never move between plies, the same commit that flips `status='ended'` persists the full canonical grid, and strict-null accuracy refuses on evaluation availability rather than missing structure. Fail-closed on an unparseable PGN, a PGN over the `MAX_TERMINAL_PGN_BYTES` 32 KiB strict-UTF-8 size gate (an O(1) code-point pre-gate bounds the string, then a strict encode catches multi-byte inflation and refuses unpaired surrogates outright), an identity disagreement while derivation is required, a missing-plus-extra exact-count grid, or any replay over `MAX_DERIVABLE_PLIES` 600 whose canonical coordinate set is incomplete (`GameEndRequest.pgn` is unbounded and must not expand into unbounded INSERTs or identity verification under the terminal lock). The ply ceiling is checked after the missing-key fast path and before SAN/FEN replay, so a complete exact-count game above it is still complete while an exact-count missing-plus-extra grid above it refuses without identity verification. Surplus rows remain untouched because a truncated PGN can be the shorter record (`g-i6st`). The parse is single and the refusal total: one `replay_pgn_mainline` call yields both the expected count and derivation records, and `end_game` reuses `ReconcileResult.expected_plies` for the accuracy recompute and analytics `ply_count`, so a size-refused PGN is parsed zero times. No receipt is written (receipts stay `final_full`-only), and a late `/moves` upsert overwrites derived placeholders with richer client evidence via ON CONFLICT. Recurrence is durably measurable through the compatibility-named `game_sessions.derived_tail_rows`, whose count now covers every PGN-derived missing row including interior coordinates; the post-commit `game_ended` event carries the same verdict but is best-effort only. Historical repair remains deliberately narrower: `app/short_move_row_backfill.py` calls the prefix-only default (`allow_sparse=False`) and repairs only the verified 47-row-short cohort, with aggregate-only output. The 10 broken-grid sessions are not mutated: their missing evaluations were never retained, and two also contain a row matching no PGN ply, so they remain documented strict-NULL residue rather than being renumbered or guessed.
-
-#### 7.3.1.1 Backfill, repair, and fail-closed activation (Release B core)
-
-Alembic revision `20260719_01` (`down_revision = 20260718_01`) is Release B's correctness state machine. It runs three phases and then two assertions that must both pass before any cache-only read may serve.
-
-**Phases.**
-
-1. **validate** — PostgreSQL only: `ALTER TABLE game_sessions VALIDATE CONSTRAINT ck_game_sessions_player_accuracy`, the CHECK Release A created `NOT VALID`. It takes `SHARE UPDATE EXCLUSIVE`, which does not conflict with the write hooks' `ROW EXCLUSIVE` / `FOR NO KEY UPDATE`, so it blocks DDL and autovacuum but not live writers. `set_config(..., true)` is `SET LOCAL` — **transaction**-scoped, and `alembic/env.py` opens one transaction around the whole run — so the revision explicitly re-arms `lock_timeout` immediately afterwards rather than letting every later row lock inherit the DDL wait.
-2. **backfill** — keyset paging (never `OFFSET`: updated rows leave the stale predicate) over `status = 'ended' AND (session_mode = 'normal' OR drill_state = 'converted') AND (player_accuracy_algo_version IS NULL OR < 1)`. **Never filters on `ended_at`** — it is nullable, and a malformed ended-visible row must still be backfilled. Each batch loads its plies in one ordered query, validates the ply-coordinate grid **before** building `AccuracyMove`s, and issues **one** guarded server statement with explicitly typed arrays (`unnest(CAST(:ids AS uuid[]), CAST(:accuracies AS integer[]))`) whose `RETURNING` names exactly the rows the stale-version guard admitted. Rows an A hook stamped first are absent and logged, not an error.
-3. **repair** — the rows the backfill's predicate *skips*: already stamped version 1 by the **unguarded** Release-A hook, so they may serve a value computed over a broken grid. Each pass materializes the candidate set once into a temp table, then per candidate: **lock, re-read with the session-scoped detector in a fresh statement, then act**. A lock-free set-based `UPDATE ... WHERE id IN (<detector>)` is unsafe — the subplan is re-evaluated under the statement's original snapshot, so it would overwrite a hook's freshly-corrected value with NULL, and the stale-version guard cannot catch it because both values are version 1. **The hook always wins.** Repaired rows stay version 1: v1 attempted the computation and its input contract rejected the inputs.
-
-**Ply-coordinate detector — three definitions that must agree.** `app/accuracy_rows_v1.ply_coordinates_intact` (frozen Python), `PLY_DETECTOR_SQL` (set-wide), and `PLY_DETECTOR_ONE_{PG,SQLITE}` (session-scoped). `session_moves` has coordinate indexes but **no stored defect marker**, and a `row_number()` window is not an indexable predicate — so every set-wide execution is a full scan of the whole relation regardless of how many rows need repair, while the session-scoped form is index-served at O(plies of one session). Hence the per-candidate re-read uses the scoped form and each pass materializes the set-wide form once. Parity across all three is pinned on **both** dialects.
-
-**What the guard does not catch, measured rather than assumed (`g-i6st`, 2026-07-28).** The detector validates ply **coordinates**, not **identity**: a row at the right `(move_number, color)` carrying a move the game never played passes all three definitions. Replaying the PGN mainline against the rows on a restore of the 2026-07-24 production dump puts a number on that gap — **20 of 1,646 ended-visible sessions** carry rows whose `move_san` disagrees with their own PGN, and **19 serve an accuracy computed over them (1.2% of served values)**. The shape is a discarded two-ply variation left at coordinates the real game later reused, so the grid stays perfect and the record resyncs immediately after; the population is historical (2026-03-28 … 2026-04-04, one 2026-05-15 outlier) and its writer is tracked in `g-discard-branch-rows`. **Length is not a proxy for it, in either direction.** `game_accuracy_for_rows` deliberately does *not* fail closed on `n > expected_total_moves`, because the surplus population is dominated by **truncated PGNs** — the extra rows replay as a legal, `fen_after`-chained continuation, making the rows the fuller record — and one such game scores 50 over its 18 rows against 92 over the PGN's 16, the difference being the queen blunder it resigned to. Rejecting on length would have nulled three correct scores while missing 16 of the 19 genuinely wrong ones. Closing the identity gap needs a PGN-vs-rows replay (+0.78 ms/session on top of a parse the hook already pays) and would supersede the input contract with an `accuracy_rows_v2` — **not** an algorithm-version bump, per `docs/session-accuracy-versioning.md`. Accepted as a recorded limit, not implemented.
-
-**Fail-closed assertions.** *Coverage*: zero ended-visible rows with `player_accuracy_algo_version IS DISTINCT FROM 1` — checks the **version**, since a computed NULL is valid. *Ply-coordinate soundness*: zero ended-visible rows at version 1 with a non-NULL accuracy over a broken grid — checks the **value**, since a repaired row is still version 1 and coverage passes either way. Neither can be answered from the repair's materialized candidate set, which is stale by construction; catching a row that broke *during* the migration is the whole point. Either failing raises, the run rolls back, and `alembic_version` does not advance.
-
-Environment surface is exactly two variables, `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` and `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`, neither of which can disable an admission guard. Statements are reached only through a per-dialect `StatementBundle`, so a `_PG` constant is unreachable on SQLite by construction. Downgrade is an explicit no-op — production rollback is a forward revert, not data reversal.
-
-Both convergence statements (`BACKFILL_REMAINING_SQL`, `REPAIR_REMAINING_SQL`) return the **count and up to 20 sampled ids in one dialect-neutral statement** — a windowed `count(*) OVER ()` over the phase's detector, where zero returned rows means zero remaining. That is not a convenience: the exhaustion template's `remaining` / `passes` / `first_remaining` must come from the scan the pass **already paid for**, and fetching the sample with a second `SELECT … LIMIT 20` would be another full detector scan, breaking both one-scan-per-pass and the import scan budget.
-
-##### 7.3.1.1.1 Runtime envelope (Release B)
-
-The same revision carries the production envelope around that core.
-
-**One clock.** `REVISION_DEADLINE_S = 900` is **revision-wide**, taken once at the top of `upgrade()` — before `VALIDATE` and before the population counts — and covers everything the revision executes, including both closing assertions. A phase clock leaves three reachable holes: the repair population count runs during mode binding before any runner exists, both assertions run *after* the runner returns, and a scan armed with a fresh `SCAN_STMT_TIMEOUT_MS` can start at second 899 and finish past second 900. Three rules close them, in both modes: (1) every statement is armed by one `_arm` with the **least of every deadline in force** — its own cap, the remaining revision budget, the batch remainder inside a per-batch batch, and in atomic mode the residual stall budget — with `lock_timeout = min(the mode's per-wait cap, that same remaining)`; (2) Python work is checked against the same clock before each pass, batch, session, repair candidate and assertion, and the compute watchdog is armed to the same remaining; (3) exhaustion raises one frozen template with `phase=<validate|backfill|repair|assert>` and **explicit `n/a`** where a field cannot exist — a mid-statement cancellation leaves the transaction aborted, so no diagnostic query is attempted and `sqlstate` carries `57014`/`55P03` instead. Rule 1's *hardness* is PostgreSQL-only (both GUCs are PostgreSQL's); on SQLite the same clock is enforced best-effort between statements, which is acceptable because SQLite is dev/CI-only, single-writer, atomic-only, and has no concurrent writer whose stall to bound. "Between statements" is meant literally and is where a per-statement count matters: the SQLite backfill applies one single-row `UPDATE` per session rather than one set-returning statement per batch, so the check is re-run before **each** of them — a single check before the loop would gate the first write and leave the rest of the batch writing unchecked past the deadline. For the same reason — no row lock this revision can shorten, and no live writer to protect — the residual stall envelope below is gated on PostgreSQL as well as on atomic mode, so a nonempty SQLite upgrade is bounded by the revision deadline alone.
-
-**Mode binding.** The mode variable is parsed on **every** dialect (`.strip()` then an exact, case-sensitive match — `ATOMIC`, `Batch`, a typo and a blank-but-set string all raise before any row is touched) and applied per dialect and per population. Off PostgreSQL, unset means atomic and `batch` raises as unsupported. On PostgreSQL the variable is **required** once either population is nonzero — there is no default, because an unset variable is a deployment error and never a silent atomic run — while a database with **both populations empty** upgrades with no configuration at all, skipping the runner but still running `VALIDATE` and both assertions (two scan-bearing `session_moves` statements, zero row locks). Binding first counts both populations and, on PostgreSQL, **probes the live relation dimensions** from the catalog (`pg_total_relation_size`, exact and O(1); `pg_class.reltuples`, an estimate and O(1) — never `count(*)`, which would add a relation scan purely to price another) and derives `G_moves` / `G_sessions` as `max(1.0, byte ratio, row ratio)` against the four frozen `SIZED_*` dimensions. Those factors are load-bearing: a correctly stamped version-1 session is in **neither** population yet adds rows and pages to both relations, and Release A is the sole writer for the whole interval between sizing and deploy — so a guard that rechecks only the populations is checking the one dimension that cannot move.
-
-**Admission.** The scan-budget invariant is rechecked at runtime with the frozen constants **rescaled by relation** (the `session_moves` terms by `G_moves`, the coverage assertion, the convergence count *and the sweep's relation-scan component* by `G_sessions`) **and the selection sweep re-priced at the page count the run's resolved batch size and live `N_stale` actually produce**, in both modes — batch mode has no stall projection, so this is what catches an outgrown relation there. Atomic mode additionally projects the **full** stall — row work, all scans under lock, the coverage assertion, the backfill's own unindexed `game_sessions` selection sweep and convergence count, **and the commit itself** via a teardown floor plus a per-mutated-row slope — and raises if it exceeds `MAX_WRITER_STALL_MS` or if the teardown reserve leaves no positive residual work budget. The backfill's own two terms are mandatory and easy to miss: its keyset selection sweep and `BACKFILL_REMAINING_SQL` both filter `game_sessions` on `player_accuracy_algo_version IS NULL OR < 1`, which **no index covers**, so each is `O(G_sessions)` and not `O(N_stale)` — a correctly stamped row *raises* their cost while leaving the population unchanged. The sweep is additionally a **two-component model, never a scalar**: it is `ceil(N_stale / batch_size) + 1` pages of one pass (the `+1` is the empty page that terminates it, and `N_stale = 0` is one page rather than zero), so its cost is a function of an operator-chosen variable that ranges over `MIN_ADMITTED_BATCH..MAX_BATCH_SIZE` and moves the measured cost by 42x. `MARGINED_MS_BACKFILL_SWEEP_SCAN x G_sessions` prices the relation walk — served from the primary key, so the relation is read about once *in total* rather than once per page — and `MARGINED_US_BACKFILL_SWEEP_PER_PAGE x pages / 1000` prices statement startup, which takes **neither** growth factor because a larger relation does not make starting a statement more expensive. `batch_size` is a **required** argument of `project_atomic_stall_ms`, `bind_mode`, `stall_for` and `assert_runtime_scan_budget` with no default: a call site that does not say what page count it is budgeting for is the defect this model replaced, and an admission projection blind to its own dominant variable cannot refuse an inadmissible configuration.
-
-**Two envelopes, both shipped.** The deployment chooses which one *runs*, never which code exists, so the per-batch runner and its PostgreSQL suite stay permanently present and permanently gated. **Atomic mode** uses Alembic's single transaction and unlocked selection, one pass per phase (no `SKIP LOCKED`, so nothing is transiently skipped and extra passes were never admitted by the projection). **Per-batch mode** runs on an independent connection whose transaction lifecycle is explicit — the `application_name` label and PID log autobegin a transaction, so it is **committed** before the batch loop opens its first one, or a first-batch rollback would silently drop the name an operator is watching for — with one explicit transaction per batch, `FOR NO KEY UPDATE SKIP LOCKED` selection, a `MAX_BATCH_MS` batch deadline, up to `MAX_PASSES` passes with a `0.5, 1, 2, 4, 5, 5 …` backoff clamped to the remaining budget (a backoff that would sleep *past* the deadline raises instead), and no transaction open during a sleep.
-
-**What bounds what, at its true confidence.** *Enforced by PostgreSQL:* no SQL runs past the deadline; no **single** lock wait exceeds the mode's cap; and no **sum** of lock waits exceeds the budget the hold spends from, because `lock_timeout` is armed as `min(cap, remaining)`. The third is separate from the second on purpose — `lock_timeout` applies **per acquisition**, so on its own it permits any number of just-under-cap waits, each extending a hold already open over every row locked so far. *Enforced where it can arm:* Python compute, by a `signal.setitimer` watchdog re-armed **per session** to `min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining, atomic remaining)`, with the previous handler and pending timer saved and restored; main thread only, and off it the runner **logs that it is unarmed** rather than claiming enforcement it lacks. Because the batch remainder is one of those minima, `MAX_BATCH_MS` is batch-wide over SQL *and* Python — which is why `EST_MAX_LOCK_HOLD_MS = MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS` and has **no** per-session compute addend. *Estimated only:* teardown, which `statement_timeout` does not cover. Per-batch mode therefore gets an after-the-fact **tripwire** — each batch compares its observed hold against `EST_MAX_LOCK_HOLD_MS` and raises, explicitly *not* a bound: by the time it fires the lock has been held too long, and what it buys is that the next batch does not repeat it and the breach becomes recorded evidence. Atomic mode **on PostgreSQL** reserves its teardown out of `MAX_WRITER_STALL_MS` and holds the work to the residual: at `t_stall_0` — the instant immediately **before** the first lock-bearing statement, conservative because it also charges that first acquisition's wait — it derives `ATOMIC_WORK_BUDGET_MS` and arms every subsequent statement against it.
-
-**Atomic mode has no lock-hold tripwire and must not claim one.** Its hold ends when Alembic's transaction commits, which happens in `env.py` *after* `upgrade()` has returned, so the revision can neither observe "first row lock through commit" nor raise on it — and raising after a durable commit would fail a deploy whose data is fine while a rerun (both populations now empty) could never reproduce the observation. What it gets instead is enforcement in front (the projection) and in flight (the residual deadline), plus **observation** behind both: the revision hands `max_stall_ms` and `projected_stall_ms` to the already-shipped `app.migration_guard.migration_stall_probe` at `t_stall_0`, and the existing `report()` in `env.py`'s `finally` — which fires exactly when COMMIT *or* ROLLBACK returns, i.e. when the locks are released, on both paths — logs `observed_atomic_stall_ms` at INFO with the projection alongside, and at **ERROR** when it exceeds the bound. It never raises. Both threshold arguments are optional, so revisions that record only a timestamp keep their INFO-only behaviour. That log line is the only empirical check on the atomic projection, and sizing qualification is where it is read.
-
-**Single-runner guard (`app/migration_guard.py`, PostgreSQL only).** `alembic upgrade head` opens the migration transaction with no mutual exclusion, so two overlapping replica starts run two upgrades at once — and `SKIP LOCKED` does not make that safe (it protects individual session rows, not `alembic_version` stamping, `VALIDATE CONSTRAINT`, or the atomic-mode single transaction). `alembic/env.py` therefore takes a **session-scoped two-key `pg_advisory_lock`** on a **dedicated guard connection** — never the migration connection — *before* the migration connection is opened, and releases it in a `finally` (explicit unlock → `invalidate()` if the unlock returned false/raised → close under `NullPool`). Session scope is mandatory: `20260709_02`'s `autocommit_block` commits the migration transaction mid-chain, which would drop a transaction-scoped lock with the backfill/repair/validate/stamp still ahead of it. A second overlapping upgrade blocks on the lock, then reads the already-advanced `alembic_version` and no-ops. Acquisition is fixed-order (label `application_name` → log `pg_backend_pid()` → arm a transaction-local `lock_timeout` → acquire → commit); a lock-timeout — and **only** SQLSTATE `55P03` — becomes the named `ConcurrentMigrationError`, while every other `OperationalError` (disconnect, shutdown, crash) propagates unchanged. The guard and migration connections are each labelled session-scoped (`ghostreplay_alembic_guard` / `ghostreplay_alembic_migration`) and log their backend PID so an operator or cancellation probe can tell them apart; `ghostreplay_accuracy_backfill` is frozen here and applied by `20260719_01`'s per-batch runner through the same shared helpers. Labelling and the PID log run **inside** `context.begin_transaction()` (never before `context.configure()`), or SQLAlchemy autobegins a transaction Alembic treats as external, `begin_transaction()` degrades to a no-op, and the whole run is silently rolled back at close under `NullPool`. A `migration_stall_probe` (first-lock-wins record, consume-and-clear `report()` from the inner `finally`, never raises) observes the atomic-mode row-lock hold, and classifies it at ERROR when the revision supplied a threshold — see §7.3.1.1.1. The lock makes correctness independent of Railway configuration, so both migration-ownership branches (`preDeployCommand`, or `startCommand` with single-replica evidence) stay open; the recorded production choice is deferred to release integration.
-
-#### 7.3.1.2 Sizing derivation and admission constants (Release B)
-
-The revision refuses an atomic run whose projected writer stall exceeds `MAX_WRITER_STALL_MS` and enforces a per-batch SQL deadline. Both bounds are made of constants only a measured run can produce, and measuring *through* the revision with those guards armed is circular — in exactly the case where batch mode is mandatory, the guarded run aborts before producing the number that would have proved it. There is deliberately **no bypass**: an environment variable that disarms the guards is production-reachable by definition, since matching `current_database()` only prevents *accidental* reuse and the production database name is knowable. Measurement therefore lives in a standalone harness, `backend/scripts/size_accuracy_backfill.py`, run by hand against a disposable restore and never on a deployment path. It reaches every statement through `ScriptDirectory.get_revision("20260719_01").module` and calls the revision's own `_accuracy_for` / `_load_moves`, so the population it measures and the statements it times are the ones that ship; `backend/test_release_b_sizing.py` asserts that structurally and forbids a harness-local constant carrying a `/* ghostreplay: */` marker.
-
-**Six kinds of work, six scaling laws.** Scaling one combined number by stale-session count makes work that is *independent of both populations* vanish from the projection whenever those populations are small or zero. So the model prices separately: `VALIDATE` (whole `game_sessions`); backfill row work (the larger of the stale-session and evaluated-move ratios); repair **per-candidate mutation only** — lock, session-scoped re-read, conditional update, **scans excluded**, scaled by `N_repair`; the **maximum of the four complete scan-bearing statements** over `session_moves` (`REPAIR_POPULATE_SQL`, `REPAIR_REMAINING_SQL`, `SOUNDNESS_ASSERT_SQL`, the pre-flight repair population count — never a bare detector, which no code path executes alone), scaled by relation size and **never zero**; the coverage assertion (whole `game_sessions`, never zero); and **atomic teardown**, a population-independent floor **plus** a per-mutated-row slope, measured at two points because one point cannot yield both — each on **its own fresh restore**, since a second pass in the same process has already validated the CHECK, so its `COMMIT` flushes no catalog change and the difference would charge `VALIDATE`'s own commit to the per-row slope. On a clean audit with a small stale set the last three *are* the whole stall — the exact shape a population-scaled model scores at nearly zero and wrongly admits into atomic mode.
-
-**The breach path is measured from outside the cancelled process.** `TEARDOWN_ALLOWANCE_MS` takes the larger of observed commit and observed **cancel-to-unlock**: the interval from cancel issuance to the moment a competing `FOR NO KEY UPDATE NOWAIT` on a held row *acquires*, observed from a second connection over ≥ 20 trials against a locked, fully dirtied batch parked by a harness-local `AFTER … FOR EACH STATEMENT` trigger. "Fully dirtied" is *proved*, not assumed: the trigger fires only once the `UPDATE` has written every row, so the controller polls `pg_stat_activity` for `wait_event = 'PgSleep'` on the holder's backend before issuing the cancel and discards a trial that never parks — a timed sleep would race the write phase and measure the rollback of a partially dirtied batch. Phase 2 refuses to freeze any teardown constant without both probe scopes present, ≥ 20 landed trials each, and an atomic probe that locked at least as many rows as the atomic transaction mutated. A clock the cancelled process starts begins *after* PostgreSQL's interrupt latency and the statement unwind have already elapsed and cannot contain them; the process-side rollback-only duration is recorded beside it, named as that, and is never the frozen input.
-
-**Frozen literals, checked at import.** The revision declares `MAX_WRITER_STALL_MS`, `MAX_BATCH_MS`, `BATCH_LOCK_WAIT_MS` / `ATOMIC_LOCK_WAIT_MS`, `REVISION_DEADLINE_S`, `MAX_PASSES`, `ATOMIC_SCANS_UNDER_LOCK`, the measured `MARGINED_*` / `SCAN_STMT_TIMEOUT_MS` / `MAX_SINGLE_SESSION_COMPUTE_MS` / `TEARDOWN_ALLOWANCE_MS` terms, and the four `SIZED_*` relation dimensions the two scan constants were measured against — frozen *in the revision*, because a correctly stamped version-1 row joins neither population while adding rows and pages to both relations, so a population recount cannot see the growth that matters most to the scan terms, and a dimension living only in the runbook cannot be divided by. `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` and `MARGINED_US_BACKFILL_SWEEP_PER_PAGE` are denominated in **microseconds**, and for the same reason: rounding a sub-millisecond slope up to an integer millisecond would add a phantom second of projected stall per thousand rows in the first case and ~2.1 s at the sweep's 4,185-page worst case in the second. Each is divided by 1000 at exactly one call site, and a constant test pins that so a “tidy-up” into milliseconds fails loudly. `MAX_BATCH_SIZE = min(B_formula, B_tested)` and `REPAIR_BATCH_SIZE = min(R_formula, R_tested)` are derived at import, so no admitted batch exceeds a size sizing actually demonstrated; the zero-batch boundary is **admissible at equality** and **raises** one millisecond past it rather than clamping to 1, which would silently violate the budget the constant exists to enforce. The scan budget `(2·MAX_PASSES + 2)·MARGINED_MS_PER_SCAN_STMT + MARGINED_MS_COVERAGE_ASSERT + MAX_PASSES·(backfill_sweep_ms(pages) + MARGINED_MS_BACKFILL_REMAINING) < REVISION_DEADLINE_S·1000` also raises at import, so a `session_moves` whose scans alone cannot fit the wall clock fails when the revision loads instead of 900 seconds into a run; the last group is the backfill's own per-pass `game_sessions` work, which a `session_moves`-only budget lost entirely. `pages` is keyword-only with **no default**, and at import it is the DECLARED worst case — `IMPORT_WORST_CASE_SWEEP_PAGES = ceil(SIZED_TOTAL_ROWS / MIN_ADMITTED_BATCH) + 1 = 4,185` — because module load has no database, no population and no resolved batch size. That charges 49.8 s against the 900 s deadline, 850 s of headroom, so nothing forces raising the admitted batch floor. `SCAN_STMT_TIMEOUT_MS` is separately required to be the maximum over **every** statement it is armed on, and the two convergence scans land on *different* terms there: `REPAIR_REMAINING_SQL` wraps the ply detector, so it scans `session_moves` and is already one of the four complete statements (`G_moves`), while `BACKFILL_REMAINING_SQL` scans `game_sessions` on the unindexed predicate and is priced by `MARGINED_MS_BACKFILL_REMAINING` (`G_sessions`) — so that term, scaling by neither population, is the one relation growth alone can push above the rest, and the one the maximum must not omit. Arming a statement with less than its own measured cost is a self-inflicted cancellation that surfaces as non-convergence. **Neither** sweep component is in *that* maximum, and only there are they excluded: each page of the sweep is armed by the mode's batch cap, so the two sweep constants price a multi-statement unit no single armed value has to cover. `EST_MAX_LOCK_HOLD_MS ≤ MAX_WRITER_STALL_MS` is arithmetic over frozen literals: it proves the *estimate* fits the budget and nothing more — what backs it at run time is the compute watchdog, the armed SQL timeouts, and the observed-lock-hold tripwire.
-
-Provenance — snapshot, date, timed SHA, every raw number, every batch candidate tried and which bound won, and the executable `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` verdict — is recorded in [`docs/release_b_runbook.md`](docs/release_b_runbook.md). The constants currently frozen are derived from a **production restore on production's own major** (18.4), applied whole from the committed measurement set under `docs/sizing/` (§9); the guarded Phase 3 runs are taken and recorded in §10, with their machine-readable artifacts under `docs/sizing/phase3/`. No further sizing qualification is planned: synthetic Phase 3b and the health-window verdict applied only to a populated pre-`20260719_01` upgrade path the project does not support.
-
-**These constants never gated the production run.** Revision `20260719_01` reached production and executed on or before 2026-07-24 — at the shape it had on 2026-07-19, before the admission constants, the runtime envelope, and the harness above existed. A 2026-07-24 production dump restored 2026-07-25 shows `alembic_version = 20260720_01`, the CHECK `convalidated`, both populations empty, and 1,603 sessions that ended before the serving write hook was even committed (`95be57a`, 2026-07-11 23:57 PDT) carrying `player_accuracy_algo_version = 1`. The run left a clean terminal state — both assertions pass, and all 95 fail-closed `NULL`-accuracy rows are refusals the frozen algorithm still makes — but no armed timeout, admission projection, compute watchdog, or lock-hold tripwire was involved in producing it, and Alembic will not re-run the revision against that database. Everything in §7.3.1.1.1 and §7.3.1.2 therefore governs only a **from-scratch** run: a fresh development or staging database, a rebuilt production, or a restore brought to head. **Phase 3 has now exercised that envelope** (`g-b-sizing-harness`, 2026-07-27, runbook §10) — the first execution anywhere of an armed timeout, the admission projection, the compute watchdog or the lock-hold tripwire against a real database. Five runs on fresh restores of the same production dump at one revision digest, all driven through `alembic upgrade` so `env.py`, the guard and the stall probe are in the path, with no bypass, and all five committed as machine-readable artifacts under `docs/sizing/phase3/` beside the controller that took them (`backend/scripts/phase3_cancellation_probe.py`) — a qualification recorded only as prose cannot be re-checked, and this probe hit two failure modes that look exactly like clean results from outside. Each artifact carries a semantic AST fingerprint of the **nine** behaviour-bearing files the run exercised — the revision, the two frozen algorithm modules it pins, the migration guard, `env.py`, the controller that took the run, the seeder that built its populations, the preparer that made and stamped the copy, and the fixture guard that computes the fingerprints and the digests — compared against the live tree by the suite, so a behavioural edit to any of them expires the qualification instead of leaving a stale artifact vouching for code that has moved. The preparer is Python for exactly this reason: it was a shell script, it chooses the template and decides that stamping happens before seeding, and a component that cannot be fingerprinted cannot be part of the set that makes the artifacts expire. The fixture is bound the same way and for a sharper reason — counts do not identify one: the harness documents that taking repair candidates by `ORDER BY id` rather than `ORDER BY md5(id)` yields the same K candidates and the same K deleted plies, identical populations and identical relation dimensions, while measuring every scan-bearing statement at a fraction of its cost — so each artifact carries content digests of the accuracy-bearing columns (*which* rows), the template provenance stamped on the copy before anything seeded it, and per-symbol fingerprints of the synthesis functions themselves. All five runs prove one base, and the four seeded copies came out identical to each other on every column the migration reads — the digest is that projection deliberately, since a whole-row hash would expire a run for a column no statement in the revision touches. A trial that measured the wrong thing writes no artifact and exits nonzero, and for a cancel that includes a run which **succeeded** despite the cancel landing: `pg_cancel_backend` returns true against a backend already finishing, the row then unlocks because the transaction committed, and every cancel-side field in the resulting artifact is correct. A production-shaped run takes the **zero-population path** — both populations empty, runner skipped, `S_scans_total = 2` — which is the expected shape and which **structurally cannot produce `observed_atomic_stall_ms`**: the probe reports from the first row lock and a skipped runner takes none, so the stall observation needs its own populated run. That run gives `observed 1279.2 ms <= projected 5831.9 ms <= MAX_WRITER_STALL_MS 30000`, on a copy whose dimensions came out AT the re-frozen basis (`g_moves = g_sessions = 1.000`), validating the basis against an independent rebuild. The cancellation probe was run against the shipped revision at **all three transaction shapes the two teardown scopes admit** — the runner connection and a `guarded_update` at a full-size backfill batch (646 rows), the runner connection and a whole `repair` batch (1,000), and the migration connection and the `soundness_assert` holding the whole population dirty (1,646) — with all four gates evidenced before each cancel: `cancel_to_unlock_ms` 1.365, 0.562 and 0.895, all far under `TEARDOWN_ALLOWANCE_MS = 6`, all raising SQLSTATE 57014 and rolling back with nothing stamped, `alembic_version` unmoved and the guard lock released. **The repair shape is not redundant with the backfill's, and it is the one the constant is sized for.** `TEARDOWN_ALLOWANCE_MS` is scoped to a batch of *either* phase and the larger is not the backfill's — `REPAIR_BATCH_SIZE` divides by a cheaper per-row cost, so it exceeds `MAX_BATCH_SIZE` (1,000 against 646) — and the revision requires the breach path be measured at `max(MAX_BATCH_SIZE, REPAIR_BATCH_SIZE)`, which Phase 2 enforces in `derive` and which a backfill-only Phase 3 leaves unqualified against the shipped code. Evidencing it needs a different gate (d): the repair phase applies one single-row `UPDATE` per candidate, so an `AFTER … FOR EACH STATEMENT` park fires per row and parking on the first would be evidence about a *one-row* transaction — the trigger therefore counts, parks only on the Nth, and publishes the count as the advisory lock's OBJID, so a second session reads the batch size off the lock rather than assuming it. The atomic cancel's 1,646 rows do **not** substitute: that transaction is priced by `MARGINED_MS_ATOMIC_TEARDOWN_*`, and a bigger transaction of the wrong kind is not coverage. Both are asserted in `test_release_b_sizing.py`, per scope. The gap that justifies measuring from outside is measured at every shape: `teardown_ms` was **0.1 ms** against 0.562 ms of cancel-to-unlock on the repair batch, so roughly four fifths of what a writer waits through is interrupt latency and statement unwind that a clock the cancelled process starts cannot contain. Both are SQLSTATE 57014 and so is a `statement_timeout` breach, so every artifact records `cancel_cause` read out of the message text — a park that outlives its own batch budget produces a run that looks cancelled and is measuring the timeout path, and it happened here at a 2 s park. The repair run also shows a per-batch transaction's committed work **surviving a later cancellation**: it breaks the repair phase after the backfill's batch committed, and the copy is left with `n_stale = 0` durable while `alembic_version` sits at `20260718_01`. **3b is unrun and now retired** (`g-b-fixture-moves-clone`, cancelled 2026-07-28): it needed 1,939 stale and 3,001 repair rows against a fixture ceiling of 1,646 ended-visible sessions, and the populated upgrade it would have qualified is not a supported path (§7.3.1.3). So **no partial batch has been demonstrated for either phase** — `N_stale = 646 = MAX_BATCH_SIZE` produces one full batch and then a zero-row page, which is the `3n + 1` argument observed rather than argued — and that is what keeps `B_TESTED` / `R_TESTED` fixture-bound below their formula limits, permanently rather than pending.
-
-**What the restore does and does not settle.** Production holds 4,184 sessions and 131,676 moves — fewer rows than the sizing snapshot on both axes. Row counts are the only dimension a *logical* dump carries: `pg_total_relation_size` on a restore measures the locally rebuilt relation, and readings of the same restore gave 4,079,616, then 4,096,000 once autovacuum materialised the FSM/VM forks, then 5,414,912 … 6,848,512 across seven sibling copies — same source population, same `game_sessions` row count, different synthesis and vacuum state. Nor does "fewer rows" imply "smaller constants": every `MARGINED_*` term is an elapsed time, jointly determined by relation size, chosen plan, storage, CPU and server major. A re-derivation on production's own major (18.4) against the restore is recorded in `docs/release_b_runbook.md` §7 and **is what the revision now ships** — applied whole on 2026-07-27, as the rest of this paragraph records. **That rerun is no longer blocked on missing evidence** (`g-b-size-measurement-json`, 2026-07-26): §7's derivation had exactly two of its eight measurement artifacts on disk — the sweep domains — so every other constant survived only as a transcription, and one re-measurement of the whole set on the 18.4 restore now commits all ten inputs plus `--derive`'s own output under `docs/sizing/`, re-derived from them by `test_the_committed_measurement_set_re_derives_its_published_output` in `test_release_b_sizing.py` and recorded in §8. It found what a transcription hides: §7's derived table carries the sweep pair at the *shipped* basis inside a column otherwise at that run's own, and the same two artifacts through the LP give 71 / 491 µs there — a transcription defect that moved no frozen constant, since the coefficients are basis-dependent by construction. **That re-freeze is done** (`g-b-sizing-harness`, 2026-07-27, runbook §9): the committed set's `--derive` output was applied WHOLE — every literal together with `SIZED_*`, from one derivation over one fixture state — so §3's constants are no longer 15.18 transcriptions of a vanished snapshot but 18.4 readings of a production restore, and `test_the_committed_derivation_is_applied_whole_with_the_basis_it_arrived_with` compares the entire shipped constants block against a live `--derive` rather than row by row, because the failure it guards is a MIXED basis rather than a wrong number. Applied whole rather than re-measured because a new set would need a new fixture and the committed one has no defect a new fixture would repair. The basis moved to 4,184 rows / 6,144,000 bytes / 130,676 moves / 45,817,856 bytes, which is SMALLER than the retired one on every axis and therefore makes every runtime growth factor LARGER — conservative in both halves. `MAX_BATCH_SIZE` fell 1,000 -> 646 and `REPAIR_BATCH_SIZE` 2,500 -> 1,000, both **fixture-bound rather than deadline-bound**: the formula admits 1,000 and 2,500, and only what the 1,646-ended-visible fixture could demonstrate holds them lower (`g-b-fixture-moves-clone`). **The provenance defect that first blocked it is fixed** (`g-b-size-harness-defects`, 2026-07-26): the harness synthesizes its populations before the measured pass, so the relation the timed statements ran against is not the one the copy arrived as — 6,144,000 bytes against 4,096,000, 130,676 moves against 131,676 — and it used to record one unlabelled reading of it while `SIZED_*`, the basis the runtime divides every scan term by, is frozen from exactly that. The post-synthesis reading was never the wrong one; it is what the timings ran against, and it stays what `SIZED_*` is frozen from, because a term and its declared basis have to move together. What was missing was the *label*. Every artifact now carries **both** readings under `dimension_bases` plus an explicit `timing_basis`, and `--derive` fails closed on an artifact with no machine-readable basis, on one whose recorded basis disagrees with the `dimensions_before` its statements were timed against, and on freezing `SIZED_*` from a snapshot whose pre-synthesis reading was never taken. Substituting the pre-synthesis reading while leaving the timings alone is refused rather than accepted as a correction — and *not* because it is optimistic: the error runs in both directions, depending on which side of a ratio the substituted reading lands on. A sweep copy's own reading substituted downward raises that point's `N_copy = frozen/copy` and over-charges it; the frozen basis substituted downward lowers every `N_copy` and under-charges the fit, while raising the run-time `g_sessions = live/SIZED` and over-charging the scan terms. The guard holds because a timing and its basis have to move together, not because either direction is safe. The pre-synthesis reading is emitted as provenance and divided by nowhere — carrying a timing onto it is a separate, explicit step. The two committed sweep artifacts were **migrated, not re-measured**: their post-synthesis reading is accurate and is all the fit needs, so both keep their points and stay active constraints, while their never-taken pre-synthesis reading is recorded as `not_recorded_legacy` rather than reconstructed from prose, a sibling copy, or an inverted growth factor. It did time `BACKFILL_REMAINING_SQL` and the selection sweep directly for the first time. **A timing may only be normalized by the basis of the copy it actually ran on**: the 1.147 ms `BACKFILL_REMAINING_SQL` maximum was measured on `gr_p1_atomic` and carries that copy's 6,848,512 bytes, giving `ceil(3 · 1.147 · max(6000/4184, 10010624/6848512)) = 6`. `MARGINED_MS_BACKFILL_REMAINING = 6` is qualified as the **worst of seven such pairings**, not of any single one, and carries no page-count term since that statement runs once per pass. **That qualification is now re-derivable rather than transcribed** (`g-b-size-derive-backfill-terms`, 2026-07-26): the same pairing over the six committed atomic and batch artifacts puts its worst point at 1.966944 ms on the frozen basis, so the shipped 6 covers it — and covers it by one rounding step, since `ceil(3·x) ≤ 6` iff `x ≤ 2`. The term ships de-provisionalized with that tightness asserted rather than recorded, because a table cannot notice a future run coming in 2% hotter. The same check did **not** clear `MARGINED_MS_COVERAGE_ASSERT = 6` — the statement the provisional derivation borrowed from, same shape against the same relation — which normalized to 2.104080 ms and demanded 7 at three of the six points (`g-b-coverage-assert-18`). That is **closed by the re-freeze**, via the exit its own tripwire named: the literal and `SIZED_*` moved together from one committed set, and at the 18.4 basis the copy the statement ran on IS the basis, so its 1.291375 ms is carried by nothing and demands `ceil(3 x 1.291375) = 4`. The shipped 6 was wrong HIGH at one basis and wrong LOW at the other, which is exactly why inheriting it across was refused. The paired tests survive, inverted rather than deleted (`test_frozen_coverage_assert_now_covers_its_own_measurement`), because the finding was never "6 is too small" but that a term and its basis move together — and this is the case where carrying one across would have been wrong in both directions. The tightness moved with it: the coverage assertion now sits 3.1% under its rounding boundary against the convergence count's 9.5%, so it is the term a future re-measure must be checked against first.
-
-**The selection sweep is a two-component model, because it cannot be a scalar at all.** The sweep is every `SELECT_BATCH_*` page of one pass, so `pages = ceil(N_stale / batch_size) + 1`, and `resolve_batch_size` admits `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` anywhere in `MIN_ADMITTED_BATCH..MAX_BATCH_SIZE`. Measured across that whole domain the cost spans **42x** (3.66 ms at 2 pages to 282.25 ms at 1,647), so no scalar is honest across it: the frozen 37 was 21x under-charged at `batch_size = 1`, and unqualified at *every* page size measured with enough trials to estimate a maximum — not merely outside part of its range. It was **deleted**, not re-picked; a scalar left in the module is a scalar something goes on to price a sweep with. What replaced it is `MARGINED_MS_BACKFILL_SWEEP_SCAN = 71` ms (the relation walk, `xG_sessions` — keyset pagination is served from the primary key, so the relation is read about once *in total* rather than once per page, which is where the original `pages x scan` derivation went wrong) plus `MARGINED_US_BACKFILL_SWEEP_PER_PAGE = 491` µs (statement startup, `x pages`, no growth factor). Both are frozen from an **upper-envelope** fit rather than a least-squares one — a regression through a set of maxima sits below some of them, so tripling its coefficients still under-prices a measurement it was fitted to — specifically the least conservative line covering every measured maximum on record, a two-variable LP solved exactly in **frozen-basis coordinates** with each point carrying the growth factor of the copy *it* ran on, since the sizing copies share a row count while their relations differ by 26% and one shared factor silently under-charges the leanest. Every measured maximum constrains the bound including the legacy 3-trial run, whose `(4 pages, 13.60 ms)` outlier bound the fit at the retired basis; the 7-trial floor applies only to points that *steer* the objective, which is why a run that cannot meet it is still admitted as coverage. After the 2026-07-27 re-freeze that run is **coverage-only** — its copy's `N_copy` fell with the basis and its twelve points all went slack, leaving the two active constraints below — and it stays in the set rather than being dropped, because a point that no longer binds is still a maximum the shipped model has to cover. Correctly pricing the sweep moved the atomic rejection boundary from `N_stale = 5,675` to **5,136** at `batch_size = 1` (at the basis in force then) — a false-admission band that is itself a function of the batch size, which is the point. **The model is measured across the whole domain it is evaluated over, out PAST the 4,185 pages the import-time budget charges: the domain reaches 6,001.** It was frozen from a domain stopping at 1,647 pages and linearly extrapolated beyond it, with the gap declared as an assumption; `g-b-sweep-endpoint-measure` closed it on a **second production-shaped basis** — `gr_p2_sweep6000`, a fresh restore of the same production dump grown by `--synthesize-sessions` to `N_stale = 6,000` (which *was* `SIZED_TOTAL_ROWS` when that run was taken), every row stale, swept at `MIN_ADMITTED_BATCH` for exactly 6,001 pages, seven trials per point, every trial retained. Nothing was rebased or merged: its points enter the same LP through their own `N_copy`, which is **clamped at 1** because that copy is larger than the frozen basis on both axes, so its timings are charged undiscounted. At the basis in force when it was taken the vertex did not move — same `a`, same `b`, same two active constraints, with no point of the new basis binding. **The 2026-07-27 re-freeze inverted that, and the endpoint run is now the one that BINDS.** Its `N_copy` clamps to 1 at either basis, so its demand on `a` is basis-independent at 23.592979 ms (71); `gr_p1_sweep`'s factor fell from 1.848714 to 1.134644 with the basis, taking a baseline-only fit from 72 down to 44. The joint fit was the baseline's line and is now the endpoint's, from the same two artifacts and no new measurement — so dropping the endpoint run would put the pair at 44 / 518, below 3x a maximum a host produced at 6,001 pages. A PostgreSQL-gated endpoint test **used to** assert the same *shape* on whatever host ran it — a sweep out to `IMPORT_WORST_CASE_SWEEP_PAGES` comparing that host's upper-range per-page slope against its own lower-range one, paired and median-reduced segment by segment — and it was **retired 2026-07-28** with the rest of the from-scratch qualification (§7.3.1.3): the only workload that reaches those page counts is a populated pre-`20260719_01` upgrade, which is not a supported path, and a supported upgrade meets an empty or near-empty population whose sweep is two pages. Its timings were never evidence for the frozen numbers and never entered the LP, since its relation was a fixture of clones rather than a production-shaped copy, so nothing about the pair above rests on it. What still runs against this pair on every gated host is `test_pg_frozen_sweep_model_covers_a_live_sweep` (margined model ≥ observed, on the sweep a real upgrade actually takes) and `test_pg_sweep_page_count_matches_the_model` (the page formula against the runner's own paging). `MARGINED_MS_BACKFILL_REMAINING = 4` is unaffected and directly qualified: it runs once per pass, carries no page-count term, and the worst of the six committed measurements normalized on their own bases is exactly 4. Raw trials, the migrated domain artifact and the endpoint basis in `docs/sizing/sweep_batch_domain_20260725.json` and `docs/sizing/sweep_batch_domain_endpoint_20260725.json`. See `docs/release_b_runbook.md` §0 and §5-§7.
-
-#### 7.3.1.3 Cache-only aggregate reads (Release B)
-
-**Sizing qualification scope retired.** The production database completed
-`20260719_01` before the post-hoc qualification program existed. The project does
-not support upgrading a populated snapshot from before that revision: fresh
-databases have no historical sessions, and recovery uses a current backup.
-Accordingly, Phase 3b session/move cloning, recurring live-host endpoint sizing,
-and Railway health-window qualification for that hypothetical path are retired.
-The conservative frozen constants and deterministic tests over the committed
-measurement artifacts remain as historical protection for the shipped migration.
-
-The read switch (`g-b-cache-reads`). Both aggregate consumers reach whole-game accuracy through **one seam**, `app.accuracy.accuracy_for_sessions(db, sessions)`, listed in that module's `__all__` and imported as `from app.accuracy import accuracy_for_sessions` — never out of `app.accuracy_v1`:
-
-```python
-def accuracy_for_sessions(db, sessions):
-    return {session.id: session.player_accuracy for session in sessions}
-```
-
-**Zero SQL.** Both callers already hold the ORM `GameSession` rows they are about to return, so the seam reads a loaded column attribute and must not trigger a lazy load or a refresh. `test_accuracy.py` pins that with a statement counter (and its converse, so the counter cannot pass vacuously); the benchmark re-asserts it on the **total** statement count per invocation. The unused `db` parameter is deliberate: it is what lets a future accuracy vN.0 swap this one body back to a bulk live computation without touching either consumer (`docs/session-accuracy-versioning.md`).
-
-**`/api/stats/summary`** already loads full ended `GameSession` objects, so the ordered move-evaluation query, the Python grouping, the per-session PGN parse, and the per-session computation are gone. `_mean_accuracy`, the overall/color grouping, the rounding, the window/visibility/ended filters, and the NULL exclusion are unchanged (§18.2–18.3). **`/api/history`** keeps one ordered `session_moves` query — it still needs `fen_after` for opening-name derivation — but narrows the select list to `(session_id, fen_after)` while **keeping its `ORDER BY move_number, white-before-black`**: `deepest_opening_name` walks the fens in play order, so dropping the ordering would silently derive a different opening rather than fail (ordering on non-selected columns is legal in SQLite and Postgres for this non-`DISTINCT` query). History builds its accuracy map from the sessions **it returns**, not from the grouped move rows, and constructs the zero-move summary per session so that branch carries its own cached value; an ended-visible session with no `session_moves` rows is absent from the `GROUP BY` yet still stamped by Release A's hook, and a map scoped to the grouped rows would regress there and nowhere else.
-
-**`/api/session/{id}/analysis` is the one endpoint that still computes**, live from its own already-loaded game through `game_accuracy_for_rows`. It is not an aggregate consumer and does not use the seam, so the ply-coordinate guard stays exercised end to end after the switch. History and stats prove the guard's verdict **transitively**: they serve the NULL `recompute_session_accuracy` stamped.
-
-**Version-agnostic read contract.** Neither the seam nor either consumer reads, filters on, or interprets `player_accuracy_algo_version`. Version currency belongs to the migration: `20260719_01`'s invalidation predicate (`player_accuracy_algo_version IS NULL OR < ACCURACY_ALGO_VERSION`) plus its coverage assertion guarantee every ended-visible row is stamped at the current version before any cache-only read serves — which is why deployment is gated on that contract being verified. A reader therefore sees exactly two states: an **integer 0–100**, or **NULL, meaning "no accuracy was derivable"** (including the guard's fail-closed verdict). Hidden rows never reach these consumers; `visible_session_filter` excludes them upstream. No read path ever writes either column.
-
-**Benchmark.** `backend/scripts/bench_stats_accuracy.py` builds its own in-memory SQLite engine and a seeded synthetic fixture (no database URL option) whose cached column is stamped by the production `recompute_session_accuracy` hook, then runs three passes in order: **equivalence** (untimed, first — identical per-session values including NULLs, identical overall/white/black means raw and rounded, and denominators equal to a pure `expected_denominators(games)`), **structural counters** (untimed, per invocation, reset outside every timed region — the live shape issues exactly `games` PGN parses and exactly **one SQL statement, which is the ordered evaluation query**; the cached path issues zero statements of any kind and zero parses). Both sides are pinned on the **total** statement count, not only on the ordered-eval count: the compute median is the numerator of the gated ratio, so a per-session lazy load would leave the eval-query count at 1 while inflating the baseline and making the 20x gate easier to pass, and only then **timing** (median over `--reps` after `--warmup` discards). It exits nonzero unless all three hold, with the gate being the same-run ratio `compute / cached >= MIN_RATIO = 20.0`; `MIN_RATIO` and `UNRESOLVED_GAMES` are module constants, never flags, so the gate is not weakenable from the command line. Absolute medians are recorded as evidence only, never gated — they are hardware-sensitive and no calibration owner exists. The final stdout line is a `BENCH_RESULT {json}` record. The equivalence pass is a round-trip proof that the write hook, the column, the seam, and the aggregate arithmetic agree; it is **not** an independent check of the algorithm, which the frozen goldens own. CI runs only `backend/test_bench_stats_accuracy.py` (small fixture, injected timings); the 500-game timing run stays **manual and non-CI** so hardware variance cannot redden CI.
-
-### 7.4 Move Analysis Storage
-
-Per-move engine evaluations are captured during gameplay (from Worker B) and stored for post-game review.
-
-```sql
-CREATE TABLE session_moves (
-    id BIGSERIAL PRIMARY KEY,
-    session_id UUID NOT NULL REFERENCES game_sessions(id) ON DELETE CASCADE,
-    move_number INTEGER NOT NULL,      -- 1, 2, 3... (full moves, not half-moves)
-    color VARCHAR(5) NOT NULL,         -- 'white' or 'black'
-    move_san VARCHAR(10) NOT NULL,     -- e.g., "Nf3", "O-O"
-    fen_after TEXT NOT NULL,           -- Position after this move
-    eval_cp INTEGER,                   -- Engine eval in centipawns (NULL if mate)
-    eval_mate INTEGER,                 -- Moves to mate (NULL if not mate)
-    best_move_san VARCHAR(10),         -- Engine's recommended move
-    best_move_eval_cp INTEGER,         -- Eval if best move was played
-    eval_delta INTEGER,                -- best_move_eval - actual_eval (positive = lost advantage)
-    classification VARCHAR(20),        -- 'best', 'excellent', 'good', 'inaccuracy', 'mistake', 'blunder'
-    fen_before TEXT,                   -- Position before this move (for analysis cache lookups)
-    best_move_uci VARCHAR(5),          -- Engine's recommended move in UCI notation
-    decision_source VARCHAR(20),      -- 'ghost_path', 'backend_engine', 'local_fallback', or NULL
-    target_blunder_id BIGINT REFERENCES blunders(id),  -- Blunder being steered toward (ghost moves only)
-
-    CONSTRAINT valid_color CHECK (color IN ('white', 'black')),
-    CONSTRAINT valid_decision_source CHECK (
-        decision_source IS NULL OR decision_source IN ('ghost_path', 'backend_engine', 'local_fallback')
-    ),
-    UNIQUE (session_id, move_number, color)
-);
-
-CREATE INDEX idx_session_moves_session ON session_moves(session_id);
-```
-
-**Classification Thresholds:**
-| Classification | Eval Delta (centipawns) |
-|----------------|-------------------------|
-| best           | 0 (played engine's top choice) |
-| excellent      | 1-10 |
-| good           | 11-50 |
-| inaccuracy     | 51-100 |
-| mistake        | 101-149 |
-| blunder        | ≥ 150 |
-
-**Data Flow:**
-1. User plays move → Worker B evaluates position
-2. Frontend stores eval data in memory during game
-3. `GameAnalysisCoordinator` incrementally uploads resolved dirty moves to `POST /api/session/{id}/moves` and retries transient failures with a frozen payload
-4. On a terminal path, the frontend stops incremental uploads, builds the complete history, and replays its exact SAN/FEN chain from the known starting FEN. If and only if that valid chain ends in a **terminal position** and its final ply remains unresolved, the frontend synthesizes that ply's eval deterministically — no engine round-trip — from the replayed board:
-   - **checkmate** → mover-relative `eval_cp=+10000`, `eval_mate=0`, `eval_delta=0` (a mating move is provably unbeatable, so the delta is exact);
-   - **terminal draw** (stalemate, threefold repetition, fifty-move rule, or insufficient material) → `eval_cp=0`, `eval_mate=null`, `eval_delta=null`. The played position is fixed at 0, but a draw does **not** prove the move was best (repetition, stalemate, or a fifty-move draw can squander a win), so the delta is unknown and is **explicitly nulled** — a stale non-null delta on the unresolved row is cleared rather than left to understate CPL.
-
-   Terminality is read from the **reconstructed history**, not the bare final FEN: threefold repetition is undetectable from a lone FEN (the repetition count is not encoded), and the fifty-move clock is only carried because the replay recomputes it. Every synthesized row is stamped `synthetic_terminal_eval=true`. Any worker-resolved row wins (including a resolved threefold draw whose search produced a nonzero eval), and malformed, truncated, extended, mismatched, or nonterminal chains remain untouched. The provenance flag keeps this sparse synthesized result out of the global analysis cache while allowing it to repair the session's persisted accuracy inputs.
-5. The frontend performs the bounded final full-history upload before requesting the terminal recompute. The existing 300 ms penultimate-ply wait is a slice of the same absolute 4 s deadline; it never extends that deadline.
-6. Server bulk-upserts `session_moves` records
-7. For the **final full-history upload only**, the server writes a durable `session_upload_receipt` row in the SAME transaction as the moves (see below)
-8. If the real penultimate analysis resolves only after the bounded wait, the coordinator retains one generation/session/request-bound repair over the frozen history. It releases that barrier only after the `final_full` attempt settles, then sends a sparse `late_eval_repair` to the dedicated `/moves/eval-repair` route without awaiting it on the terminal path. The lifecycle mints the final request id before arming and binds both requests to it; the repair carries `eval_repair=true` plus `final_client_request_id`. While holding the same session writer lock as `final_full`, the backend requires the receipt matching that exact `(session_id, client_request_id)` or returns 409 without writing. This closes the timeout race where the client attempt has settled but the server transaction is still committing its older null snapshot: the repair either waits behind that exact transaction and sees its receipt, or retries later with the frozen payload. A receipt from an earlier duplicate finalization cannot open the gate. Delivery is bounded to six total attempts, with the final retry about 31 seconds after the first failure; after that the coordinator discards the repair instead of polling a permanently absent receipt for the page lifetime. The dedicated route is also a mixed-version fail-closed boundary: an old backend returns 404 rather than ignoring the discriminator and accepting the sparse payload as an ordinary upload. Backend-first rollout is still required so the repair is not exhausted before the capability appears; the operational gate is in `docs/production-release-checklist.md`. The repair never re-enables ordinary incremental uploads, carries no `terminal_action`, requests no opportunity recompute, and is canceled on session replacement/clear/destroy. The existing post-end `recompute_session_accuracy` hook heals the cached value atomically under the lock. Thus `final_full` remains the sole full/finality upload and sole receipt writer, while a late real result can repair one null row without guessing an evaluation or changing the terminal latency bound.
-
-**Final-upload receipt (g-upload-observe).** The end-of-session full upload is bounded by a 4 s client deadline and times out on ~18.5% of terminal actions; a client `TimeoutError` is an abort, **not** proven loss (the server can commit row-by-row after the client gives up). To measure the exact **final-upload noncommit rate** — independent of fire-and-forget PostHog delivery — every request carries a client-generated `X-Client-Request-ID` (present even on a timeout, unlike the server-echoed `X-Request-ID`), and each `/moves` caller tags its `upload_kind` (`final_full` | `incremental` | `revert` | `late_eval_repair`). Only the `final_full` upload sends a `terminal_action` (`game_end` | `resign` | `drill_natural_end` | `accuracy_fail`); its presence is the server's discriminator. For `final_full` the server writes a `session_upload_receipt` row inside the moves' transaction, keyed by the middleware-normalized (non-null) `client_request_id`. A `final_full` upload lacking a valid client id is rejected **400 before any writes**, so no null-id receipt can exist. The invariant the join depends on is **`final_full` 200 ⇒ receipt**: an empty `final_full` upload writes no moves but still commits its receipt, so the endpoint never returns success without one. Presence/absence of the matching receipt row (on the post-rollout cohort, past a maturation window) is the exact commit classification: **present ⇒ committed; absent ⇒ the final request did not commit** — which alone does NOT prove tail rows are missing (earlier incremental uploads may already have persisted them), and actual tail-loss is not measured here. The middleware + backend + migration MUST deploy before the frontend, or new client events would hit an old server that writes no receipt and manufacture false loss. Client-side, a deadline that expires **while the response body streams** is classified `timeout`, not `parse`: `fetch()` resolves as soon as headers arrive, so a late abort surfaces on the body read, and that overrun must stay in the timeout cohort (its real status + `X-Request-ID` are retained, since they prove the server answered). `session_moves_uploaded` is retained as a timing/convenience signal only.
-
-The deterministic fill remains deliberately **final-ply-only**. The bounded wait from `g-2nrn` handles fast penultimate results; `g-residual-eval-gaps` adds the guarded sparse post-resolution repair for results that settle later. Historical gaps are never synthesized: `scripts/repair_residual_eval_gaps.py` is dry-run by default and applies only an exact retained cache MOVE grain that holds `GAME_ANALYSIS_REUSE` for the session owner. It replays the stored SAN/FEN edge, converts the retained white-relative eval back to mover-relative storage, rechecks every guard under the session writer lock, recomputes cached accuracy, and bumps evidence last. Rows without such retained evidence remain NULL and are reported only in aggregate.
-
-**Upload cancellation:** Unconverted drill sessions are best-effort evidence until they are converted. When a drill is abandoned, naturally ended, reset, or replaced by another drill/normal game without conversion, the client disables and aborts that drill's pending session-move uploads so stale rounds do not occupy live gameplay request capacity. If a late upload for an already ended, unconverted drill still reaches the backend, the backend keeps the raw `session_moves` upsert idempotent but skips expensive evidence side effects (ghost graph, blunder opportunity, analysis-cache, and opening-score recompute).
-
-**Deferred evidence side effects (g-yjtn).** `POST /api/session/:id/moves` returns as soon as the `session_moves` rows are durably committed. On the request path only the cheap O(1) work remains: the `session_moves` upsert + commit (the durability boundary), the post-commit `session_moves_uploaded` analytics event, and a non-blocking **enqueue**. The expensive accounting — the graph-dependent transaction (advisory lock + ghost-graph upsert + blunder-opportunity recompute + commit), the analysis-cache write, and the opening-score recompute enqueue — is handed to an **in-process background worker** (`app/session_evidence_scheduler.py`), removing the per-row round-trips and the `pg_advisory_xact_lock` wait from user-visible latency. The worker mirrors the opening-score scheduler (§13.1): a single daemon thread, in-memory coalescing, drain-on-graceful-shutdown — **not** a durable DB outbox.
-
-**Parent-row writer locking and evidence sink.** Writers that mutate `game_sessions` or `blunders` serialize same-row changes with PostgreSQL `FOR NO KEY UPDATE` (centralized by `app.row_locks.for_no_key_update`, with `populate_existing()` for identity-map safety). This still conflicts with another writer lock on the same row while remaining compatible with foreign-key `KEY SHARE` locks taken by child inserts. For moves, game end, drill transitions, first-blunder recording, and SRS reviews, all entity writes are explicitly flushed before `opening_score_cursors.evidence_seq` is advanced; the cursor upsert is the transaction's final blocking database statement before commit. Manual target adds do not lock their source session and therefore bump every newly inserted target unconditionally, whether the source is active or already ended; duplicate targets do not bump.
-
-**Branch-scoped stale-write locks (g-branch-locks).** The drill route-check and next-opponent endpoints also take the session's `FOR NO KEY UPDATE` lock, but only around the **branch that actually mutates**. Route-check re-reads the drill state under the lock: the `root_reached` and on-route branches are pure **snapshots** that write nothing (and take no lock work beyond the read), while the target-reached and off-route branches lock and write; a snapshot branch preserves a concurrently-recorded failure rather than clobbering it. The `root_reached` snapshot has exactly one exception (§17.4.1): a **validated root confirmation** for a session whose evidence boundary is still NULL locks and stamps it, since a session can hold `root_reached` without a boundary — legacy rows and soft-declined confirmations both produce state without one (the observed-root fallback stamps both together). Confirmation claims are validated **before** the lock is taken — they read only immutable inputs — so a false claim fails fast without ever locking. Next-opponent returns **400** on a stale drill that has already `failed` under the lock, and **falls through** (no drill write) on one that has already `converted`. Critically, next-opponent **releases the session lock before the engine call** so a concurrent `/moves` upload can commit while the (potentially slow) engine computes the reply — the lock spans only the stale-write check, not the engine work.
-
-**NKU writer inventory (source-scanned).** The complete set of sanctioned `game_sessions` / `blunders` writer-lock sites — game end (×2), post-end `/moves`, the five drill writers, route-check (two branches), next-opponent, first/auto and manual blunder recording, and SRS review — is pinned by `test_writer_locks.py`, which also **source-scans** the lock modules and fails if any `.with_for_update()` there is not `FOR NO KEY UPDATE` (i.e. `key_share=True`, non-`read`). This keeps the inventory honest: a new non-NKU lock on these tables breaks the guard rather than shipping a silent `FOR UPDATE`/`FOR KEY SHARE` deadlock regression. The `analysis_cache` / `position_analysis` repos deliberately take a different (bare `FOR UPDATE`) lock on their own tables and are out of this inventory's scope.
-
-**Coordination graph (acyclic, cursor is a pure sink).** Across all these paths the lock-acquisition order is consistent and forms a DAG: `session → users`/`advisory → cursor`, `blunder → cursor`, `advisory → cursor`. No path takes any lock *after* writing `opening_score_cursors`, so the evidence cursor is a pure sink and the writers cannot form a lock cycle. The `session_upload_receipt` write (g-upload-observe) preserves this: its `session_id` is a **plain, FK-free column**, so the append-only insert takes **no `KEY SHARE` lock** on `game_sessions`, and it is flushed **before** the `evidence_seq` cursor bump (never after the transaction's final blocking statement) — a pure sink alongside the cursor, adding no edge to the DAG.
-
-`opponent_decisions` (g-ghost-target-server-record) makes the opposite choice deliberately, and stays inside the DAG anyway. Its `session_id` **does** carry an FK with `ON DELETE CASCADE` — retention is session-lifetime, so the cascade is load-bearing — but the receipt's FK-free rationale does not apply: `next-opponent-move` never writes `opening_score_cursors`, so its insert is not competing with a cursor bump. The pre-root drill branch already holds `FOR NO KEY UPDATE` on that same `game_sessions` row, making the insert's `KEY SHARE` a same-transaction no-op; the ghost and engine branches hold no lock at all (the drill lock is rolled back before either runs) and take `KEY SHARE` on `game_sessions` then `blunders` — the same session→blunder order `record_blunder` uses, held only for the microseconds to commit. `KEY SHARE` conflicts solely with `FOR UPDATE` and key-column updates, and every sanctioned lock on these tables is NKU (`test_writer_locks.py`), so no new edge and no cycle.
-
-- **Coalescing & dedup.** Pending work is keyed by `session_id` (one user + player_color per session). Within a coalesced entry, moves are deduped by `(move_number, color)` with **last-write-wins** — the same key as the `session_moves` upsert — so the end-of-session burst (the incremental fire-and-forget uploader plus the final full-history upload re-sending the same slots) collapses to **one worker run carrying exactly one payload per committed slot**. The entry is bounded by session size, not upload count, and the deduped payload avoids the analysis-cache `DUPLICATE_CONFLICT` that a naive concatenation of overlapping slots (with differing evals) would cause. The single worker thread serializes **all** evidence runs (even across sessions/users), so in single-process/single-replica prod the advisory lock is effectively uncontended; it still guards the unique indexes against any cross-process writer.
-- **Best-effort enqueue.** The enqueue swallows and logs any scheduler fault so it can never regress `/moves` from 200 to 500 (same contract as the opening-score `request_recompute`). The request returns 200 with the usual `drill_state` / `drill_terminal_reason`.
-- **Durability risk (accepted).** A hard kill (SIGKILL/OOM/deploy-kill) between enqueue and worker completion drops that session's deferred accounting — a narrow regression vs the prior synchronous commit, traded for the latency win. Backstops: (1) blunder-opportunity events **self-heal** on the next successful same-session upload (a full recompute from all committed `session_moves`); (2) the offline `scripts/recompute_srs_opportunities.py` recompute; (3) `drain=True` on graceful shutdown.
-- **Shutdown ordering (load-bearing).** On graceful shutdown the lifespan drains the baseline scheduler, then the evidence scheduler, then the immediate terminal-delta lane, then the ordinary opening-score scheduler (then PostHog and `engine.dispose()`). The evidence drain's final step calls the ordinary scheduler's `request_recompute`, which silently early-returns once that scheduler is shutting down; draining evidence *before* stopping it keeps those recompute enqueues live. The terminal lane is a leaf and never enqueues a whole recompute, so it has no reciprocal dependency, but it must drain before the ordinary scheduler teardown completes and before the engine is disposed.
-
-**Per-user graph-write serialization (g-q0aw, PostgreSQL only).** On the worker, the graph-dependent work runs as a single **transaction** that takes `pg_advisory_xact_lock(user_id)` and, holding it, upserts the ghost graph, recomputes the session's blunder-opportunity events, and commits. The advisory lock makes concurrent same-user graph writes **queue deterministically** instead of racing the `(user_id, fen_hash)` / `(from_position_id, move_san)` unique indexes; the writes are idempotent, so they converge on the same deduped edge set. In single-process prod the single evidence worker already serializes these runs, so the lock primarily guards against a cross-process writer (extra replicas/workers, the backfill script). The lock and two transaction-local guardrails — `lock_timeout` (default `5s`, on advisory-lock acquisition) and `statement_timeout` (default `10s`) — are set via `set_config(..., is_local=true)` as the first statements of the fresh transaction and are released/reset by that transaction's commit, so the lock spans exactly the graph-upsert + opportunity-event contention window. The backfill script (`scripts/backfill_ghost_graph.py`) calls the graph upsert directly, **bypassing** this lock and the timeouts (intentional for a single-threaded admin migration); it must not run concurrently with live uploads.
-
-**Timeout degradation.** On a recoverable Postgres timeout SQLSTATE (`55P03` lock-not-available / `57014` query-canceled) the graph transaction rolls back and **retries once** — a clean full recompute, since the `session_moves` rows are already committed and opportunity events are rebuilt from all session moves. If the retry also times out, the worker rolls back and **accepts the gap** with an explicit WARNING: blunder-opportunity accounting for that session is dropped and does **not** self-heal (SRS counters read the persisted rows with no lazy recompute), regenerating only on the next successful same-session upload. On the timeout-degrade path the **analysis-cache write** (its own transaction) and the **opening-score recompute enqueue** (cheap, coalesced, self-healing) still run — they sit outside the graph-dependent failure boundary. Other `OperationalError`s (connection failures, etc.) and all non-timeout errors instead abort the run and are **logged on the worker thread** (the `/moves` response has already returned 200, so nothing surfaces to the client); each session's run is isolated, so one failure never wedges the worker or other sessions' runs.
-
-**Connection pool knobs.** The SQLAlchemy engine pool is env-overridable via `DB_POOL_SIZE` (default 10) and `DB_MAX_OVERFLOW` (default 10), bumped from the prior hard-coded 5. The evidence **worker** now opens its own pooled session per run and holds one connection during the graph/analysis-cache work (bounded by `lock_timeout`) instead of the request holding it. The effective connection ceiling is `(pool_size + max_overflow)` **per process** — multiply by worker/replica count before tuning against PostgreSQL `max_connections`.
-
-### 7.5 First-Auto-Blunder Rule Enforcement
-
-The `blunder_recorded` flag ensures only one automatically detected blunder per session enters the Ghost Move Library:
-
-```
-POST /api/blunder called
-        │
-        ▼
-┌───────────────────────┐
-│ Check session.blunder │
-│   _recorded flag      │
-└───────────────────────┘
-        │
-   ┌────┴────┐
-   │         │
- FALSE      TRUE
-   │         │
-   ▼         ▼
-┌─────────┐  ┌─────────┐
-│ Record  │  │ Ignore  │
-│ blunder │  │ (return │
-│ to graph│  │  200 OK)│
-│ Set flag│  └─────────┘
-│ = TRUE  │
-└─────────┘
-```
-
-**API Behavior:**
-1. Client sends `POST /api/blunder` with `{ session_id, fen, user_move, eval_delta }`
-2. Server checks `blunder_recorded` flag on session
-3. If `FALSE`: Insert blunder into the Ghost Move Library, set flag `TRUE`, return `201 Created`
-4. If `TRUE`: Skip insertion, return `200 OK` with `{ "recorded": false, "reason": "session_limit" }`
-5. `POST /api/blunder/manual` is not subject to this flag (manual capture is allowed in active and ended sessions).
-
-**Additional constraints on auto-recording (`POST /api/blunder` only):**
-- **First-move exemption:** A blunder on the very first move (only 1 move in the PGN) is silently skipped and not recorded. Ghost mode can never steer back to the starting position, so recording the first move is meaningless.
-- **10-move cap:** Auto-recording is restricted to blunders occurring within the first 10 full moves. Blunders after move 10 return HTTP 400. Manual capture (`/api/blunder/manual`) has no move-count restriction.
-
-### 7.6 Game Termination
-
-**Resignation:**
-- User clicks "Resign" button
-- Frontend sends `POST /api/game/end` with `{ "session_id": "{id}", "result": "resign" }`
-- Session marked as ended
-
-**Checkmate/Stalemate:**
-- `chess.js` detects game over state
-- Frontend sends `POST /api/game/end` with `{ "session_id": "{id}", "result": "<outcome>" }`
-- Session marked as ended
-
-**Abandonment:**
-- User explicitly abandons (e.g., clicks "New Game" mid-game)
-- Frontend sends `POST /api/game/end` with `{ "session_id": "{id}", "result": "abandon" }`
-- Session marked as ended (`status = 'ended'`, `result = 'abandon'`)
-- `abandon` result does not affect rating (excluded from `RESULT_SCORES`)
-- If the user closes the browser without calling this endpoint, the session remains `active` indefinitely (no background cleanup job)
-
-### 7.7 Session Persistence
-
-**What IS persisted:**
-- Session metadata (start/end times, result, engine Elo)
-- Full PGN of the game
-- Per-move engine analysis (eval, best move, classification)
-- Ghost Move Library targets: auto blunders and manually selected MoveList decisions (anchored to the `positions` + `moves` graph)
-
-**Browser Refresh Behavior:**
-- Refreshing mid-game loses the current game state
-- User must start a new game
-- Previous session remains `active` in the DB (no cleanup job runs)
-- *Future enhancement: LocalStorage-based state recovery*
+The sections below are advanced subsystem reference that later passes will
+condense only after a verified overview or focused destination exists. The
+compact endpoint-family map is retained as a navigation aid; route modules and
+generated OpenAPI remain its exact authority.
 
 ---
 
@@ -1121,579 +252,13 @@ copy here cannot become stale. See [Engineering map](#engineering-map) for the
 application boundary and the generated OpenAPI document from the running
 FastAPI application for exact endpoint details.
 
-## 9. After-Game Analysis Display
-
-When a game ends, users are presented with an analysis view showing their performance with engine evaluations.
-
-### 9.1 Screen Layout
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  ┌───────────────────────┐   ┌─────────────────────────────────┐   │
-│  │                       │   │  Evaluation Graph               │   │
-│  │                       │   │  ┌─────────────────────────────┐│   │
-│  │      Chessboard       │   │  │    ▲                        ││   │
-│  │                       │   │  │   / \    /\                 ││   │
-│  │                       │   │  │  /   \  /  \      /\        ││   │
-│  │                       │   │  │0├─────\/────\────/──\──     ││   │
-│  │                       │   │  │  ▼          \  /    ▼       ││   │
-│  └───────────────────────┘   │  │              \/             ││   │
-│                              │  └─────────────────────────────┘│   │
-│  ┌───────────────────────┐   │  Move: 15 of 42                 │   │
-│  │ ◀◀  ◀  ▶  ▶▶        │   └─────────────────────────────────┘   │
-│  │ Navigation Controls   │                                        │
-│  └───────────────────────┘   ┌─────────────────────────────────┐   │
-│                              │  Move List (scrollable)         │   │
-│  ┌───────────────────────┐   │  1. e4    e5                    │   │
-│  │ Eval Bar              │   │  2. Nf3   Nc6                   │   │
-│  │ ████████░░  +1.2      │   │  3. Bb5   a6                    │   │
-│  └───────────────────────┘   │  4. Ba4   Nf6                   │   │
-│                              │  5. O-O   Be7                    │   │
-│  ┌───────────────────────┐   │  6. Re1   b5?!  ← inaccuracy    │   │
-│  │ Current Position      │   │  7. Bb3   d6                    │   │
-│  │ Best: Nc6 (+0.3)      │   │  8. c3    O-O                   │   │
-│  │ Played: d5?? (-2.1)   │   │  9. h3    Na5??  ← BLUNDER      │   │
-│  │ Classification: Blunder│   │  ...                           │   │
-│  └───────────────────────┘   └─────────────────────────────────┘   │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │ [New Game]  [Review Blunders]  [Back to Dashboard]          │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### 9.2 Components
-
-#### 9.2.1 Chessboard
-
-- Displays the position at the currently selected move
-- Arrows can optionally show the best move (toggle)
-- Highlights the last move played (from/to squares)
-
-#### 9.2.2 Evaluation Graph
-
-- **X-axis:** Move number (1 to N)
-- **Y-axis:** Engine evaluation in pawns (-5 to +5, clamped)
-- **Line color:** Gradient from white's perspective (green = white advantage, red = black advantage)
-- **Markers:** Dots on the line at each move; colored by classification (win-chance model):
-  - Red dot: Blunder (≥ 0.30 win-chance drop)
-  - Orange dot: Mistake (≥ 0.20 win-chance drop)
-  - Yellow dot: Inaccuracy (≥ 0.10 win-chance drop)
-- **Interaction:** Clicking on the graph jumps to that move
-- **Current position:** Vertical line indicator shows selected move
-
-#### 9.2.3 Evaluation Bar
-
-- Vertical or horizontal bar showing current position advantage
-- Filled portion represents winning probability (based on eval)
-- Numerical eval displayed: `+1.2` or `M3` (mate in 3)
-- Color: White fill for white advantage, black fill for black advantage
-
-#### 9.2.4 Navigation Controls
-
-| Button | Action |
-|--------|--------|
-| ◀◀ | Jump to start |
-| ◀ | Previous move |
-| ▶ | Next move |
-| ▶▶ | Jump to end |
-
-**Keyboard shortcuts:**
-- `←` / `→` : Previous/next move
-- `Home` / `End` : Jump to start/end
-- `↑` / `↓` : Jump to previous/next critical moment (blunder/mistake)
-
-#### 9.2.5 Move List
-
-- Standard two-column format (white move | black move)
-- Current move highlighted
-- Classification icons per move (from `classifyMoveAdvanced`):
-  - `??` — Blunder (≥ 0.30 win-chance drop)
-  - `?` — Mistake (≥ 0.20 win-chance drop)
-  - `?!` — Inaccuracy (≥ 0.10 win-chance drop)
-  - `✓` — Good move (≥ 0.02 win-chance drop)
-  - `!` — Excellent move (< 0.02 win-chance drop, not best)
-  - `⭐` — Best move (played move matches engine's top choice)
-- Clicking a move navigates to that position
-
-#### 9.2.6 Position Analysis Panel
-
-Shows details for the currently selected move:
-
-- **Best move:** Engine's recommended move with eval
-- **Played move:** What was actually played with eval
-- **Eval delta:** Difference in centipawns
-- **Classification:** Blunder/Mistake/Inaccuracy/Good/Excellent/Best
-
-### 9.3 Data Source
-
-Analysis data comes from two sources:
-- `session_moves` table — populated during gameplay by `GameAnalysisCoordinator` (Worker B) via `POST /api/session/{id}/moves` on game end
-- `analysis_cache` table — pre-computed results for known positions; queried in parallel with the worker to accelerate first-analysis
-
-Classifications are produced by `classifyMoveAdvanced` (win-chance model) during gameplay, stored alongside centipawn evals in `session_moves`.
-
-The response's `position_analysis` map is keyed by full `fen_before` (one entry per played position), but its best-move / best-line / best-eval truth is sourced at the *position* grain: `backend/app/api/session.py` resolves each entry by `normalize_fen(move.fen_before)` against the `position_analysis` storage table and emits it under the original full-FEN key. Each entry carries an explicit `position_trusted` flag — `true` for a trusted storage winner / legacy-v2 projection, `false` for an untrusted `SessionMove` seed fallback. `best_move_eval_cp` is side-to-move-relative (the white-relative storage `best_eval` sign-converted by active color). `best_move_eval_mate` is likewise side-to-move-relative (the white-relative storage `best_eval_mate` sign-converted by active color) and is emitted whenever the trusted winner carries a mate eval — typically a mate-only winner (`best_eval=None`), but a superset merge of disagreeing runs (`backend/app/position_analysis_policy.py`) can retain *both* `best_eval` and `best_eval_mate`, in which case both wire fields are populated. Consumers treat mate as authoritative when both are present (mate-first, matching `tree_eval._best_move_eval`). See §14.6.
-
-```typescript
-interface MoveAnalysis {
-  moveNumber: number;
-  color: 'white' | 'black';
-  moveSan: string;
-  fenAfter: string;
-  evalCp: number | null;      // null if mate
-  evalMate: number | null;    // moves to mate
-  bestMoveSan: string;
-  bestMoveEvalCp: number;
-  evalDelta: number;
-  classification: 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
-}
-```
-
-### 9.4 API Endpoint
-
-#### GET /api/session/:id/analysis
-
-Returns full analysis for a completed game session.
-
-**Response (200):**
-```json
-{
-  "session_id": "uuid",
-  "pgn": "string | null",
-  "result": "checkmate_win | checkmate_loss | resign | draw | abandon | null",
-  "player_color": "white | black",
-  "moves": [
-    {
-      "move_number": 1,
-      "color": "white",
-      "move_san": "e4",
-      "fen_after": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
-      "eval_cp": 30,
-      "eval_mate": null,
-      "best_move_san": "e4",
-      "best_move_eval_cp": 30,
-      "eval_delta": 0,
-      "classification": "best",
-      "segment": "string"
-    }
-  ],
-  "summary": {
-    "blunders": 2,
-    "mistakes": 3,
-    "inaccuracies": 5,
-    "average_centipawn_loss": "integer | null",
-    "accuracy": "integer | null"
-  },
-  "position_analysis": {
-    "<fen_before>": {
-      "best_move_uci": "string",
-      "best_move_san": "string | null",
-      "best_move_eval_cp": "integer | null",
-      "best_move_eval_mate": "integer | null",
-      "best_line_uci": ["string"],
-      "position_trusted": "boolean"
-    }
-  },
-  "expected_total_moves": "integer | null",
-  "analyzed_moves": "integer",
-  "is_complete": "boolean"
-}
-```
-
-The summary's blunder/mistake/inaccuracy counts and `average_centipawn_loss`
-are player-only: only moves whose `color` matches `player_color` contribute.
-Average centipawn loss is nonnegative; negative `eval_delta` values are treated
-as `0` for display/summary purposes. `average_centipawn_loss` is rounded
-**half-up** to an integer (an exact `.5` rounds up), matching the frontend's
-`Math.round` — see [Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations).
-
-`average_centipawn_loss` is `null` if and only if no player move has an
-`eval_delta` — an unanalyzed game reports `null`, not `0`. It is deliberately
-not gated on completeness: a partially analyzed game reports the average over
-the plies that did resolve. A value of `0` therefore means perfect play, not
-missing data, and clients must not collapse the two (use a null check, never a
-truthiness check).
-
-#### Evidence grain: summary vs. displayed stats
-
-The numbers on a review screen do not all come from the same evidence. Four
-distinct grains, deliberately:
-
-1. **Backend `summary` (blunders/mistakes/inaccuracies/`average_centipawn_loss`)
-   and `accuracy`** — ORIGINAL game-time evidence, computed server-side over the
-   persisted (base) `session_moves` rows. Base, not immutable: a post-end
-   `POST /api/session/{id}/moves` upload can add, change, or clear evaluations,
-   which is why accuracy self-heals on a later upload. Accuracy v1 is frozen.
-2. **Displayed class counts and Avg CPL on BOTH review pages** (`/history` and
-   `/game`, via `GameReviewStats`) — EXACT-BEST-PROJECTED moves: a played move
-   equal to the *trusted* position best counts as `best` with `0` CPL. Each page
-   projects at its own seam and hands the projected array to the stats hook and
-   the board, so for TRUSTED EXACT-BEST PROMOTIONS the pane and the board's gold
-   "best" stars agree. That guarantee is scoped to promotions only — a board star
-   raised by a grain-3 overlay is still board-only and is not counted by the pane.
-3. **Board-only re-annotation overlays** (the `upgraded` field, §Read-time
-   re-annotation) — board display only. They never reach page-level stats: the
-   overlay layer lives inside the board, below the array the page hands it.
-4. **`/history`'s no-analysis fallback panel** (`summary.*` from `/api/history`,
-   shown when a game has no analysis) — ORIGINAL evidence, unprojected. A
-   different surface from `GameReviewStats`, deliberately left alone.
-
-Grain 2 (displayed stats) therefore sits beside grain 1 (accuracy) on the same
-pane. This skew is accepted, not a bug: accuracy v1 is frozen, and projection
-only ever *promotes*, so the skew is bounded and one-directional. Two notes
-on that bound:
-
-- **It holds on the displayed integer, not only on the unrounded mean.**
-  Projection only ever replaces a nonnegative `eval_delta` with `0` and never
-  raises one, so the unrounded projected player mean cannot exceed the unrounded
-  summary mean, and the projected class counts cannot exceed the summary counts.
-  The displayed integers now inherit that bound: both sides round half-up — the
-  frontend's `Math.round` (`gameStats.ts`) and the backend's `round_half_up_cpl`
-  ([Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations)) — and half-up rounding is monotone, so it cannot reorder two means
-  that are already ordered. This was previously conditional: while the backend
-  still used Python's banker's rounding, an exact-half mean could display one
-  point HIGHER than the summary (unrounded `2.5` → displayed `3` vs. summary
-  `2`) even though projection lowered nothing.
-- **Null is not comparable, and projection can create a `0` where the summary is
-  `null`.** Promotion writes `eval_delta: 0` unconditionally — including onto a
-  move whose stored delta was `null` — so a game with no resolved player deltas
-  but one promoted move displays `0` against a `null` summary. `≤` is undefined
-  there; the bound is asserted only over games where both sides are non-null.
-
-### 9.5 Entry Points
-
-The analysis screen (`/game?id=<session_id>`) is accessible from:
-
-**Entry Point 1: Post-Game Prompt**
-- Immediately after a game ends on `/play`, the game UI offers a link to view analysis
-- Navigates to `/game?id=<session_id>` for the just-completed game
-
-**Entry Point 2: Game History**
-- User navigates to `/history`
-- Selects any completed game from the list
-- Opens `/game?id=<session_id>` for that historical game
-
-**App navigation** (via `AppNav`):
-- `/play` — Start/continue a game
-- `/history` — Browse past games
-- `/blunders` — Due blunders (Ghost Move Library)
-- `/openings` — Opening performance
-- `/stats` — Overall stats and rating graph
-
-### 9.6 MVP Constraints
-
-- **No engine lines:** MVP shows only the single best move, not multiple variations
-- **No local analysis:** Display only the analysis captured during gameplay (no re-analysis)
-- **No export:** PGN download deferred to post-MVP
-- **No sharing:** Social/sharing features deferred
-
----
-
-## 10. Game History View
-
-The Game History view allows users to browse their past games and access analysis for any completed game.
-
-### 10.1 Entry Points
-
-```
-┌─────────────────────┐
-│     Dashboard       │
-│                     │
-│  [New Game]         │
-│  [Game History] ────┼──────► Game History View
-│  [Due Blunders]     │
-└─────────────────────┘
-
-┌─────────────────────┐
-│   Game Ends         │
-│                     │
-│  "View Analysis?"   │
-│  [Yes] → Analysis   │
-│  [No]  → Dashboard  │
-│  [History] ─────────┼──────► Game History View
-└─────────────────────┘
-```
-
-### 10.2 Screen Layout
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Game History                                                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ▶ Jan 31, 2026 • 10:45 AM                                           │   │
-│  │   Result: Won (Checkmate)  •  vs Bot (1200)  •  32 moves            │   │
-│  │   Blunders: 1  •  Mistakes: 2  •  Inaccuracies: 4                   │   │
-│  │   Avg Centipawn Loss: 18                                            │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ▶ Jan 30, 2026 • 3:22 PM                                            │   │
-│  │   Result: Lost (Checkmate)  •  vs Bot (1400)  •  45 moves           │   │
-│  │   Blunders: 3  •  Mistakes: 1  •  Inaccuracies: 2                   │   │
-│  │   Avg Centipawn Loss: 42                                            │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │ ▶ Jan 30, 2026 • 11:08 AM                                           │   │
-│  │   Result: Draw (Stalemate)  •  vs Bot (1000)  •  58 moves           │   │
-│  │   Blunders: 0  •  Mistakes: 3  •  Inaccuracies: 5                   │   │
-│  │   Avg Centipawn Loss: 12                                            │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-│                                                                             │
-│  ... (scrollable list, newest first)                                        │
-│                                                                             │
-│  ┌───────────────────────────────────────────────────────────────────┐     │
-│  │  [Back to Dashboard]                                               │     │
-│  └───────────────────────────────────────────────────────────────────┘     │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 10.3 Game Card Data
-
-Each game in the list displays:
-
-| Field | Source | Example |
-|-------|--------|---------|
-| Date/Time | `game_sessions.started_at` | Jan 31, 2026 • 10:45 AM |
-| Result | `game_sessions.result` | Won (Checkmate), Lost (Resign), Draw |
-| Opponent Elo | `game_sessions.engine_elo` | vs Bot (1200) |
-| Move Count | Derived from PGN | 32 moves |
-| Blunders | Count from `session_moves` | 2 |
-| Mistakes | Count from `session_moves` | 3 |
-| Inaccuracies | Count from `session_moves` | 5 |
-| Avg CP Loss | Computed from `session_moves.eval_delta` | 18 |
-
-**Result Display Mapping:**
-
-| `result` value | Display Text |
-|----------------|--------------|
-| `checkmate_win` | Won (Checkmate) |
-| `checkmate_loss` | Lost (Checkmate) |
-| `resign` | Lost (Resigned) |
-| `draw` | Draw |
-| `abandon` | Abandoned |
-
-### 10.4 Interaction Flow
-
-```
-User clicks game card
-        │
-        ▼
-┌───────────────────┐
-│  Load Analysis    │
-│  GET /api/session │
-│  /{id}/analysis   │
-└─────────┬─────────┘
-          │
-          ▼
-┌───────────────────┐
-│  Analysis Screen  │
-│  (Section 9)     │
-└───────────────────┘
-```
-
-**Click behavior:** Clicking anywhere on a game card opens the analysis view for that game (Section 9).
-
-### 10.5 API Endpoint
-
-#### GET /api/history
-
-Returns list of user's completed games (newest first).
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `limit` | integer | 50 | Max games to return (max 100) |
-
-**Response (200):**
-```json
-{
-  "games": [
-    {
-      "session_id": "uuid",
-      "started_at": "2026-01-31T10:45:00Z",
-      "ended_at": "2026-01-31T11:02:00Z",
-      "result": "checkmate_win",
-      "engine_elo": 1200,
-      "move_count": 32,
-      "summary": {
-        "blunders": 1,
-        "mistakes": 2,
-        "inaccuracies": 4,
-        "average_centipawn_loss": "integer | null"
-      }
-    }
-  ]
-}
-```
-
-History summaries follow the same player-only rule as session analysis for
-blunder/mistake/inaccuracy counts and `average_centipawn_loss`. ACPL also clamps
-negative eval deltas to zero, including legacy stored rows, and uses the same
-half-up rounding rule as session analysis — see [Analysis evidence](docs/architecture/analysis-evidence.md#centipawn-loss-representations).
-
-`average_centipawn_loss` carries the same null semantics as session analysis: it
-is `null` if and only if no player move has an `eval_delta` (an unanalyzed game,
-or a game with no moves at all), a partially analyzed game reports the average
-over the plies that resolved, and `0` means perfect play rather than missing
-data.
-
-### 10.6 Empty State
-
-When user has no completed games:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Game History                                                   │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│                     ♔                                           │
-│                                                                 │
-│              No games played yet                                │
-│                                                                 │
-│     Play your first game to start building your history!        │
-│                                                                 │
-│                    [Start New Game]                             │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### 10.7 MVP Constraints
-
-- **No sorting:** Games always shown newest first
-- **No filtering:** All games shown (filter by date/result/blunders deferred)
-- **No pagination:** Simple limit-based loading (cursor pagination deferred)
-- **No search:** Full-text search in PGN deferred
-- **No mini-board preview:** Showing final position thumbnail deferred
-
----
-
-## 11. Testing Strategy
-
-### 11.1 Tooling
-
-| Layer | Tooling | Scope |
-| --- | --- | --- |
-| Unit (Frontend) | Vitest | Pure functions, state reducers, utilities |
-| Unit (Backend) | pytest | SRS math, Ghost Move Library helpers, DB query builders |
-| Integration (Frontend) | React Testing Library | UI flows, board events, ghost state transitions |
-| Integration (Backend) | pytest + httpx | API endpoints, DB interactions, SRS updates |
-| E2E | Playwright | Full user journeys in the browser |
-
-### 11.2 Coverage Priorities (MVP)
-
-**SRS & Ghost Logic**
-- Priority score calculation (pass streak + time since last review)
-- Due selection weighting (deterministic with fixed seed)
-- Ghost activation/deactivation on path deviations
-- Re-hooking on transpositions (normalized FEN hashing)
-
-**Blunder Detection**
-- First auto-detected mistake only per session (within first 10 moves)
-- Threshold handling (>=50cp recording, >=50cp replay failure)
-- Pre-move position reference (P_before) for stored blunders
-- 10-move recording cap enforcement (moves 11+ rejected)
-- Manual MoveList capture supports any player move (no threshold requirement)
-
-**Graph Traversal**
-- Recursive query cycle detection
-- Depth bounds and stopping conditions
-- Correct next-move selection for ghost path
-
-**Frontend Interaction**
-- Pause + feedback modal on replay failure
-- Resume flow after correction
-- UI state when backend response switches between `ghost` and `engine` mode
-
-### 11.3 Key Test Cases
-
-| Area | Test Case | Expectation |
-| --- | --- | --- |
-| SRS | pass_streak increments on correct replay | priority decreases |
-| SRS | replay failure resets pass_streak | priority increases |
-| Ghost | user deviates off path | ghost deactivates |
-| Ghost | user transposes back to known node | ghost reactivates |
-| Blunder | blunder stored against pre-move FEN | decision point preserved |
-| Analysis | first auto blunder only | later mistakes ignored unless manually added |
-| Manual add | duplicate position capture | `is_new=false` and UI shows "already in library" |
-
-### 11.4 Test Data & Determinism
-
-- Use fixed PGNs with known engine evals for replay scenarios.
-- Seed any probabilistic SRS selection to make tests deterministic.
-- Pin Stockfish evaluation settings for unit/integration tests that rely on eval deltas.
-
----
-
-## 12. Rating System
-
-Ghost Replay uses an Elo-style rating system to track player strength against the engine.
-
-### 12.1 Constants
-
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `DEFAULT_RATING` | 1200 | Starting rating for new users |
-| `PROVISIONAL_THRESHOLD` | 20 | Games played before rating stabilizes |
-| `K_PROVISIONAL` | 40 | K-factor during provisional period |
-| `K_STABLE` | 20 | K-factor once rating is stable |
-
-### 12.2 Formula
-
-```
-expected = 1 / (1 + 10^((engine_elo - player_rating) / 400))
-new_rating = round(player_rating + K * (score - expected))
-```
-
-The opponent rating is `engine_elo` from the game session (the bot difficulty setting).
-
-### 12.3 Result Scores
-
-| Result | Score |
-|--------|-------|
-| `checkmate_win` | 1.0 |
-| `checkmate_loss` | 0.0 |
-| `resign` | 0.0 |
-| `draw` | 0.5 |
-| `abandon` | not rated |
-
-### 12.4 When Rating Is Computed
-
-A `rating_history` row is inserted at `POST /api/game/end` when `is_rated=true` and the result is one of the four rated outcomes above. `abandon` results are never rated regardless of `is_rated`.
-
-The `is_provisional` flag is `true` when `games_played < PROVISIONAL_THRESHOLD` at the time of the game.
-
-### 12.5 Post-Game Display
-
-The `/api/game/end` response includes a `rating` field:
-
-```json
-{
-  "rating_before": 1200,
-  "rating_after": 1214,
-  "is_provisional": true
-}
-```
-
-The end-game banner uses these values to show the rating change. When `is_provisional=true`, a provisional indicator is shown alongside the rating.
-
-`rating` is `null` when the game is unrated or the result is `abandon`.
-
-DB reference: [`backend/app/models.py`](backend/app/models.py)
-
----
-
 ## 13. Opening Weakness Tracking
 
 The opening score system computes per-user 0-100 mastery scores (higher = better) for each opening line and surfaces them on the `/openings` page.
 
 ### 13.1 Trigger Points
 
-- **After move uploads:** the recompute is no longer called inline at the end of `POST /api/session/:id/moves`. That handler commits `session_moves` and enqueues the evidence side effects to a background worker (§7.4); the worker's final step calls `request_recompute()` to schedule a **coalesced** opening-score recompute off the request path (g-yjtn). The opening-score worker then runs `recompute_opening_scores_if_needed()` and, if the user's inputs (game history or opening registry) have changed since the last batch, computes a new batch.
+- **After move uploads:** the recompute is no longer called inline at the end of `POST /api/session/:id/moves`. That handler commits `session_moves` and enqueues the evidence side effects to its [background worker](backend/app/session_evidence_scheduler.py); the worker's final step calls `request_recompute()` to schedule a **coalesced** opening-score recompute off the request path (g-yjtn). The opening-score worker then runs `recompute_opening_scores_if_needed()` and, if the user's inputs (game history or opening registry) have changed since the last batch, computes a new batch.
 - **After SRS reviews:** `recompute_opening_scores_if_needed()` is called after each SRS review submission, since a review pass can change per-opening accuracy.
 - **On openings page load:** reads are stale-while-revalidate, and only the paths that can afford latency block:
   - a **warm** reader (batch present) calls `request_recompute()` to schedule a coalesced background convergence and serves the cached batch immediately, never blocking;
@@ -2039,7 +604,7 @@ carries an untrusted display fallback (§14, tiers 3-4) — when no trusted eval
 surfaces an untrusted `played_eval` so off-book cards still render a number. The root eval
 and all position-fact reads remain strictly trust-gated. For drill grading, strictness-0 compares the played move to the trusted
 `best_move_uci` alone (no move-eval needed); thresholds use `position_eval_loss_cp` or
-fall back to the worker (see §6.4.6).
+fall back to the [browser analysis coordinator](src/services/GameAnalysisCoordinator.ts).
 
 **Opening-score quality fallback.** When a session move lacks its primary
 `session_moves` evals, `opening_evidence._apply_cache_fallbacks` upgrades it to a
@@ -2375,65 +940,11 @@ Per §13.2 a trust-selection semantic change requires exactly this bump — and 
 explicitly NOT a substitute for hashing the association set, because it cannot
 invalidate anything that changes after it lands.
 
-## 15. Local Fallback
-
-When the backend is unreachable, the frontend uses local Stockfish to generate opponent moves rather than blocking gameplay.
-
-### 15.1 `decision_source: 'local_fallback'`
-
-The `decision_source` column on `session_moves` accepts three values:
-
-| Value | Source |
-|-------|--------|
-| `ghost_path` | Backend served a Ghost Move Library move |
-| `backend_engine` | Backend served an engine move |
-| `local_fallback` | Frontend generated the move locally (backend unreachable) |
-
-`local_fallback` is set exclusively by the frontend in `applyLocalFallbackMove()` (`useChessGameController.ts`). The backend never produces this value — it is excluded from the `NextOpponentMoveResponse` type.
-
-### 15.2 Behavior
-
-- Ghost path steering is unavailable in fallback mode (no backend response to provide path data).
-- The locally-generated move is committed with `decisionSource: "local_fallback"` and the game continues normally.
-- Client-side blunder detection and analysis still run.
-- Move uploads proceed as normal once connectivity is restored.
-
----
-
-## 16. Practice Continuation
-
-Practice Continuation is the local free-play state a session enters when the user rewinds the board to a prior position mid-game.
-
-### 16.1 Trigger Flow
-
-1. User clicks the Revert button to select an earlier position.
-2. If the current game is rated (`isRated=true`), a confirmation modal is shown (`showRevertWarning=true`).
-3. On confirm: the game is ended as `resign` via `POST /api/game/end`, and any rating change is applied.
-4. The board rewinds locally to the selected position.
-5. `isPracticeContinuation = true`, `isRated = false`, drill state cleared, session move uploads halted.
-
-### 16.2 Behavior While Active
-
-| Aspect | Normal game | Practice continuation |
-|--------|-------------|----------------------|
-| Game-over API call | `POST /api/game/end` | None — `finishLocalGame()` only |
-| Move uploads | Yes | No |
-| SRS reviews | Triggered | Not triggered |
-| Rating change | Yes (if rated) | No |
-| Ghost / drill | Active | Disabled |
-| Resign button | `POST /api/game/end` | `finishLocalGame()` locally |
-
-### 16.3 Reset
-
-`isPracticeContinuation` resets to `false` when a new game session is started.
-
----
-
 ## 17. Drill Mode
 
 Drill Mode is a structured opening practice feature. The user plays toward a specific target position — a registered boundary root, **or any `/openings` tree position reached via its played line** (every expanded move card is drillable) — then optionally converts the session into a rated game from that point forward.
 
-Card-initiated drills (ad-hoc, non-root) send the target FEN plus the full UCI line from the start position; `/api/drills/start` validates the line by replay (each move legal and the line reaching the claimed target, else `422`) and persists it as `game_sessions.drill_line` (space-joined UCI; `NULL` for registered-root drills). The session's display metadata (name/family/eco/depth) is synthesized to match the card: the deepest named book node along the line (the same name inheritance §16 uses), `depth = len(line)`.
+Card-initiated drills (ad-hoc, non-root) send the target FEN plus the full UCI line from the start position; `/api/drills/start` validates the line by replay (each move legal and the line reaching the claimed target, else `422`) and persists it as `game_sessions.drill_line` (space-joined UCI; `NULL` for registered-root drills). The session's display metadata (name/family/eco/depth) is synthesized to match the card: the deepest named book node along the line, `depth = len(line)`.
 
 ### 17.1 Session Type
 
@@ -2898,15 +1409,15 @@ is never inferred from opening key, moves, or reusable settings, and the abandon
 session is **never revived** — any mismatch or missing precondition falls back to ordinary
 `/play` initialization.
 
-DB reference: §7.3 (`game_sessions` drill columns)
+DB reference: [`backend/app/models.py`](backend/app/models.py) (`game_sessions` drill columns)
 
 ---
 
 ## 18. Stats Summary Populations
 
 `GET /api/stats/summary` (`app/api/stats.py`) reports over a `window_days` window: the
-user's sessions that pass `visible_session_filter()` (normal games + converted drills,
-§7.3) and whose normal play started at or after the cutoff. Within that one window, the
+user's sessions that pass `visible_session_filter()` (normal games + converted drills)
+and whose normal play started at or after the cutoff. Within that one window, the
 three numbers on the **moves** card are computed over **three different populations**.
 This is deliberate, and each is pinned by a test in `test_stats_api.py`.
 
@@ -2914,7 +1425,7 @@ This is deliberate, and each is pinned by a test in `test_stats_api.py`.
 |-------|-------|--------------------------|
 | `quality_distribution` | **move** | Classified player moves across **all** windowed sessions — **in-progress games included** |
 | `mistake_free_game_rate` | **game** | **All** ended sessions in the window |
-| `accuracy_pct` | **game** | Ended sessions in the window **that scored** — i.e. whose **cached** `player_accuracy` is not `NULL` (§7.3.1.3) |
+| `accuracy_pct` | **game** | Ended sessions in the window **that scored** — i.e. whose **cached** `player_accuracy` is not `NULL`; see [session-accuracy versioning](docs/session-accuracy-versioning.md) |
 
 `colors.{white,black}.accuracy_pct` is the same statistic as `accuracy_pct`, scoped to
 that color. All three fields (and the color-scoped ones) are `null`, never `0`, when
@@ -2940,7 +1451,7 @@ the distribution, then consulted only for ended sessions.
 
 ### 18.2 `accuracy_pct` is an unweighted mean of per-game integers
 
-Accuracy v1 returns a **rounded 0..100 integer** per game (frozen — §7.3.1), and that is
+Accuracy v1 returns a **rounded 0..100 integer** per game (see [session-accuracy versioning](docs/session-accuracy-versioning.md)), and that is
 what `game_sessions.player_accuracy` stores. `_mean_accuracy` averages the cached integers
 and rounds again to one decimal. Two consequences, both accepted:
 
@@ -2949,7 +1460,7 @@ and rounds again to one decimal. Two consequences, both accepted:
 
 Keep it that way. It answers *"how well do I play in a typical game"*, which is a
 per-game question, so per-game weighting is the honest one. Decisively: since the Release B
-read switch (§7.3.1.3) that per-game integer **is** what `game_sessions.player_accuracy`
+read switch described in [session-accuracy versioning](docs/session-accuracy-versioning.md), that per-game integer **is** what `game_sessions.player_accuracy`
 serves. A move-weighted variant would need per-move evidence the cache does not retain, so
 it is **foreclosed** — not on a collision course with a future switch, but incompatible with
 the one that already shipped.
@@ -2964,7 +1475,7 @@ present (as clean) in the mistake-free rate.
 That drop-arm is not a rare edge. It fires for an ended game with no resolved evals, and the
 frozen ply-coordinate guard (g-22t8.6) makes it **load-bearing**: a game whose ply
 coordinates are broken scores `None` rather than a silently wrong number. Since the read
-switch (§7.3.1.3) that verdict reaches the mean **through the cache** rather than through a
+switch described in [session-accuracy versioning](docs/session-accuracy-versioning.md), that verdict reaches the mean **through the cache** rather than through a
 live call — `recompute_session_accuracy` runs the guard, stamps the `NULL`, and
 `_mean_accuracy` drops it here. The guard's fail-closed contract depends on this arm
 existing.

@@ -32,6 +32,26 @@ by [`backend/tests/fixtures/cpl_cap_vectors.json`](../../backend/tests/fixtures/
 The models, route projections, and tests define the particular columns and
 uses.
 
+## Evaluation perspective and mate interpretation
+
+Analysis normalizes an engine score before it compares the best and played
+continuations, so capture and review decisions have one player-relative
+meaning. Readers may project the same fact to a white-relative representation
+where their storage or display contract requires it; they must not silently
+mix those perspectives.
+
+Mate is retained as an explicit mate count as well as receiving a centipawn
+conversion when a common comparison surface needs one. In particular, a mate
+count of zero means the side to move is checkmated. The conversion supports
+threshold and loss decisions; it does not erase the mate meaning needed for
+faithful display or evidence projection.
+
+The browser authority is
+[`src/workers/analysisUtils.ts`](../../src/workers/analysisUtils.ts), with
+cross-boundary projections in
+[`src/services/analysisEvidence.ts`](../../src/services/analysisEvidence.ts).
+The corresponding worker and evidence tests define the edge cases.
+
 ## Two evidence grains
 
 One analysis run can establish two different facts:
