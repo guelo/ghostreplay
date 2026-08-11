@@ -167,9 +167,21 @@ session clears that local practice state.
 
 ## Cross-cutting contracts
 
-- **Identity and visibility.** FastAPI authorizes every account-scoped game,
-  target, review, history, and progress read or write. A saved game becomes a
-  history/review surface only when it meets the session-visibility rule.
+- **Identity and visibility.** On first visit, the browser auto-registers an
+  anonymous user and keeps its generated credentials and bearer token in
+  origin-scoped `localStorage`; until claimed, account recovery is bound to
+  that browser profile and device storage. Claiming updates the same `users`
+  row (username, password hash, and anonymous flag), so its ID and all
+  account-owned training data stay in place rather than being migrated. Issued
+  access tokens have a seven-day lifetime. When one expires, the browser
+  discards it and signs in again with the stored credentials; a separate
+  refresh-token flow is intentionally deferred. FastAPI authorizes every
+  account-scoped game, target, review, history, and progress read or write. A
+  saved game becomes a history/review surface only when it meets the
+  session-visibility rule. The exact lifecycle is owned by the browser
+  [auth context](src/contexts/AuthContext.tsx), the backend
+  [auth routes](backend/app/api/auth.py), and
+  [token security](backend/app/security.py).
 - **Evidence boundaries.** Reusable analysis is not assumed trustworthy merely
   because it exists. Position and played-move evidence have separate grains and
   read gates; consumers degrade to permitted evidence or an unavailable result.
