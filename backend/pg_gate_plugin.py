@@ -385,7 +385,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_capture_cohort_pg.py::test_rerun_is_byte_identical",
     "test_capture_cohort_pg.py::test_retry_then_succeed_on_first_attempt_movement",
     "test_capture_cohort_pg.py::test_self_check_failure_leaves_prior_untouched",
-    "test_capture_cohort_pg.py::test_self_check_rejects_a_cohort_the_release_path_would_reject",
+    "test_capture_cohort_pg.py::test_self_check_rejects_a_cohort_the_candidate_selector_would_reject",
     "test_capture_cohort_pg.py::test_self_check_runs_real_scoring_and_publishes",
     "test_capture_cohort_pg.py::test_starvation_regression_global_epoch_only_does_not_retry",
     "test_capture_cohort_pg.py::test_strict_mode_retries_on_global_epoch_movement",
