@@ -373,6 +373,9 @@ class RatingHistory(Base):
     __tablename__ = "rating_history"
     __table_args__ = (
         Index("idx_rating_history_user_timestamp", "user_id", "recorded_at"),
+        # Idempotency boundary for concurrent /api/game/end attempts. The session
+        # row lock lets one request insert; the loser observes status='ended' and
+        # returns the route's 400, while uniqueness prevents a second rating row.
         Index("uq_rating_history_game_session", "game_session_id", unique=True),
         # Durable-head index (Release A). Serves the "latest rated row for a user"
         # lookup ordered by games_played first: WHERE user_id = ? ORDER BY
