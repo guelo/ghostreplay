@@ -1516,6 +1516,13 @@ def recompute_opening_scores(
                 ]
             )
 
+        # Keep both large read-model writes below as mapping-based Core bulk
+        # inserts WITHOUT ``.returning(...)``. Their generated row IDs have no
+        # consumer: every child row is already linked by the flushed ``batch.id``.
+        # RETURNING would therefore make the database produce and transfer one
+        # unused result per inserted row. Both executes still share this batch
+        # transaction with the pending scope/named-root rows; the single commit
+        # publishes everything, and any failure reaches the rollback below.
         if position_scores:
             insert_started = time.monotonic()
             db.execute(
