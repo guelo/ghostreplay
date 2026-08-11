@@ -28,7 +28,8 @@ These tests pin:
   is dominated by truncated PGNs whose rows are the fuller record), while a
   coordinate-BREAKING surplus fails closed;
 * the /stats blast radius — a guard-nulled game leaves ``accuracy_pct``'s
-  population but STAYS in ``mistake_free_game_rate``'s (SPEC §18.3);
+  population but STAYS in ``mistake_free_game_rate``'s; the separate populations
+  are defined in ``docs/features/stats-metrics.md``;
 * the static wiring pin: no module under ``app/api/`` may reference
   ``compute_game_accuracy``.
 """
@@ -399,7 +400,10 @@ def test_session_analysis_accuracy_is_none_on_broken_grid(
 def test_stats_summary_drops_broken_game_from_accuracy_but_keeps_mistake_free(
     client, auth_headers, create_game_session, db_session
 ):
-    """The guard's /stats blast radius, pinned in both halves (SPEC §18.3).
+    """The guard's /stats blast radius, pinned in both halves.
+
+    docs/features/stats-metrics.md defines the separate accuracy and
+    mistake-free populations.
 
     accuracy_pct is eval-coordinate-grain and drops the broken game from its
     denominator. mistake_free_game_rate is classification-grain — a broken ply grid

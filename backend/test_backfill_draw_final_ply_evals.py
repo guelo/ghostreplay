@@ -1200,7 +1200,8 @@ def test_between_phase_session_leaving_the_cohort_is_skipped(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Evidence bump ordering: the cursor upsert is the transaction's final write (SPEC 7.4).
+# Evidence bump ordering: the cursor upsert is the transaction's final write after the
+# move and cached-accuracy writes have flushed.
 # ---------------------------------------------------------------------------
 def test_cursor_upsert_is_last_write(db_session):
     from sqlalchemy import event

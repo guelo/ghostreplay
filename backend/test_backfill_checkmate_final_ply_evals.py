@@ -665,7 +665,7 @@ def test_residual_repair_stamps_none_accuracy(db_session):
 
 # ---------------------------------------------------------------------------
 # Review fix #2: the evidence cursor upsert is the transaction's final write, after the
-# move + accuracy writes have flushed (cursor pure sink, SPEC 7.4).
+# move + accuracy writes have flushed (cursor pure sink).
 # ---------------------------------------------------------------------------
 def test_cursor_upsert_is_last_write(db_session):
     plies, pgn = _play(SCHOLAR)

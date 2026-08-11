@@ -1,12 +1,13 @@
 > **Scope of this guide.** `SPEC.md` is the project overview: stable product
-> capabilities, system boundaries, and the paths to the authoritative detail.
-> Exact schemas, request and response contracts, formulas, operational
-> procedures, and design history belong in code, generated OpenAPI, migrations,
-> focused documents, and tests. The detailed reference retained below is being
-> reduced in sequential, reviewable passes.
+> capabilities, system boundaries, and paths to authoritative detail. Exact
+> schemas, request and response contracts, formulas, operational procedures,
+> and design history belong in code, generated OpenAPI, migrations, focused
+> documents, and tests.
 >
-> Within the retained detailed reference, **post-MVP** and **deferred** mark
-> postponed or forward-looking work, not implemented behavior.
+> **Maintenance.** Update this overview when a stable product capability or
+> system boundary changes, and keep its links limited to source-checked,
+> current authorities. Do not duplicate implementation contracts here or use
+> it to preserve planned, retired, or historical designs.
 
 # Ghost Replay
 
@@ -20,12 +21,6 @@
 - [Cross-cutting contracts](#cross-cutting-contracts)
 - [Engineering map](#engineering-map)
 - [Further reading](#further-reading)
-- [Retained detailed reference](#retained-detailed-reference)
-  - [8. Endpoint families](#8-endpoint-families)
-  - [13. Opening weakness tracking](#13-opening-weakness-tracking)
-  - [14. Analysis evidence](#14-analysis-evidence)
-  - [17. Drill mode](#17-drill-mode)
-  - [18. Stats and metric populations](#18-stats-and-metric-populations)
 
 ## Purpose and core training loop
 
@@ -62,9 +57,11 @@ advances its streak and a failure resets it.
 
 ### Review and progress
 
+Players begin with an anonymous account, so their games, targets, reviews, and
+progress are already account-scoped. They can later claim that same account
+with credentials for cross-device use without losing their training record.
 After a game, players can review the game, revisit saved history, and follow
-their Elo rating and summary statistics. Authentication establishes the account
-boundary for games, targets, reviews, and progress.
+their Elo rating and summary statistics.
 
 ### Openings and drills
 
@@ -202,119 +199,21 @@ tests remain authoritative for exact contracts.
 
 ## Further reading
 
-The following sources were audited in Pass 0 and are current for their narrow
-purposes:
+These source-checked references provide the detailed contract for one subject;
+they supplement, rather than duplicate, the implementation authorities named
+in the engineering map.
 
-- [Session-accuracy versioning](docs/session-accuracy-versioning.md) covers its
-  release/versioning contract.
-- [Opening book](docs/opening-book.md) covers the maintained opening-book input.
-- [Analysis evidence](docs/architecture/analysis-evidence.md) covers the
-  verified cross-cutting evidence, trust, and freshness contract.
-- [Release A runbook](docs/release_a_runbook.md) and [Release B runbook](docs/release_b_runbook.md)
-  are operational reading, not product or API specifications.
+- **Architecture and evidence policy:**
+  [analysis evidence](docs/architecture/analysis-evidence.md).
+- **Feature contracts:** [drill mode](docs/features/drill-mode.md) and
+  [stats and metrics](docs/features/stats-metrics.md).
+- **Opening data and scoring:** [opening-book loader](docs/opening-book.md) and
+  [opening-score model and calibration](docs/openingscore_final.md).
+- **Session accuracy:** [versioning policy](docs/session-accuracy-versioning.md).
+- **Operational history:** [Release A](docs/release_a_runbook.md) and
+  [Release B](docs/release_b_runbook.md) runbooks. These are deployment records,
+  not product or API specifications.
 
-Additional focused references will be added only after their implementation and
-authority are verified.
-
-## Retained detailed reference
-
-The sections below are advanced subsystem reference that later passes will
-condense only after a verified overview or focused destination exists. The
-compact endpoint-family map is retained as a navigation aid; route modules and
-generated OpenAPI remain its exact authority.
-
----
-
-## 8. Endpoint families
-
-FastAPI route modules own endpoint handlers and their current request/response
-models, validation, and status codes. The application-level
-[`backend/app/main.py`](backend/app/main.py) error handler owns the standard
-error envelope, including the retryability signal consumed by
-[`src/utils/api.ts`](src/utils/api.ts); its behavior is pinned by
-[`backend/test_error_envelope.py`](backend/test_error_envelope.py). Generated
-OpenAPI is the exact public contract. This overview groups endpoints by player
-workflow rather than repeating payload schemas.
-
-| Family | Responsibility | Authority |
-| --- | --- | --- |
-| Authentication | Create an anonymous account, authenticate it, and claim it for cross-device use. | [`backend/app/api/auth.py`](backend/app/api/auth.py) |
-| Game and session | Start and end games, serve opponent decisions, persist moves, and return saved-session analysis/opening views. | [`backend/app/api/game.py`](backend/app/api/game.py), [`backend/app/api/session.py`](backend/app/api/session.py) |
-| Ghost targets and review | Capture automatic or manual training targets, list the library, and record spaced-repetition review outcomes. | [`backend/app/api/blunder.py`](backend/app/api/blunder.py), [`backend/app/api/srs.py`](backend/app/api/srs.py) |
-| Analysis evidence | Resolve reusable analysis and accept approved session/analysis-board evidence through the trust policy. | [`backend/app/api/analysis.py`](backend/app/api/analysis.py), [`backend/app/api/session.py`](backend/app/api/session.py), [Analysis evidence](docs/architecture/analysis-evidence.md) |
-| Openings and drills | Serve published opening scores and trees, calculate score changes, and run drill lifecycle and route checks. | [`backend/app/api/openings.py`](backend/app/api/openings.py), [`backend/app/api/drills.py`](backend/app/api/drills.py) |
-| History and progress | Return saved games, ratings, achievements, and aggregate statistics for the authenticated player. | [`backend/app/api/history.py`](backend/app/api/history.py), [`backend/app/api/stats.py`](backend/app/api/stats.py) |
-| Health | Report service, database, and opening-cache readiness for operations. | [`backend/app/api/health.py`](backend/app/api/health.py) |
-
-Feature routes resolve the caller’s identity before operating on account-scoped
-records. Domain rules stay with their route/service/model owners so a payload
-copy here cannot become stale. See [Engineering map](#engineering-map) for the
-application boundary and the generated OpenAPI document from the running
-FastAPI application for exact endpoint details.
-
-## 13. Opening weakness tracking
-
-Opening scores turn a player's game and review evidence into a per-user,
-side-specific readiness view of their repertoire. The openings page and drill picker
-share an opening tree, so a player can explore a line, understand its score where
-evidence is available, and choose a reachable position to practise.
-
-Scores are published as coherent per-player-side snapshots. Reads can keep serving the
-last complete snapshot while a worker checks whether game, review, registry, or trusted
-analysis evidence requires a rebuild; a player with no qualifying evidence remains
-unscored rather than receiving an invented score. The exact scorer, snapshot format,
-freshness proof, and calibration are implementation contracts.
-
-- [Opening score model and calibration](docs/openingscore_final.md) explains the
-  readiness model and its product interpretation.
-- [Opening book loader](docs/opening-book.md) describes the client-side opening-book
-  lookup used for live attribution.
-- [Analysis evidence contract](docs/architecture/analysis-evidence.md) defines which
-  cached analysis can contribute to opening evidence.
-
----
-
-## 14. Analysis evidence
-
-Ghost Replay treats stored chess analysis as evidence, not as an interchangeable cache.
-Position evidence answers which continuation is best; move evidence answers what happened
-after a particular played move. Each is reused only when its profile, declared contract,
-capability, and user scope permit the consuming feature to trust it.
-
-When usable analysis is absent, stale, malformed, or insufficiently trusted, gameplay and
-review use their normal worker or unavailable-result paths. They do not promote a weak
-result into a canonical answer. The detailed trust, coherence, publication, and opening
-freshness rules are in the [analysis evidence contract](docs/architecture/analysis-evidence.md).
-
----
-
-## 17. Drill mode
-
-Drill mode lets a player choose an opening target and practise the route to it. The server
-confirms each route transition and records when the target was genuinely reached; strictness
-then applies only to play after that confirmation. This keeps scripted opening moves from
-being misrepresented as ordinary training evidence.
-
-A drill can finish off route, on a post-root accuracy failure, or at a natural game end.
-A root-reached or failed drill may be converted into a rated normal game while its session
-remains open; otherwise it remains an unrated practice session and is excluded from
-normal history and statistics.
-Stopped drills can be reviewed transiently in the browser without creating a saved game
-review, rating event, history entry, or statistics.
-
-The [drill mode contract](docs/features/drill-mode.md) records the session lifecycle,
-route/root evidence boundary, conversion, terminal outcomes, and transient-review policy.
-
----
-
-## 18. Stats and metric populations
-
-The stats summary intentionally uses different populations for different questions:
-move quality reflects all classified player moves in visible sessions, while
-game-level rates use completed games. Accuracy is a separate completed-and-scored-game
-population, so an unscored game is never shown as zero accuracy.
-
-This distinction is a product contract, not an accidental query detail. The
-[stats and metrics contract](docs/features/stats-metrics.md) defines the populations,
-empty-state behavior, and cached-accuracy policy; the stats service and its tests define
-the exact calculations.
+For exact API and storage contracts, start with the
+[FastAPI routes](backend/app/api/), [models](backend/app/models.py),
+[migrations](backend/alembic/), and generated OpenAPI from the running service.

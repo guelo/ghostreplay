@@ -8,8 +8,8 @@ committed; receipt absent past the adjudication horizon ⇒ did NOT commit),
 independent of fire-and-forget PostHog delivery.
 
 ``session_id`` is a PLAIN column (NO FK) so the append-only insert takes no
-``KEY SHARE`` lock on ``game_sessions`` and cannot perturb the writer-lock DAG
-(SPEC.md); the /moves endpoint flushes it BEFORE the ``evidence_seq`` cursor bump.
+``KEY SHARE`` lock on ``game_sessions`` and cannot perturb the writer-lock DAG;
+the /moves endpoint flushes it BEFORE the ``evidence_seq`` cursor bump.
 ``client_request_id`` is NOT NULL — a ``final_full`` upload lacking a valid client
 id is rejected 400 before any writes, so no null-id receipt can exist.
 

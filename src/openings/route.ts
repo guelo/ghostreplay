@@ -8,7 +8,6 @@ import type { OpeningPlayerColor } from "../utils/api";
  * The canonical (tree) form is `color=white|black` + repeated `move=<uci>`. The
  * legacy `opening=<normalized FEN>` deep-link entry is honored only when no
  * `move` is present and is rewritten to the resolved `move=` line on response.
- * See SPEC §13.5.
  */
 export type OpeningRoute = {
   playerColor: OpeningPlayerColor;

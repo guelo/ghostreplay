@@ -99,7 +99,8 @@ def get_history(
     )
 
     # Per-move FENs per session, for opening-name derivation only (counts come from
-    # the GROUP BY above; accuracy comes from the cache — SPEC §7.3.1.3).
+    # the GROUP BY above; accuracy comes from the cache; see
+    # docs/session-accuracy-versioning.md).
     #
     # move_number and color have LEFT the select list but MUST stay in the ORDER BY:
     # deepest_opening_name walks the fens in play order, so dropping the ordering

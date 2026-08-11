@@ -6,8 +6,10 @@ legacy/contaminated rows the write guard would reject today, so they can no
 longer feed the eval-delta / win-chance fallbacks that drive drill pass/fail,
 regular-game classification/recording, and SRS grading.
 
-See SPEC.md §14.5 for the category model and `app/analysis_cache_audit.py` for
-the (pure, unit-tested) classifier.
+See the [analysis evidence contract](../../docs/architecture/analysis-evidence.md)
+for the trust and degradation boundary, and
+[`app/analysis_cache_audit.py`](../app/analysis_cache_audit.py) for the pure,
+unit-tested category classifier.
 
 ## Preconditions — DO NOT skip
 

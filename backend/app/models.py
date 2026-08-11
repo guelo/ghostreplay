@@ -507,7 +507,7 @@ class SessionUploadReceipt(Base):
 
     Append-only sink: ``session_id`` is a PLAIN column (NO FK) so the insert takes
     no ``KEY SHARE`` lock on ``game_sessions`` and cannot perturb the writer-lock
-    DAG (SPEC.md). The insert is flushed BEFORE the ``evidence_seq`` cursor bump,
+    DAG. The insert is flushed BEFORE the ``evidence_seq`` cursor bump,
     so it never lands after the transaction's final blocking statement.
     ``client_request_id`` is NOT NULL: a ``final_full`` upload lacking a valid
     client id is rejected 400 before any writes, so a null-id receipt (which would
@@ -593,7 +593,7 @@ class OpponentDecision(Base):
 
     **FK to game_sessions, unlike SessionUploadReceipt.** That receipt keeps a plain
     FK-free ``session_id`` so it stays a pure sink alongside the ``evidence_seq``
-    cursor bump (SPEC.md). ``next-opponent-move`` never writes the cursor, and
+    cursor bump. ``next-opponent-move`` never writes the cursor, and
     ``session_moves`` / ``blunder_opportunity_events`` already carry FK-CASCADE to
     ``game_sessions`` from cursor-bumping paths. The route branch already holds
     ``FOR NO KEY UPDATE`` on this very row, so the insert's ``KEY SHARE`` is a

@@ -40,10 +40,10 @@ Design contracts (see the g-eh2w bead design field for the full plan):
   stamped ``player_accuracy_algo_version = current`` with ``player_accuracy = None``
   would otherwise be skipped by the Release B read switch and serve null forever.
   The fill therefore mirrors the serving writers' parent-session lock
-  (:func:`app.row_locks.for_no_key_update`) and flush order (SPEC §7.4): flush the
-  move, recompute accuracy, flush accuracy, THEN bump evidence.
+  (:func:`app.row_locks.for_no_key_update`) and flush order: flush the move,
+  recompute accuracy, flush accuracy, THEN bump evidence.
 * **Evidence bump** once per group that wrote >= 1 row, as the transaction's final
-  blocking statement (the ``opening_score_cursors`` pure sink, SPEC §7.4) — after
+  blocking statement (the ``opening_score_cursors`` pure sink) — after
   every move + accuracy write of the group has been flushed.
 * **Concurrency-safe / idempotent** — Phase B holds the parent-session
   ``FOR NO KEY UPDATE`` lock and re-applies the both-fields-null predicate under
@@ -455,12 +455,14 @@ def _fill_session(session: Session, game_session: GameSession, move_id: int) -> 
     concurrently-resolved row, so the backfill never overwrites a real worker eval with
     the synthetic +10000/0/0.
 
-    The flush order mirrors the serving move writers (SPEC §7.4): flush the filled move
-    so ``recompute_session_accuracy``'s scoped SELECT sees it (autoflush is disabled),
-    recompute + stamp the cached accuracy, then flush that so the group's evidence bump
-    remains the transaction's final blocking statement. Without the recompute a repaired
-    session already stamped at the current algo version with ``player_accuracy = None``
-    would stay cache-null forever (the Release B read switch skips current-version rows).
+    The flush order mirrors the serving move writers and is pinned by
+    ``test_backfill_checkmate_final_ply_evals.py::test_cursor_upsert_is_last_write``:
+    flush the filled move so ``recompute_session_accuracy``'s scoped SELECT sees it
+    (autoflush is disabled), recompute + stamp the cached accuracy, then flush that so
+    the group's evidence bump remains the transaction's final blocking statement.
+    Without the recompute a repaired session already stamped at the current algo version
+    with ``player_accuracy = None`` would stay cache-null forever (the Release B read
+    switch skips current-version rows).
     """
     row = (
         session.query(SessionMove)
@@ -508,7 +510,7 @@ def apply_backfill(
     writes, bounds lock-hold time, and makes the run resumable — a mid-run failure leaves
     committed groups repaired and reruns the rest idempotently. The lock order (parent
     session -> child move -> cursor) matches the serving writers, so no cycle forms and
-    the cursor stays a pure sink (SPEC §7.4).
+    the cursor stays a pure sink after every move and cached-accuracy write has flushed.
     """
     outcome = BackfillOutcome()
 

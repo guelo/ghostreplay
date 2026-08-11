@@ -1,4 +1,4 @@
-"""Cache-only aggregate accuracy reads (g-b-cache-reads, SPEC §7.3.1.3).
+"""Cache-only aggregate accuracy reads (g-b-cache-reads).
 
 Release B switched ``/api/stats/summary`` and ``/api/history`` onto
 ``game_sessions.player_accuracy``, read through the single seam
@@ -144,7 +144,10 @@ def test_history_summary_accuracy_is_the_cached_value(client, auth_headers, db_s
 # 2. The surrounding aggregate semantics survive unchanged.
 # ---------------------------------------------------------------------------
 def test_null_cached_accuracy_drops_out_of_the_denominator(client, auth_headers, db_session):
-    """"Ended games that SCORED", not "ended games" (SPEC §18.3).
+    """"Ended games that SCORED", not "ended games".
+
+    docs/features/stats-metrics.md defines the completed-and-scored-game
+    denominator.
 
     The NULL game carries scoreable move rows, so a read that recomputed would pull
     it INTO the mean and move the number.

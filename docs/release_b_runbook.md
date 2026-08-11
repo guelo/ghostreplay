@@ -1551,7 +1551,7 @@ add slack. The headroom above is a property of the host, not of the sampling.
 
 **What this did not establish.** Linearity *on this host*, on a fixture of clones,
 and nothing more. Its timings are not evidence for the frozen pair and never enter
-the LP — the constants' docstrings, `SPEC.md` and the gate manifest all say so.
+the LP — the constants' docstrings and the gate manifest both say so.
 `gr_p2_sweep6000` is where the endpoint became a measured claim about the shipped
 constants.
 

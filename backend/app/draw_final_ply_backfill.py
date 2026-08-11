@@ -493,12 +493,14 @@ def _fill_session(session: Session, game_session: GameSession, move_id: int) -> 
        session whose chain grew a new terminal ply still "ends in a draw", but the row we
        hold is no longer that ply.
 
-    The flush order mirrors the serving move writers (SPEC 7.4): flush the filled move so
-    ``recompute_session_accuracy``'s scoped SELECT sees it (autoflush is disabled),
-    recompute + stamp the cached accuracy, then flush that so the group's evidence bump
-    remains the transaction's final blocking statement. Without the recompute a repaired
-    session already stamped at the current algo version with ``player_accuracy = None``
-    would stay cache-null forever (the Release B read switch skips current-version rows).
+    The flush order mirrors the serving move writers and is pinned by
+    ``test_backfill_draw_final_ply_evals.py::test_cursor_upsert_is_last_write``:
+    flush the filled move so ``recompute_session_accuracy``'s scoped SELECT sees it
+    (autoflush is disabled), recompute + stamp the cached accuracy, then flush that so
+    the group's evidence bump remains the transaction's final blocking statement.
+    Without the recompute a repaired session already stamped at the current algo version
+    with ``player_accuracy = None`` would stay cache-null forever (the Release B read
+    switch skips current-version rows).
     """
     row = (
         session.query(SessionMove)
@@ -571,7 +573,8 @@ def apply_backfill(
     with that group's row + accuracy writes, bounds lock-hold time, and makes the run
     resumable — a mid-run failure leaves committed groups repaired and reruns the rest
     idempotently. The lock order (parent session -> child move -> cursor) matches the
-    serving writers, so no cycle forms and the cursor stays a pure sink (SPEC 7.4).
+    serving writers, so no cycle forms and the cursor stays a pure sink after every move
+    and cached-accuracy write has flushed.
 
     A candidate skipped by a re-check is NOT filled by this run and NOT counted; a later
     rerun's Phase A picks up the session's new final row naturally.

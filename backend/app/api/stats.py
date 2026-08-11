@@ -391,8 +391,8 @@ def get_stats_summary(
     # evidence about how the user is moving now; an open game's moves are not
     # excluded. The game-grain metrics below (mistake_free_game_rate, accuracy_pct)
     # are ended-only, because they are not defined until a game is over. Same card,
-    # different populations, on purpose — pinned by test_stats_api.py:243-259. See
-    # SPEC §18.1.
+    # different populations, on purpose — pinned by test_stats_api.py:243-259 and
+    # described in docs/features/stats-metrics.md.
     #
     # The blunder counts built here are per-session and feed the game-grain
     # mistake-free rate, which consults them for ended sessions only.
@@ -435,7 +435,8 @@ def get_stats_summary(
     )
     mistake_free_game_rate = _rate(clean_ended, len(ended_sessions))
 
-    # --- Whole-game accuracy over ended sessions (cache-only; SPEC §7.3.1.3) ---
+    # --- Whole-game accuracy over ended sessions (cache-only; see
+    # docs/session-accuracy-versioning.md) ---
     # Read straight off the already-loaded ``ended_sessions`` rows through the
     # shared seam: no ordered evaluation query, no PGN parse, no live computation
     # on this path. The ply-coordinate guard still decides the value — it just
@@ -445,7 +446,10 @@ def get_stats_summary(
     ended_session_ids = [session.id for session in ended_sessions]
 
     def _mean_accuracy(ids: list[uuid.UUID]) -> float | None:
-        """Unweighted mean of per-game accuracy INTEGERS. See SPEC §18.2-18.3.
+        """Unweighted mean of per-game accuracy INTEGERS.
+
+        docs/features/stats-metrics.md defines this completed-and-scored-game
+        population.
 
         Two deliberate properties, both kept:
 

@@ -1,7 +1,7 @@
 • Yes, this is doable, but the score should be derived from full opening-phase decisions, not just blunders. In this
   codebase, that’s possible because backend/app/models.py already has full session_moves and blunder_reviews, and src/
   openings/openingBook.ts can map a FEN to an opening label in a transposition-aware way. If you used only blunders, the
-  score would be badly biased because GhostReplay only auto-records the first opening mistake per game in SPEC.md.
+  score would be badly biased because GhostReplay only auto-records the first opening mistake per game.
 
   I’d recommend a 3-part model:
 

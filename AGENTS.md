@@ -1,6 +1,10 @@
 # Agent Instructions
 
-The overall project and architecture is described in SPEC.md.
+`SPEC.md` is the project overview: stable product capabilities, system
+boundaries, and source-checked paths to detailed authority. Update it when a
+stable capability or boundary changes; keep exact API/schema/algorithm and
+operational detail with code, generated OpenAPI, migrations, focused documents,
+and tests.
 
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
