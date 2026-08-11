@@ -15,7 +15,7 @@ import { useAnalysisEvidence } from "../services/analysisEvidence";
 import type { EvidenceReuseContext } from "../services/analysisEvidence";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { isTrustedExactBestHit, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
+import { isTrustedExactBestHit, mateToCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
 import { isCheckmateFen, whiteCpForMove } from "../utils/moveGraphEval";
 import { projectExactBest } from "../utils/projectExactBest";
 import AnalysisGraph from "./AnalysisGraph";
@@ -82,6 +82,10 @@ const fenSideToMove = (fen: string): "w" | "b" => {
   const idx = fen.indexOf(" ");
   return (idx >= 0 ? fen[idx + 1] : "w") as "w" | "b";
 };
+
+/** White-perspective cp for a terminal FEN whose side to move is checkmated. */
+const whiteTerminalCp = (sideToMove: "w" | "b") =>
+  sideToMove === "w" ? mateToCp(0) : -mateToCp(0);
 
 type NavigationTrace = {
   id: number;
@@ -1000,13 +1004,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     const topLine = mergedEngineLines[0];
     if (!topLine?.score) return null;
     if (topLine.score.type !== "mate") return null;
-    return sideToMove === "w" ? topLine.score.value : -topLine.score.value;
+    const whiteRelative =
+      sideToMove === "w" ? topLine.score.value : -topLine.score.value;
+    return whiteRelative === 0 ? 0 : whiteRelative;
   }, [showEngineArrows, mergedEngineLines, sideToMove]);
 
-  // When engine arrows are on AND the live search has produced a score, the eval
-  // bar should read both cp and mate from that single live source. Otherwise it
-  // falls back to the cached variation analysis (both channels). This keeps the
-  // cp/mate pair consistent so a stale cached mate can't override a live cp.
+  // When engine arrows are on AND the visible search has produced a score, all
+  // selected-position consumers should read both cp and mate from that source.
+  // Otherwise they fall back to cached variation analysis (both channels). This
+  // keeps the pair consistent so a stale cached mate can't override a live cp.
   const useLiveEngineEval =
     showEngineArrows &&
     (liveEngineEvalCp !== null || liveEngineEvalMate !== null);
@@ -1052,12 +1058,68 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return playerToWhiteMate(cached.playedEvalMate, boardOrientation);
   }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation, analysisCacheVersion]);
 
+  // One atomic source for every selected-variation eval consumer. The visible
+  // engine result is already gated to displayedFen via activeEngineLines; when
+  // it has no score, fall back to the selected node's FEN-keyed cache. A
+  // terminal displayed FEN also normalizes a cp-only source to mate 0 so every
+  // consumer agrees that the position is checkmate.
+  const selectedVariationEval = useMemo(() => {
+    if (useLiveEngineEval) {
+      if (isInVariation && isCheckmateDisplayed && liveEngineEvalMate === null) {
+        return { cp: whiteTerminalCp(sideToMove), mate: 0 };
+      }
+      return { cp: liveEngineEvalCp, mate: liveEngineEvalMate };
+    }
+    if (varEvalCp !== null || varEvalMate !== null) {
+      if (isInVariation && isCheckmateDisplayed && varEvalMate === null) {
+        return { cp: whiteTerminalCp(sideToMove), mate: 0 };
+      }
+      return { cp: varEvalCp, mate: varEvalMate };
+    }
+    if (isInVariation && isCheckmateDisplayed) {
+      return {
+        cp: whiteTerminalCp(sideToMove),
+        mate: 0,
+      };
+    }
+    return { cp: null, mate: null };
+  }, [
+    useLiveEngineEval,
+    liveEngineEvalCp,
+    liveEngineEvalMate,
+    varEvalCp,
+    varEvalMate,
+    isInVariation,
+    isCheckmateDisplayed,
+    sideToMove,
+  ]);
+
+  // Graph/EvalBar geometry needs a cp value for mate-only scores. A mate-0
+  // count has no sign, so use the displayed FEN's side to move: that side is
+  // checkmated, which determines whether white's terminal cp is + or -.
+  const selectedVariationDisplayCp = useMemo(() => {
+    if (selectedVariationEval.cp !== null) return selectedVariationEval.cp;
+    if (selectedVariationEval.mate === null) return null;
+    if (selectedVariationEval.mate !== 0) {
+      return mateToCp(selectedVariationEval.mate);
+    }
+    return whiteTerminalCp(sideToMove);
+  }, [selectedVariationEval, sideToMove]);
+
   // Variation header eval for MoveList (mate code takes precedence over cp)
   const varHeaderEval = useMemo((): string | null => {
     if (!isInVariation) return null;
-    if (varEvalCp == null && varEvalMate == null) return null;
-    return formatWhiteEval(varEvalCp, varEvalMate);
-  }, [isInVariation, varEvalCp, varEvalMate]);
+    if (
+      selectedVariationEval.cp === null &&
+      selectedVariationEval.mate === null
+    ) {
+      return null;
+    }
+    return formatWhiteEval(
+      selectedVariationEval.cp,
+      selectedVariationEval.mate,
+    );
+  }, [isInVariation, selectedVariationEval]);
 
   // What-if line for the graph overlay: dotted path tracing the selected
   // variation up to (and including) the selected move. Future/deselected moves
@@ -1085,6 +1147,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     // sibling variations can share an absolute ply). Worker cp is
     // player-perspective, so convert to white-perspective for the graph.
     const streaming =
+      selectedVariationDisplayCp === null &&
       variationStreamingEval &&
       variationStreamingEval.fen === selectedVarNode.fen
         ? {
@@ -1101,6 +1164,16 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
       // Exclude the in-flight tip; it is drawn as the streaming segment instead.
       .filter(({ index }) => !(streaming && index === streaming.index))
       .map(({ node, index }) => {
+        if (
+          node.id === selectedVarNodeId &&
+          selectedVariationDisplayCp !== null
+        ) {
+          return {
+            index,
+            cp: selectedVariationDisplayCp,
+            pending: false,
+          };
+        }
         const cached = getVarAnalysis(node.fen);
         const cp =
           cached && cached.playedEval != null
@@ -1119,6 +1192,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     getVarAnalysis,
     getAbsolutePly,
     variationStreamingEval,
+    selectedVariationDisplayCp,
     boardOrientation,
     analysisCacheVersion,
   ]);
@@ -1469,13 +1543,13 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             <EvalBar
               whitePerspectiveCp={
                 isInVariation
-                  ? (useLiveEngineEval ? liveEngineEvalCp : varEvalCp)
+                  ? selectedVariationDisplayCp
                   : (currentEvalCp ??
                     (effectiveIndex >= 0 ? evals[effectiveIndex] ?? null : null))
               }
               whitePerspectiveMate={
                 isInVariation
-                  ? (useLiveEngineEval ? liveEngineEvalMate : varEvalMate)
+                  ? selectedVariationEval.mate
                   : currentEvalMate
               }
               whiteOnBottom={boardOrientation === "white"}
@@ -1728,13 +1802,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             highlightedMoves={highlightedMoves}
             evalCp={
               isInVariation
-                ? varEvalCp
+                ? selectedVariationDisplayCp
                 : currentEvalCp ?? evals[effectiveIndex] ?? null
             }
-            evalMate={isInVariation ? varEvalMate : currentEvalMate}
+            evalMate={
+              isInVariation ? selectedVariationEval.mate : currentEvalMate
+            }
             isCheckmate={
-              (!isInVariation && isCheckmateDisplayed) ||
-              (isInVariation && varEvalMate === 0)
+              isCheckmateDisplayed ||
+              (isInVariation && selectedVariationEval.mate === 0)
             }
             variationLine={variationLine}
           />

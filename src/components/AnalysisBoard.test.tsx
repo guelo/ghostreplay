@@ -1920,10 +1920,11 @@ describe('AnalysisBoard — variation tree integration', () => {
     expect(styles).toHaveProperty('c4')
   })
 
-  it('uses variation-cached eval for eval bar when in variation', () => {
+  it('falls back to one variation-cached eval across all selected-position consumers', () => {
     const node = makeVarNode()
     mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
     mockSelectedVarNodeId = 'var-node-1'
+    mockGetAbsolutePly.mockReturnValue(2)
     // Return cached analysis for this variation FEN
     mockGetVarAnalysis.mockImplementation((fen: string) => {
       if (fen === varNodeFen) return { playedEval: 50, id: 'req-1', move: 'Bc4', bestMove: 'Nf3', bestEval: 30, currentPositionEval: null, playedEvalMate: null, currentPositionEvalMate: null, moveIndex: null, delta: null, classification: null, blunder: false, recordable: false }
@@ -1934,6 +1935,138 @@ describe('AnalysisBoard — variation tree integration', () => {
 
     // White orientation: playerToWhite(50, 'white') = 50
     expect(capturedEvalBarProps.whitePerspectiveCp).toBe(50)
+    expect(capturedMoveListProps.headerEvalOverride).toBe('+0.5')
+    expect(capturedGraphProps.evalCp).toBe(50)
+    expect(capturedGraphProps.evalMate).toBeNull()
+    expect(capturedGraphProps.variationLine).toEqual(
+      expect.objectContaining({
+        points: [{ index: 2, cp: 50, pending: false }],
+        streaming: null,
+      }),
+    )
+  })
+
+  it('uses a FEN-matched live cp eval across the selected variation while cache analysis is pending', () => {
+    const node = makeVarNode()
+    mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
+    mockSelectedVarNodeId = 'var-node-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+    mockEngineInfoFenRef.current = varNodeFen
+    // Black is to move in varNodeFen, so a side-to-move -40cp score is +40cp
+    // from white's perspective.
+    mockEngineInfoRef.current = [
+      { score: { type: 'cp', value: -40 }, depth: 18, multipv: 1 },
+    ]
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(40)
+    expect(capturedEvalBarProps.whitePerspectiveMate).toBeNull()
+    expect(capturedMoveListProps.headerEvalOverride).toBe('+0.4')
+    expect(capturedGraphProps.evalCp).toBe(40)
+    expect(capturedGraphProps.evalMate).toBeNull()
+    expect(capturedGraphProps.variationLine).toEqual(
+      expect.objectContaining({
+        points: [{ index: 2, cp: 40, pending: false }],
+        streaming: null,
+      }),
+    )
+  })
+
+  it('uses a live mate-0 score for the selected variation badge, checkmate signal, and graph tip', () => {
+    const checkmateFen = 'r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4'
+    const beforeCheckmateFen = 'r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4'
+    const node = makeVarNode({
+      fen: checkmateFen,
+      fenBefore: beforeCheckmateFen,
+      san: 'Qxf7#',
+      uci: 'h5f7',
+    })
+    mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
+    mockSelectedVarNodeId = 'var-node-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+    mockEngineInfoFenRef.current = checkmateFen
+    mockEngineInfoRef.current = [
+      { score: { type: 'mate', value: 0 }, depth: 21, multipv: 1 },
+    ]
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    // Black is the checkmated side to move, so white's graph/bar cp is terminal +.
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(10000)
+    expect(capturedEvalBarProps.whitePerspectiveMate).toBe(0)
+    expect(capturedMoveListProps.headerEvalOverride).toBe('#')
+    expect(capturedGraphProps.evalCp).toBe(10000)
+    expect(capturedGraphProps.evalMate).toBe(0)
+    expect(capturedGraphProps.isCheckmate).toBe(true)
+    expect(capturedGraphProps.variationLine).toEqual(
+      expect.objectContaining({
+        points: [{ index: 2, cp: 10000, pending: false }],
+        streaming: null,
+      }),
+    )
+  })
+
+  it('uses the terminal variation FEN before either eval source resolves', () => {
+    const checkmateFen = 'r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4'
+    const beforeCheckmateFen = 'r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4'
+    const node = makeVarNode({
+      fen: checkmateFen,
+      fenBefore: beforeCheckmateFen,
+      san: 'Qxf7#',
+      uci: 'h5f7',
+    })
+    mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
+    mockSelectedVarNodeId = 'var-node-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(10000)
+    expect(capturedEvalBarProps.whitePerspectiveMate).toBe(0)
+    expect(capturedMoveListProps.headerEvalOverride).toBe('#')
+    expect(capturedGraphProps.evalCp).toBe(10000)
+    expect(capturedGraphProps.evalMate).toBe(0)
+    expect(capturedGraphProps.isCheckmate).toBe(true)
+    expect(capturedGraphProps.variationLine).toEqual(
+      expect.objectContaining({
+        points: [{ index: 2, cp: 10000, pending: false }],
+        streaming: null,
+      }),
+    )
+  })
+
+  it('normalizes a cp-only cache entry at a terminal variation FEN to checkmate', () => {
+    const checkmateFen = 'r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4'
+    const beforeCheckmateFen = 'r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4'
+    const node = makeVarNode({
+      fen: checkmateFen,
+      fenBefore: beforeCheckmateFen,
+      san: 'Qxf7#',
+      uci: 'h5f7',
+    })
+    mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
+    mockSelectedVarNodeId = 'var-node-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+    mockGetVarAnalysis.mockImplementation((fen: string) => {
+      if (fen === checkmateFen) return { playedEval: 25, id: 'req-1', move: 'Qxf7#', bestMove: 'Qxf7#', bestEval: 25, currentPositionEval: null, playedEvalMate: null, currentPositionEvalMate: null, moveIndex: null, delta: null, classification: null, blunder: false, recordable: false }
+      return undefined
+    })
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(10000)
+    expect(capturedEvalBarProps.whitePerspectiveMate).toBe(0)
+    expect(capturedMoveListProps.headerEvalOverride).toBe('#')
+    expect(capturedGraphProps.evalCp).toBe(10000)
+    expect(capturedGraphProps.evalMate).toBe(0)
+    expect(capturedGraphProps.isCheckmate).toBe(true)
+    expect(capturedGraphProps.variationLine).toEqual(
+      expect.objectContaining({
+        points: [{ index: 2, cp: 10000, pending: false }],
+        streaming: null,
+      }),
+    )
   })
 
   it('uses game eval for eval bar when not in variation', () => {
