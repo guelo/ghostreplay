@@ -13,19 +13,21 @@ import { hasRenderableBadge } from "../utils/openingDeltaBadge";
 
 type BoardOrientation = "white" | "black";
 
-/** Where a delta came from: the terminal endpoint's warm (possibly stale) read,
- *  or the poll's provably-fresh reconciliation. Only "reconciled" deltas are
- *  worth promoting to a late notification — a warm terminal delta is commonly
- *  equal to the stored before-score and would render the same suppressed zero. */
-export type DeltaOrigin = "terminal" | "reconciled";
+/** Whether the current session's warm opening-score delta has finished its
+ *  provably-fresh reconciliation. */
+export type OpeningDeltaFreshness = "pending" | "fresh" | "unavailable";
 
 export type SessionOpeningDelta = {
   sessionId: string;
   items: OpeningScoreDeltaItem[] | null;
-  origin: DeltaOrigin;
+  freshness: OpeningDeltaFreshness;
 };
 
-export type LateOpeningDelta = SessionOpeningDelta & { nonce: number };
+/** Only a provably-fresh result may be promoted to the previous-drill queue. */
+export type LateOpeningDelta = Omit<SessionOpeningDelta, "freshness"> & {
+  freshness: "fresh";
+  nonce: number;
+};
 
 /** Identity of the applied position a drill root confirmation is about. Every
  *  field is load-bearing: the confirmation's staleness guard re-checks all of
@@ -67,7 +69,7 @@ let lateDeltaNonce = 0;
  */
 function enqueueLate(
   queue: LateOpeningDelta[],
-  delta: SessionOpeningDelta,
+  delta: SessionOpeningDelta & { freshness: "fresh" },
 ): LateOpeningDelta[] {
   lateDeltaNonce += 1;
   const next = [...queue, { ...delta, nonce: lateDeltaNonce }];
@@ -224,6 +226,12 @@ export type GameActions = {
     items: OpeningScoreDeltaItem[] | null,
     pollToken: number,
   ) => void;
+  /** Release a matching pending current-session gate when polling genuinely
+   *  gives up. Retains the warm items for display. */
+  markOpeningDeltaUnavailable: (
+    sessionId: string,
+    pollToken: number,
+  ) => void;
   /** Mark (or unmark, with null) the session the player is leaving, so a delta
    *  reconciling during the /start round-trip is queued rather than committed to
    *  an invisible inline slot. */
@@ -334,17 +342,17 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
   setTerminalOpeningDelta: (sessionId, items) =>
     set(() => ({
-      openingScoreDelta: { sessionId, items, origin: "terminal" as const },
+      openingScoreDelta: { sessionId, items, freshness: "pending" as const },
     })),
 
   applyPolledOpeningDelta: (sessionId, items, pollToken) =>
     set((s) => {
       // Superseded by a deliberate abandonment while this request was in flight.
       if (pollToken !== s.openingDeltaPollToken) return {};
-      const delta: SessionOpeningDelta = {
+      const delta: SessionOpeningDelta & { freshness: "fresh" } = {
         sessionId,
         items,
-        origin: "reconciled" as const,
+        freshness: "fresh",
       };
       // Still the current drill AND its end screen is still up: reconcile the
       // warm value in place, where it renders as inline badges.
@@ -355,6 +363,24 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
       // dropping it — but only if it would actually render something.
       if (!hasRenderableBadge(items)) return {};
       return { lateOpeningDeltas: enqueueLate(s.lateOpeningDeltas, delta) };
+    }),
+
+  markOpeningDeltaUnavailable: (sessionId, pollToken) =>
+    set((s) => {
+      if (pollToken !== s.openingDeltaPollToken) return {};
+      if (s.sessionId !== sessionId) return {};
+      if (
+        s.openingScoreDelta?.sessionId !== sessionId ||
+        s.openingScoreDelta.freshness !== "pending"
+      ) {
+        return {};
+      }
+      return {
+        openingScoreDelta: {
+          ...s.openingScoreDelta,
+          freshness: "unavailable" as const,
+        },
+      };
     }),
 
   setDepartingSession: (sessionId) =>

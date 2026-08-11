@@ -503,7 +503,10 @@ export const useChessGameLifecycle = ({
           );
           // The immediate delta is the warm/possibly-stale cache; reconcile to the
           // provably-fresh value once the background recompute lands (g-fix-end-latency).
-          void pollFreshOpeningDelta(finalizingSessionId);
+          void pollFreshOpeningDelta(
+            finalizingSessionId,
+            "drill_natural_end",
+          );
           s.setIsRated(false);
           // Natural-ended drills remain hidden and unrated unless converted.
           // (The upload tail was already discarded by stopSessionUploads, folded
@@ -552,7 +555,7 @@ export const useChessGameLifecycle = ({
           );
         // Reconcile the warm delta to the provably-fresh value once the background
         // recompute lands (g-fix-end-latency).
-        void pollFreshOpeningDelta(finalizingSessionId);
+        void pollFreshOpeningDelta(finalizingSessionId, "game_end");
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
           finalizingSessionId,
@@ -669,7 +672,7 @@ export const useChessGameLifecycle = ({
         );
         // Reconcile the warm delta to the provably-fresh value once the background
         // recompute lands (g-fix-end-latency). store.sessionId is the id resigned above.
-        void pollFreshOpeningDelta(store.sessionId!);
+        void pollFreshOpeningDelta(store.sessionId!, "game_revert");
         s.setIsRated(false);
         s.setIsPracticeContinuation(true);
         s.setDrillState(null);
@@ -1161,7 +1164,7 @@ export const useChessGameLifecycle = ({
         );
       // Reconcile the warm delta to the provably-fresh value once the background
       // recompute lands (g-fix-end-latency).
-      void pollFreshOpeningDelta(finalizingSessionId);
+      void pollFreshOpeningDelta(finalizingSessionId, "game_resign");
       // The only resign path that reaches the fanfare (audio gate default-on), so
       // tag its reason for the termination-type subtitle (g-8079). The three
       // pseudo-end resign literals (abandonStoppedDrill "Drill abandoned.",

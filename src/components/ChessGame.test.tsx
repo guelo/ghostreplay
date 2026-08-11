@@ -27,6 +27,7 @@ const fetchCurrentRatingMock = vi.fn();
 const getStatsAchievementsMock = vi.fn();
 const fetchSessionOpeningsMock = vi.fn();
 const pollFreshOpeningDeltaMock = vi.fn();
+const getOpeningDeltaPollSnapshotMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
 const captureEventMock = vi.fn();
@@ -72,6 +73,9 @@ vi.mock("../utils/api", async (importOriginal) => {
 vi.mock("../utils/openingDeltaPoll", () => ({
   pollFreshOpeningDelta: (...args: unknown[]) =>
     pollFreshOpeningDeltaMock(...args),
+  getOpeningDeltaPollSnapshot: (...args: unknown[]) =>
+    getOpeningDeltaPollSnapshotMock(...args),
+  getOpeningDeltaVisibility: () => "visible",
   abortOpeningDeltaPolls: () => {},
 }));
 
@@ -416,6 +420,8 @@ beforeEach(() => {
     start_ply: 1,
   });
   captureEventMock.mockReset();
+  getOpeningDeltaPollSnapshotMock.mockReset();
+  getOpeningDeltaPollSnapshotMock.mockReturnValue(null);
   getStatsAchievementsMock.mockReset();
   getStatsAchievementsMock.mockResolvedValue({
     perfect_streak: { personal_best: 0 },
@@ -453,6 +459,8 @@ describe("ChessGame start flow", () => {
     getOpeningRootsMock.mockResolvedValue({ families: [] });
     __resetOpeningRootIndexCache();
     pollFreshOpeningDeltaMock.mockReset();
+    getOpeningDeltaPollSnapshotMock.mockReset();
+    getOpeningDeltaPollSnapshotMock.mockReturnValue(null);
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     lookupOpeningByFenMock.mockReset();
@@ -1431,7 +1439,10 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().viewIndex).toBe(-1);
     });
     // The reconcile-poll fires for the failed drill session (g-fix-end-latency).
-    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-characterization");
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
+      "session-characterization",
+      "drill_accuracy_fail",
+    );
     // The full move history is durably uploaded BEFORE failDrill computes the
     // opening-score delta (g-xanz barrier). The bug was ordering-specific, so
     // assert the upload ran first — not merely that both were called.
@@ -2443,7 +2454,134 @@ describe("ChessGame characterization safeguards", () => {
       opening_key: "target-fen",
       player_color: "white",
       engine_elo: MAIA_ELO_BINS[0],
+      surface: "drill_stop",
+      opening_delta_state_at_click: "not_applicable",
     });
+  });
+
+  it("blocks repeated stopped-drill activations until the matching delta is fresh", async () => {
+    useGameStore.setState({
+      sessionId: "drill-wait",
+      isGameActive: true,
+      drillOpeningKey: "target-fen",
+      drillOpeningName: "Target",
+      drillState: "failed",
+      drillStrictness: "standard",
+      drillStrictnessCp: 25,
+      drillTerminalReason: "accuracy",
+      playerColor: "white",
+      departingSessionId: null,
+    });
+    useGameStore.getState().setTerminalOpeningDelta("drill-wait", null);
+    getOpeningDeltaPollSnapshotMock.mockReturnValue({
+      trigger: "drill_accuracy_fail",
+      elapsedMs: 1750,
+      attemptCount: 2,
+      requestErrorCount: 0,
+    });
+
+    render(<ChessGame />);
+    const waiting = screen.getByRole("button", {
+      name: "Updating score before another drill",
+    });
+
+    fireEvent.click(waiting, { detail: 1 });
+    fireEvent.click(waiting, { detail: 1 });
+
+    const blockedEvents = captureEventMock.mock.calls.filter(
+      ([event]) => event === "drill_again_blocked",
+    );
+    expect(blockedEvents).toEqual([
+      [
+        "drill_again_blocked",
+        {
+          surface: "drill_stop",
+          trigger: "drill_accuracy_fail",
+          wait_elapsed_ms: 1750,
+          input_method: "pointer",
+          visibility: "visible",
+        },
+      ],
+      [
+        "drill_again_blocked",
+        {
+          surface: "drill_stop",
+          trigger: "drill_accuracy_fail",
+          wait_elapsed_ms: 1750,
+          input_method: "pointer",
+          visibility: "visible",
+        },
+      ],
+    ]);
+    expect(startDrillMock).not.toHaveBeenCalled();
+    expect(abandonDrillMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().departingSessionId).toBeNull();
+
+    act(() => {
+      const state = useGameStore.getState();
+      state.applyPolledOpeningDelta(
+        "drill-wait",
+        null,
+        state.openingDeltaPollToken,
+      );
+    });
+    startDrillMock.mockResolvedValueOnce(
+      makeDrillResponse({ session_id: "drill-after-wait" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^again$/i }), {
+      detail: 1,
+    });
+
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(1));
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_clicked", {
+      opening_key: "target-fen",
+      player_color: "white",
+      engine_elo: expect.any(Number),
+      surface: "drill_stop",
+      opening_delta_state_at_click: "fresh",
+    });
+    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
+  });
+
+  it("blocks the repeat-handler settings fallback while its adjacent gear remains usable", async () => {
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    useGameStore.setState({
+      sessionId: "drill-wait-settings",
+      isGameActive: true,
+      drillOpeningKey: "target-fen",
+      drillState: "failed",
+      drillStrictness: "standard",
+      drillStrictnessCp: null,
+      drillTerminalReason: "accuracy",
+      playerColor: "white",
+    });
+    useGameStore
+      .getState()
+      .setTerminalOpeningDelta("drill-wait-settings", null);
+
+    render(<ChessGame />);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Updating score before another drill",
+      }),
+    );
+
+    expect(startDrillMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /start drill/i })).toBeNull();
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_blocked", {
+      surface: "drill_stop",
+      trigger: "unknown",
+      wait_elapsed_ms: null,
+      input_method: "programmatic",
+      visibility: "visible",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /change drill settings/i }),
+    );
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
   });
 
   it("opens the setup overlay instead of restarting when exact cp is missing", async () => {
@@ -2463,6 +2601,13 @@ describe("ChessGame characterization safeguards", () => {
     expect(
       await screen.findByRole("button", { name: /start drill/i }),
     ).toBeInTheDocument();
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_clicked", {
+      opening_key: "target-fen",
+      player_color: "white",
+      engine_elo: null,
+      surface: "drill_stop",
+      opening_delta_state_at_click: "not_applicable",
+    });
   });
 
   it("a drill restarted via Again still stops on a post-root bad move", async () => {
@@ -2962,6 +3107,12 @@ describe("ChessGame characterization safeguards", () => {
     });
     act(() => {
       useGameStore.getState().setDrillState("failed");
+      const state = useGameStore.getState();
+      state.applyPolledOpeningDelta(
+        state.sessionId!,
+        null,
+        state.openingDeltaPollToken,
+      );
     });
 
     expect(
@@ -2969,6 +3120,57 @@ describe("ChessGame characterization safeguards", () => {
     ).toBeInTheDocument();
     expect(useGameStore.getState().gameResult).not.toBeNull();
   };
+
+  it("blocks natural-end Another drill until freshness, then restarts from the same surface", async () => {
+    await reachNaturalEndDrillBanner();
+    const sessionId = useGameStore.getState().sessionId!;
+    act(() => {
+      useGameStore.getState().setTerminalOpeningDelta(sessionId, null);
+    });
+    getOpeningDeltaPollSnapshotMock.mockReturnValue({
+      trigger: "drill_natural_end",
+      elapsedMs: 1500,
+      attemptCount: 2,
+      requestErrorCount: 0,
+    });
+
+    const waiting = await screen.findByRole("button", {
+      name: "Updating score before another drill",
+    });
+    fireEvent.click(waiting, { detail: 1 });
+
+    expect(startDrillMock).not.toHaveBeenCalled();
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_blocked", {
+      surface: "post_game",
+      trigger: "drill_natural_end",
+      wait_elapsed_ms: 1500,
+      input_method: "pointer",
+      visibility: "visible",
+    });
+
+    act(() => {
+      const state = useGameStore.getState();
+      state.applyPolledOpeningDelta(
+        sessionId,
+        [],
+        state.openingDeltaPollToken,
+      );
+    });
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+    fireEvent.click(
+      screen.getByRole("button", { name: /another drill/i }),
+      { detail: 1 },
+    );
+
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(1));
+    expect(captureEventMock).toHaveBeenCalledWith(
+      "drill_again_clicked",
+      expect.objectContaining({
+        surface: "post_game",
+        opening_delta_state_at_click: "fresh",
+      }),
+    );
+  });
 
   it("natural-end Another drill restarts instantly with exact opening/side/strictness (difficulty resampled)", async () => {
     await reachNaturalEndDrillBanner();
@@ -6527,6 +6729,42 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
       });
     });
     expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
+  });
+
+  it("restores the reviewed drill in the pending wait state and keeps the gear available", async () => {
+    seedAbandonedDrillStore();
+    useGameStore.getState().setTerminalOpeningDelta("drill-1", null);
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+    getOpeningDeltaPollSnapshotMock.mockReturnValue({
+      trigger: "drill_accuracy_fail",
+      elapsedMs: 3000,
+      attemptCount: 3,
+      requestErrorCount: 0,
+    });
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+
+    render(<ChessGame />);
+
+    const waiting = screen.getByRole("button", {
+      name: "Updating score before another drill",
+    });
+    fireEvent.click(waiting, { detail: 1 });
+    expect(startDrillMock).not.toHaveBeenCalled();
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_blocked", {
+      surface: "drill_stop",
+      trigger: "drill_accuracy_fail",
+      wait_elapsed_ms: 3000,
+      input_method: "pointer",
+      visibility: "visible",
+    });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /change drill settings/i }),
+    );
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
   });
 
   it("Again restarts with the preserved opening/side/strictness (difficulty resampled) and no stale-session traffic", async () => {

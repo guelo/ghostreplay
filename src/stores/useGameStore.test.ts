@@ -58,7 +58,10 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     is_new: before == null,
   });
 
-  const reconcile = (sessionId: string, items: ReturnType<typeof item>[]) =>
+  const reconcile = (
+    sessionId: string,
+    items: ReturnType<typeof item>[] | null,
+  ) =>
     useGameStore
       .getState()
       .applyPolledOpeningDelta(
@@ -76,7 +79,7 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "s1",
       items: changes,
-      origin: "terminal",
+      freshness: "pending",
     });
   });
 
@@ -90,9 +93,53 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "s1",
       items: fresh,
-      origin: "reconciled",
+      freshness: "fresh",
     });
     expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
+  });
+
+  it.each([null, []])("marks a no-change %s response fresh", (items) => {
+    useGameStore.setState({ sessionId: "s1" });
+    useGameStore.getState().setTerminalOpeningDelta("s1", null);
+
+    reconcile("s1", items);
+
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "s1",
+      items,
+      freshness: "fresh",
+    });
+  });
+
+  it("marks only the matching pending current session unavailable and retains warm items", () => {
+    const warm = [item("k1", 41, 44)];
+    useGameStore.setState({ sessionId: "s1" });
+    useGameStore.getState().setTerminalOpeningDelta("s1", warm);
+    const token = useGameStore.getState().openingDeltaPollToken;
+
+    useGameStore.getState().markOpeningDeltaUnavailable("other", token);
+    expect(useGameStore.getState().openingScoreDelta?.freshness).toBe("pending");
+
+    useGameStore.getState().markOpeningDeltaUnavailable("s1", token + 1);
+    expect(useGameStore.getState().openingScoreDelta?.freshness).toBe("pending");
+
+    useGameStore.getState().markOpeningDeltaUnavailable("s1", token);
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "s1",
+      items: warm,
+      freshness: "unavailable",
+    });
+    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
+  });
+
+  it("does not downgrade an already-fresh record to unavailable", () => {
+    useGameStore.setState({ sessionId: "s1" });
+    reconcile("s1", [item("k1", 41, 47)]);
+    const token = useGameStore.getState().openingDeltaPollToken;
+
+    useGameStore.getState().markOpeningDeltaUnavailable("s1", token);
+
+    expect(useGameStore.getState().openingScoreDelta?.freshness).toBe("fresh");
   });
 
   it("queues a superseded session's delta instead of dropping it", () => {

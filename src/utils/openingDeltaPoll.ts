@@ -1,148 +1,289 @@
+import { captureEvent } from "../analytics/posthog";
+import { useGameStore } from "../stores/useGameStore";
+import { hasRenderableBadge } from "./openingDeltaBadge";
 import { getOpeningScoreDelta } from "./api";
 import type { OpeningScoreDeltaPollResponse } from "./api";
-import { useGameStore } from "../stores/useGameStore";
 
-// ≈ the scheduler's quiet_window debounce, so each RETRY lands roughly one
-// recompute cycle apart; the max-attempts ceiling bounds total work even if the
-// user lingers on the end screen.
+// Approximately the scheduler's quiet-window debounce, so retries land roughly
+// one recompute cycle apart.
 const DELTA_POLL_INTERVAL_MS = 1500;
 // Phase 2 publishes played-root scores before the whole-batch commit, but keeps
 // the scheduler's 1.5s quiet window and can still queue behind an already-running
-// whole-graph job. On the restored PostgreSQL 18 copy the measured worst
-// durable-terminal-to-fresh-read bound was 37.2s (a process-cold prior job, then
-// warm scoped publication/read). Formula:
+// whole-graph job. The measured durable-terminal-to-fresh-read bound was 37.2s:
 //   1 + ceil((37.2s + 2 * 1.5s) / 1.5s) = 28 attempts.
-// The first request is immediate, so this is a ~40.5s sampling span. It is not a
-// strict wall-clock ceiling: request timeouts can extend elapsed time. Phase 3's
-// immediate priority lane may tighten it after remeasurement.
+// That is a 40.5s request-start span. If every request reaches its 4s timeout,
+// the full gate can last 28 * 4s + 27 * 1.5s = 152.5s (plus browser suspension).
 const DELTA_POLL_MAX_ATTEMPTS = 28;
 const DELTA_POLL_REQUEST_TIMEOUT_MS = 4000;
-// Matches the store's LATE_OPENING_DELTA_LIMIT: a poll that survives to commit
-// needs a queue slot to land in, so holding more polls than the queue can hold
-// only buys work that will be discarded.
+// Matches the bounded late-result queue: no more than three live computations
+// are useful, regardless of how many evicted continuations are still waking.
 const DELTA_POLL_MAX_CONCURRENT = 3;
 
-/**
- * Reconcile-poll the end-of-session opening-score delta (g-fix-end-latency).
- *
- * The terminal endpoints serve a warm — possibly stale — delta immediately (no
- * multi-second scheduler wait) and enqueue a background recompute. This loop
- * polls GET /api/openings/score-delta until the server reports `is_fresh`, then
- * commits the provably-fresh value (erasing any transient over/under-statement
- * from the warm read). It also stops on `is_fresh=true` when nothing crossed /
- * the cache was already fresh.
- *
- * The first attempt fires IMMEDIATELY (the sleep is trailing, not leading): the
- * old leading sleep created a guaranteed 1500ms window in which clicking "Again"
- * destroyed the just-finished drill's reconciliation before it was ever
- * attempted (g-f3m4).
- *
- * Cancellation is no longer "bail when sessionId changes" — that discarded drill
- * A's diff outright. Two distinct transitions are modelled instead:
- *
- *   - SUPERSEDE (a new drill starts): the loop runs to completion; the store
- *     routes the result to the late-notification queue, owned by A, never into
- *     B's inline badges.
- *   - ABANDON (handleReset): the poll token is bumped and this loop's signal is
- *     aborted. The token is re-checked at COMMIT time inside the store updater —
- *     an AbortController alone leaves a race where the response resolves between
- *     the abort and the commit.
- */
+export type OpeningDeltaPollTrigger =
+  | "drill_accuracy_fail"
+  | "drill_natural_end"
+  | "game_end"
+  | "game_resign"
+  | "game_revert";
 
-type ActivePoll = { promise: Promise<void>; controller: AbortController };
+export type OpeningDeltaPollOutcome =
+  | "fresh"
+  | "attempts_exhausted"
+  | "abandoned"
+  | "capacity_evicted";
 
-// In-flight loops keyed by session, insertion-ordered. A same-session
-// double-start (overlapping terminal paths) joins the running loop instead of
-// spawning a second one.
+export type OpeningDeltaPollResult = {
+  trigger: OpeningDeltaPollTrigger;
+  mode: "drill" | "game";
+  outcome: OpeningDeltaPollOutcome;
+  elapsedMs: number;
+  attemptCount: number;
+  requestErrorCount: number;
+  freshOnFirstAttempt: boolean;
+  sessionReplacedBeforeCompletion: boolean;
+  hasRenderableChange: boolean;
+  visibilityAtStart: string;
+  visibilityAtEnd: string;
+  visibilityChanged: boolean;
+};
+
+export type OpeningDeltaPollSnapshot = {
+  trigger: OpeningDeltaPollTrigger;
+  elapsedMs: number;
+  attemptCount: number;
+  requestErrorCount: number;
+};
+
+type LoopAbortReason = "abandoned" | "capacity_evicted";
+
+type ActivePoll = {
+  promise: Promise<OpeningDeltaPollResult> | null;
+  controller: AbortController;
+  abortReason: LoopAbortReason | null;
+  sessionId: string;
+  trigger: OpeningDeltaPollTrigger;
+  startedAt: number;
+  attemptCount: number;
+  requestErrorCount: number;
+  visibilityAtStart: string;
+};
+
+// Insertion-ordered by session. Aborted entries remain until their own single
+// finalizer runs; capacity accounting counts only non-aborted entries.
 const runningLoops = new Map<string, ActivePoll>();
 
-export function pollFreshOpeningDelta(sessionId: string): Promise<void> {
-  const existing = runningLoops.get(sessionId);
-  if (existing) return existing.promise;
+const monotonicNow = (): number =>
+  typeof performance === "undefined" ? Date.now() : performance.now();
 
-  // Overflow: abort and drop the OLDEST active poll before starting the newest,
-  // mirroring the late queue's drop-oldest rule so the two layers can never
-  // discard different drills.
-  while (runningLoops.size >= DELTA_POLL_MAX_CONCURRENT) {
-    const oldest = runningLoops.entries().next().value;
+export const getOpeningDeltaVisibility = (): string =>
+  typeof document === "undefined" ? "unknown" : document.visibilityState;
+
+const pollMode = (trigger: OpeningDeltaPollTrigger): "drill" | "game" =>
+  trigger.startsWith("drill_") ? "drill" : "game";
+
+const activeLoopCount = (): number => {
+  let count = 0;
+  for (const poll of runningLoops.values()) {
+    if (!poll.controller.signal.aborted) count += 1;
+  }
+  return count;
+};
+
+const oldestLiveLoop = (): ActivePoll | null => {
+  for (const poll of runningLoops.values()) {
+    if (!poll.controller.signal.aborted) return poll;
+  }
+  return null;
+};
+
+/**
+ * Reconcile the terminal endpoint's warm opening-score delta to a provably-fresh
+ * value. Same-session callers join one loop and therefore share its clock,
+ * counters, result, and completion event.
+ */
+export function pollFreshOpeningDelta(
+  sessionId: string,
+  trigger: OpeningDeltaPollTrigger,
+): Promise<OpeningDeltaPollResult> {
+  const existing = runningLoops.get(sessionId);
+  if (
+    existing &&
+    !existing.controller.signal.aborted &&
+    existing.promise
+  ) {
+    return existing.promise;
+  }
+
+  // Eviction is asynchronous: abort now, but let the evicted loop's continuation
+  // own its unavailable transition, event, result, and map cleanup.
+  while (activeLoopCount() >= DELTA_POLL_MAX_CONCURRENT) {
+    const oldest = oldestLiveLoop();
     if (!oldest) break;
-    const [oldestId, poll] = oldest;
-    poll.controller.abort();
-    runningLoops.delete(oldestId);
+    oldest.abortReason = "capacity_evicted";
+    oldest.controller.abort("capacity_evicted");
     console.warn(
       `[OpeningDelta] Poll concurrency cap (${DELTA_POLL_MAX_CONCURRENT}); ` +
-        `aborted oldest (session ${oldestId}).`,
+        `aborted oldest (session ${oldest.sessionId}).`,
     );
   }
 
   const controller = new AbortController();
-  const promise = runDeltaPollLoop(sessionId, controller.signal).finally(() => {
-    // Only remove our own entry — an overflow eviction may already have replaced
-    // it with a newer poll for the same key.
-    if (runningLoops.get(sessionId)?.controller === controller) {
-      runningLoops.delete(sessionId);
-    }
-  });
-  runningLoops.set(sessionId, { promise, controller });
-  return promise;
+  const poll: ActivePoll = {
+    promise: null,
+    controller,
+    abortReason: null,
+    sessionId,
+    trigger,
+    startedAt: monotonicNow(),
+    attemptCount: 0,
+    requestErrorCount: 0,
+    visibilityAtStart: getOpeningDeltaVisibility(),
+  };
+  poll.promise = runDeltaPollLoop(poll);
+  runningLoops.set(sessionId, poll);
+  return poll.promise;
+}
+
+export function getOpeningDeltaPollSnapshot(
+  sessionId: string,
+): OpeningDeltaPollSnapshot | null {
+  const poll = runningLoops.get(sessionId);
+  if (!poll || poll.controller.signal.aborted) return null;
+  return {
+    trigger: poll.trigger,
+    elapsedMs: Math.max(0, Math.round(monotonicNow() - poll.startedAt)),
+    attemptCount: poll.attemptCount,
+    requestErrorCount: poll.requestErrorCount,
+  };
 }
 
 async function runDeltaPollLoop(
-  sessionId: string,
-  signal: AbortSignal,
-): Promise<void> {
-  // Snapshot the token at request time; the commit re-checks it against the
-  // token as of the commit, which is what actually closes the race.
+  poll: ActivePoll,
+): Promise<OpeningDeltaPollResult> {
   const pollToken = useGameStore.getState().openingDeltaPollToken;
+  let sawFresh = false;
+  let hasRenderableChange = false;
+  let result: OpeningDeltaPollResult | null = null;
 
-  for (let attempt = 0; attempt < DELTA_POLL_MAX_ATTEMPTS; attempt += 1) {
-    // Trailing sleep: attempt 0 fires with no delay.
-    if (attempt > 0) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, DELTA_POLL_INTERVAL_MS),
-      );
+  try {
+    for (let attempt = 0; attempt < DELTA_POLL_MAX_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await delay(DELTA_POLL_INTERVAL_MS);
+      if (poll.controller.signal.aborted) break;
+
+      poll.attemptCount += 1;
+      let response: OpeningScoreDeltaPollResponse;
+      try {
+        response = await requestDeltaWithTimeout(poll);
+      } catch {
+        // An explicit loop abort is a terminal outcome, not a request error.
+        if (poll.controller.signal.aborted) break;
+        poll.requestErrorCount += 1;
+        continue;
+      }
+
+      // A capacity eviction may arrive while a fulfilled response continuation
+      // is queued. It must never commit under its still-valid global store token.
+      if (poll.controller.signal.aborted) break;
+
+      if (response.is_fresh) {
+        const items = response.opening_score_changes ?? null;
+        sawFresh = true;
+        hasRenderableChange = hasRenderableBadge(items);
+        useGameStore
+          .getState()
+          .applyPolledOpeningDelta(poll.sessionId, items, pollToken);
+        break;
+      }
     }
-    if (signal.aborted) return;
+  } finally {
+    // This is the only terminal path for a newly-created loop.
+    result = finalizePoll(poll, pollToken, sawFresh, hasRenderableChange);
+  }
 
-    let res: OpeningScoreDeltaPollResponse;
-    try {
-      res = await getOpeningScoreDelta(sessionId, {
-        signal: anySignal([
-          signal,
-          AbortSignal.timeout(DELTA_POLL_REQUEST_TIMEOUT_MS),
-        ]),
-      });
-    } catch {
-      // Abort / timeout / transient network error. An abort is terminal; a
-      // timeout retries on the next tick.
-      if (signal.aborted) return;
-      continue;
-    }
+  return result;
+}
 
-    // Re-check AFTER the await: a concurrency eviction (or an abandonment) can
-    // land while the response is in flight, and a fulfilled promise still runs
-    // its continuation. The store's poll token does not cover eviction — that is
-    // a client-side capacity decision, not a global invalidation — so an evicted
-    // loop would otherwise commit with a perfectly valid token.
-    if (signal.aborted) return;
+function finalizePoll(
+  poll: ActivePoll,
+  pollToken: number,
+  sawFresh: boolean,
+  hasRenderableChange: boolean,
+): OpeningDeltaPollResult {
+  const outcome: OpeningDeltaPollOutcome = sawFresh
+    ? "fresh"
+    : poll.abortReason === "capacity_evicted"
+      ? "capacity_evicted"
+      : poll.controller.signal.aborted
+        ? "abandoned"
+        : "attempts_exhausted";
 
-    if (res.is_fresh) {
-      useGameStore
-        .getState()
-        .applyPolledOpeningDelta(
-          sessionId,
-          res.opening_score_changes ?? null,
-          pollToken,
-        );
-      return;
-    }
+  if (runningLoops.get(poll.sessionId) === poll) {
+    runningLoops.delete(poll.sessionId);
+  }
+
+  if (outcome === "attempts_exhausted" || outcome === "capacity_evicted") {
+    useGameStore
+      .getState()
+      .markOpeningDeltaUnavailable(poll.sessionId, pollToken);
+  }
+
+  const visibilityAtEnd = getOpeningDeltaVisibility();
+  const state = useGameStore.getState();
+  const completion: OpeningDeltaPollResult = {
+    trigger: poll.trigger,
+    mode: pollMode(poll.trigger),
+    outcome,
+    elapsedMs: Math.max(0, Math.round(monotonicNow() - poll.startedAt)),
+    attemptCount: poll.attemptCount,
+    requestErrorCount: poll.requestErrorCount,
+    freshOnFirstAttempt: sawFresh && poll.attemptCount === 1,
+    sessionReplacedBeforeCompletion: state.sessionId !== poll.sessionId,
+    hasRenderableChange,
+    visibilityAtStart: poll.visibilityAtStart,
+    visibilityAtEnd,
+    visibilityChanged: poll.visibilityAtStart !== visibilityAtEnd,
+  };
+
+  captureEvent("opening_delta_poll_completed", {
+    trigger: completion.trigger,
+    mode: completion.mode,
+    outcome: completion.outcome,
+    elapsed_ms: completion.elapsedMs,
+    attempt_count: completion.attemptCount,
+    request_error_count: completion.requestErrorCount,
+    fresh_on_first_attempt: completion.freshOnFirstAttempt,
+    session_replaced_before_completion:
+      completion.sessionReplacedBeforeCompletion,
+    has_renderable_change: completion.hasRenderableChange,
+    visibility_at_start: completion.visibilityAtStart,
+    visibility_at_end: completion.visibilityAtEnd,
+    visibility_changed: completion.visibilityChanged,
+  });
+
+  return completion;
+}
+
+async function requestDeltaWithTimeout(
+  poll: ActivePoll,
+): Promise<OpeningScoreDeltaPollResponse> {
+  const timeout = new AbortController();
+  const timeoutId = setTimeout(
+    () => timeout.abort("request_timeout"),
+    DELTA_POLL_REQUEST_TIMEOUT_MS,
+  );
+  try {
+    return await getOpeningScoreDelta(poll.sessionId, {
+      signal: anySignal([poll.controller.signal, timeout.signal]),
+    });
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
-/**
- * Compose abort signals. `AbortSignal.any` is not available in every runtime we
- * target (or in the jsdom test environment), so fall back to a manual relay.
- */
+const delay = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+/** Compose abort signals without depending on AbortSignal.any in jsdom. */
 function anySignal(signals: AbortSignal[]): AbortSignal {
   if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
   const controller = new AbortController();
@@ -158,16 +299,15 @@ function anySignal(signals: AbortSignal[]): AbortSignal {
   return controller.signal;
 }
 
-/**
- * Stop every in-flight poll. Pairs with `abandonOpeningDeltas`: that action
- * invalidates RESULTS via the token, but a loop whose server keeps answering
- * `is_fresh: false` never reaches a commit, so without this it would burn its
- * full attempt budget and hold a concurrency slot against the next drill.
- */
+/** Stop every live loop as a deliberate abandonment. Finalization stays owned
+ * by each loop's continuation, preserving one completion path and event. */
 export function abortOpeningDeltaPolls(): void {
-  for (const poll of runningLoops.values()) poll.controller.abort();
-  runningLoops.clear();
+  for (const poll of runningLoops.values()) {
+    if (poll.controller.signal.aborted) continue;
+    poll.abortReason = "abandoned";
+    poll.controller.abort("abandoned");
+  }
 }
 
-/** Test seam: drop all in-flight poll bookkeeping between cases. */
+/** Test seam: production-equivalent abandonment between cases. */
 export const __resetOpeningDeltaPolls = abortOpeningDeltaPolls;

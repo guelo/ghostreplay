@@ -65,6 +65,22 @@ The snapshot is identity-bound to that session and disappears on refresh or dire
 It creates no rating event, saved game review, history row, or normal-game statistic.
 Returning to the stopped-drill presentation never revives the ended backend session.
 
+## Repeating a finished drill
+
+When a terminal drill response starts opening-score reconciliation, a direct repeat
+action for that same session waits for the provably-fresh result. A fresh response
+with no visible score change still releases the action. Poll exhaustion or client
+capacity eviction fails open rather than stranding the end screen; a pre-root
+off-route failure starts no reconciliation and remains immediately repeatable.
+Settings, analysis, ordinary new-game actions, and other departures are not gated.
+
+The initial evaluation uses the full reconciliation lifetime as the repeat gate.
+The exact attempt, timeout, failure, accessibility, and telemetry mechanics live in
+[opening-score drill-repeat wait telemetry](../opening-delta-drill-wait.md) and the
+browser implementation. A fresh result that belongs to a session left through a
+non-repeat path retains its previous-session ownership and cannot contaminate the
+new session's inline score.
+
 ## Authorities
 
 - Lifecycle, conversion, and route validation:
@@ -79,3 +95,5 @@ Returning to the stopped-drill presentation never revives the ended backend sess
 - Browser lifecycle and review behavior:
   [src/hooks/useChessGameLifecycle.ts](../../src/hooks/useChessGameLifecycle.ts),
   [src/components/ChessGame.tsx](../../src/components/ChessGame.tsx), and their tests.
+- Repeat-gate timing and event contract:
+  [opening-score drill-repeat wait telemetry](../opening-delta-drill-wait.md).

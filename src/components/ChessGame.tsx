@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SetStateAction } from "react";
+import type { MouseEvent as ReactMouseEvent, SetStateAction } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Chess } from "chess.js";
 import type { Square } from "chess.js";
@@ -17,7 +17,11 @@ import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import type { DrillRootConfirmRequest } from "../stores/useGameStore";
-import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
+import {
+  getOpeningDeltaPollSnapshot,
+  getOpeningDeltaVisibility,
+  pollFreshOpeningDelta,
+} from "../utils/openingDeltaPoll";
 import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
@@ -39,6 +43,7 @@ import {
   type DrillFailInfo,
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
+import { classifyDrillAgainInput } from "./chess-game/domain/drillAgainActivation";
 import {
   derivePerfectStreak,
   type PreviousPerfectStreakState,
@@ -328,6 +333,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const ratingScores = useGameStore((s) => s.ratingScores);
   const scoreChanges = useGameStore((s) => s.scoreChanges);
   const openingScoreDelta = useGameStore((s) => s.openingScoreDelta);
+  const isDrillDeltaPending =
+    openingScoreDelta?.sessionId === sessionId &&
+    openingScoreDelta.freshness === "pending";
   // Inline badges render a delta ONLY for the session that earned it (g-f3m4).
   // A stale-stamped delta (its drill was replaced) renders nothing here; it is
   // surfaced as a last-drill toast instead.
@@ -1587,7 +1595,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       );
       // Reconcile the warm delta to the provably-fresh value once the background
       // recompute lands (g-fix-end-latency).
-      void pollFreshOpeningDelta(sessionId);
+      void pollFreshOpeningDelta(sessionId, "drill_accuracy_fail");
       drillFailedMoveIndexRef.current = result.moveIndex;
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
@@ -2209,9 +2217,37 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Instantly restart the drill: opening/side/strictness replay exactly, but
   // opponent difficulty is re-randomized uniformly over every bin (g-ncvm,
   // widened by g-acsr).
-  const handleAgainDrill = useCallback(async () => {
+  const handleAgainDrill = useCallback(async (
+    surface: "drill_stop" | "post_game",
+    event?: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
     if (isStartingGame) return;
     const s = useGameStore.getState();
+    const matchingDelta =
+      s.sessionId != null && s.openingScoreDelta?.sessionId === s.sessionId
+        ? s.openingScoreDelta
+        : null;
+
+    // The live store read is authoritative: rendering can race a fresh commit or
+    // an unavailable transition. No restart side effect may precede this guard.
+    if (matchingDelta?.freshness === "pending") {
+      const snapshot = getOpeningDeltaPollSnapshot(s.sessionId!);
+      captureEvent("drill_again_blocked", {
+        surface,
+        trigger: snapshot?.trigger ?? "unknown",
+        wait_elapsed_ms: snapshot?.elapsedMs ?? null,
+        input_method: classifyDrillAgainInput(event?.nativeEvent),
+        visibility: getOpeningDeltaVisibility(),
+      });
+      return;
+    }
+
+    const openingDeltaStateAtClick =
+      matchingDelta?.freshness === "fresh"
+        ? "fresh"
+        : matchingDelta?.freshness === "unavailable"
+          ? "unavailable"
+          : "not_applicable";
     // Exact replay is impossible without the exact cp — open the overlay
     // instead (it samples its own Elo). Sample AFTER this guard so the value
     // logged in telemetry is exactly the value actually used.
@@ -2220,6 +2256,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         opening_key: s.drillOpeningKey ?? null,
         player_color: s.playerColor,
         engine_elo: null, // no Elo committed here; the overlay will sample
+        surface,
+        opening_delta_state_at_click: openingDeltaStateAtClick,
       });
       handleAgainSettings();
       return;
@@ -2233,6 +2271,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       opening_key: s.drillOpeningKey,
       player_color: s.playerColor,
       engine_elo: nextEngineElo, // logged value == value actually used
+      surface,
+      opening_delta_state_at_click: openingDeltaStateAtClick,
     });
 
     const result = await handleNewDrill({
@@ -2262,6 +2302,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       handleAgainSettings();
     }
   }, [isStartingGame, handleNewDrill, handleAgainSettings]);
+
+  const handlePostGameDrillAgain = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      void handleAgainDrill("post_game", event);
+    },
+    [handleAgainDrill],
+  );
+  const handleStoppedDrillAgain = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      void handleAgainDrill("drill_stop", event);
+    },
+    [handleAgainDrill],
+  );
 
   // Reviewed-return "View analysis": the saved snapshot is still in the store
   // (it was never cleared on return), so just re-open the review. Never rebuild
@@ -2555,9 +2608,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 drillOpeningKey={drillOpeningKey}
                 drillState={drillState}
                 isReviewedDrillReturn={isReviewedDrillReturn}
-                onNewDrill={handleAgainDrill}
+                onNewDrill={handlePostGameDrillAgain}
                 onAnotherDrillSettings={handleAgainSettings}
                 drillActionsDisabled={isStartingGame}
+                drillAgainPending={isDrillDeltaPending}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
                 onViewAnalysis={handleViewAnalysis}
@@ -2573,8 +2627,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               isReviewedDrillReturn) && (
               <DrillStopActions
                 terminalReason={drillTerminalReason}
-                onAnotherDrill={handleAgainDrill}
+                onAnotherDrill={handleStoppedDrillAgain}
                 onAnotherDrillSettings={handleAgainSettings}
+                drillAgainPending={isDrillDeltaPending}
                 // Live stop rebuilds + opens the review; reviewed return just
                 // re-opens the saved snapshot (rebuilding would wipe it, since
                 // the live analysis map was cleared on the way out).

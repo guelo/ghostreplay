@@ -1,4 +1,5 @@
 import { memo } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import SettingsGearIcon from "./SettingsGearIcon";
 import type {
   DrillSessionState,
@@ -22,11 +23,13 @@ type PostGameBannerProps = {
    * "New game" banner, without reviving the abandoned backend session.
    */
   isReviewedDrillReturn?: boolean;
-  onNewDrill?: () => void;
+  onNewDrill?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   /** Open the setup overlay to change drill settings (gear button). */
   onAnotherDrillSettings?: () => void;
   /** Disable the restart actions while a new drill is starting. */
   drillActionsDisabled?: boolean;
+  /** Keep only the repeat action event-capable while score reconciliation runs. */
+  drillAgainPending?: boolean;
   ratingChange: RatingChange | null;
   scoreChanges?: RatingScores | null;
   ratingDisplayType?: RatingScoreKey;
@@ -45,6 +48,7 @@ const PostGameBanner = ({
   onNewDrill,
   onAnotherDrillSettings,
   drillActionsDisabled,
+  drillAgainPending = false,
   ratingChange,
   scoreChanges,
   ratingDisplayType = "elo",
@@ -78,12 +82,19 @@ const PostGameBanner = ({
           {onNewDrill && (
             <span className="drill-again-group">
               <button
-                className="chess-button primary"
+                className={`chess-button primary${drillAgainPending ? " drill-again-waiting" : ""}`}
                 type="button"
                 onClick={onNewDrill}
                 disabled={drillActionsDisabled}
+                aria-disabled={drillAgainPending || undefined}
+                aria-busy={drillAgainPending || undefined}
+                aria-label={
+                  drillAgainPending
+                    ? "Updating score before another drill"
+                    : undefined
+                }
               >
-                Another drill
+                {drillAgainPending ? "Updating score…" : "Another drill"}
               </button>
               {onAnotherDrillSettings && (
                 <button
@@ -143,12 +154,19 @@ const PostGameBanner = ({
           {drillOpeningKey && onNewDrill && (
             <span className="drill-again-group">
               <button
-                className="chess-button primary"
+                className={`chess-button primary${drillAgainPending ? " drill-again-waiting" : ""}`}
                 type="button"
                 onClick={onNewDrill}
                 disabled={drillActionsDisabled}
+                aria-disabled={drillAgainPending || undefined}
+                aria-busy={drillAgainPending || undefined}
+                aria-label={
+                  drillAgainPending
+                    ? "Updating score before another drill"
+                    : undefined
+                }
               >
-                New Drill
+                {drillAgainPending ? "Updating score…" : "New Drill"}
               </button>
               {onAnotherDrillSettings && (
                 <button

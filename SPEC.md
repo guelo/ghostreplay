@@ -68,7 +68,12 @@ their Elo rating and summary statistics.
 The openings area separates White and Black repertoires, lets a player explore
 a scored opening tree, and can start a drill from a selected branch. A drill is
 initially unrated; after its opening objective is reached, the player may
-convert it to rated normal play.
+convert it to rated normal play. After a drill ends and opening-score
+reconciliation begins, repeating that drill waits for the current session's
+fresh result or a fail-open outcome; settings, analysis, and other departures
+remain available, and late results retain ownership of the session that earned
+them. The focused lifecycle and timing contract is in
+[drill mode](docs/features/drill-mode.md).
 
 ## System architecture
 

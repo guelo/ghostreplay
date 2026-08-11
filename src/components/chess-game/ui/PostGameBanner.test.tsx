@@ -145,6 +145,63 @@ describe("PostGameBanner", () => {
     expect(onNewDrill).toHaveBeenCalledTimes(1);
   });
 
+  it("gates only the natural-end repeat action while score freshness is pending", () => {
+    const props = makeProps();
+    const onNewDrill = vi.fn();
+    const onAnotherDrillSettings = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        drillState="failed"
+        onNewDrill={onNewDrill}
+        onAnotherDrillSettings={onAnotherDrillSettings}
+        drillAgainPending
+      />,
+    );
+
+    const waiting = screen.getByRole("button", {
+      name: "Updating score before another drill",
+    });
+    expect(waiting).not.toBeDisabled();
+    expect(waiting).toHaveAttribute("aria-disabled", "true");
+    expect(waiting).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(waiting, { detail: 1 });
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+
+    expect(onNewDrill).toHaveBeenCalledTimes(1);
+    expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("gates generic New Drill without gating View Analysis or New Game", () => {
+    const props = makeProps();
+    const onNewDrill = vi.fn();
+    const onAnotherDrillSettings = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        onNewDrill={onNewDrill}
+        onAnotherDrillSettings={onAnotherDrillSettings}
+        drillAgainPending
+      />,
+    );
+
+    const waiting = screen.getByRole("button", {
+      name: "Updating score before another drill",
+    });
+    expect(waiting).not.toBeDisabled();
+    fireEvent.click(waiting, { detail: 1 });
+    fireEvent.click(screen.getByRole("button", { name: /view analysis/i }));
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+
+    expect(onNewDrill).toHaveBeenCalledTimes(1);
+    expect(props.onViewAnalysis).toHaveBeenCalledTimes(1);
+    expect(props.onShowStartOverlay).toHaveBeenCalledTimes(1);
+    expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a gear button in the natural-end drill branch and fires onAnotherDrillSettings", () => {
     const props = makeProps();
     const onAnotherDrillSettings = vi.fn();

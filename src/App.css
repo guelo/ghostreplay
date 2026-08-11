@@ -2447,6 +2447,20 @@
     box-shadow: var(--shadow-md);
 }
 
+/* Opening-score freshness is an aria-disabled, event-capable wait state so
+   attempted repeat activations remain measurable (g-lcy0). */
+.chess-button.primary.drill-again-waiting {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    border-color: var(--border-color-strong);
+    box-shadow: none;
+    cursor: progress;
+}
+
+.chess-button.primary.drill-again-waiting:hover {
+    border-color: var(--border-color-strong);
+}
+
 .chess-button.danger {
     background: var(--gradient-error);
     color: var(--text-on-gradient);

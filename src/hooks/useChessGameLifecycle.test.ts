@@ -343,7 +343,10 @@ describe("useChessGameLifecycle", () => {
     expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
     expect(setShowRevertWarning).toHaveBeenLastCalledWith(false);
     // Reconcile-poll fires for the resigned session (g-fix-end-latency).
-    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
+      "session-123",
+      "game_revert",
+    );
   });
 
   it("prunes only pending SRS reviews removed by a local rewind", async () => {
@@ -1736,10 +1739,13 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "session-123",
       items: OPENING_CHANGES,
-      origin: "terminal",
+      freshness: "pending",
     });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
-    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
+      "session-123",
+      "game_end",
+    );
     // P1: the full move history is uploaded BEFORE endGame's recompute. Assert
     // order (the bug was ordering-specific), not just that both were called.
     expect(uploadSessionMovesMock).toHaveBeenCalled();
@@ -1777,10 +1783,13 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "session-123",
       items: OPENING_CHANGES,
-      origin: "terminal",
+      freshness: "pending",
     });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
-    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
+      "session-123",
+      "game_resign",
+    );
     expect(uploadSessionMovesMock).toHaveBeenCalled();
     expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
       endGameMock.mock.invocationCallOrder[0],
@@ -1823,10 +1832,13 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "drill-session-xanz",
       items: OPENING_CHANGES,
-      origin: "terminal",
+      freshness: "pending",
     });
     // The reconcile-poll fires for the finalizing drill session (g-fix-end-latency).
-    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("drill-session-xanz");
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
+      "drill-session-xanz",
+      "drill_natural_end",
+    );
     // P1: the drill's moves are uploaded BEFORE naturalEndDrill recomputes (and
     // before stopSessionUploads discards the tail). Assert order, not just calls.
     expect(uploadSessionMovesMock).toHaveBeenCalled();
@@ -1872,7 +1884,7 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual({
       sessionId: "session-123",
       items: OPENING_CHANGES,
-      origin: "terminal",
+      freshness: "pending",
     });
   });
 

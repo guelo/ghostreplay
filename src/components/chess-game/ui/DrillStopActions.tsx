@@ -1,9 +1,10 @@
 import { memo } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import SettingsGearIcon from "./SettingsGearIcon";
 
 type DrillStopActionsProps = {
   terminalReason: "off_route" | "accuracy" | "natural_end" | null;
-  onAnotherDrill: () => void;
+  onAnotherDrill: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   /** Open the setup overlay to change drill settings (gear button). */
   onAnotherDrillSettings: () => void;
   onAnalyze: () => void;
@@ -18,6 +19,8 @@ type DrillStopActionsProps = {
   isPreparing: boolean;
   /** Disable the restart actions while a new drill is starting. */
   disabled?: boolean;
+  /** Keep restart event-capable while its opening score is reconciling. */
+  drillAgainPending?: boolean;
   /** Non-blocking error (e.g. abandon failed) shown above the actions. */
   errorMessage?: string | null;
 };
@@ -41,6 +44,7 @@ const DrillStopActions = ({
   showAnalyze = true,
   isPreparing,
   disabled,
+  drillAgainPending = false,
   errorMessage,
 }: DrillStopActionsProps) => {
   return (
@@ -54,12 +58,19 @@ const DrillStopActions = ({
       <div className="chess-post-game-actions">
         <span className="drill-again-group">
           <button
-            className="chess-button primary"
+            className={`chess-button primary${drillAgainPending ? " drill-again-waiting" : ""}`}
             type="button"
             onClick={onAnotherDrill}
             disabled={isPreparing || disabled}
+            aria-disabled={drillAgainPending || undefined}
+            aria-busy={drillAgainPending || undefined}
+            aria-label={
+              drillAgainPending
+                ? "Updating score before another drill"
+                : undefined
+            }
           >
-            Again
+            {drillAgainPending ? "Updating score…" : "Again"}
           </button>
           <button
             className="drill-settings-gear"
