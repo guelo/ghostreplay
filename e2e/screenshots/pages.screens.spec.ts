@@ -193,7 +193,7 @@ test.describe("history", () => {
 // --- Openings ------------------------------------------------------------
 
 test.describe("openings", () => {
-  test("loading / populated / selected-line / no-data / error", async ({
+  test("side-selection / loading / populated / selected-line / no-data / error", async ({
     page,
     loginAs,
   }) => {
@@ -202,10 +202,21 @@ test.describe("openings", () => {
     test.setTimeout(300_000);
     await prepareDeterministicPage(page);
 
-    // Loading: stall the tree fetch so the skeleton persists.
+    // Side selection: the bare entry point intentionally mounts no explorer and
+    // issues no tree request until the player explicitly chooses a color.
     await loginAs(page, "due");
-    await stallRoute(page, "**/api/openings/tree**");
     await page.goto("/openings");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "side-selection",
+      waitFor: (p) => p.locator(".openings-selection-gate"),
+    });
+
+    // Loading: stall the tree fetch, then enter the tree through the real color
+    // toggle so the skeleton persists after the gate-to-explorer transition.
+    await stallRoute(page, "**/api/openings/tree**");
+    await page.getByRole("button", { name: "White" }).click();
+    await expect(page).toHaveURL(/[?&]color=white(?:&|$)/);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
       state: "loading",
@@ -215,7 +226,7 @@ test.describe("openings", () => {
 
     // Populated: the due user has games → a scored tree workspace renders. The
     // first real request warms the singleton graph; allow a wide window.
-    await page.goto("/openings");
+    await page.goto("/openings?color=white");
     await expect(page.locator(".openings-state--loading")).toBeHidden({
       timeout: 180_000,
     });
@@ -253,7 +264,7 @@ test.describe("openings", () => {
 
     // No-data: the empty user has no games → book-only tree + banner.
     await loginAs(page, "empty");
-    await page.goto("/openings");
+    await page.goto("/openings?color=white");
     await expect(page.locator(".openings-state--loading")).toBeHidden({
       timeout: 60_000,
     });
@@ -265,7 +276,7 @@ test.describe("openings", () => {
 
     // Error: force a failure on the tree fetch.
     await failRoute(page, "**/api/openings/tree**");
-    await page.goto("/openings");
+    await page.goto("/openings?color=white");
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
       state: "error",
