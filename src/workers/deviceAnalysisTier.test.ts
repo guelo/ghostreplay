@@ -106,6 +106,12 @@ describe('sessionAnalysisDepth', () => {
     expect(depth).toBeLessThanOrEqual(MAX_DEVICE_DEPTH)
   })
 
+  it('keeps in-game analysis below the visible d21 tier', () => {
+    // Depth 21 is reserved for analysis-board reuse. The evidence policy relies
+    // on every in-game tier being strictly shallower when d21 supersedes it.
+    expect(MAX_DEVICE_DEPTH).toBeLessThan(21)
+  })
+
   it('is exactly the historical default while the ceiling is at parity', () => {
     // The parity landing must be a strict no-op: with MAX_DEVICE_DEPTH pinned at
     // the baseline, no device can search deeper than it did before. Delete this

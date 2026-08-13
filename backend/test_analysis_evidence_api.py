@@ -6,6 +6,7 @@ shared cache writer: owner-only, scoped to exact mainline moves, stamped with th
 non-authoritative-but-replacement-eligible ``browser-analysis-v1`` profile.
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 from app.analysis_profiles import (
     BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_ANALYSIS_PROFILE_ID,
+    BROWSER_GAME_V2_PROFILE_ID,
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
     get_profile,
@@ -34,7 +36,7 @@ from app.api.session import (
     _derive_move_uci,
     _EVIDENCE_ACCEPTED_REASONS,
     _prepare_analysis_evidence_rows,
-    _session_membership_keys,
+    _session_evidence_context,
 )
 from app.evidence_contracts import RESOLVER_COMPLETE_V2
 from app.fen import normalize_fen
@@ -51,6 +53,13 @@ NB6_FEN_AFTER = "2kr1b1r/pp1q4/1Np5/P1P2p2/3P2pp/8/1B3PPP/R2QR1K1 b - - 1 22"
 # Line 1 of the completed visible depth-21 MultiPV-3 search (it ranks c4b6 first).
 NB6_BEST_LINE = ("c4b6", "a7b6", "a5b6")
 NB6_BEST_CP = 631
+
+_BROWSER_BUILD = "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1"
+_BROWSER_NET = (
+    "nn-9067e33176e8.nnue:"
+    "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+)
+_OTHER_BROWSER_NET = "other.nnue:" + "1" * 64
 
 
 # --------------------------------------------------------------------------- #
@@ -171,6 +180,33 @@ def _evidence_row(
     }
 
 
+def _in_game_e4_row(*, depth=17, eval_file_id=_BROWSER_NET):
+    return {
+        "move_number": 1,
+        "color": "white",
+        "move_san": "e4",
+        "fen_before": START,
+        "fen_after": FEN_AFTER_E4,
+        "move_uci": "e2e4",
+        "eval_cp": 20,
+        "best_move_uci": "d2d4",
+        "best_move_san": "d4",
+        "best_move_eval_cp": 35,
+        "best_line_uci": ["d2d4", "d7d5"],
+        "eval_delta": 15,
+        "classification": "excellent",
+        "provenance": {
+            "engine_version": "18",
+            "engine_build": _BROWSER_BUILD,
+            "eval_file_id": eval_file_id,
+            "search_limit_type": "depth",
+            "search_limit_value": depth,
+            "threads": 1,
+            "hash_mb": 128,
+        },
+    }
+
+
 def _post(client, auth_headers, session_id, rows, user_id=123, producer="visible-multipv-v1"):
     body: dict = {"rows": rows}
     if producer is not _NO_PRODUCER:
@@ -276,14 +312,45 @@ def test_derive_matches_chessjs_uci_convention():
 
 
 # --------------------------------------------------------------------------- #
-# _session_membership_keys / _build_evidence_cache_row (pure helpers)
+# _session_evidence_context / _build_evidence_cache_row (pure helpers)
 # --------------------------------------------------------------------------- #
-def test_membership_keys_skip_legacy_null_fen():
+def test_session_evidence_context_skips_legacy_null_fen():
     moves = [
         SessionMove(session_id=uuid.uuid4(), move_number=1, color="white", move_san="e4", fen_before=START, fen_after=FEN_AFTER_E4),
         SessionMove(session_id=uuid.uuid4(), move_number=1, color="black", move_san="e5", fen_before=None, fen_after=FEN_AFTER_E5),
     ]
-    assert _session_membership_keys(moves) == {(START, "e2e4")}
+    membership, live_by_key = _session_evidence_context(moves)
+    assert membership == {(START, "e2e4")}
+    assert live_by_key == {}
+
+
+def test_session_browser_live_witness_fails_closed_for_ambiguous_repetition():
+    def move(raw_provenance):
+        return SessionMove(
+            session_id=uuid.uuid4(),
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=START,
+            fen_after=FEN_AFTER_E4,
+            browser_provenance=(
+                json.dumps(raw_provenance, sort_keys=True, separators=(",", ":"))
+                if raw_provenance is not None
+                else None
+            ),
+        )
+
+    depth17 = _in_game_e4_row()["provenance"]
+    depth18 = _in_game_e4_row(depth=18)["provenance"]
+    key = (START, "e2e4")
+
+    membership, witnessed = _session_evidence_context(
+        [move(depth17), move(depth17)]
+    )
+    assert membership == {key}
+    assert witnessed[key].metadata["search_limit_value"] == 17
+    assert _session_evidence_context([move(depth17), move(None)]) == ({key}, {})
+    assert _session_evidence_context([move(depth17), move(depth18)]) == ({key}, {})
 
 
 def test_build_evidence_cache_row_stamps_profile_and_derives_san():
@@ -575,6 +642,146 @@ def test_endpoint_replaces_browser_game_row(client, auth_headers, create_game_se
     assert row.played_eval == 40
 
 
+def test_endpoint_visible_d21_promotes_current_in_game_v2_row(
+    client, auth_headers, create_game_session, db_session
+):
+    """The current in-game producer must not strand the d21 correction.
+
+    This is the production-shaped regression: /moves first stores a
+    browser-game-v2 row saying the played move is merely excellent, then the
+    analysis board's visible d21 result proves that same move is best. The POST
+    must replace the cache row, return the immediate MoveList upgrade, and make
+    the same upgrade survive a session-analysis refetch.
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+    move_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": [_in_game_e4_row()]},
+        headers=auth_headers(user_id=123),
+    )
+    assert move_response.status_code == 200
+    before = _cache_row(db_session, START, "e2e4")
+    assert before.analysis_profile_id == BROWSER_GAME_V2_PROFILE_ID
+    assert before.classification == "excellent"
+
+    evidence_response = _post(
+        client,
+        auth_headers,
+        session_id,
+        [_evidence_row(played_eval=42, best_eval=42, classification="best")],
+    )
+    assert evidence_response.status_code == 200
+    result = evidence_response.json()["results"][0]
+    assert result["reason"] == "dominates_replace"
+    assert result["upgrade"]["classification"] == "best"
+
+    stored = _cache_row(db_session, START, "e2e4")
+    assert stored.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+    assert stored.best_move_uci == stored.move_uci == "e2e4"
+    assert stored.classification == "best"
+
+    refetch = client.get(
+        f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123)
+    )
+    assert refetch.status_code == 200
+    move = refetch.json()["moves"][0]
+    assert move["classification"] == "excellent"
+    assert move["upgraded"]["classification"] == "best"
+
+
+def test_endpoint_visible_d21_does_not_promote_ambiguous_session_provenance(
+    client, auth_headers, create_game_session, db_session
+):
+    """Conflicting provenance for one exact session key removes its witness."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    move_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": [_in_game_e4_row(depth=17)]},
+        headers=auth_headers(user_id=123),
+    )
+    assert move_response.status_code == 200
+
+    # Model a repeated exact key with a different valid search configuration.
+    # Membership remains valid, but neither provenance may authorize replacement.
+    db_session.add(
+        SessionMove(
+            session_id=uuid.UUID(session_id),
+            move_number=2,
+            color="white",
+            move_san="e4",
+            fen_before=START,
+            fen_after=FEN_AFTER_E4,
+            classification="excellent",
+            segment="normal",
+            browser_provenance=json.dumps(
+                _in_game_e4_row(depth=18)["provenance"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    )
+    db_session.commit()
+
+    evidence_response = _post(
+        client,
+        auth_headers,
+        session_id,
+        [_evidence_row(played_eval=42, best_eval=42, classification="best")],
+    )
+    assert evidence_response.status_code == 200
+    result = evidence_response.json()["results"][0]
+    assert result["reason"] == "incompatible_keep"
+    assert result["upgrade"] is None
+
+    stored = _cache_row(db_session, START, "e2e4")
+    assert stored.analysis_profile_id == BROWSER_GAME_V2_PROFILE_ID
+    assert stored.classification == "excellent"
+
+
+@pytest.mark.parametrize(
+    "depth,eval_file_id",
+    [
+        (21, _BROWSER_NET),
+        (17, _OTHER_BROWSER_NET),
+    ],
+)
+def test_endpoint_visible_d21_does_not_replace_unrankable_game_v2_row(
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+    depth,
+    eval_file_id,
+):
+    """The endpoint witness is narrow: equal/deeper and alternate-net rows stay."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    move_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                _in_game_e4_row(depth=depth, eval_file_id=eval_file_id)
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert move_response.status_code == 200
+
+    evidence_response = _post(
+        client,
+        auth_headers,
+        session_id,
+        [_evidence_row(played_eval=42, best_eval=42, classification="best")],
+    )
+    assert evidence_response.status_code == 200
+    result = evidence_response.json()["results"][0]
+    assert result["reason"] == "incompatible_keep"
+    assert result["upgrade"] is None
+
+    stored = _cache_row(db_session, START, "e2e4")
+    assert stored.analysis_profile_id == BROWSER_GAME_V2_PROFILE_ID
+    assert stored.classification == "excellent"
+
+
 def test_endpoint_correctively_replaces_retired_analysis_row(client, auth_headers, create_game_session, db_session):
     # A stored RETIRED browser-analysis-v1 row (the defective hidden protocol) is
     # correctively replaced by the visible-MultiPV successor for the exact key.
@@ -711,7 +918,10 @@ def test_endpoint_writer_omits_survivor_surfaces_anomaly(
     _seed_e4_move(db_session, session_id)
     monkeypatch.setattr(
         "app.api.session.write_analysis_cache_rows",
-        lambda db, rows, submitter_user_id=None: [],
+        lambda db,
+        rows,
+        submitter_user_id=None,
+        visible_d21_live_by_key=None: [],
     )
     resp = _post(client, auth_headers, session_id, [_evidence_row()])
     assert resp.json()["results"][0]["reason"] == EVIDENCE_WRITER_NO_RESULT

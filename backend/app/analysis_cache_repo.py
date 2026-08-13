@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis_cache_policy import (
+    CacheRow,
     Decision,
     Reason,
     decide_analysis_cache_replacement,
@@ -713,6 +714,7 @@ def _resolve_conflict(
     locked: _LockedRows,
     submitter_user_id: int | None,
     claims: list[_ClaimAction],
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None,
 ) -> None:
     """Apply the replacement policy for one pre-existing key (in-memory decide +
     ORM mutation); record the resulting Reason and this key's claim action."""
@@ -723,6 +725,11 @@ def _resolve_conflict(
         incoming_proj,
         existing_submitters=locked.submissions.get(existing_row.id, frozenset()),
         incoming_submitter=submitter_user_id,
+        visible_d21_live=(
+            visible_d21_live_by_key.get(key)
+            if visible_d21_live_by_key is not None
+            else None
+        ),
     )
     claim = _claim_for_decision(
         decision, existing_proj, incoming_proj, existing_row.id, submitter_user_id
@@ -750,6 +757,7 @@ def _run_batch(
     insert,
     for_update: bool,
     submitter_user_id: int | None = None,
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Set-based read-decide-write for an already-deduped, key-sorted batch.
 
@@ -831,6 +839,7 @@ def _run_batch(
                     locked,
                     submitter_user_id,
                     claims,
+                    visible_d21_live_by_key,
                 )
         if not vanished:
             pending = []
@@ -871,6 +880,7 @@ def _run_batch(
                     locked,
                     submitter_user_id,
                     claims,
+                    visible_d21_live_by_key,
                 )
             else:
                 reason_by_key[r["key"]] = Reason.RECOVERY_ABORTED_KEEP
@@ -913,6 +923,8 @@ def write_analysis_cache_rows(
     caller_session: Session,
     rows: list[dict],
     submitter_user_id: int | None = None,
+    *,
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Atomically apply the replacement policy to a batch of cache rows.
 
@@ -925,6 +937,12 @@ def write_analysis_cache_rows(
     threaded all the way into the writer's own transaction because the claim pass
     must run under the same lock as the decision that justified it; an
     endpoint-side write after this call would race a concurrent canonical REPLACE.
+
+    ``visible_d21_live_by_key`` is an analysis-evidence-only compare-and-replace
+    witness. For each supplied key, the policy checks the locked cache row against
+    that session's exact validated browser provenance before allowing the otherwise
+    incomparable visible-d21-over-current-game promotion. Ordinary writers omit it
+    and retain the parity-matrix policy byte-for-byte.
     """
     if not rows:
         return []
@@ -955,11 +973,17 @@ def write_analysis_cache_rows(
         # to this engine, never the shared/read engine); caller bind for :memory:.
         write_engine = _sqlite_write_engine(bind)
         results = _run_sqlite(
-            sessionmaker(bind=write_engine), surviving, submitter_user_id
+            sessionmaker(bind=write_engine),
+            surviving,
+            submitter_user_id,
+            visible_d21_live_by_key=visible_d21_live_by_key,
         )
     else:  # postgresql: batched ON CONFLICT insert + one FOR UPDATE lock select
         results = _run_postgresql(
-            sessionmaker(bind=bind), surviving, submitter_user_id
+            sessionmaker(bind=bind),
+            surviving,
+            submitter_user_id,
+            visible_d21_live_by_key=visible_d21_live_by_key,
         )
 
     results = dedupe_results + results
@@ -1006,6 +1030,7 @@ def _run_batch_with_retry(
     dialect: str,
     lock=None,
     submitter_user_id: int | None = None,
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Run one batch on a fresh session, retrying transient conflicts.
 
@@ -1034,6 +1059,7 @@ def _run_batch_with_retry(
                     insert=insert,
                     for_update=for_update,
                     submitter_user_id=submitter_user_id,
+                    visible_d21_live_by_key=visible_d21_live_by_key,
                 )
             except OperationalError as exc:
                 session.rollback()
@@ -1086,7 +1112,11 @@ def _is_retryable_pg_error(exc: OperationalError) -> bool:
 
 
 def _run_sqlite(
-    factory, surviving: list[dict], submitter_user_id: int | None = None
+    factory,
+    surviving: list[dict],
+    submitter_user_id: int | None = None,
+    *,
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Run the batch under BEGIN IMMEDIATE, retrying on SQLITE_BUSY.
 
@@ -1105,11 +1135,16 @@ def _run_sqlite(
         dialect="sqlite",
         lock=_sqlite_write_lock,
         submitter_user_id=submitter_user_id,
+        visible_d21_live_by_key=visible_d21_live_by_key,
     )
 
 
 def _run_postgresql(
-    factory, surviving: list[dict], submitter_user_id: int | None = None
+    factory,
+    surviving: list[dict],
+    submitter_user_id: int | None = None,
+    *,
+    visible_d21_live_by_key: dict[tuple[str, str], CacheRow] | None = None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Run the batch with a single FOR UPDATE lock select, retrying deadlocks."""
     return _run_batch_with_retry(
@@ -1121,4 +1156,5 @@ def _run_postgresql(
         max_retries=_PG_MAX_RETRIES,
         dialect="postgresql",
         submitter_user_id=submitter_user_id,
+        visible_d21_live_by_key=visible_d21_live_by_key,
     )

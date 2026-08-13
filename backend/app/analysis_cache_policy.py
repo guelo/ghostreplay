@@ -13,8 +13,11 @@ The decision separates three axes:
     :func:`cross_grain_authority_replaces` or the exact same-profile migration
     predicate instead (g-6xc3, g-move-grain-same-prof)
 
-Ordering signals are authority + explicit ``dominates`` edges + completeness
-masks only — never raw numeric depth.
+Ordinary ordering signals are authority + explicit ``dominates`` edges +
+completeness masks, never a bare numeric depth. The one contextual exception is
+the analysis-evidence endpoint's visible-d21 correction: it supplies the current
+session's validated in-game provenance as an exact compare-and-replace witness,
+so the locked row may be ordered only when it is that same shipped sub-d21 search.
 """
 from __future__ import annotations
 
@@ -310,6 +313,78 @@ class CacheRow:
             return False
         profile = get_profile(self.analysis_profile_id)
         return bool(profile and profile.replacement_eligible and profile.active)
+
+
+_VISIBLE_D21_INTENTIONAL_DIFFERENCES = frozenset(
+    {
+        "search_limit_value",
+        "hash_mb",
+        "multipv",
+        "analyzer_protocol_version",
+        "profile_manifest_digest",
+    }
+)
+
+
+def _visible_d21_session_promotion_replaces(
+    existing: CacheRow,
+    incoming: CacheRow,
+    live: CacheRow | None,
+) -> bool:
+    """Whether a session-witnessed d21 result may replace matching in-game evidence.
+
+    ``browser-game-v2`` is declared-dynamic and intentionally has no categorical
+    edge from ``browser-analysis-multipv-v2``: the profile can represent depth 21+
+    and arbitrary valid builds/nets. The analysis-evidence endpoint can authorize
+    the shipped path more narrowly because it owns a third operand — the exact
+    validated provenance persisted on this session's move.
+
+    The locked cache row must match that live operand field-for-field, and the
+    two producers must share every identity field except the five deliberate
+    visible-search differences above. This proves configuration equivalence, not
+    authorship: an identically configured row originally written by another
+    client is equally eligible because its evidence has the same ordering. An
+    alternate build/net/hash, a nodes/movetime search, or a depth-21+ row remains
+    incomparable and cannot be downgraded.
+    """
+    if live is None:
+        return False
+    if existing.effective_profile_id() != BROWSER_GAME_V2_PROFILE_ID:
+        return False
+    if live.effective_profile_id() != BROWSER_GAME_V2_PROFILE_ID:
+        return False
+    if incoming.effective_profile_id() != BROWSER_ANALYSIS_MULTIPV_PROFILE_ID:
+        return False
+
+    # This is a compare-and-replace witness, not merely a same-profile hint.
+    if any(
+        existing.metadata.get(field) != live.metadata.get(field)
+        for field in IDENTITY_FIELDS
+    ):
+        return False
+
+    if any(
+        existing.metadata.get(field) != incoming.metadata.get(field)
+        for field in IDENTITY_FIELDS
+        if field not in _VISIBLE_D21_INTENTIONAL_DIFFERENCES
+    ):
+        return False
+
+    existing_limit = existing.metadata.get("search_limit_value")
+    incoming_limit = incoming.metadata.get("search_limit_value")
+    return (
+        existing.metadata.get("search_limit_type") == "depth"
+        and incoming.metadata.get("search_limit_type") == "depth"
+        # The current in-game worker's shipped Hash is 128 MB. Hash affects
+        # search strength, so an arbitrary server-valid dynamic value cannot
+        # inherit this narrowly-reviewed 128 -> visible-64 ordering.
+        and existing.metadata.get("hash_mb") == 128
+        and incoming.metadata.get("hash_mb") == 64
+        and isinstance(existing_limit, int)
+        and isinstance(incoming_limit, int)
+        and incoming_limit == 21
+        and existing_limit < incoming_limit
+    )
 
 
 def _fields_agree(existing: CacheRow, incoming: CacheRow) -> bool:
@@ -619,6 +694,7 @@ def decide_analysis_cache_replacement(
     *,
     existing_submitters: frozenset[int] = frozenset(),
     incoming_submitter: int | None = None,
+    visible_d21_live: CacheRow | None = None,
 ) -> tuple[Decision, Reason]:
     # An incoming row that fails its contract or makes an unverifiable profile
     # claim is never stored.
@@ -729,17 +805,21 @@ def decide_analysis_cache_replacement(
     # ``dominates`` lookup is rerouted through the shared comparator so the
     # authority barrier and explicit edges (AUTHORITY / PROTOCOL_CORRECTION /
     # TIER_BASELINE) live in one place (g-reuse-d21-search D6). The comparator
-    # gives ordering + edge kind; the completeness gate below is unchanged.
+    # gives ordering + edge kind. The endpoint-scoped visible-d21 witness may
+    # additionally prove the exact current-game row described above; it is not a
+    # global profile edge. The completeness gate below is unchanged.
     comparison = compare_evidence_rows(incoming, existing)
-    # Two grains of win: a CATEGORICAL A_SUPERSEDES (authority / explicit edge) and
-    # a MEASURED A_STRONGER (steps 4-5). Both let the incoming row through; they
-    # differ only in the reason reported below. Every other outcome —
-    # B_SUPERSEDES, B_STRONGER, EQUAL, INCOMPARABLE — keeps the stored row, and
-    # THIS caller genuinely treats them alike, so it collapses them here rather
-    # than the comparator collapsing them for everyone.
-    if comparison.outcome not in (
-        Supersession.A_SUPERSEDES,
-        Supersession.A_STRONGER,
+    contextual_d21_win = _visible_d21_session_promotion_replaces(
+        existing, incoming, visible_d21_live
+    )
+    # Two comparator grains of win — categorical A_SUPERSEDES and measured
+    # A_STRONGER — let the incoming row through. Ordinarily every other outcome
+    # keeps the stored row; the contextual d21 witness is the one additional,
+    # explicitly-scoped admission from INCOMPARABLE.
+    if (
+        comparison.outcome
+        not in (Supersession.A_SUPERSEDES, Supersession.A_STRONGER)
+        and not contextual_d21_win
     ):
         return Decision.KEEP, Reason.INCOMPATIBLE_KEEP
     contract_ok = is_superset_or_successor(
@@ -758,7 +838,10 @@ def decide_analysis_cache_replacement(
         # the two rows shared a profile or not. Of the categorical wins,
         # PROTOCOL_CORRECTION gets its own reason so the corrective replacement of
         # a defective hidden row is observable; AUTHORITY / TIER_BASELINE keep the
-        # historical dominates_replace reason for parity.
+        # historical dominates_replace reason for parity. The contextual d21 win
+        # deliberately shares dominates_replace to preserve the endpoint's wire
+        # contract; introduce a distinct Reason only with an explicit telemetry/API
+        # requirement.
         if comparison.outcome is Supersession.A_STRONGER:
             reason = Reason.STRENGTH_REPLACE
         elif comparison.kind is EdgeKind.PROTOCOL_CORRECTION:
@@ -768,9 +851,11 @@ def decide_analysis_cache_replacement(
         return Decision.REPLACE, reason
     # Rule 5b (g-6xc3): the completeness gate cannot be satisfied ACROSS GRAINS, by
     # construction, so an authoritative grain-split write is judged on authority
-    # instead. Reached only after the comparator returned A_SUPERSEDES / A_STRONGER;
-    # for the authoritative-over-non-authoritative pair this rule requires, step 2's
-    # authority barrier always returns A_SUPERSEDES, so the two never disagree.
+    # instead. This point is reached after either a comparator win OR the contextual
+    # d21 witness (whose comparator result is INCOMPARABLE). The contextual path is
+    # non-authoritative and therefore cannot satisfy this rule; for the authoritative-
+    # over-non-authoritative pair the rule requires, step 2's authority barrier
+    # returns A_SUPERSEDES.
     if cross_grain_authority_replaces(existing, incoming):
         return Decision.REPLACE, Reason.CROSS_GRAIN_AUTHORITY_REPLACE
     return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP

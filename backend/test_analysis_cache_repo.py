@@ -1713,9 +1713,18 @@ def test_run_postgresql_retries_then_succeeds(monkeypatch):
     sentinel = [(("k", "e2e4"), repo.Reason.NEW_KEY)]
     calls = {"n": 0}
 
-    def fake_run_batch(session, surviving, *, insert, for_update, submitter_user_id=None):
+    def fake_run_batch(
+        session,
+        surviving,
+        *,
+        insert,
+        for_update,
+        submitter_user_id=None,
+        visible_d21_live_by_key=None,
+    ):
         calls["n"] += 1
         assert for_update is True
+        assert visible_d21_live_by_key is None
         if calls["n"] <= 2:  # two deadlocks, then success
             orig = Exception()
             orig.pgcode = "40P01"
@@ -1749,8 +1758,17 @@ def test_run_postgresql_reraises_non_retryable(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_run_batch(session, surviving, *, insert, for_update, submitter_user_id=None):
+    def fake_run_batch(
+        session,
+        surviving,
+        *,
+        insert,
+        for_update,
+        submitter_user_id=None,
+        visible_d21_live_by_key=None,
+    ):
         calls["n"] += 1
+        assert visible_d21_live_by_key is None
         orig = Exception()
         orig.pgcode = "23505"
         raise OperationalError("duplicate key value", {}, orig)
@@ -1790,7 +1808,16 @@ def test_run_batch_with_retry_warns_per_retry_and_on_exhaustion(
         def close(self):
             pass
 
-    def always_fail(session, surviving, *, insert, for_update, submitter_user_id=None):
+    def always_fail(
+        session,
+        surviving,
+        *,
+        insert,
+        for_update,
+        submitter_user_id=None,
+        visible_d21_live_by_key=None,
+    ):
+        assert visible_d21_live_by_key is None
         orig = Exception(err_text)
         if pgcode is not None:
             orig.pgcode = pgcode

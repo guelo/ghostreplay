@@ -150,6 +150,20 @@ from a bare source label or a raw depth value. A narrower post-split write can
 move the position grain to its dedicated store, but it must never discard move
 evidence.
 
+The visible analysis board's fixed depth-21 MultiPV producer is an explicit tier
+successor to the fixed legacy in-game browser producer. The current in-game
+producer is declared-dynamic and has no categorical profile edge: it can represent
+server-accepted searches that are depth 21+, use another network, or otherwise do
+not match the visible worker. For that producer, the session-scoped evidence
+endpoint supplies the saved move's validated provenance as a compare-and-replace
+witness. Under the cache-row lock, promotion is allowed only when the stored row
+matches that witness exactly, shares the visible worker's engine and network, and
+uses the shipped in-game search settings (including Hash 128) at a depth strictly
+below 21. This lets a completed visible search re-annotate the played move—including
+promotion to Best—without globally ordering every dynamic in-game row below d21.
+The visible producer remains non-authoritative: canonical evidence still wins and
+cannot be overwritten by the browser tier.
+
 Position storage accepts only authoritative, `position-complete-v1` winners;
 this fail-closed gate runs before any strength or dominance comparison, even
 for a new position key.

@@ -420,22 +420,89 @@ def test_v2_does_not_reclaim_a_legacy_browser_game_v1_row():
     )
 
 
-def test_v2_and_visible_multipv_are_incomparable_both_ways():
+def _visible_multipv_row(**overrides):
+    data = {
+        "analysis_profile_id": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        "evidence_contract_id": RESOLVER_COMPLETE,
+        **EVIDENCE,
+        **stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
+    }
+    data.update(overrides)
+    return project_cache_row(data)
+
+
+def test_v2_and_visible_multipv_are_incomparable_without_a_session_witness():
+    multipv = _visible_multipv_row()
+    # MultiPV 3 vs 1 — different scoring semantics, so depth 21 vs 20 is not a
+    # global ordering. In particular, the fixed profile has no categorical edge
+    # over every row the declared-dynamic browser-game-v2 profile can represent.
+    assert compare_row_strength(multipv, v2_row(20)) is StrengthComparison.INCOMPARABLE
+    assert compare_evidence_rows(multipv, v2_row(20)).outcome is Supersession.INCOMPARABLE
+    assert decide_analysis_cache_replacement(v2_row(20), multipv) == (
+        Decision.KEEP,
+        Reason.INCOMPATIBLE_KEEP,
+    )
+    assert decide_analysis_cache_replacement(multipv, v2_row(20)) == (
+        Decision.KEEP,
+        Reason.INCOMPATIBLE_KEEP,
+    )
+
+
+@pytest.mark.parametrize("depth", [17, 18, 19, 20])
+def test_visible_d21_session_witness_replaces_matching_shallower_v2_rows(depth):
+    existing = v2_row(depth)
+    multipv = _visible_multipv_row()
+    live = browser_live_descriptor(json.dumps(provenance(depth)))
+    assert live is not None
+    assert decide_analysis_cache_replacement(
+        existing, multipv, visible_d21_live=live
+    ) == (Decision.REPLACE, Reason.DOMINATES_REPLACE)
+
+
+@pytest.mark.parametrize(
+    "existing,raw_live",
+    [
+        # Equal depth: the visible result is not strictly deeper.
+        (v2_row(21), provenance(21)),
+        # The cache row belongs to a different search than this session's move.
+        (v2_row(17), provenance(17, hash_mb=64)),
+        # Even an exact witness cannot bridge a different engine network.
+        (
+            v2_row(17, eval_file_id="other.nnue:" + "1" * 64),
+            provenance(17, eval_file_id="other.nnue:" + "1" * 64),
+        ),
+        # Alternate Hash is a different search configuration even when this
+        # session exactly witnesses it; only shipped in-game Hash 128 is ordered
+        # against the visible worker's fixed Hash 64.
+        (v2_row(17, hash_mb=64), provenance(17, hash_mb=64)),
+    ],
+)
+def test_visible_d21_session_witness_rejects_unproven_or_unrankable_v2_rows(
+    existing, raw_live
+):
+    live = browser_live_descriptor(json.dumps(raw_live))
+    assert live is not None
+    assert decide_analysis_cache_replacement(
+        existing, _visible_multipv_row(), visible_d21_live=live
+    ) == (Decision.KEEP, Reason.INCOMPATIBLE_KEEP)
+
+
+def test_visible_d21_session_witness_still_honors_completeness():
+    live = browser_live_descriptor(json.dumps(provenance(17)))
+    assert live is not None
     multipv = project_cache_row(
         {
             "analysis_profile_id": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
             "evidence_contract_id": RESOLVER_COMPLETE,
-            **EVIDENCE,
+            **{**EVIDENCE, "best_move_san": None},
             **stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID),
         }
     )
-    # MultiPV 3 vs 1 — different scoring semantics, so depth 21 vs 20 is not an
-    # ordering. The multipv-v2 -> browser-analysis-v1 corrective edge is untouched.
-    assert compare_row_strength(multipv, v2_row(20)) is StrengthComparison.INCOMPARABLE
-    assert decide_analysis_cache_replacement(v2_row(20), multipv)[0] is Decision.KEEP
-    assert decide_analysis_cache_replacement(multipv, v2_row(20)) == (
+    assert decide_analysis_cache_replacement(
+        v2_row(17), multipv, visible_d21_live=live
+    ) == (
         Decision.KEEP,
-        Reason.INCOMPATIBLE_KEEP,
+        Reason.INCOMING_LESS_COMPLETE_KEEP,
     )
 
 

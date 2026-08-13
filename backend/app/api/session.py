@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.analysis_cache_policy import (
     BROWSER_ANALYSIS_ACCEPTED_REASONS,
     ROW_MUTATING_REASONS,
+    CacheRow,
     browser_live_descriptor,
 )
 from app.analysis_cache_repo import write_analysis_cache_rows
@@ -2017,19 +2018,43 @@ def _is_legal_line(fen: str, line: list[str]) -> bool:
     return True
 
 
-def _session_membership_keys(session_moves: list[SessionMove]) -> set[tuple[str, str]]:
-    """Exact ``(fen_before, played_uci)`` keys for a session's mainline moves.
+def _session_evidence_context(
+    session_moves: list[SessionMove],
+) -> tuple[set[tuple[str, str]], dict[tuple[str, str], CacheRow]]:
+    """Build membership and contextual d21 witnesses in one session-move pass.
 
     The FEN half is the same byte string browser-game rows used; the UCI half is
     the server-side SAN->UCI re-derivation (``SessionMove`` has no stored UCI). Legacy
     moves with a null/unparseable ``fen_before`` or SAN are omitted (not eligible).
+
+    A cache row is global, while the endpoint request is session-scoped. The
+    witness lets the locked writer prove that the row it is about to replace has
+    the same engine/search configuration recorded on this session move. It does
+    not prove which client authored the shared row. Missing, malformed, or
+    conflicting provenance for a repeated exact key removes that witness while
+    retaining membership; replacement then falls back to ordinary incomparability.
     """
-    keys: set[tuple[str, str]] = set()
-    for sm in session_moves:
-        uci = _derive_move_uci(sm.fen_before, sm.move_san)
-        if uci is not None:
-            keys.add((sm.fen_before, uci))
-    return keys
+    membership: set[tuple[str, str]] = set()
+    live_by_key: dict[tuple[str, str], CacheRow] = {}
+    ambiguous: set[tuple[str, str]] = set()
+    for move in session_moves:
+        uci = _derive_move_uci(move.fen_before, move.move_san)
+        if not move.fen_before or uci is None:
+            continue
+        key = (move.fen_before, uci)
+        membership.add(key)
+        if key in ambiguous:
+            continue
+        live = browser_live_descriptor(move.browser_provenance)
+        incumbent = live_by_key.get(key)
+        if live is None or (
+            incumbent is not None and incumbent.metadata != live.metadata
+        ):
+            live_by_key.pop(key, None)
+            ambiguous.add(key)
+            continue
+        live_by_key[key] = live
+    return membership, live_by_key
 
 
 def _build_evidence_cache_row(
@@ -2181,8 +2206,10 @@ def submit_analysis_evidence(
     row's classification is independently rederived from its root-relative scores.
     Complete evidence can correctively replace a defective retired
     ``browser-analysis-v1`` row and a weaker ``browser-game-v1`` row for the same
-    exact ``(fen_before, move_uci)``, but never becomes a trusted /lookup hit,
-    reclaims legacy rows, or overwrites canonical depth-24 evidence.
+    exact ``(fen_before, move_uci)``. It can replace a current ``browser-game-v2``
+    row only when the locked row exactly matches this session move's validated
+    provenance and is a matching sub-d21 search. It never becomes a trusted
+    /lookup hit, reclaims legacy rows, or overwrites canonical depth-24 evidence.
     """
     game_session = _get_session_or_404(db, session_id)
     _ensure_session_owned_by_user(game_session, user)
@@ -2207,7 +2234,7 @@ def submit_analysis_evidence(
     session_moves = (
         db.query(SessionMove).filter(SessionMove.session_id == session_id).all()
     )
-    membership = _session_membership_keys(session_moves)
+    membership, visible_d21_live_by_key = _session_evidence_context(session_moves)
 
     prepared = _prepare_analysis_evidence_rows(rows, membership, request.producer)
 
@@ -2224,7 +2251,10 @@ def submit_analysis_evidence(
         # REPLACE and could leave the user associated with facts they never
         # submitted, after that REPLACE's clearing pass had already run.
         for (fen, uci), reason in write_analysis_cache_rows(
-            db, survivors, submitter_user_id=user.user_id
+            db,
+            survivors,
+            submitter_user_id=user.user_id,
+            visible_d21_live_by_key=visible_d21_live_by_key,
         ):
             writer_reasons[(fen, uci)] = reason.value
 

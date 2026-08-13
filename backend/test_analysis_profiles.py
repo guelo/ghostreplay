@@ -319,8 +319,9 @@ def test_browser_analysis_multipv_profile_authority_and_dominance():
     assert p.active is True
     assert p.authoritative is False
     assert p.replacement_eligible is True
-    # Correctively replaces the retired hidden protocol AND the weaker d17 game
-    # baseline for the same key (PROTOCOL_CORRECTION + TIER_BASELINE edges).
+    # Correctively replaces the retired hidden protocol AND the weaker legacy d17
+    # game baseline for the same key (PROTOCOL_CORRECTION + TIER_BASELINE). The
+    # declared-dynamic current game profile is intentionally not categorical.
     assert p.dominates == frozenset(
         {BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID}
     )

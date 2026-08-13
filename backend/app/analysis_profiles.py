@@ -434,7 +434,11 @@ _BROWSER_ANALYSIS = Profile(
 # NON-authoritative (never a trusted /lookup hit, never reclaims legacy rows,
 # never overwrites canonical) but replacement_eligible, so it correctively
 # replaces a defective browser-analysis-v1 row (PROTOCOL_CORRECTION edge) and a
-# weaker browser-game-v1 d17 row (TIER_BASELINE edge) for the exact key.
+# weaker legacy browser-game-v1 d17 row (TIER_BASELINE edge) for the exact key.
+# Current browser-game-v2 rows are deliberately NOT categorically dominated:
+# that declared-dynamic profile also represents server-accepted deeper and
+# alternate-engine rows. Its shipped d17 promotion is authorized only with the
+# submitting session's exact provenance witness in analysis_cache_policy.
 _BROWSER_ANALYSIS_MULTIPV_IDENTITY = {
     "engine_name": "Stockfish",
     "engine_version": "18",
@@ -465,7 +469,7 @@ _BROWSER_ANALYSIS_MULTIPV = Profile(
     replacement_eligible=True,
     active=True,
     dynamic_fields=frozenset(),  # fixed profile
-    # Mirrors the two new outgoing EDGES in evidence_policy.py; the registry-load
+    # Mirrors the two outgoing EDGES in evidence_policy.py; the registry-load
     # assertion checks EDGES<->dominates parity in both directions.
     dominates=frozenset({BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID}),
     **_BROWSER_ANALYSIS_MULTIPV_IDENTITY,
