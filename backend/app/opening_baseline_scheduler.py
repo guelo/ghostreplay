@@ -201,20 +201,32 @@ class OpeningBaselineScheduler:
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
-                now = self.clock()
+                # A shutdown notification can land while run_due executes outside
+                # this lock. Once the latch is visible, never begin another retry
+                # wait before draining the remaining entries.
+                shutting_down = self._shutdown
                 deadlines = [
                     entry.not_before
                     for session_id, entry in self._pending.items()
                     if session_id not in self._inflight
                 ]
-                wait_for = None if not deadlines else max(0.0, min(deadlines) - now)
-                if wait_for is None or wait_for > 0:
-                    # Bounded fallback keeps shutdown responsive even if a notify
-                    # is missed; ordinary retries wake at their earliest deadline.
-                    self._cond.wait(
-                        timeout=1.0 if wait_for is None else min(wait_for, 1.0)
-                    )
-                shutting_down = self._shutdown
+                if shutting_down:
+                    if not deadlines:
+                        # Defensive invariant guard: this scheduler keeps pending
+                        # and in-flight keys disjoint, so current production and
+                        # synchronous paths cannot reach this state. If future
+                        # queueing changes do, park instead of spinning.
+                        self._cond.wait(timeout=0.1)
+                else:
+                    now = self.clock()
+                    wait_for = None if not deadlines else max(0.0, min(deadlines) - now)
+                    if wait_for is None or wait_for > 0:
+                        # Bounded fallback also keeps ordinary operation responsive
+                        # if a notification is missed.
+                        self._cond.wait(
+                            timeout=1.0 if wait_for is None else min(wait_for, 1.0)
+                        )
+                    shutting_down = self._shutdown
             self.run_due(now=float("inf") if shutting_down else None)
 
     # ------------------------------------------------------------------

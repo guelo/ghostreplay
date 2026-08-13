@@ -282,19 +282,31 @@ class SessionEvidenceScheduler:
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
-                now = self.clock()
+                # A shutdown notification can land while run_due executes outside
+                # this lock. Once the latch is visible, never begin another
+                # debounce wait before draining the remaining entries.
+                shutting_down = self._shutdown
                 due_deadlines = [
                     entry.deadline
                     for session_id, entry in self._pending.items()
                     if session_id not in self._inflight
                 ]
-                if due_deadlines:
-                    wait_for = max(0.0, min(due_deadlines) - now)
+                if shutting_down:
+                    if not due_deadlines:
+                        # Only the synchronous run_due test surface can leave a
+                        # pending key in flight on another thread. Park briefly
+                        # until _run_one completion notifies instead of spinning.
+                        self._cond.wait(timeout=0.1)
                 else:
-                    wait_for = None
-                if wait_for is None or wait_for > 0:
-                    self._cond.wait(timeout=wait_for)
-                shutting_down = self._shutdown
+                    now = self.clock()
+                    wait_for = (
+                        None
+                        if not due_deadlines
+                        else max(0.0, min(due_deadlines) - now)
+                    )
+                    if wait_for is None or wait_for > 0:
+                        self._cond.wait(timeout=wait_for)
+                    shutting_down = self._shutdown
             self.run_due(now=float("inf") if shutting_down else None)
 
     # ------------------------------------------------------------------

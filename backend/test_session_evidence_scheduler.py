@@ -446,6 +446,109 @@ def test_shutdown_drain_true_runs_pending():
     assert all(s.closed for s in sessions)
 
 
+def test_shutdown_drain_does_not_lose_notify_between_worker_iterations(monkeypatch):
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(
+        time.monotonic,
+        run,
+        quiet_window=0.0,
+        max_wait=60.0,
+        auto_start=True,
+    )
+
+    real_run_due = SessionEvidenceScheduler.run_due
+    worker_between_iterations = threading.Event()
+    release_worker = threading.Event()
+    gate_first_run = True
+
+    def gated_run_due(self, now=None):
+        nonlocal gate_first_run
+        if self is sched and gate_first_run:
+            gate_first_run = False
+            worker_between_iterations.set()
+            assert release_worker.wait(timeout=5.0)
+        return real_run_due(self, now)
+
+    monkeypatch.setattr(SessionEvidenceScheduler, "run_due", gated_run_due)
+
+    first_sid = uuid.uuid4()
+    sched.enqueue(first_sid, 1, "white", [_move(1, "white")])
+    assert worker_between_iterations.wait(timeout=5.0)
+
+    sched.quiet_window = 30.0
+    second_sid = uuid.uuid4()
+    sched.enqueue(second_sid, 2, "black", [_move(1, "black")])
+
+    shutdown_errors: list[BaseException] = []
+
+    def shut_down():
+        try:
+            sched.shutdown(drain=True, timeout=0.5)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+
+    shutdown_thread = threading.Thread(target=shut_down)
+    shutdown_thread.start()
+
+    with sched._cond:
+        deadline = time.monotonic() + 5.0
+        while not sched._shutdown:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0
+            sched._cond.wait(timeout=remaining)
+
+    release_worker.set()
+    shutdown_thread.join(timeout=2.0)
+
+    if sched._thread is not None and sched._thread.is_alive():
+        with sched._cond:
+            for entry in sched._pending.values():
+                entry.deadline = sched.clock()
+            sched._cond.notify_all()
+        sched._thread.join(timeout=2.0)
+        sched.shutdown(drain=True, timeout=2.0)
+
+    assert not shutdown_thread.is_alive()
+    assert shutdown_errors == []
+    assert sched._pending == {}
+    assert sched._inflight == set()
+    assert sched._thread is None
+    assert [call["session_id"] for call in run.calls] == [first_sid, second_sid]
+
+
+def test_shutdown_drain_parks_when_pending_key_is_already_inflight(monkeypatch):
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(_FakeClock(), run)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 1, "white", [_move(1, "white")])
+    with sched._cond:
+        sched._shutdown = True
+        sched._inflight.add(sid)
+
+    parked = threading.Event()
+    real_wait = threading.Condition.wait
+
+    def observed_wait(condition, timeout=None):
+        if condition is sched._cond:
+            assert timeout == 0.1
+            parked.set()
+        return real_wait(condition, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", observed_wait)
+    worker = threading.Thread(target=sched._worker_loop)
+    worker.start()
+    assert parked.wait(timeout=5.0)
+    assert run.calls == []
+
+    with sched._cond:
+        sched._inflight.discard(sid)
+        sched._cond.notify_all()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert [call["session_id"] for call in run.calls] == [sid]
+
+
 def test_shutdown_drain_false_clears_pending():
     run = _RecordingSideEffects()
     # Long quiet window so the entry never becomes due before shutdown clears it.

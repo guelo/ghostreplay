@@ -299,7 +299,12 @@ class OpeningScoreDeltaLane:
             self._thread = thread
 
     def shutdown(self, drain: bool = True, timeout: float = 30.0) -> None:
-        """Stop accepting work and boundedly drain or cancel pending attempts."""
+        """Stop accepting work and boundedly drain or cancel pending attempts.
+
+        Drain forces untouched attempts due immediately. A failed attempt keeps
+        its configured retry backoff so transient teardown-time failures retain
+        their normal recovery opportunity within the caller's timeout.
+        """
         if drain:
             # Start before taking the shutdown latch even when the queue is empty.
             # That closes the small accept-without-worker race for a concurrent
@@ -340,21 +345,52 @@ class OpeningScoreDeltaLane:
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
-                now = self.clock()
-                due_deadlines = [
-                    entry.deadline
+                # A shutdown notification can land while run_due executes outside
+                # this lock. Once the latch is visible, drain untouched attempts
+                # immediately while keeping failed attempts on bounded backoff.
+                shutting_down = self._shutdown
+                dispatchable = [
+                    entry
                     for key, entry in self._pending.items()
                     if key not in self._inflight
                 ]
-                wait_for = (
-                    None
-                    if not due_deadlines
-                    else max(0.0, min(due_deadlines) - now)
-                )
-                if wait_for is None or wait_for > 0:
-                    self._cond.wait(timeout=wait_for)
-                shutting_down = self._shutdown
-            self.run_due(now=float("inf") if shutting_down else None)
+                if shutting_down:
+                    if not dispatchable:
+                        # Only the synchronous run_due test surface can leave a
+                        # pending key in flight on another thread. Park briefly
+                        # until _run_one completion notifies instead of spinning.
+                        self._cond.wait(timeout=0.1)
+                    else:
+                        now = self.clock()
+                        # First attempts are ordinarily immediate already. Keep
+                        # that drain guarantee even if a stale deadline survives,
+                        # but do not pull retry attempts through their backoff.
+                        first_attempts = [
+                            entry for entry in dispatchable if entry.has_first_attempt
+                        ]
+                        for entry in first_attempts:
+                            entry.deadline = min(entry.deadline, now)
+                        retry_wait = max(
+                            0.0,
+                            min(entry.deadline for entry in dispatchable) - now,
+                        )
+                        if retry_wait > 0 and not first_attempts:
+                            self._cond.wait(timeout=min(retry_wait, 0.1))
+                else:
+                    now = self.clock()
+                    wait_for = (
+                        None
+                        if not dispatchable
+                        else max(
+                            0.0,
+                            min(entry.deadline for entry in dispatchable) - now,
+                        )
+                    )
+                    if wait_for is None or wait_for > 0:
+                        self._cond.wait(timeout=wait_for)
+            # A live clock preserves retry backoff during drain. The latch-first
+            # branch above makes every untouched first attempt immediately due.
+            self.run_due()
 
     def _run_one(self, key: Key, entry: _Entry) -> None:
         worker_started = self.clock()

@@ -492,6 +492,137 @@ def test_shutdown_drain_starts_worker_for_pending_non_autostart_lane():
     assert lane._thread is None
 
 
+def test_shutdown_drain_does_not_lose_notify_between_worker_iterations(monkeypatch):
+    publish = _RecordingPublish()
+    lane, _ = _make_lane(time.monotonic, publish, auto_start=True)
+
+    real_run_due = OpeningScoreDeltaLane.run_due
+    worker_between_iterations = threading.Event()
+    release_worker = threading.Event()
+    gate_first_run = True
+
+    def gated_run_due(self, now=None):
+        nonlocal gate_first_run
+        if self is lane and gate_first_run:
+            gate_first_run = False
+            worker_between_iterations.set()
+            assert release_worker.wait(timeout=5.0)
+        return real_run_due(self, now)
+
+    monkeypatch.setattr(OpeningScoreDeltaLane, "run_due", gated_run_due)
+
+    lane.enqueue(1, "white", uuid.uuid4())
+    assert worker_between_iterations.wait(timeout=5.0)
+
+    lane.enqueue(2, "black", uuid.uuid4())
+    with lane._cond:
+        lane._pending[(2, "black")].deadline = lane.clock() + 30.0
+
+    shutdown_errors: list[BaseException] = []
+
+    def shut_down():
+        try:
+            lane.shutdown(drain=True, timeout=0.5)
+        except BaseException as exc:
+            shutdown_errors.append(exc)
+
+    shutdown_thread = threading.Thread(target=shut_down)
+    shutdown_thread.start()
+
+    with lane._cond:
+        deadline = time.monotonic() + 5.0
+        while not lane._shutdown:
+            remaining = deadline - time.monotonic()
+            assert remaining > 0
+            lane._cond.wait(timeout=remaining)
+
+    release_worker.set()
+    shutdown_thread.join(timeout=2.0)
+
+    if lane._thread is not None and lane._thread.is_alive():
+        with lane._cond:
+            for entry in lane._pending.values():
+                entry.deadline = lane.clock()
+            lane._cond.notify_all()
+        lane._thread.join(timeout=2.0)
+        lane.shutdown(drain=True, timeout=2.0)
+
+    assert not shutdown_thread.is_alive()
+    assert shutdown_errors == []
+    assert lane._pending == {}
+    assert lane._inflight == set()
+    assert lane._thread is None
+    assert [call[:2] for call in publish.calls] == [(1, "white"), (2, "black")]
+
+
+def test_shutdown_drain_preserves_retry_backoff(monkeypatch):
+    clock = _FakeClock()
+    attempts: list[float] = []
+
+    def fail_once(db, user_id, player_color, requests, *, on_complete):
+        attempts.append(clock())
+        if len(attempts) == 1:
+            raise RuntimeError("transient publication failure")
+        on_complete({"outcome": "published", "published_count": len(requests)})
+        return len(requests)
+
+    lane, _ = _make_lane(clock, fail_once, retry_backoff=(0.25,))
+    lane.enqueue(1, "white", uuid.uuid4())
+    with lane._cond:
+        lane._shutdown = True
+
+    waits: list[float] = []
+    real_wait = threading.Condition.wait
+
+    def advancing_wait(condition, timeout=None):
+        if condition is lane._cond:
+            assert timeout is not None
+            waits.append(timeout)
+            clock.advance(timeout)
+            return True
+        return real_wait(condition, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", advancing_wait)
+    lane._worker_loop()
+
+    assert attempts == pytest.approx([1000.0, 1000.25])
+    assert sum(waits) == pytest.approx(0.25)
+    assert all(wait <= 0.1 for wait in waits)
+
+
+def test_shutdown_drain_parks_when_pending_key_is_already_inflight(monkeypatch):
+    publish = _RecordingPublish()
+    lane, _ = _make_lane(_FakeClock(), publish)
+    key = (1, "white")
+    lane.enqueue(*key, uuid.uuid4())
+    with lane._cond:
+        lane._shutdown = True
+        lane._inflight.add(key)
+
+    parked = threading.Event()
+    real_wait = threading.Condition.wait
+
+    def observed_wait(condition, timeout=None):
+        if condition is lane._cond:
+            assert timeout == 0.1
+            parked.set()
+        return real_wait(condition, timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait", observed_wait)
+    worker = threading.Thread(target=lane._worker_loop)
+    worker.start()
+    assert parked.wait(timeout=5.0)
+    assert publish.calls == []
+
+    with lane._cond:
+        lane._inflight.discard(key)
+        lane._cond.notify_all()
+    worker.join(timeout=5.0)
+
+    assert not worker.is_alive()
+    assert [call[:2] for call in publish.calls] == [key]
+
+
 def test_completion_log_carries_queue_phase_and_publication_timings(caplog):
     clock = _FakeClock()
     lane, _ = _make_lane(clock, _RecordingPublish())
