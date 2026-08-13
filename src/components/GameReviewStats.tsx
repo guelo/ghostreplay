@@ -5,6 +5,16 @@ import { CLASSIFICATION_ICON } from './MoveRow.helpers';
 
 const ACCURACY_INFO =
   'How closely your moves matched the engine\'s best moves across the game.\n\n 100% means perfect play. Lower scores reflect how much each move gave up.'
+
+const CLASSIFICATION_LABELS: Record<
+  ClassKey,
+  { accessible: string; full: string; compact: string }
+> = {
+  blunder: { accessible: 'Blunders', full: 'Blunders', compact: 'Blund.' },
+  mistake: { accessible: 'Mistakes', full: 'Mistakes', compact: 'Mist.' },
+  inaccuracy: { accessible: 'Inaccuracies', full: 'Inaccur.', compact: 'Inacc.' },
+};
+
 interface GameReviewStatsProps {
   sideStats: { player: SideStats; opponent: SideStats };
   activeStat: StatSelection;
@@ -71,8 +81,7 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
 
         {/* Classification rows */}
         {CLASS_KEYS.map((cls: ClassKey) => {
-          const label = cls === 'inaccuracy' ? 'Inaccur.' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
-          const fullLabel = cls === 'inaccuracy' ? 'Inaccuracies' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
+          const labels = CLASSIFICATION_LABELS[cls];
           const iconInfo = CLASSIFICATION_ICON[cls];
           const labelSel = { side: 'player' as const, cls };
           const isLabelActive = activeStat?.cls === cls;
@@ -81,7 +90,7 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
             <button
               key={`${cls}-label`}
               type="button"
-              aria-label={`Your ${fullLabel}`}
+              aria-label={`Your ${labels.accessible}`}
               aria-pressed={isLabelPressed}
               className={`history-stats-pane__label history-stats-pane__label--${cls} history-stats-pane__label--interactive${isLabelActive ? ' history-stats-pane__label--active' : ''}`}
               onMouseEnter={() => onStatHover(labelSel)}
@@ -96,7 +105,15 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
                   {iconInfo.icon}
                 </span>
               )}
-              {label}
+              <span className="history-stats-pane__label-copy history-stats-pane__label-copy--full">
+                {labels.full}
+              </span>
+              <span
+                className="history-stats-pane__label-copy history-stats-pane__label-copy--compact"
+                aria-hidden="true"
+              >
+                {labels.compact}
+              </span>
             </button>,
             ...(['player', 'opponent'] as const).map((side) => {
               const sel = { side, cls };
@@ -107,7 +124,7 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
                 <button
                   key={`${cls}-${side}`}
                   type="button"
-                  aria-label={`${sideLabel} ${fullLabel}: ${sideStats[side][cls].count}`}
+                  aria-label={`${sideLabel} ${labels.accessible}: ${sideStats[side][cls].count}`}
                   aria-pressed={isPressed}
                   className={`history-stats-pane__value history-stats-pane__value--${cls} history-stats-pane__value--interactive${isActive ? ' history-stats-pane__value--active' : ''}`}
                   onMouseEnter={() => onStatHover(sel)}
@@ -140,7 +157,15 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
 
         {/* Accuracy row (user only) */}
         <div className="history-stats-pane__label history-stats-pane__label--accuracy" ref={infoRef}>
-          Accuracy
+          <span className="history-stats-pane__accuracy-copy history-stats-pane__accuracy-copy--full">
+            Accuracy
+          </span>
+          <span
+            className="history-stats-pane__accuracy-copy history-stats-pane__accuracy-copy--compact"
+            aria-hidden="true"
+          >
+            Acc.
+          </span>
           <button
             type="button"
             className="history-stats-pane__info-btn"

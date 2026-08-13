@@ -202,6 +202,7 @@ for (const target of PAGES) {
     { width: 500, height: 800 },
     { width: 390, height: 734 },
     { width: 360, height: 640 },
+    { width: 320, height: 568 },
   ]) {
     test(`${target.name}: short narrow puts stats beside the graph at ${width}x${height}`, async ({
       page,
@@ -211,8 +212,9 @@ for (const target of PAGES) {
       await loginAs(page, "stable");
       await target.open(page);
 
-      const { graph, stats, board } = await settledBoxes(page, {
+      const { graph, plot, stats, board } = await settledBoxes(page, {
         graph: ".analysis-graph",
+        plot: ".analysis-graph > svg",
         stats: ".history-stats-pane",
         board: ".analysis-board__board-frame",
       });
@@ -226,13 +228,27 @@ for (const target of PAGES) {
       expect(stats.y + stats.height).toBeLessThanOrEqual(height + 1);
       expect(stats.x + stats.width).toBeLessThanOrEqual(width + 1);
 
-      // The graph keeps the leftover width — the stats pane is the narrow one.
-      expect(graph.width).toBeGreaterThan(0);
-      expect(stats.width).toBeLessThan(graph.width + stats.width);
+      // The direct-child SVG is the actual plotted data area; the graph wrapper
+      // also includes the fixed-width y-axis. The plot must win the width budget
+      // rather than merely leaving a nonzero wrapper beside the stats pane.
+      expect(plot.width).toBeGreaterThan(stats.width);
 
       // Trading the stacked stats row for a side-by-side one is what buys the
       // board its height back; it must be bigger than mode 1 would have left.
       expect(board.width).toBeGreaterThan(150);
+
+      if (width <= 360) {
+        await page
+          .getByRole("button", { name: /what does accuracy mean/i })
+          .click();
+        const { popup } = await settledBoxes(page, {
+          popup: ".history-stats-pane__info-popup",
+        });
+        expect(popup.x).toBeGreaterThanOrEqual(-1);
+        expect(popup.x + popup.width).toBeLessThanOrEqual(width + 1);
+        expect(popup.y).toBeGreaterThanOrEqual(-1);
+        expect(popup.y + popup.height).toBeLessThanOrEqual(height + 1);
+      }
     });
   }
 }

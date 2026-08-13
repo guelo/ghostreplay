@@ -85,7 +85,7 @@ describe('GameReviewStats accuracy row', () => {
 });
 
 describe('GameReviewStats classification icons', () => {
-  it('renders the movelist classification icon next to each label', () => {
+  it('keeps full accessible names alongside compact copy and decorative icons', () => {
     renderStats(87);
     // Blunder ??, Mistake ?, Inaccuracy ?! — rendered as decorative pills.
     const blunder = screen.getByRole('button', { name: /^your blunders$/i });
@@ -97,6 +97,9 @@ describe('GameReviewStats classification icons', () => {
     expect(blunder.querySelector('.move-icon--blunder')).not.toBeNull();
     expect(mistake.querySelector('.move-icon--mistake')).not.toBeNull();
     expect(inaccuracy.querySelector('.move-icon--inaccuracy')).not.toBeNull();
+    expect(screen.getByText('Blund.')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByText('Mist.')).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.getByText('Inacc.')).toHaveAttribute('aria-hidden', 'true');
   });
 });
 
@@ -232,6 +235,8 @@ describe('GameReviewStats accuracy info button', () => {
     renderStats(87);
 
     const btn = screen.getByRole('button', { name: /what does accuracy mean/i });
+    expect(screen.getByText('Accuracy')).toBeInTheDocument();
+    expect(screen.getByText('Acc.')).toHaveAttribute('aria-hidden', 'true');
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
 
     await user.click(btn);
