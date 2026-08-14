@@ -1,0 +1,659 @@
+
+/* --- Opening tree node cards (g-tree-node-cards) -------------------------- */
+/* Width-agnostic presentational cards for opening-tree nodes. The left accent
+   border encodes the grade (--grade-accent); column widths/scroll belong to
+   g-tree-layout, not here. */
+.tree-node-card {
+    --grade-accent: var(--text-tertiary);
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.tree-node-card--grade-a {
+    --grade-accent: var(--color-green-600);
+}
+.tree-node-card--grade-b {
+    --grade-accent: var(--color-green-500);
+}
+.tree-node-card--grade-c {
+    --grade-accent: var(--color-yellow-600);
+}
+.tree-node-card--grade-d {
+    --grade-accent: var(--color-orange-500);
+}
+.tree-node-card--grade-f {
+    --grade-accent: var(--color-red-500);
+}
+.tree-node-card--grade-none {
+    --grade-accent: var(--text-tertiary);
+}
+
+/* A fresh score outcome belongs to the card, not beside it. Keep the outcome
+   colour separate from the grade accent: an A can fall and an F can improve. */
+.tree-node-card--score-change-up {
+    --score-change-accent: var(--success);
+    --score-change-tint: color-mix(in srgb, var(--success) 15%, transparent);
+}
+
+.tree-node-card--score-change-down {
+    --score-change-accent: var(--error);
+    --score-change-tint: color-mix(in srgb, var(--error) 14%, transparent);
+}
+
+/* --- Compact variant: two-line selection button -------------------------- */
+.tree-node-card--compact {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--grade-accent);
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--card-bg));
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+}
+
+button.tree-node-card--compact {
+    cursor: pointer;
+}
+
+/* The score's arrival is intentionally brief: it is feedback for this opening,
+   not a reward-screen animation. The tint and glow call attention to the whole
+   active card while preserving its ordinary grade border. */
+.tree-node-card--compact.tree-node-card--score-change-animate {
+    animation: opening-score-card-glow 600ms ease-out;
+}
+
+@keyframes opening-score-card-glow {
+    0% {
+        box-shadow: inset 0 0 0 0 var(--score-change-tint);
+    }
+    35% {
+        box-shadow:
+            inset 0 0 0 1px var(--score-change-tint),
+            0 0 0.7rem var(--score-change-tint);
+    }
+    100% {
+        box-shadow: inset 0 0 0 0 transparent;
+    }
+}
+
+/* Selected highlight via background + inset ring so the grade accent border
+   stays intact (one visual variable per concept). */
+.tree-node-card--compact.tree-node-card--selected {
+    background: color-mix(in srgb, var(--grade-accent) 16%, var(--card-bg));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--grade-accent) 45%, transparent);
+}
+
+.tree-node-card--compact:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
+    outline-offset: 1px;
+}
+
+.tree-node-card__line {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+}
+
+.tree-node-card__line--primary {
+    justify-content: space-between;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.tree-node-card__move {
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.tree-node-card__primary-right {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.tree-node-card__score {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 0.78rem;
+}
+
+/* The resolved score becomes the headline of a newly known outcome. It grows
+   roughly 28% over the standard compact score, then the tinted capsule confirms
+   the signed change without competing with the new value. */
+.tree-node-card__score--hero {
+    font-size: 1rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+
+.tree-node-card__score--previous {
+    color: var(--text-primary);
+}
+
+.tree-node-card__score--resolved {
+    color: var(--score-change-accent);
+}
+
+.tree-node-card__score--changed {
+    animation: opening-score-number-arrive 300ms cubic-bezier(0.18, 0.8, 0.28, 1.16) both;
+}
+
+@keyframes opening-score-number-arrive {
+    from {
+        opacity: 0.35;
+        transform: translateY(0.32em) scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.tree-node-card__score-change-badge {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    padding: 0.1rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--score-change-accent) 38%, transparent);
+    border-radius: 999px;
+    background: var(--score-change-tint);
+    color: var(--score-change-accent);
+    font-size: 0.68rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+    white-space: nowrap;
+}
+
+.tree-node-card__score-change-badge--animated {
+    animation: opening-score-badge-pop 220ms ease-out both;
+}
+
+@keyframes opening-score-badge-pop {
+    from {
+        opacity: 0;
+        transform: scale(0.72);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card--compact.tree-node-card--score-change-animate,
+    .tree-node-card__score--changed,
+    .tree-node-card__score-change-badge--animated {
+        animation: none;
+    }
+}
+
+/* Score loading placeholder (g-a5v3): occupies the score + grade slot while a
+   cold score cache is recomputing. Width is fixed to roughly the widest real
+   content ("100" + grade tag) so hydrating a score does not reflow the card. */
+.tree-node-card__score-loading {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 3.1rem;
+    height: 0.95rem;
+}
+
+.tree-node-card__score-spinner {
+    flex: 0 0 0.8rem;
+    box-sizing: border-box;
+    width: 0.8rem;
+    height: 0.8rem;
+    border: 2px solid color-mix(in srgb, var(--brand-primary) 22%, transparent);
+    border-top-color: var(--brand-primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Respect reduced-motion: keep the ring visible, drop the rotation. */
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card__score-spinner {
+        animation: none;
+    }
+}
+
+/* Screen-reader-only loading label — the spinner alone is invisible to AT. */
+.tree-node-card__score-loading-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.tree-node-card__grade {
+    flex: 0 0 auto;
+    padding: 0.05rem 0.3rem;
+    border: 1px solid color-mix(in srgb, var(--grade-accent) 45%, transparent);
+    border-radius: 0.3rem;
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--grade-accent);
+}
+
+.tree-node-card__line--secondary {
+    gap: 0.4rem;
+}
+
+/* Off-book marker: a violet pill (deliberately off the grade hue — greens /
+   yellows / reds — and the blue connectors, so it reads as "your line" rather
+   than a grade or a book edge) flagging moves that branch off the eco.json
+   book. Clickable: toggles the info popover below. Mirrors the grade tag's
+   sizing for a consistent chip rhythm. */
+.tree-node-card__off-book-wrap {
+    flex: 0 0 auto;
+    display: inline-flex;
+}
+
+.tree-node-card__off-book {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-violet-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-violet-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-violet-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__off-book:hover {
+    background: color-mix(in srgb, var(--color-violet-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-violet-500) 75%, transparent);
+}
+
+.tree-node-card__off-book:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-violet-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* "Transposition" chip — a book position reached through a different move order
+   (g-openings-transpose). Same plumbing as the off-book chip, in emerald so it
+   reads as in-book rather than as the player's own off-book branch. */
+.tree-node-card__transposition {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-emerald-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-emerald-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-emerald-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__transposition:hover {
+    background: color-mix(in srgb, var(--color-emerald-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-emerald-500) 75%, transparent);
+}
+
+.tree-node-card__transposition:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-emerald-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* "Your move" chip — the third move type (a board exploration). Mirrors the
+   off-book chip's plumbing but in sky to match its connector color (g-obh5). */
+.tree-node-card__selected-move {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-sky-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-sky-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-sky-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__selected-move:hover {
+    background: color-mix(in srgb, var(--color-sky-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-sky-500) 75%, transparent);
+}
+
+.tree-node-card__selected-move:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-sky-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* Fixed (viewport-anchored) so it escapes the tree columns' overflow scrollers.
+   Positioned in JS from the trigger's rect. */
+.tree-node-card__off-book-popup {
+    position: fixed;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 232px;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-elevated, var(--bg-secondary, #2a2a2a));
+    border: 1px solid color-mix(in srgb, var(--color-violet-500) 38%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-size: 0.72rem;
+    font-weight: 400;
+    line-height: 1.45;
+    letter-spacing: normal;
+    text-transform: none;
+    text-align: left;
+    color: var(--text-secondary);
+    cursor: default;
+}
+
+.tree-node-card__off-book-popup strong {
+    font-size: 0.74rem;
+    color: var(--text-primary);
+}
+
+.tree-node-card__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__eval {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+/* --- Expanded variant: full metric panel --------------------------------- */
+/* The expanded card is the selected deepest node, so it gets stronger emphasis
+   than the compact selected state: a full grade-accent border, an accent-tinted
+   background (matching the selected/collapsed cards) and a lifted shadow that
+   eases in to read as elevation above the surrounding tree. */
+.tree-node-card--expanded {
+    /* Positioning context for the optional full-surface collapse overlay
+       (lineage in-place expansion); harmless on /openings (no overlay there). */
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--grade-accent) 55%, var(--border-color));
+    border-left: 3px solid var(--grade-accent);
+    border-radius: 0.7rem;
+    background: color-mix(in srgb, var(--grade-accent) 18%, var(--card-bg));
+    color: var(--text-primary);
+    box-shadow:
+        0 6px 18px color-mix(in srgb, var(--grade-accent) 24%, transparent),
+        0 1px 3px color-mix(in srgb, var(--text-primary) 14%, transparent);
+    animation: tree-node-card-elevate 0.22s ease-out;
+}
+
+@keyframes tree-node-card-elevate {
+    from {
+        transform: translateY(5px) scale(0.985);
+        box-shadow:
+            0 0 0 transparent,
+            0 0 0 transparent;
+        opacity: 0.4;
+    }
+    to {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card--expanded {
+        animation: none;
+    }
+}
+
+.tree-node-card__header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.tree-node-card__move-label {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.tree-node-card__name-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    min-width: 0;
+}
+
+.tree-node-card--expanded .tree-node-card__name {
+    font-size: 0.78rem;
+}
+
+.tree-node-card__score-panel,
+.tree-node-card__metrics {
+    margin: 0;
+    display: grid;
+    gap: 0.5rem;
+}
+
+.tree-node-card__score-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tree-node-card__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tree-node-card__score-metric,
+.tree-node-card__metric {
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
+    border-radius: 0.55rem;
+    background: color-mix(in srgb, var(--color-white) 70%, var(--bg-primary));
+}
+
+.tree-node-card__score-metric {
+    padding: 0.5rem 0.6rem;
+}
+
+.tree-node-card__metric {
+    padding: 0.45rem 0.55rem;
+}
+
+.tree-node-card__score-metric dt,
+.tree-node-card__metric dt {
+    margin: 0;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+
+.tree-node-card__score-metric dd {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+}
+
+.tree-node-card__score-value {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.tree-node-card__metric dd {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.tree-node-card__terminal {
+    margin: 0;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__action-button {
+    /* Raised above the collapse overlay (z-index:0) so it stays clickable when
+       the card is rendered with a collapse surface (lineage expansion). */
+    position: relative;
+    z-index: 1;
+    align-self: stretch;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    border-radius: 999px;
+    background: var(--button-secondary-bg);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    flex: 1 1 auto;
+    transition: border-color 200ms ease, background 200ms ease;
+}
+
+.tree-node-card__action-button:hover {
+    border-color: var(--text-primary);
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+}
+
+.tree-node-card__action-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
+    outline-offset: 2px;
+}
+
+/* Stretched click target that collapses the expanded card; sits behind the
+   raised footer actions so those controls stay clickable (same pattern as the
+   former .opening-family-card__collapse-nav). */
+.tree-node-card__collapse-nav {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    z-index: 0;
+}
+
+/* --- Family mode: opening-lineage card (/history & /play) ----------------- */
+/* The lineage entry identifies an opening family by position — no SAN/eval — so
+   the score panel drops the Eval tile (the name-led header is shared with the
+   /openings move card via .tree-node-card__move--name). */
+.tree-node-card--family .tree-node-card__score-panel {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* --- Name-led header + played move list (all surfaces, g-d65n) ------------ */
+/* The primary line leads with the opening NAME on every surface. Collapsed
+   cards give it two lines before truncating, while the score/grade keeps its
+   fixed slot at the right; expanded cards continue to wrap without a limit. */
+.tree-node-card__move--name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tree-node-card--compact .tree-node-card__move--name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+}
+
+/* The played move list ("1.e4 c6 2.Bc4") is the secondary line; the last
+   (crossing) move is bold to disambiguate siblings that share a name. */
+.tree-node-card__move-list {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__move-list-last {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+/* Compact: one truncated line (full text in the title). The growing flex child
+   of the secondary line, so chips/eval keep their intrinsic width. */
+.tree-node-card__move-list--compact {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Expanded: wraps to as many lines as needed — no truncation. */
+.tree-node-card__move-list--expanded {
+    min-width: 0;
+    white-space: normal;
+}
+
+/* Expanded header: the name wraps (no truncation) and the move list wraps below
+   it, chips flowing after. */
+.tree-node-card--expanded .tree-node-card__move-label {
+    white-space: normal;
+}
+
+.tree-node-card--expanded .tree-node-card__name-line {
+    flex-wrap: wrap;
+}
+
+/* "View in Openings" footer link lives inside the expanded card; raised above
+   the collapse overlay (z-index:0) so it stays clickable. */
+.tree-node-card__footer-action {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}

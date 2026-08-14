@@ -1,0 +1,1565 @@
+
+/* Pop entrance animation for analysis icons */
+@keyframes move-icon-pop {
+    0%   { transform: scale(0); opacity: 0; }
+    60%  { transform: scale(1.25); opacity: 1; }
+    100% { transform: scale(1); }
+}
+
+.move-icon--pop {
+    animation: move-icon-pop 400ms ease-out both;
+}
+
+@keyframes move-best-button {
+    0% {
+        opacity: 0;
+        transform: scale(0.985);
+        background: color-mix(in srgb, #facc15 0%, transparent);
+        box-shadow:
+            inset 0 0 0 0 color-mix(in srgb, #facc15 0%, transparent),
+            0 0 0 0 color-mix(in srgb, #f59e0b 0%, transparent);
+    }
+    18% {
+        opacity: 0.72;
+        transform: scale(1);
+        background: color-mix(in srgb, #facc15 8%, transparent);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #facc15 28%, transparent),
+            0 0 0 0 color-mix(in srgb, #f59e0b 0%, transparent);
+    }
+    40% {
+        opacity: 1;
+        transform: scale(1.01);
+        background: color-mix(in srgb, #facc15 16%, transparent);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #facc15 52%, transparent),
+            0 0 0 1px color-mix(in srgb, #fde68a 24%, transparent),
+            0 12px 18px -16px color-mix(in srgb, #f59e0b 75%, transparent);
+    }
+    68% {
+        opacity: 0.62;
+        transform: scale(1.005);
+        background: color-mix(in srgb, #fde68a 10%, transparent);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #fde68a 34%, transparent),
+            0 0 16px 0 color-mix(in srgb, #facc15 18%, transparent);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1);
+        background: color-mix(in srgb, #fde68a 0%, transparent);
+        box-shadow:
+            inset 0 0 0 0 color-mix(in srgb, #fde68a 0%, transparent),
+            0 0 24px 0 color-mix(in srgb, #f59e0b 0%, transparent);
+    }
+}
+
+@keyframes move-best-san {
+    0% {
+        transform: translate3d(0, 0, 0);
+        color: inherit;
+        text-shadow: none;
+    }
+    16% {
+        transform: translate3d(0, 1px, 0);
+    }
+    42% {
+        transform: translate3d(0, -1px, 0) scale(1.035);
+        color: color-mix(in srgb, var(--text-primary) 62%, #fff3b0);
+        text-shadow:
+            0 0 16px color-mix(in srgb, #fde68a 92%, transparent),
+            0 0 4px color-mix(in srgb, #fff 96%, transparent);
+    }
+    64% {
+        transform: translate3d(0, 0, 0) scale(1.015);
+    }
+    100% {
+        transform: translate3d(0, 0, 0);
+        color: inherit;
+        text-shadow: none;
+    }
+}
+
+@keyframes move-best-icon {
+    0% {
+        transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+        box-shadow: 0 0 0 0 transparent;
+        filter: saturate(1);
+    }
+    10% {
+        transform: translate3d(0, 1px, 0) scale(0.82) rotate(-10deg);
+        box-shadow:
+            0 0 0 0 color-mix(in srgb, #facc15 0%, transparent),
+            0 0 0 0 color-mix(in srgb, #fde68a 0%, transparent);
+    }
+    34% {
+        transform: translate3d(0, -3px, 0) scale(1.64) rotate(8deg);
+        box-shadow:
+            0 0 0 8px color-mix(in srgb, #facc15 0%, transparent),
+            0 0 28px color-mix(in srgb, #fde68a 86%, transparent);
+        filter: saturate(1.32) brightness(1.08);
+    }
+    58% {
+        transform: translate3d(0, -1px, 0) scale(1.08) rotate(-2deg);
+        box-shadow:
+            0 0 0 3px color-mix(in srgb, #facc15 0%, transparent),
+            0 0 16px color-mix(in srgb, #fde68a 32%, transparent);
+    }
+    74% {
+        transform: translate3d(0, 0, 0) scale(0.985) rotate(1deg);
+    }
+    100% {
+        transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+        box-shadow: 0 0 0 0 transparent;
+        filter: saturate(1);
+    }
+}
+
+@keyframes move-best-burst {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.22) rotate(-18deg);
+    }
+    22% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1.2) rotate(2deg);
+    }
+    58% {
+        opacity: 0.46;
+        transform: translate(-50%, -50%) scale(2.28) rotate(14deg);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(2.95) rotate(24deg);
+    }
+}
+
+@keyframes move-best-tail {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.56);
+        box-shadow:
+            inset 0 0 0 0 color-mix(in srgb, #fde68a 0%, transparent),
+            0 0 0 0 color-mix(in srgb, #facc15 0%, transparent),
+            0 0 0 0 color-mix(in srgb, #fff8d6 0%, transparent);
+    }
+    24% {
+        opacity: 0.88;
+        transform: translate(-50%, -50%) scale(1.18);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #fde68a 100%, transparent),
+            0 0 26px 2px color-mix(in srgb, #facc15 52%, transparent),
+            0 0 44px 6px color-mix(in srgb, #fff8d6 32%, transparent);
+    }
+    58% {
+        opacity: 0.52;
+        transform: translate(-50%, -50%) scale(1.64);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #fde68a 55%, transparent),
+            0 0 34px 4px color-mix(in srgb, #f59e0b 28%, transparent),
+            0 0 56px 10px color-mix(in srgb, #fff8d6 18%, transparent);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(2.12);
+        box-shadow:
+            inset 0 0 0 1px color-mix(in srgb, #fde68a 0%, transparent),
+            0 0 44px 8px color-mix(in srgb, #f59e0b 0%, transparent),
+            0 0 72px 12px color-mix(in srgb, #fff8d6 0%, transparent);
+    }
+}
+
+@keyframes move-best-spark-1 {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.25);
+    }
+    24% {
+        opacity: 1;
+        transform: translate(-24px, -28px) scale(1.12);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-34px, -40px) scale(0.32);
+    }
+}
+
+@keyframes move-best-spark-2 {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.25);
+    }
+    28% {
+        opacity: 0.95;
+        transform: translate(28px, -16px) scale(1.14);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(40px, -24px) scale(0.28);
+    }
+}
+
+@keyframes move-best-spark-3 {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.25);
+    }
+    30% {
+        opacity: 0.9;
+        transform: translate(12px, 24px) scale(1.08);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(18px, 38px) scale(0.26);
+    }
+}
+
+@keyframes move-best-connector {
+    0% {
+        opacity: 0;
+        transform: scaleX(0.2);
+        box-shadow: 0 0 0 0 color-mix(in srgb, #fde68a 0%, transparent);
+    }
+    24% {
+        opacity: 0.95;
+        transform: scaleX(1);
+        box-shadow: 0 0 12px 0 color-mix(in srgb, #fde68a 72%, transparent);
+    }
+    58% {
+        opacity: 0.45;
+        transform: scaleX(0.9);
+    }
+    100% {
+        opacity: 0;
+        transform: scaleX(1.08);
+        box-shadow: 0 0 18px 0 color-mix(in srgb, #fde68a 0%, transparent);
+    }
+}
+
+.move-button.move-button--celebrate-best {
+    overflow: visible;
+    z-index: 3;
+}
+
+.move-san__text--celebrate-best {
+    animation: move-best-san 620ms cubic-bezier(0.2, 0.9, 0.25, 1.12) both;
+}
+
+.move-icon--celebrate-best {
+    animation: move-best-icon 620ms cubic-bezier(0.18, 0.88, 0.28, 1.18) both;
+}
+
+.move-best-fx {
+    position: absolute;
+    inset: -1.1rem -1.4rem -1.2rem -0.9rem;
+    pointer-events: none;
+    z-index: 0;
+}
+
+.move-best-fx__plate {
+    position: absolute;
+    inset: 0;
+    border-radius: 0.55rem;
+    background:
+        radial-gradient(circle at 24% 50%, color-mix(in srgb, #fff8d6 26%, transparent), transparent 58%),
+        radial-gradient(circle at 70% 50%, color-mix(in srgb, #fde68a 22%, transparent), transparent 62%);
+    filter: blur(8px);
+}
+
+.move-icon-stage {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 0.4em;
+}
+
+.move-icon-stage--celebrate-best {
+    z-index: 1;
+}
+
+.move-best-fx__plate {
+    animation: move-best-button 620ms cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
+}
+
+.move-icon-stage > .move-icon {
+    position: relative;
+    z-index: 2;
+    margin-right: 0;
+}
+
+.move-icon-stage__burst,
+.move-icon-stage__ring,
+.move-icon-stage__tail,
+.move-icon-stage__spark {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.move-icon-stage__burst,
+.move-icon-stage__ring,
+.move-icon-stage__tail {
+    border-radius: 999px;
+}
+
+.move-icon-stage__burst {
+    width: 3.8rem;
+    height: 3.8rem;
+    background:
+        radial-gradient(circle, color-mix(in srgb, #fffdf2 96%, transparent) 0 12%, color-mix(in srgb, #fde68a 68%, transparent) 24%, color-mix(in srgb, #facc15 20%, transparent) 46%, transparent 72%);
+    clip-path: polygon(
+        50% 0%,
+        58% 22%,
+        78% 6%,
+        70% 30%,
+        100% 18%,
+        82% 42%,
+        100% 50%,
+        82% 58%,
+        100% 82%,
+        70% 70%,
+        78% 94%,
+        58% 78%,
+        50% 100%,
+        42% 78%,
+        22% 94%,
+        30% 70%,
+        0% 82%,
+        18% 58%,
+        0% 50%,
+        18% 42%,
+        0% 18%,
+        30% 30%,
+        22% 6%,
+        42% 22%
+    );
+    filter: drop-shadow(0 0 10px color-mix(in srgb, #facc15 70%, transparent));
+    animation: move-best-burst 480ms ease-out both;
+}
+
+.move-icon-stage__ring {
+    width: 3.4rem;
+    height: 3.4rem;
+    border: 1px solid color-mix(in srgb, #fde68a 86%, transparent);
+    animation: move-best-tail 860ms ease-out both;
+}
+
+.move-icon-stage__tail {
+    width: 5rem;
+    height: 5rem;
+    background:
+        radial-gradient(circle, color-mix(in srgb, #fff8d6 26%, transparent) 0, color-mix(in srgb, #fde68a 10%, transparent) 34%, transparent 72%);
+    animation: move-best-tail 860ms ease-out both;
+}
+
+.move-icon-stage__spark {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    background: radial-gradient(circle, #fff 0 34%, #fde68a 48%, transparent 72%);
+    opacity: 0;
+}
+
+.move-icon-stage__spark--1 {
+    animation: move-best-spark-1 760ms ease-out both;
+}
+
+.move-icon-stage__spark--2 {
+    animation: move-best-spark-2 780ms ease-out both;
+}
+
+.move-icon-stage__spark--3 {
+    animation: move-best-spark-3 740ms ease-out both;
+}
+
+.move-bubble--srs-pass {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    background: color-mix(in srgb, var(--success) 12%, var(--bg-tertiary));
+    border: 1px solid var(--success);
+    color: var(--text-primary);
+}
+
+.srs-stats {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+    white-space: nowrap;
+}
+
+.srs-stats__item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 2.2rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: 6px;
+    background: var(--bg-primary);
+    border: 1px solid color-mix(in srgb, var(--text-primary) 12%, transparent);
+    line-height: 1.05;
+}
+
+.srs-stats__value {
+    font-size: 1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+.srs-stats__caption {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.srs-stats__item--pass .srs-stats__value {
+    color: color-mix(in srgb, var(--success) 80%, white);
+}
+
+.srs-stats__item--fail .srs-stats__value {
+    color: color-mix(in srgb, var(--eval-blunder) 75%, white);
+}
+
+.srs-stats__item--streak .srs-stats__value {
+    color: var(--text-primary);
+}
+
+.panel-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.panel-settings {
+    display: inline-flex;
+}
+
+.panel-sound-toggle {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+}
+
+.panel-sound-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.panel-sound-toggle[aria-pressed="true"] {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+.move-bubble--srs-fail {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    background: color-mix(in srgb, var(--eval-blunder) 12%, var(--bg-tertiary));
+    border: 1px solid var(--eval-blunder);
+    color: var(--eval-blunder);
+}
+/* Animated pulsing icon for SRS fail */
+.srs-fail-icon {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    border: 2px solid var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 25%, var(--bg-tertiary));
+    cursor: pointer;
+    animation: srs-fail-pulse 1.2s ease-in-out infinite;
+    transition:
+        background 200ms,
+        border-color 200ms;
+    padding: 0;
+}
+
+.srs-fail-icon:hover {
+    background: color-mix(in srgb, var(--eval-blunder) 40%, var(--bg-tertiary));
+}
+
+.srs-fail-icon--revealed {
+    animation: none;
+    opacity: 0.6;
+    cursor: default;
+}
+
+.srs-fail-icon__symbol {
+    font-size: 1.1rem;
+    font-weight: 900;
+    line-height: 1;
+    color: var(--eval-blunder);
+}
+
+@keyframes srs-fail-pulse {
+    0%,
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0
+            color-mix(in srgb, var(--eval-blunder) 40%, transparent);
+    }
+    50% {
+        transform: scale(1.12);
+        box-shadow: 0 0 0 6px
+            color-mix(in srgb, var(--eval-blunder) 0%, transparent);
+    }
+}
+
+.srs-fail-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.srs-fail-body__label {
+    font-weight: 700;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.move-placeholder-dots {
+    color: var(--text-tertiary);
+    font-size: 0.85rem;
+    padding: 0.35rem 0.3rem;
+    text-align: center;
+}
+
+.move-analyzing-spinner {
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    margin-left: 0.3em;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.chess-meta-strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Ghost mode indicator */
+.chess-meta--ghost {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.chess-meta--engine {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.ghost-mode-label {
+    color: var(--status-ghost);
+}
+
+.ghost-icon {
+    display: block;
+    color: var(--status-ghost);
+    animation: ghost-float 2s ease-in-out infinite;
+}
+
+@keyframes ghost-float {
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-2px);
+    }
+}
+
+/* Ghost info anchor (positions the popover below the button) */
+.ghost-info-anchor {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+/* Ghost info button */
+.ghost-info-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--status-ghost);
+    padding: 0;
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+
+.ghost-info-btn:hover {
+    opacity: 1;
+}
+
+/* Ghost info box */
+.ghost-info-box {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 0.35rem;
+    padding: 0.6rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--status-ghost);
+    background: var(--card-bg);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    min-width: 150px;
+}
+
+.ghost-info-box__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+}
+
+.ghost-info-box__title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--status-ghost);
+}
+
+.ghost-info-box__close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    padding: 0 0.15rem;
+    line-height: 1;
+}
+
+.ghost-info-box__close:hover {
+    color: var(--text-primary);
+}
+
+.ghost-info-box__board {
+    width: 200px;
+    height: 200px;
+    margin: 0 auto 0.4rem;
+}
+
+.static-mini-board {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    width: 100%;
+    height: 100%;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.static-mini-board__sq {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f0d9b5;
+}
+
+.static-mini-board__sq--dark {
+    background: #b58863;
+}
+
+.static-mini-board__piece {
+    position: relative;
+    font-size: 1.45rem;
+    line-height: 1;
+    user-select: none;
+    /* Nudge up so the glyph sits centered within the square. */
+    transform: translateY(-8%);
+}
+
+/* White backdrop copy of the glyph fills the otherwise see-through interior. */
+.static-mini-board__piece::before {
+    content: attr(data-glyph);
+    position: absolute;
+    inset: 0;
+    color: #fff;
+    z-index: -1;
+}
+
+.static-mini-board__piece--white {
+    color: #fff;
+    text-shadow:
+        -1px -1px 0 #000,
+        1px -1px 0 #000,
+        -1px 1px 0 #000,
+        1px 1px 0 #000;
+}
+
+.static-mini-board__piece--black {
+    color: #000;
+}
+
+.ghost-info-box__srs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+/* Game End Banner */
+.game-end-banner {
+    margin-top: 1rem;
+    padding: 1rem 1.25rem;
+    border-radius: 1rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--card-bg);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    box-shadow: var(--shadow-md);
+}
+
+.game-end-banner-message {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.rating-delta {
+    margin: 0.25rem 0 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    animation: rating-delta-in 0.4s ease-out;
+}
+
+.rating-delta--up {
+    color: #4caf50;
+}
+
+.rating-delta--down {
+    color: #ef5350;
+}
+
+.rating-delta__value {
+    font-weight: 400;
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+@keyframes rating-delta-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Moves Column (material + move list) */
+.moves-column {
+    grid-area: moves;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    align-self: stretch;
+    max-height: calc(100dvh - var(--game-viewport-chrome));
+    height: 0;
+    min-height: 100%;
+}
+
+@media (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 6.5rem;
+    }
+}
+
+@media (max-height: 680px) {
+    .chess-layout {
+        --game-viewport-chrome: 8.5rem;
+    }
+}
+
+/*
+ * 2-col /play, short viewports (≤760px tall, ≥768px wide — the band where the
+ * board sits left of a full-width analysis graph). The board is capped by
+ * --game-board-max-width while its column still has horizontal slack, and the
+ * 6.5rem/8.5rem chrome bumps above over-reserve vertical space — leaving dead
+ * margin below the graph. Those bumps were sized for the old fixed-220px graph;
+ * now that the graph shrinks with viewport height (clamp at line ~7560), the
+ * reservation is doubly stale. Shrink the reserved chrome to roughly the real
+ * top offset so the board grows into that margin. Because raising the board's
+ * max-width only enlarges a width-constrained board, this is a no-op once the
+ * board already fills its column (narrower viewports) — matching "grow only
+ * when the board isn't using all its width" — and once the board hits its 300px
+ * floor at very short heights. The larger board pushes the graph down to the
+ * viewport bottom. Must follow the max-height bumps above so source order wins
+ * (equal specificity). See g-jth2 / g-9g1y.
+ */
+@media (min-width: 768px) and (max-width: 1099px) and (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 3rem;
+    }
+}
+
+/* Turn labels */
+.turn-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+    padding: 0 0.5rem;
+    letter-spacing: 0.02em;
+}
+
+.turn-label-spinner {
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Material Display */
+.material-display {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 2rem;
+    padding: 0 0.5rem;
+}
+
+/* Only the narrow /game + /history layout, which sits both sides on one row,
+   needs to name them; everywhere else position already says whose captures
+   these are. */
+.material-label {
+    display: none;
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--text-tertiary);
+}
+
+.material-icons {
+    font-size: 32px;
+    line-height: 1;
+    letter-spacing: -0.08em;
+}
+
+.analysis-board .material-icons {
+    font-size: 16px;
+}
+
+.material-score {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text-secondary);
+}
+
+/* Move List */
+.move-list-container {
+    padding: 0;
+    border-radius: 1rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--card-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-height: 600px;
+}
+
+.moves-column > .move-list-container {
+    max-height: none;
+    flex: 1;
+    min-height: 0;
+}
+
+.move-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.move-list-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.move-list-viewing {
+    font-size: 0.8rem;
+    color: var(--brand-secondary);
+    font-weight: 500;
+}
+
+.move-list-viewing.hidden {
+    visibility: hidden;
+}
+
+.move-list-actions {
+    display: flex;
+    gap: 0.35rem;
+    justify-content: center;
+}
+
+.move-action-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition:
+        border-color 150ms ease,
+        background 150ms ease,
+        color 150ms ease;
+}
+
+.move-action-button:hover:not(:disabled) {
+    border-color: var(--border-color-strong);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.move-action-button:disabled {
+    color: var(--text-tertiary);
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.move-action-button.danger {
+    color: var(--text-secondary);
+}
+
+.move-action-button.danger:hover:not(:disabled) {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+/* ---------------------------------------------------------------------------
+   Horizontal mobile move list (HorizontalMoveList)
+   --------------------------------------------------------------------------- */
+.h-move-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.controls-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+/* Relocated material (mobile portrait only) is hidden by default; the 659px
+   block opts these in and hides the moves-column originals. */
+.chess-panel__material,
+.controls-row__material {
+    display: none;
+}
+
+.h-move-list__row {
+    display: flex;
+    align-items: stretch;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.h-move-arrow {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-radius: 0.5rem;
+    font-size: 1.25rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.h-move-arrow:hover:not(:disabled) {
+    border-color: var(--border-color-strong);
+    background: var(--bg-tertiary);
+}
+
+.h-move-arrow:disabled {
+    color: var(--text-tertiary);
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* g-1y68 A2 (mobile) — return-to-live emphasis for the horizontal move strip.
+   The vertical list dramatizes its ⟩⟩ button; the horizontal list has no
+   jump-to-latest arrow, so surface a dedicated brand-filled pill that only
+   appears while reviewing a past ply of a live game. */
+.h-move-arrow--return-live {
+    width: auto;
+    gap: 0.3rem;
+    padding: 0 0.6rem;
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    font-size: 1rem;
+    animation: move-nav-return-live-pulse 2s ease-in-out infinite;
+}
+
+.h-move-arrow--return-live:hover:not(:disabled) {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    filter: brightness(1.06);
+}
+
+.h-move-arrow__live-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+}
+
+.h-move-list__strip {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    white-space: nowrap;
+    display: flex;
+    align-items: flex-end;
+    gap: 0.1rem;
+    padding: 0;
+    scrollbar-width: thin;
+    background: #fff;
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    color: #1a1a1a;
+}
+
+.h-move-list__strip .h-move {
+    color: #1a1a1a;
+}
+
+.h-move-list__strip .h-move-num {
+    color: #6b7280;
+}
+
+/* Classification badge floats above-left of the move like a thought bubble,
+   reusing the vertical list's pill shape (.move-icon) for the oval. */
+.h-move-badge {
+    position: absolute;
+    top: 7px;
+    left: 2px;
+    margin: 0;
+    z-index: 3;
+    pointer-events: none;
+    font-size: 0.72rem;
+    line-height: 1.15;
+    padding: 0.02rem 0.32rem;
+    font-weight: 800;
+}
+
+/* White moves carry a leading move number, so shift the badge right to sit over
+   the move button (matching black moves, which have no number). */
+.h-move-badge--numbered {
+    left: 0.95rem;
+}
+
+.h-move-list__strip::-webkit-scrollbar {
+    height: 6px;
+}
+
+.h-move-list__strip::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 3px;
+}
+
+@media (hover: none) and (pointer: coarse) {
+    .h-move-list__strip {
+        scrollbar-width: none;
+    }
+    .h-move-list__strip::-webkit-scrollbar {
+        display: none;
+    }
+}
+
+.h-move-empty {
+    color: var(--text-tertiary);
+    font-size: 0.85rem;
+    padding: 0 0.5rem;
+}
+
+.h-move-token {
+    position: relative;
+    display: inline-flex;
+    align-items: flex-end;
+    flex-shrink: 0;
+    gap: 0.1rem;
+    /* Reserve room above the move so the floating badge sits a few px from the
+       strip's top edge without being clipped by overflow-x. */
+    padding-top: 0.95rem;
+    padding-bottom: 0.2rem;
+}
+
+.h-move-num {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    font-weight: 400;
+    opacity: 0.65;
+    font-size: 0.8rem;
+    margin-left: 0.25rem;
+    user-select: none;
+}
+
+.h-move {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-primary);
+    border-radius: 0.35rem;
+    padding: 0.15rem 0.35rem;
+    font-size: 0.95rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.h-move:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+}
+
+.h-move.selected {
+    background: var(--accent, var(--bg-tertiary));
+    border-color: var(--border-color-strong);
+    font-weight: 600;
+}
+
+.h-move.branch-point {
+    border-color: var(--border-color-strong);
+    border-style: dashed;
+}
+
+.h-move-spinner {
+    width: 0.6rem;
+    height: 0.6rem;
+}
+
+.h-move-msg {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1rem;
+    height: 1rem;
+    border: none;
+    background: transparent;
+    color: var(--accent, var(--text-secondary));
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.h-move-popup {
+    z-index: 50;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color-strong);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+
+.h-move-popup__close {
+    position: absolute;
+    top: 0.15rem;
+    right: 0.3rem;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.move-list-nav {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.move-nav-button {
+    flex: 1;
+    padding: 0.25rem 0.5rem;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+        border-color 150ms ease,
+        background 150ms ease;
+}
+
+.move-nav-button:hover:not(:disabled) {
+    border-color: var(--border-color-strong);
+    background: var(--bg-tertiary);
+}
+
+.move-nav-button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* g-1y68 A2 — reinforce the return-to-live action for eyes in the move list.
+   While reviewing a past ply of a live game the ⟩⟩ button fills with the brand
+   color, grows to fit a "LIVE" label, and pulses to draw the eye. */
+.move-nav-button--return-live {
+    flex: 1.9 1 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    animation: move-nav-return-live-pulse 2s ease-in-out infinite;
+}
+
+.move-nav-button--return-live:hover:not(:disabled) {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    filter: brightness(1.06);
+}
+
+.move-nav-button__live-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+}
+
+@keyframes move-nav-return-live-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 50%, transparent);
+    }
+    50% {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 0%, transparent);
+    }
+}
+
+/* g-1y68 — honor reduced-motion: keep the cues (color/frame/label) but drop the
+   pulses, shake, and slide-in entrances. */
+@media (prefers-reduced-motion: reduce) {
+    .board-return-live,
+    .move-nav-button--return-live,
+    .h-move-arrow--return-live,
+    .chessboard-square-measure--nudge {
+        animation: none;
+    }
+
+    .board-return-live,
+    .board-return-live__label {
+        transition: none;
+    }
+}
+
+.move-list-scroll {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+}
+
+.move-list-empty {
+    margin: 0;
+    color: var(--text-tertiary);
+    font-size: 0.9rem;
+    font-style: italic;
+}
+
+.move-list-grid {
+    display: grid;
+    grid-template-columns: 2.5rem 1fr 1fr;
+    align-items: center;
+    position: relative;
+    isolation: isolate;
+}
+
+.move-list-grid[data-player-col="white"] {
+    grid-template-columns: 2.5rem 1.4fr 1fr;
+}
+
+.move-list-grid[data-player-col="black"] {
+    grid-template-columns: 2.5rem 1fr 1.4fr;
+}
+
+/* Continuous tint band behind the player's column */
+.move-list-grid[data-player-col]::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: color-mix(in srgb, var(--brand-secondary) 6%, transparent);
+    pointer-events: none;
+    z-index: -1;
+}
+
+.move-list-grid[data-player-col="white"]::before {
+    left: 2.5rem;
+    width: calc((100% - 2.5rem) * 0.5833);
+}
+
+.move-list-grid[data-player-col="black"]::before {
+    right: 0;
+    width: calc((100% - 2.5rem) * 0.5833);
+}
+
+.move-list-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.25rem 0.3rem;
+    border-bottom: 1px solid var(--border-color);
+    position: sticky;
+    top: 0;
+    background: var(--bg-secondary);
+    z-index: 1;
+}
+
+/* "You" header — prominent treatment */
+.move-list-header--you {
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    border-bottom: 2px solid var(--brand-secondary);
+    background: color-mix(in srgb, var(--brand-secondary) 6%, var(--bg-secondary));
+}
+
+.move-list-header-eval {
+    text-transform: none;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: rgba(59, 130, 246, 0.2);
+}
+
+.move-number {
+    grid-column: 1;
+    color: var(--text-tertiary);
+    font-size: 0.85rem;
+    text-align: right;
+    padding: 0.35rem 0.25rem 0.35rem 0.15rem;
+    border-right: 1px solid var(--border-color);
+    overflow: visible;
+    white-space: nowrap;
+}
+
+.move-button {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0.35rem 0.3rem;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    font-size: 0.9rem;
+    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    position: relative;
+    isolation: isolate;
+    transition:
+        background 150ms ease,
+        border-color 150ms ease,
+        color 150ms ease;
+}
+
+.move-san {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.move-san__connector {
+    flex: 0 0 0.78rem;
+    align-self: center;
+    height: 1px;
+    margin-right: 0.25rem;
+    transform-origin: left center;
+    background: linear-gradient(90deg, color-mix(in srgb, #facc15 92%, transparent), color-mix(in srgb, #fff8d6 0%, transparent));
+    animation: move-best-connector 560ms ease-out both;
+    border-radius: 999px;
+}
+
+.move-san__text {
+    display: inline-block;
+    min-width: 0;
+}
+
+.move-col-white {
+    grid-column: 2;
+}
+
+.move-col-black,
+.move-button-placeholder {
+    grid-column: 3;
+    border-left: 1px solid var(--border-color);
+}
+
+.move-button:hover {
+    background: var(--hover-overlay);
+    border-color: var(--border-color);
+}
+
+.move-button.selected {
+    background: var(--card-bg-selected);
+    border-color: var(--brand-secondary);
+    color: var(--text-primary);
+}
+
+/* Player column: bigger move text */
+.move-list-grid[data-player-col="white"] .move-col-white.move-button,
+.move-list-grid[data-player-col="black"] .move-col-black.move-button {
+    font-size: 1rem;
+}
+
+/* Eval formula below move */
+.move-eval {
+    font-size: 0.6rem;
+    font-weight: 600;
+    opacity: 0.7;
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    position: relative;
+    z-index: 1;
+}
+
+/* Player column: slightly bigger eval */
+.move-list-grid[data-player-col="white"] .move-col-white .move-eval,
+.move-list-grid[data-player-col="black"] .move-col-black .move-eval {
+    font-size: 0.65rem;
+}
+
+.move-eval:empty {
+    display: none;
+}
+
+/* Move classification colors */
+.move-button.move-blunder {
+    color: var(--eval-blunder);
+}
+.move-button.move-mistake {
+    color: var(--eval-mistake);
+}
+.move-button.move-inaccuracy {
+    color: var(--eval-inaccuracy);
+}
+.move-button.move-excellent {
+    color: var(--eval-excellent);
+}
+.move-button.move-best {
+    color: var(--brand-primary);
+}
+
+.move-button.move-blunder.selected {
+    color: var(--eval-blunder);
+}
+.move-button.move-mistake.selected {
+    color: var(--eval-mistake);
+}
+.move-button.move-inaccuracy.selected {
+    color: var(--eval-inaccuracy);
+}
+.move-button.move-excellent.selected {
+    color: var(--eval-excellent);
+}
+.move-button.move-best.selected {
+    color: var(--brand-primary);
+}
+
+/* Variation lines (what-if branches in MoveList) */
+.variation-line {
+    grid-column: 1 / -1;
+    min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    padding: 0.1rem 0.5rem 0.1rem 2.5rem;
+    background: var(--card-bg);
+}
+
+.variation-prefix {
+    color: var(--text-tertiary);
+    user-select: none;
+}
+
+.variation-ply {
+    cursor: pointer;
+    padding: 0.05em 0.2em;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.variation-ply:hover {
+    background: var(--hover-overlay);
+}
+
+.variation-ply--selected {
+    background: rgba(59, 130, 246, 0.7);
+    color: white;
+}
+
+.variation-move-number {
+    color: var(--text-tertiary);
+}
+
+.variation-ply--selected .variation-move-number {
+    color: white;
+}
