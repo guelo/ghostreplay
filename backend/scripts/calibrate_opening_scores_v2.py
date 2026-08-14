@@ -2,7 +2,7 @@
 """Historical opening-score v2 calibration tooling and synthetic regression.
 
 The report and release-selection paths preserve the evidence used to develop v2,
-but are not authority for the explicit sm-v2-5 product semantics. The
+but are not authority for the explicit sm-v2-6 product semantics. The
 ``cutoff-readiness`` mode writes a private, non-authoritative population-readiness
 assessment, and ``emit-user14-fixture`` regenerates the shared synthetic regression
 without reading a database.
@@ -44,7 +44,7 @@ import tempfile
 import time
 import uuid
 import dataclasses
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,6 +103,7 @@ SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/opening_score_delta.py",
     "backend/app/opening_score_delta_lane.py",
     "backend/app/opening_score_scheduler.py",
+    "backend/app/opening_transposition_artifact.py",
     "backend/app/position_analysis_policy.py",
     "backend/app/position_analysis_repo.py",
     "backend/app/posthog_client.py",
@@ -219,10 +220,17 @@ from app.opening_rootcalc import (  # noqa: E402
     RootCalcConfig,
     RootScore,
     compute_all_root_scores,
+    compute_root_coverage_decay_sweep,
     compute_root_score,
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots  # noqa: E402
+from app.opening_transposition_artifact import (  # noqa: E402
+    DensifiedEdges,
+    EMPTY_DENSIFIED_EDGES,
+    coverage_structural_edge_is_eligible,
+    load_strict_densified_edges,
+)
 
 DEFAULT_MIN_OBSERVATIONS = 20
 HISTOGRAM_EDGES = (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)
@@ -625,6 +633,7 @@ def score_overlay(
     pair_id: str | None = None,
     subject_id: str | None = None,
     cohort_role: str | None = None,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> PairScore:
     """Score one overlay in memory and separate the synthetic hero row.
 
@@ -656,6 +665,7 @@ def score_overlay(
         include_branch_summaries=False,
         include_synthetic_root=True,
         telemetry=telemetry,
+        routing_snapshot=routing_snapshot,
     )
     elapsed = time.perf_counter() - started
 
@@ -695,6 +705,7 @@ def score_pair(
     config: RootCalcConfig | None = None,
     *,
     as_of: datetime,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> PairScore:
     """Build the overlay for a pair (DB read only) and score it in memory.
 
@@ -702,7 +713,16 @@ def score_pair(
     ``score_overlay`` so the scoring clock can never fall through to ``datetime.now``.
     """
     overlay = overlay_evidence(db, user_id, player_color, graph)
-    return score_overlay(user_id, player_color, graph, overlay, roots, config, as_of=as_of)
+    return score_overlay(
+        user_id,
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        as_of=as_of,
+        routing_snapshot=routing_snapshot,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +803,7 @@ CURRENT_SM_V2_3_CELL = GridCell(
     report_fold_scope="all",
     report_self_term="keep",
 )
-SM_V2_5_DEFAULT_CELL = GridCell(
+SM_V2_6_DEFAULT_CELL = GridCell(
     lcb_z=1.0,
     coverage_fold="gate",
     coverage_live_threshold=1,
@@ -1013,6 +1033,7 @@ def score_pair_grid(
     cells: tuple[GridCell, ...],
     *,
     as_of: datetime,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> dict[GridCell, PairScore]:
     """Build a pair's overlay ONCE (the ~2.6s cost), then score it per grid cell.
 
@@ -1027,7 +1048,14 @@ def score_pair_grid(
     overlay = overlay_evidence(db, user_id, player_color, graph)
     return {
         cell: score_overlay(
-            user_id, player_color, graph, overlay, roots, cell.config, as_of=as_of
+            user_id,
+            player_color,
+            graph,
+            overlay,
+            roots,
+            cell.config,
+            as_of=as_of,
+            routing_snapshot=routing_snapshot,
         )
         for cell in cells
     }
@@ -2883,8 +2911,8 @@ def _user14_scenario() -> tuple[
     evidence, exposing the SAME FEN as a user-turn node under black and an opponent-turn
     node under white on IDENTICAL evidence. Returns (graph, black_overlay, white_overlay,
     roots, root_fen, child_fen). The pinned values reproduce (scored under
-    CURRENT_SM_V2_3_CELL at SYNTHETIC_AS_OF) root pre-fold quality 54.32, Caro child
-    34.38, and sm-v2-5 route coverage 7/18 (each inside its self-check tolerance).
+    CURRENT_SM_V2_3_CELL at SYNTHETIC_AS_OF) stable root/child quality and
+    depth-weighted visited-node coverage operands.
     """
     root_fen = _diag_positions(["e2e4"])[1]  # 1.e4, black to move (USER / OPP mirror)
     child_fen = _diag_positions(["e2e4", "c7c6"])[2]  # Caro-Kann, white to move (OPP)
@@ -2894,9 +2922,8 @@ def _user14_scenario() -> tuple[
 
     # Exactly SEVEN paths: the prepared mainline plus the unprepared siblings at each of
     # the two opponent levels. The Caro node gets 2 White replies (d4 + Nc3); the deep
-    # node gets 6 (exd5 + 5 siblings). Under sm-v2-5 the traversed d4 reply earns
-    # immediate local credit before its deeper 1/6 opportunity mass, producing
-    # (earned, available)=(7/12, 3/2) and route coverage 7/18 at the Caro node.
+    # node gets 6 (exd5 + 5 siblings). The scorer derives binary visits from the played
+    # edges and recursively discounts the uniform structural breadth.
     paths = [
         ["e2e4", "c7c6", "d2d4", "d7d5", "e4d5"],  # prepared mainline: Caro Exchange
         ["e2e4", "c7c6", "b1c3"],                    # 1 unprepared Caro reply (2.Nc3)
@@ -2969,43 +2996,34 @@ def _fold_mirror_scenario() -> tuple[
     """The TURN-SYMMETRY fixture (g-fold-sym-gate): EQUAL, NONZERO coverage on both turns.
 
     The one configuration in which "user multiplier == opponent multiplier" is a meaningful
-    assertion. _user14_scenario CANNOT carry this property: its Caro child is a user-turn
-    node with an EMPTY prepared-children set under white (both overlay edges are black
-    moves), so the white root's coverage is 0 while the black root's is 1/12 — comparing the
-    two multipliers there demands (1/12)**p == 0, which no p > 0 satisfies. Turn symmetry
-    needs its own topology, not a tolerance.
+    assertion. _user14_scenario deliberately exercises asymmetric turn behavior, so turn
+    symmetry needs its own isomorphic topology rather than a tolerance.
 
     Returns (graph, black_overlay, white_overlay, roots, root_fen). Topology::
 
         F  = after 1.e4          (black to move)  <- the mirrored root
         F -> A  (c7c6)           A  = after 1...c6 (white to move)
         F -> B  (e7e5)           B  = after 1...e5 (white to move), LEAF, NO evidence
-        A -> A1 (d2d4)           A1 = after 2.d4   (black to move), LEAF
-        A -> A2 (b1c3)           A2 = after 2.Nc3  (black to move), LEAF, NO evidence
+        A -> A1 (d2d4)           A1 = after 2.d4   (black to move), LEAF, visited
+        B -> B1 (g1f3)           B1 = after 2.Nf3  (black to move), LEAF, unvisited
 
-    Both sides then reach coverage EXACTLY FOLD_MIRROR_COVERAGE, by two different routes:
+    No edge leaves F in the evidence, so a user-turn F uses the same full structural
+    fallback that an opponent-turn F always uses. A and A1 are visited by the deeper
+    A -> A1 traversal; B and B1 remain unvisited. The two equal-depth branches therefore
+    give both turns equal, nonzero, sub-one coverage. This also makes the fixture exercise
+    shared FEN visit credit independently of an incoming root traversal.
 
-      * black (F is a USER turn): prepared={A} at weight 1.0, and A is an opponent node
-        whose two replies split 0.5/0.5 with only A1 covered  ->  0.5.
-      * white (F is an OPPONENT turn): children {A, B} split 0.5/0.5, B is uncovered, and A
-        is a USER turn whose single prepared child A1 gives it coverage 1.0  ->  0.5.
-
-    The exactness holds for EVERY cell in required_cells u DEMO_CELLS: the coverage channel
-    is independent of coverage_fold / lcb_z / report_fold_*, and A1's 20 live attempts clear
-    every coverage_live_threshold in the grid. The gate pins the 0.5 to a literal so a
-    topology drift fails loudly instead of making the equality checks vacuous (coverage 0 or
-    1 on BOTH sides would satisfy them trivially).
+    The relation is independent of coverage_fold / lcb_z / report_fold_* and the gate checks
+    the semantic interval and equality directly instead of pinning a legacy literal.
     """
     root_fen = _diag_positions(["e2e4"])[1]  # 1.e4, black to move (the mirrored root)
     a_fen = _diag_positions(["e2e4", "c7c6"])[2]  # 1...c6, white to move
     a1_fen = _diag_positions(["e2e4", "c7c6", "d2d4"])[3]  # 2.d4, black to move (LEAF)
-    # Exactly ONE uncovered sibling at EACH level, so both turns divide by 2 (2.Nc3 is the
-    # opponent-turn sibling under black; 1...e5 is the sibling under white).
+    # Equal-depth branches keep the two root terms' available mass identical.
     graph = _diag_graph(
         [
             ["e2e4", "c7c6", "d2d4"],
-            ["e2e4", "c7c6", "b1c3"],
-            ["e2e4", "e7e5"],
+            ["e2e4", "e7e5", "g1f3"],
         ]
     )
 
@@ -3022,17 +3040,9 @@ def _fold_mirror_scenario() -> tuple[
         overlay.nodes[a1_fen] = NodeEvidence(
             fen=a1_fen, quality_sum=10.0, quality_count=20, live_attempts=20
         )
-        # Prepared-child status comes from EDGES. One black move (c7c6) and one white move
-        # (d2d4), so whichever color is scored finds exactly one prepared child on its own
-        # user-turn node — that is the mirror.
-        overlay.edges[(root_fen, a_fen)] = EdgeEvidence(
-            root_fen,
-            a_fen,
-            "c7c6",
-            traversal_count=60,
-            live_attempts=60,
-            live_passes=60,
-        )
+        # Deliberately no edge leaves root_fen: black (user turn) must use the same full
+        # fallback breadth that white (opponent turn) uses. The deeper traversal credits A
+        # and A1 as visited without selecting a route at F (as a transposition can do).
         overlay.edges[(a_fen, a1_fen)] = EdgeEvidence(
             a_fen,
             a1_fen,
@@ -3044,6 +3054,181 @@ def _fold_mirror_scenario() -> tuple[
         return overlay
 
     return graph, _overlay("black"), _overlay("white"), _diag_roots(root_fen), root_fen
+
+
+@dataclass(frozen=True)
+class CoverageDepthDecayDiagnostic:
+    """Committed-topology result for the synthetic depth-decay sweep."""
+
+    selected_decay: float
+    passing_decays: tuple[float, ...]
+    selected_coverages: Mapping[str, float]
+
+
+_COVERAGE_DEPTH_DECAY_BANDS: tuple[tuple[str, float, float], ...] = (
+    ("white_line", 0.30, 0.40),
+    ("black_line", 0.35, 0.45),
+    ("white_breadth", 0.90, 0.94),
+    ("black_breadth", 0.97, 0.99),
+)
+
+
+def _coverage_anchor_edges(
+    graph: OpeningGraph,
+    routing_snapshot: DensifiedEdges,
+    root_fen: str,
+) -> tuple[tuple[str, str, str], ...]:
+    """Build the deterministic 1,999-position breadth evidence tree."""
+
+    distances = {root_fen: 0}
+    predecessors: dict[str, list[tuple[str, str]]] = {}
+    pending: deque[str] = deque([root_fen])
+    while pending:
+        parent_fen = pending.popleft()
+        destinations: dict[str, str] = {}
+        node = graph.get_node(parent_fen)
+        if node is not None:
+            for uci, child_fen in node.children.items():
+                if coverage_structural_edge_is_eligible(parent_fen, child_fen):
+                    destinations[child_fen] = min(uci, destinations.get(child_fen, uci))
+        for uci, child_fen in routing_snapshot.children_of(parent_fen).items():
+            if coverage_structural_edge_is_eligible(parent_fen, child_fen):
+                destinations[child_fen] = min(uci, destinations.get(child_fen, uci))
+
+        child_depth = distances[parent_fen] + 1
+        for child_fen, uci in sorted(destinations.items()):
+            previous_depth = distances.get(child_fen)
+            if previous_depth is None:
+                distances[child_fen] = child_depth
+                predecessors[child_fen] = [(parent_fen, uci)]
+                pending.append(child_fen)
+            elif previous_depth == child_depth:
+                predecessors[child_fen].append((parent_fen, uci))
+
+    selected = {root_fen}
+    selected.update(
+        sorted(
+            (fen for fen in distances if fen != root_fen),
+            key=lambda fen: (distances[fen], fen),
+        )[:1999]
+    )
+    edges: list[tuple[str, str, str]] = []
+    for child_fen in sorted(
+        selected - {root_fen}, key=lambda fen: (distances[fen], fen)
+    ):
+        candidates = [
+            (parent_fen, uci)
+            for parent_fen, uci in predecessors[child_fen]
+            if parent_fen in selected
+            and distances[parent_fen] + 1 == distances[child_fen]
+        ]
+        if not candidates:
+            raise RuntimeError(
+                "Coverage depth-decay anchor has no selected shortest-path predecessor"
+            )
+        parent_fen, uci = min(candidates)
+        edges.append((parent_fen, uci, child_fen))
+    return tuple(edges)
+
+
+def _coverage_anchor_sweep(
+    graph: OpeningGraph,
+    routing_snapshot: DensifiedEdges,
+    root_fen: str,
+    player_color: str,
+    edges: tuple[tuple[str, str, str], ...],
+    decays: tuple[float, ...],
+) -> dict[float, float]:
+    overlay = EvidenceOverlay(0, player_color)
+    for parent_fen, uci, child_fen in edges:
+        overlay.edges[(parent_fen, child_fen)] = EdgeEvidence(
+            parent_fen, child_fen, uci, traversal_count=1
+        )
+    return compute_root_coverage_decay_sweep(
+        root_fen,
+        player_color,
+        graph,
+        overlay,
+        _diag_roots(root_fen),
+        decays,
+        routing_snapshot=routing_snapshot,
+    )
+
+
+def run_coverage_depth_decay_diagnostic(
+    graph: OpeningGraph | None = None,
+    routing_snapshot: DensifiedEdges | None = None,
+) -> CoverageDepthDecayDiagnostic:
+    """Re-derive the served decay from public committed opening topology only."""
+
+    graph = graph or get_opening_graph()
+    routing_snapshot = routing_snapshot or load_strict_densified_edges(graph)
+    white_moves = (
+        "e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1"
+    )
+    black_moves = (
+        "e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4", "f3d4", "g8f6", "b1c3", "a7a6"
+    )
+    white_positions = _diag_positions(list(white_moves))
+    black_positions = _diag_positions(list(black_moves))
+    white_root = white_positions[0]
+    black_root = black_positions[1]
+    anchor_inputs = {
+        "white_line": (
+            white_root,
+            "white",
+            tuple(zip(white_positions, white_moves, white_positions[1:])),
+        ),
+        "black_line": (
+            black_root,
+            "black",
+            tuple(zip(black_positions[1:], black_moves[1:], black_positions[2:])),
+        ),
+        "white_breadth": (
+            white_root,
+            "white",
+            _coverage_anchor_edges(graph, routing_snapshot, white_root),
+        ),
+        "black_breadth": (
+            black_root,
+            "black",
+            _coverage_anchor_edges(graph, routing_snapshot, black_root),
+        ),
+    }
+
+    decays = tuple(hundredths / 100.0 for hundredths in range(50, 96))
+    anchor_sweeps = {
+        name: _coverage_anchor_sweep(
+            graph, routing_snapshot, root_fen, color, edges, decays
+        )
+        for name, (root_fen, color, edges) in anchor_inputs.items()
+    }
+    passing: list[tuple[float, float, dict[str, float]]] = []
+    for decay in decays:
+        coverages = {
+            name: sweep[decay] for name, sweep in anchor_sweeps.items()
+        }
+        if all(
+            lower <= coverages[name] <= upper
+            for name, lower, upper in _COVERAGE_DEPTH_DECAY_BANDS
+        ):
+            objective = sum(
+                ((coverages[name] - (lower + upper) / 2.0) / (upper - lower)) ** 2
+                for name, lower, upper in _COVERAGE_DEPTH_DECAY_BANDS
+            )
+            passing.append((objective, decay, coverages))
+
+    if not passing:
+        raise RuntimeError("No coverage depth-decay candidate satisfies all anchor bands")
+    objective, selected_decay, selected_coverages = min(
+        passing, key=lambda row: (row[0], -row[1])
+    )
+    del objective
+    return CoverageDepthDecayDiagnostic(
+        selected_decay=selected_decay,
+        passing_decays=tuple(row[1] for row in passing),
+        selected_coverages=MappingProxyType(dict(selected_coverages)),
+    )
 
 
 def _score_target(
@@ -3285,11 +3470,11 @@ def run_user14_diagnostic(
 
     Scores the frozen _user14_scenario under each grid cell on BOTH colors from the
     identical synthetic evidence, at now=as_of, debug=True. The old aggregate required
-    every graded-for-selection arm to lower the reference A to <= C. sm-v2-5's corrected
-    route-exposure operand intentionally invalidates that numerical comparison, and this
+    every graded-for-selection arm to lower the reference A to <= C. sm-v2-6's visited-node
+    visit-breadth operand intentionally invalidates that numerical comparison, and this
     dormant grid does not decide the new model, so ``passed`` is ``None``.
     The per-cell operands remain useful diagnostics; the checked-in User-14 fixture is
-    the sm-v2-5 product regression.
+    the sm-v2-6 product regression.
     """
     scenario = _user14_scenario()
 
@@ -3889,6 +4074,7 @@ class ScoredCalibrationCohort:
     source_revision: str | None  # git rev-parse HEAD — AUDIT only, never a gate
     source_dirty_paths: tuple[str, ...]  # SCORER_SOURCE_FILES differing from HEAD — audit
     scorer_source_digest: str  # the deterministic source binding
+    routing_edge_fingerprint: str  # exact immutable routing snapshot scored
     provenance_record_sha256: str  # SHA-256 over the on-disk provenance-record bytes
     runtime_python: str  # platform.python_version()
     runtime_chess_version: str  # chess.__version__
@@ -4089,6 +4275,7 @@ def _build_selection_inputs(
     # run the split load guard. The load guard reads as_of FROM the validated header.
     artifact_bytes = Path(artifact_path).read_bytes()
     provenance_bytes = Path(provenance_path).read_bytes()
+    routing_snapshot = load_strict_densified_edges(graph)
     runtime_binding = _current_runtime_binding(graph, roots)
     try:
         loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
@@ -4124,6 +4311,7 @@ def _build_selection_inputs(
                 pair_id=lp.pair_id,
                 subject_id=lp.subject_id,
                 cohort_role=lp.cohort_role,
+                routing_snapshot=routing_snapshot,
             )
             for cell in required_cells
         }
@@ -4177,6 +4365,7 @@ def _build_selection_inputs(
         source_revision=_git_head_revision(),
         source_dirty_paths=_scorer_dirty_paths(),
         scorer_source_digest=fenced_digest,  # the FENCED digest, not a fresh read
+        routing_edge_fingerprint=routing_snapshot.fingerprint,
         provenance_record_sha256=hashlib.sha256(provenance_bytes).hexdigest(),
         runtime_python=platform.python_version(),
         runtime_chess_version=chess.__version__,
@@ -4276,6 +4465,7 @@ def validate_capture_candidate(
     NOTHING stricter: a quantile pair that pools ZERO named scores for a cell is fine as
     long as the POOLED distribution reaches len >= 2, exactly as candidate selection accepts.
     """
+    routing_snapshot = load_strict_densified_edges(graph)
     runtime_binding = _current_runtime_binding(graph, roots)
     loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
     header = loaded.header
@@ -4296,6 +4486,7 @@ def validate_capture_candidate(
                 pair_id=lp.pair_id,
                 subject_id=lp.subject_id,
                 cohort_role=lp.cohort_role,
+                routing_snapshot=routing_snapshot,
             )
             for cell in required_cells
         }
@@ -5479,6 +5670,7 @@ class WinnerBinding:
     artifact_sha256: str
     graph_fingerprint: str
     roots_fingerprint: str
+    routing_edge_fingerprint: str
     evidence_derivation_fingerprint: str
     release_guard_opening_key: str
     release_guard_child_opening_key: str
@@ -5505,6 +5697,7 @@ def build_winner_binding(
         artifact_sha256=prov.artifact_sha256,
         graph_fingerprint=prov.graph_fingerprint,
         roots_fingerprint=prov.roots_fingerprint,
+        routing_edge_fingerprint=cohort.routing_edge_fingerprint,
         evidence_derivation_fingerprint=prov.evidence_derivation_fingerprint,
         release_guard_opening_key=prov.release_guard_opening_key,
         release_guard_child_opening_key=prov.release_guard_child_opening_key,
@@ -5548,13 +5741,6 @@ NOT_A_READY_GRADES: tuple[str, ...] = ("C", "D", "F")
 # Float-reassociation slack on the report-stage identity (reported == pre_fold_quality x
 # multiplier), EXACT in real arithmetic. Absolute, boundary INCLUSIVE (op "<=").
 FOLD_IDENTITY_TOL = 1.0e-9
-# The coverage _fold_mirror_scenario reaches on BOTH turns, by construction. This pins the
-# FIXTURE'S TOPOLOGY, not a modelling threshold — nothing about the release policy changes
-# if the mirror is rebuilt at a different value. It exists so the turn-symmetry checks
-# cannot pass vacuously: equal multipliers are trivially true at coverage 0 on both sides
-# (0**p == 0) or 1 on both sides (1**p == 1), so a drift into either degenerate topology
-# must fail the gate loudly rather than silently making it prove nothing.
-FOLD_MIRROR_COVERAGE = 0.5
 # Raw parent-<=-child epsilon (criterion 2 and real_parent_le_child_raw).
 RAW_PARENT_CHILD_EPS = 1.0
 
@@ -6385,7 +6571,8 @@ def _check_wrapper_types(inputs: SelectionInputs) -> None:
         _require_str(path, f"cohort.source_dirty_paths[{i}]")
     for name in (
         "model_version", "scorer_contract_id", "scorer_source_digest",
-        "provenance_record_sha256", "runtime_python", "runtime_chess_version",
+        "provenance_record_sha256", "routing_edge_fingerprint",
+        "runtime_python", "runtime_chess_version",
     ):
         _require_str(getattr(cohort, name), f"cohort.{name}")
     # The diagnostics binding stamps are compared in check 1(c); a str SUBCLASS overriding
@@ -6478,10 +6665,22 @@ def _check_runtime_and_provenance(inputs: SelectionInputs, arms: tuple[Arm, ...]
         val = getattr(prov, name)
         if not _DERIVATION_HEX_RE.match(val):
             raise SelectionBindingError(f"binding: provenance.{name} is not 64-char lowercase hex: {val!r}")
-    for name in ("provenance_record_sha256", "scorer_source_digest"):
+    for name in (
+        "provenance_record_sha256",
+        "scorer_source_digest",
+        "routing_edge_fingerprint",
+    ):
         val = getattr(cohort, name)
         if not _DERIVATION_HEX_RE.match(val):
             raise SelectionBindingError(f"binding: cohort.{name} is not 64-char lowercase hex: {val!r}")
+    current_routing_fingerprint = load_strict_densified_edges(
+        get_opening_graph()
+    ).fingerprint
+    if cohort.routing_edge_fingerprint != current_routing_fingerprint:
+        raise SelectionBindingError(
+            "binding: cohort.routing_edge_fingerprint does not match the current "
+            "validated routing artifact"
+        )
     # (c) fingerprint / model / contract cross-check.
     required_cells = _required_cells(arms)
     for cell in required_cells:
@@ -6739,11 +6938,12 @@ def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm, p: float) -> GateOutcome
         checks.append(GateCheck(
             "fold_multiplier_opp_cov", res_opp, FOLD_IDENTITY_TOL, "<=", res_opp <= FOLD_IDENTITY_TOL
         ))
-        # Pinning the fixture's own coverage is what keeps the two equalities below from
-        # passing vacuously on a degenerate (0-on-both / 1-on-both) topology.
         checks.append(GateCheck(
-            "fold_mirror_coverage_pinned", mirror_user_cov, FOLD_MIRROR_COVERAGE,
-            "==", mirror_user_cov == FOLD_MIRROR_COVERAGE,
+            "fold_mirror_coverage_nondegenerate",
+            0.0,
+            min(mirror_user_cov, 1.0 - mirror_user_cov),
+            "<",
+            0.0 < mirror_user_cov < 1.0,
         ))
         checks.append(GateCheck(
             "fold_mirror_coverage_equal", mirror_opp_cov, mirror_user_cov,
@@ -7054,7 +7254,7 @@ def select_candidate(inputs: SelectionInputs) -> SelectionResult:
 
 # The settled repo-relative fixture path, computed from __file__ (NOT the process CWD,
 # so it is stable regardless of where the CLI is invoked). The explicit
-# --emit-user14-fixture mode binds the builder+writer to SM_V2_5_DEFAULT_CELL and
+# --emit-user14-fixture mode binds the builder+writer to SM_V2_6_DEFAULT_CELL and
 # SCORE_MODEL_VERSION; ordinary report/candidate-selection paths never write the checked-in file.
 DEFAULT_USER14_FIXTURE_PATH = (
     Path(__file__).resolve().parents[2]
@@ -7455,7 +7655,7 @@ def serialize_full(result: SelectionResult) -> str:
 
 # --- The redacted stdout summary: an EXACT allowlist, validated key-set by key-set -------
 
-# Fifteen keys, ENUMERATED rather than derived, so a field ADDED to WinnerBinding fails
+# Keys are ENUMERATED rather than derived, so a field ADDED to WinnerBinding fails
 # test_winner_binding_key_tuple_matches_the_dataclass instead of silently escaping the
 # allowlist (or silently vanishing from the summary).
 _SUMMARY_BINDING_KEYS: tuple[str, ...] = (
@@ -7471,6 +7671,7 @@ _SUMMARY_BINDING_KEYS: tuple[str, ...] = (
     "artifact_sha256",
     "graph_fingerprint",
     "roots_fingerprint",
+    "routing_edge_fingerprint",
     "evidence_derivation_fingerprint",
     "release_guard_opening_key",
     "release_guard_child_opening_key",
@@ -7777,8 +7978,17 @@ def _validate_summary_candidate(candidate: object, index: int, cohort_fit: bool)
 def _validate_summary_binding(binding: object) -> dict:
     obj = _require_keyset(binding, frozenset(_SUMMARY_BINDING_KEYS), "winner_binding")
     for key in ("config_fingerprint", "scorer_source_digest", "provenance_record_sha256",
-                "artifact_sha256", "graph_fingerprint", "roots_fingerprint"):
+                "artifact_sha256", "graph_fingerprint", "roots_fingerprint",
+                "routing_edge_fingerprint"):
         _require_pattern(obj[key], _SHA256_RE, f"winner_binding.{key}")
+    current_routing_fingerprint = load_strict_densified_edges(
+        get_opening_graph()
+    ).fingerprint
+    _require_equal(
+        obj["routing_edge_fingerprint"],
+        current_routing_fingerprint,
+        "winner_binding.routing_edge_fingerprint",
+    )
     _require_equal(obj["scorer_contract_id"], REPORT_SCORER_CONTRACT_ID,
                    "winner_binding.scorer_contract_id")
     for key in ("runtime_python", "runtime_chess_version"):
@@ -8626,7 +8836,7 @@ def build_cutoff_readiness_report(
             and baseline["policy"] == _readiness_policy_payload()
             and baseline_identity["scored_model_version"] == SCORE_MODEL_VERSION
             and baseline_identity["config_fingerprint"]
-            == _cfg_fp(SM_V2_5_DEFAULT_CELL)
+            == _cfg_fp(SM_V2_6_DEFAULT_CELL)
         )
         if baseline_claims_current_contract:
             try:
@@ -8915,7 +9125,7 @@ def validate_cutoff_readiness_report(payload: object) -> dict[str, object]:
         raise ReadinessReportSchemaError(
             "the current report was not scored under the running model version"
         )
-    if identity["config_fingerprint"] != _cfg_fp(SM_V2_5_DEFAULT_CELL):
+    if identity["config_fingerprint"] != _cfg_fp(SM_V2_6_DEFAULT_CELL):
         raise ReadinessReportSchemaError(
             "the current report was not scored under the running default-cell config"
         )
@@ -9509,7 +9719,7 @@ def _build_cutoff_readiness_from_artifact(
         loaded_pair = loaded_by_id.get(scored.pair_id)
         if loaded_pair is None or loaded_pair.subject_id != scored.subject_id:
             raise ReadinessReportError("the scored and loaded pair manifests disagree")
-        cell_score = scored.grid.get(SM_V2_5_DEFAULT_CELL)
+        cell_score = scored.grid.get(SM_V2_6_DEFAULT_CELL)
         if cell_score is None:
             raise ReadinessReportError("the current default cell is absent from the scored grid")
         pairs.append(CutoffReadinessPair(
@@ -9530,7 +9740,7 @@ def _build_cutoff_readiness_from_artifact(
         artifact_as_of=cohort.as_of,
         captured_model_version=cohort.provenance.captured_model_version,
         scored_model_version=cohort.model_version,
-        config_fingerprint=_cfg_fp(SM_V2_5_DEFAULT_CELL),
+        config_fingerprint=_cfg_fp(SM_V2_6_DEFAULT_CELL),
         scorer_source_digest_value=cohort.scorer_source_digest,
         pairs=pairs,
         baseline_report=baseline_report,
@@ -9863,7 +10073,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     subparsers.add_parser(
         "emit-user14-fixture",
-        help="Write the deterministic sm-v2-5 synthetic User-14 product regression.",
+        help="Write the deterministic sm-v2-6 synthetic User-14 product regression.",
     )
 
     if argv and argv[0] == "select-release":
@@ -10259,7 +10469,7 @@ def main(argv: list[str] | None = None, *, session_factory=None):
     if args.mode == "cutoff-readiness":
         return _run_cutoff_readiness(args)
     if args.mode == "emit-user14-fixture":
-        payload = build_user14_fixture(SM_V2_5_DEFAULT_CELL, SCORE_MODEL_VERSION)
+        payload = build_user14_fixture(SM_V2_6_DEFAULT_CELL, SCORE_MODEL_VERSION)
         write_user14_fixture(payload)
         return 0
 
@@ -10281,6 +10491,7 @@ def main(argv: list[str] | None = None, *, session_factory=None):
 
     graph = get_opening_graph()
     roots = get_opening_roots()
+    routing_snapshot = load_strict_densified_edges(graph)
     named_root_count = _named_root_count(roots)
 
     arm_grid = build_arm_grid(args.report_fold_p_grid)
@@ -10302,7 +10513,14 @@ def main(argv: list[str] | None = None, *, session_factory=None):
         # Build each pair's overlay ONCE and score it for every required cell.
         pair_grids = [
             score_pair_grid(
-                db, user_id, player_color, graph, roots, required_cells, as_of=run_as_of
+                db,
+                user_id,
+                player_color,
+                graph,
+                roots,
+                required_cells,
+                as_of=run_as_of,
+                routing_snapshot=routing_snapshot,
             )
             for user_id, player_color in selected
         ]

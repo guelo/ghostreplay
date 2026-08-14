@@ -338,7 +338,12 @@ class OpeningLineageItem(BaseModel):
     depth: int
     score: float | None
     confidence: float | None
-    coverage: float | None
+    coverage: float | None = Field(
+        description=(
+            "Depth-weighted visited-position Coverage (0-100) from the compatible "
+            "opening-score batch; shared across transpositions."
+        )
+    )
     sample_size: int | None
     game_count: int | None
     path: list[str]

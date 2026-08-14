@@ -45,6 +45,10 @@ from app.opening_graph import (
     build_opening_graph,
 )
 from app.opening_roots import build_opening_roots
+from app.opening_transposition_artifact import (
+    _reset_strict_densified_edges_cache_for_testing,
+    load_strict_densified_edges,
+)
 from scripts.densify_opening_graph import _check
 
 ARTIFACT = "eco.transpositions.json"
@@ -316,16 +320,13 @@ class TestGraphIsUntouched:
         RoutingView(real_graph, DensifiedEdges(real_edges))
         assert build_opening_roots(real_graph).fingerprint == before
 
-    def test_densification_is_outside_the_calibration_scorer_manifest(self):
-        """The manifest digest hashes file BYTES, so a pure function added to a
-        pinned file would churn the scorer-source digest and force a release
-        re-calibration. graph_topology_fingerprint lives in opening_densify.py
-        for exactly this reason — keep it, and the routing modules, out."""
+    def test_only_shared_artifact_contract_enters_scorer_manifest(self):
+        """Generation/browsing stay outside while the score-input contract is bound."""
         from scripts.calibrate_opening_scores_v2 import SCORER_SOURCE_FILES
 
+        assert "backend/app/opening_transposition_artifact.py" in SCORER_SOURCE_FILES
         assert "backend/app/opening_densify.py" not in SCORER_SOURCE_FILES
         assert "backend/app/drill_steering.py" not in SCORER_SOURCE_FILES
-        # ...and the fingerprint helper is not hiding in a pinned file.
         import app.opening_graph as opening_graph_module
 
         assert not hasattr(opening_graph_module, "graph_topology_fingerprint")
@@ -422,6 +423,111 @@ class TestDeepImmutability:
 
 
 class TestArtifact:
+    def test_live_artifact_replacement_rekeys_one_process_view(self, tmp_path: Path):
+        graph = _graph(
+            [("a", "1", "b"), ("b", "2", "c"), ("a", "3", "d"), ("d", "4", "e")]
+        )
+        path = tmp_path / ARTIFACT
+        first_payload = serialize_edges(
+            graph, (("b", "9", "e"),), "2026-01-01T00:00:00+00:00"
+        )
+        second_payload = serialize_edges(
+            graph, (("d", "8", "c"),), "2026-01-02T00:00:00+00:00"
+        )
+        path.write_text(json.dumps(first_payload))
+        _reset_routing_views_for_testing()
+        with patch("app.opening_densify.resolve_artifact_path", return_value=path):
+            first = routing_view(graph)
+            path.write_text(json.dumps(second_payload))
+            second = routing_view(graph)
+        assert first is not second
+        assert first.overlay_fingerprint != second.overlay_fingerprint
+        assert first.routing_children("b")["9"] == "e"
+        assert second.routing_children("d")["8"] == "c"
+        _reset_routing_views_for_testing()
+
+    def test_generated_at_only_rewrite_keeps_view_and_score_identity(self, tmp_path: Path):
+        graph = _graph(
+            [("a", "1", "b"), ("b", "2", "c"), ("a", "3", "d"), ("d", "4", "e")]
+        )
+        edges = (("b", "9", "e"),)
+        path = tmp_path / ARTIFACT
+        path.write_text(
+            json.dumps(serialize_edges(graph, edges, "2026-01-01T00:00:00+00:00"))
+        )
+        _reset_routing_views_for_testing()
+        with patch("app.opening_densify.resolve_artifact_path", return_value=path):
+            first = routing_view(graph)
+            path.write_text(
+                json.dumps(serialize_edges(graph, edges, "2030-12-31T00:00:00+00:00"))
+            )
+            second = routing_view(graph)
+        assert first is second
+        assert first.overlay_fingerprint == DensifiedEdges(edges).fingerprint
+        _reset_routing_views_for_testing()
+
+    def test_strict_loader_rejects_missing_artifact(self, tmp_path: Path):
+        graph = _graph([("a", "1", "b")])
+        with pytest.raises(DensificationError, match="missing"):
+            load_strict_densified_edges(graph, tmp_path / ARTIFACT)
+
+    def test_strict_loader_memoizes_one_validated_file_identity(
+        self, tmp_path: Path
+    ):
+        graph = _graph([("a", "1", "b")])
+        path = tmp_path / ARTIFACT
+        path.write_text(
+            json.dumps(serialize_edges(graph, (), "2026-01-01T00:00:00+00:00"))
+        )
+        _reset_strict_densified_edges_cache_for_testing()
+        try:
+            with patch(
+                "app.opening_transposition_artifact.load_densified_edges",
+                wraps=load_densified_edges,
+            ) as validate:
+                first = load_strict_densified_edges(graph, path)
+                second = load_strict_densified_edges(graph, path)
+            assert second is first
+            assert validate.call_count == 1
+        finally:
+            _reset_strict_densified_edges_cache_for_testing()
+
+    def test_strict_loader_revalidates_an_atomic_artifact_replacement(
+        self, tmp_path: Path
+    ):
+        graph = _graph(
+            [("a", "1", "b"), ("b", "2", "c"), ("a", "3", "d"), ("d", "4", "e")]
+        )
+        path = tmp_path / ARTIFACT
+        path.write_text(
+            json.dumps(
+                serialize_edges(
+                    graph,
+                    (("b", "9", "e"),),
+                    "2026-01-01T00:00:00+00:00",
+                )
+            )
+        )
+        _reset_strict_densified_edges_cache_for_testing()
+        try:
+            first = load_strict_densified_edges(graph, path)
+            replacement = tmp_path / "replacement.json"
+            replacement.write_text(
+                json.dumps(
+                    serialize_edges(
+                        graph,
+                        (("d", "8", "c"),),
+                        "2026-01-02T00:00:00+00:00",
+                    )
+                )
+            )
+            replacement.replace(path)
+            second = load_strict_densified_edges(graph, path)
+            assert second is not first
+            assert second.edges == (("d", "8", "c"),)
+        finally:
+            _reset_strict_densified_edges_cache_for_testing()
+
     def test_checked_in_artifact_matches_the_current_graph(
         self, real_graph: OpeningGraph, real_edges, artifact_path: Path
     ):

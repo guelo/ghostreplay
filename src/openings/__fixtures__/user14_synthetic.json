@@ -1,11 +1,11 @@
 {
-  "black_root_score": 33.873921291663905,
+  "black_root_score": 46.863927130600594,
   "caro_child_score": 34.383717801179955,
   "config_fingerprint": "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090",
-  "coverage_implied_score": 62.360956446232365,
-  "model_version": "sm-v2-5",
+  "coverage_implied_score": 86.27519954148292,
+  "model_version": "sm-v2-6",
   "report_fold_p": 0.5,
-  "root_coverage_fraction": 0.38888888888888895,
+  "root_coverage_fraction": 0.7443410055922693,
   "schema_version": 1,
   "white_root_score": 9.763107293781747
 }

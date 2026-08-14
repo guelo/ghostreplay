@@ -26,6 +26,7 @@ from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import BranchSummary, RootScore
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.fen import active_color
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,14 @@ def _mock_singletons():
     with (
         patch(_PATCH_GRAPH, return_value=_make_graph()),
         patch(_PATCH_ROOTS, return_value=_make_roots()),
+        patch(
+            "app.api.openings.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
+        patch(
+            "app.opening_cache.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
         patch("app.opening_score_scheduler.refresh_now", return_value=False),
         patch("app.opening_score_scheduler.request_recompute"),
     ):

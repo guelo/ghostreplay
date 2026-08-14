@@ -52,6 +52,7 @@ from app.opening_cache import (
 from app.opening_graph import get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_rootcalc import SYNTHETIC_INITIAL_FEN, root_calc_config_fingerprint
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.opening_score_delta import (
     BASELINE_RETRYABLE_SOURCES,
     BASELINE_TERMINAL_SOURCES,
@@ -70,9 +71,10 @@ T_AFTER = datetime(2026, 6, 20, tzinfo=timezone.utc)
 
 def _baseline_envelope(scores):
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_version": SCORE_MODEL_VERSION,
         "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+        "routing_edge_fingerprint": EMPTY_DENSIFIED_EDGES.fingerprint,
         "scores": scores,
     }
 

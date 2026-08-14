@@ -42,10 +42,23 @@ from app.opening_rootcalc import (
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 import scripts.calibrate_opening_scores_v2 as cal
 # The selection fixture builders are reused rather than duplicated by the CLI tests.
 import test_calibrate_selection as selfix
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_graphs_have_an_explicit_empty_routing_snapshot(monkeypatch):
+    """Keep synthetic calibration graphs and their fixture stamps on one snapshot."""
+
+    monkeypatch.setattr(
+        cal, "load_strict_densified_edges", lambda _graph: EMPTY_DENSIFIED_EDGES
+    )
+    monkeypatch.setattr(
+        selfix, "ROUTING_FP", EMPTY_DENSIFIED_EDGES.fingerprint
+    )
 
 
 # --- in-memory fixtures (mirrors test_opening_rootcalc helpers) -------------
@@ -569,9 +582,9 @@ class TestArmGrid:
 
 
 class TestGridCellConfig:
-    def test_sm_v2_5_cell_matches_served_default(self):
-        assert cal.SM_V2_5_DEFAULT_CELL.config == RootCalcConfig()
-        assert cal._cfg_fp(cal.SM_V2_5_DEFAULT_CELL) == root_calc_config_fingerprint(
+    def test_sm_v2_6_cell_matches_served_default(self):
+        assert cal.SM_V2_6_DEFAULT_CELL.config == RootCalcConfig()
+        assert cal._cfg_fp(cal.SM_V2_6_DEFAULT_CELL) == root_calc_config_fingerprint(
             RootCalcConfig()
         )
         assert cal.CURRENT_SM_V2_3_CELL.config != RootCalcConfig()
@@ -890,6 +903,17 @@ _USER14_OPERANDS = {
 
 
 class TestDiagnostics:
+    def test_coverage_depth_decay_is_rederived_from_committed_topology(self):
+        diagnostic = cal.run_coverage_depth_decay_diagnostic(
+            cal.get_opening_graph(), selfix.ROUTING_SNAPSHOT
+        )
+        assert diagnostic.passing_decays == tuple(
+            hundredths / 100.0 for hundredths in range(75, 83)
+        )
+        assert diagnostic.selected_decay == RootCalcConfig().coverage_depth_decay == 0.79
+        for name, lower, upper in cal._COVERAGE_DEPTH_DECAY_BANDS:
+            assert lower <= diagnostic.selected_coverages[name] <= upper
+
     def test_run_diagnostics_three_keys(self):
         diag = cal.run_diagnostics(cal.build_arm_grid())
         assert set(diag) == {"user14", "opponent_guard", "cliff"}
@@ -899,8 +923,8 @@ class TestDiagnostics:
     def test_user14_operands_aggregate_and_roles(self):
         grid = cal.build_arm_grid()
         diag = cal.run_user14_diagnostic(grid)
-        # The historical sm-v2-4 selection gate is informational under sm-v2-5:
-        # corrected route exposure raises the synthetic fold operand, so the old
+        # The historical sm-v2-4 selection gate is informational under sm-v2-6:
+        # depth-weighted visited-node coverage changes the synthetic fold operand, so the old
         # all-arms-reach-<=C predicate is no longer an approval oracle or a hard failure.
         assert cal.fixed_band(diag["reference"]["user_tp_score"]) == "A"
         assert diag["passed"] is None
@@ -921,17 +945,23 @@ class TestDiagnostics:
         assert b1_row["graded_for"] == "reference"
         assert 30.0 <= b1_row["synth_black_root_score"] <= 38.0  # ~34 de-inflation ref
 
-    def test_user14_mirror_coverage_is_asymmetric_by_construction(self):
-        # WHY _fold_mirror_scenario has to exist (g-fold-sym-gate): the User-14 mirror
-        # exposes the same FEN on both turns, but NOT at the same coverage. Route
-        # traversal makes the opponent side fully covered while the user side is 7/18;
-        # multiplier equality therefore remains invalid on this fixture.
+    def test_user14_mirror_coverage_uses_independent_visit_breadth_operands(self):
+        # User-14 intentionally has different user/opponent structural selection rules.
+        # Validate each fold against its own independently calculated coverage; equality is
+        # reserved for the dedicated isomorphic fixture below.
         scenario = cal._user14_scenario()
         for cell in cal.ARM1.cells:
             ops = cal._user14_cell_operands(scenario, cell, as_of=cal.SYNTHETIC_AS_OF)
-            assert ops["synth_opp_root_coverage_fraction"] == 1.0
-            assert ops["synth_root_coverage_fraction"] == pytest.approx(7.0 / 18.0)
-            assert ops["synth_user_turn_multiplier"] != ops["synth_opp_turn_multiplier"]
+            user_cov = ops["synth_root_coverage_fraction"]
+            opp_cov = ops["synth_opp_root_coverage_fraction"]
+            assert 0.0 < user_cov < 1.0
+            assert 0.0 <= opp_cov <= 1.0
+            assert ops["synth_user_turn_multiplier"] == pytest.approx(
+                user_cov ** cell.report_fold_p
+            )
+            assert ops["synth_opp_turn_multiplier"] == pytest.approx(
+                opp_cov ** cell.report_fold_p
+            )
 
     def test_fold_mirror_scenario_is_coverage_symmetric(self):
         # The turn-symmetry fixture: EQUAL, NONZERO coverage on both turns for EVERY cell
@@ -945,8 +975,9 @@ class TestDiagnostics:
             oc = ops["fold_mirror_opp_coverage_fraction"]
             um = ops["fold_mirror_user_multiplier"]
             om = ops["fold_mirror_opp_multiplier"]
-            assert uc == oc == cal.FOLD_MIRROR_COVERAGE, cell.label
-            assert um == cal.FOLD_MIRROR_COVERAGE ** cell.report_fold_p, cell.label
+            assert 0.0 < uc < 1.0, cell.label
+            assert uc == oc, cell.label
+            assert um == uc ** cell.report_fold_p, cell.label
             if cell.report_fold_scope == "all":
                 assert om == um, cell.label  # bit-identical, not merely close
             else:
@@ -1243,14 +1274,14 @@ class TestUser14Fixture:
         cal.write_user14_fixture(payload, path=target)
         assert cal.DEFAULT_USER14_FIXTURE_PATH != target
 
-    def test_emit_mode_is_bound_to_sm_v2_5_default(self):
+    def test_emit_mode_is_bound_to_sm_v2_6_default(self):
         with patch.object(cal, "write_user14_fixture") as writer:
             assert cal.main(["emit-user14-fixture"]) == 0
         payload = writer.call_args.args[0]
         assert payload == cal.build_user14_fixture(
-            cal.SM_V2_5_DEFAULT_CELL, cal.SCORE_MODEL_VERSION
+            cal.SM_V2_6_DEFAULT_CELL, cal.SCORE_MODEL_VERSION
         )
-        assert payload["model_version"] == "sm-v2-5"
+        assert payload["model_version"] == "sm-v2-6"
         assert payload["config_fingerprint"] == root_calc_config_fingerprint()
 
 
@@ -2902,6 +2933,7 @@ class TestScorerSourceDigest:
             "backend/app/opening_score_delta.py",
             "backend/app/opening_score_delta_lane.py",
             "backend/app/opening_score_scheduler.py",
+            "backend/app/opening_transposition_artifact.py",
             "backend/app/position_analysis_policy.py",
             "backend/app/position_analysis_repo.py",
             "backend/app/posthog_client.py",
@@ -3609,7 +3641,8 @@ class TestWinnerBinding:
         "config_fingerprint", "scorer_contract_id", "scorer_source_digest",
         "provenance_record_sha256", "runtime_python", "runtime_chess_version",
         "source_revision", "source_dirty_paths", "model_version", "artifact_sha256",
-        "graph_fingerprint", "roots_fingerprint", "evidence_derivation_fingerprint",
+        "graph_fingerprint", "roots_fingerprint", "routing_edge_fingerprint",
+        "evidence_derivation_fingerprint",
         "release_guard_opening_key", "release_guard_child_opening_key",
     }
 
@@ -3635,6 +3668,7 @@ class TestWinnerBinding:
         assert wb.artifact_sha256 == c.provenance.artifact_sha256
         assert wb.graph_fingerprint == c.provenance.graph_fingerprint
         assert wb.roots_fingerprint == c.provenance.roots_fingerprint
+        assert wb.routing_edge_fingerprint == c.routing_edge_fingerprint
         assert wb.evidence_derivation_fingerprint == c.provenance.evidence_derivation_fingerprint
         assert wb.release_guard_opening_key == c.provenance.release_guard_opening_key
         assert wb.release_guard_child_opening_key == c.provenance.release_guard_child_opening_key

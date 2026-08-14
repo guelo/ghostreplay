@@ -30,6 +30,7 @@ from app.opening_cache import (
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 
 def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
@@ -2193,9 +2194,10 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
     assert session.baseline_watermark_epoch is not None
     assert session.baseline_watermark_fingerprint is not None
     assert json.loads(session.opening_score_baseline) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_version": oc.SCORE_MODEL_VERSION,
         "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "routing_edge_fingerprint": EMPTY_DENSIFIED_EDGES.fingerprint,
         "scores": {"opening-x": 41.0},
     }
 
@@ -2227,9 +2229,10 @@ def test_game_start_accepts_later_batch_when_watermark_still_matches(
     assert session.baseline_watermark_epoch is not None
     assert session.baseline_watermark_fingerprint is not None
     assert json.loads(session.opening_score_baseline) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_version": oc.SCORE_MODEL_VERSION,
         "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "routing_edge_fingerprint": EMPTY_DENSIFIED_EDGES.fingerprint,
         "scores": {"opening-x": 41.0},
     }
 

@@ -28,6 +28,7 @@ from app.opening_cache import (
 )
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from sql_capture import capture_statements, cursor_last_before_commit, no_cursor_bump
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
@@ -2249,9 +2250,10 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
     assert session.baseline_watermark_epoch is not None
     assert session.baseline_watermark_fingerprint is not None
     assert json.loads(session.opening_score_baseline) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_version": oc.SCORE_MODEL_VERSION,
         "root_calc_config_fingerprint": oc.root_calc_config_fingerprint(),
+        "routing_edge_fingerprint": EMPTY_DENSIFIED_EDGES.fingerprint,
         "scores": {"opening-x": 55.0},
     }
 

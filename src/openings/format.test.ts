@@ -14,7 +14,7 @@ import {
 } from './format'
 import user14Synthetic from './__fixtures__/user14_synthetic.json'
 
-// The g-xnv7 grade/tone boundaries remain frozen through sm-v2-5
+// The g-xnv7 grade/tone boundaries remain frozen through sm-v2-6
 // (2026-07-09 final grid: pooled p50≈10, p75≈21, p95≈44). These tests pin the
 // boundaries so any future shift is a deliberate, reviewed change.
 describe('getPriorityLabel', () => {
@@ -53,12 +53,28 @@ describe('getPriorityTone', () => {
   })
 })
 
-describe('sm-v2-5 synthetic product regression', () => {
-  it('renders the regenerated route-exposure score on frozen bands', () => {
-    expect(user14Synthetic.model_version).toBe('sm-v2-5')
-    expect(user14Synthetic.root_coverage_fraction).toBeCloseTo(7 / 18)
-    expect(getPriorityLabel(user14Synthetic.black_root_score)).toBe('B')
+describe('sm-v2-6 synthetic product regression', () => {
+  it('renders the regenerated visit-breadth score on frozen bands', () => {
+    expect(user14Synthetic.model_version).toBe('sm-v2-6')
+    expect(user14Synthetic.root_coverage_fraction).toBeGreaterThan(0)
+    expect(user14Synthetic.root_coverage_fraction).toBeLessThan(1)
+    expect(user14Synthetic.coverage_implied_score).toBeCloseTo(
+      100 * Math.sqrt(user14Synthetic.root_coverage_fraction),
+    )
+    for (const score of [
+      user14Synthetic.black_root_score,
+      user14Synthetic.caro_child_score,
+      user14Synthetic.white_root_score,
+    ]) {
+      expect(score).toBeGreaterThan(0)
+      expect(score).toBeLessThan(100)
+    }
+    expect(getPriorityLabel(user14Synthetic.black_root_score)).toBe('A')
     expect(getPriorityTone(user14Synthetic.black_root_score)).toBe('steady')
+    expect(getPriorityLabel(user14Synthetic.caro_child_score)).toBe('B')
+    expect(getPriorityTone(user14Synthetic.caro_child_score)).toBe('steady')
+    expect(getPriorityLabel(user14Synthetic.white_root_score)).toBe('C')
+    expect(getPriorityTone(user14Synthetic.white_root_score)).toBe('watch')
   })
 })
 

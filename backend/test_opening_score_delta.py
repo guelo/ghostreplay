@@ -61,6 +61,7 @@ from app.opening_score_delta import (
     snapshot_opening_baseline,
 )
 from app.opening_score_delta_lane import OpeningScoreDeltaLane
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 
 @contextmanager
@@ -107,6 +108,14 @@ def _stub_scheduler():
         patch("app.opening_score_scheduler.refresh_now", return_value=True),
         patch("app.opening_score_scheduler.is_recompute_scheduled", return_value=False),
         patch("app.opening_score_scheduler.is_recompute_inflight", return_value=False),
+        patch(
+            "app.opening_cache.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
+        patch(
+            "app.opening_score_delta.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
     ):
         yield
 
@@ -121,6 +130,7 @@ def _baseline_envelope(
     *,
     model_version: str = SCORE_MODEL_VERSION,
     config_fingerprint: str | None = None,
+    routing_edge_fingerprint: str | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": OPENING_BASELINE_SCHEMA_VERSION,
@@ -129,6 +139,11 @@ def _baseline_envelope(
             root_calc_config_fingerprint()
             if config_fingerprint is None
             else config_fingerprint
+        ),
+        "routing_edge_fingerprint": (
+            EMPTY_DENSIFIED_EDGES.fingerprint
+            if routing_edge_fingerprint is None
+            else routing_edge_fingerprint
         ),
         "scores": scores,
     }
@@ -139,12 +154,14 @@ def _baseline_json(
     *,
     model_version: str = SCORE_MODEL_VERSION,
     config_fingerprint: str | None = None,
+    routing_edge_fingerprint: str | None = None,
 ) -> str:
     return json.dumps(
         _baseline_envelope(
             scores,
             model_version=model_version,
             config_fingerprint=config_fingerprint,
+            routing_edge_fingerprint=routing_edge_fingerprint,
         )
     )
 
@@ -173,7 +190,7 @@ def test_baseline_parser_accepts_same_model_envelopes(scores):
         ),
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model_version": SCORE_MODEL_VERSION,
                 "root_calc_config_fingerprint": root_calc_config_fingerprint(),
                 "scores": {},
@@ -210,6 +227,13 @@ def test_baseline_parser_suppresses_same_model_different_root_config():
         {"a": 42.0},
         model_version=SCORE_MODEL_VERSION,
         config_fingerprint=old_config_fingerprint,
+    )
+    assert _parse_compatible_baseline(payload) is None
+
+
+def test_baseline_parser_suppresses_same_model_different_routing_edges():
+    payload = _baseline_json(
+        {"a": 42.0}, routing_edge_fingerprint="0" * 64
     )
     assert _parse_compatible_baseline(payload) is None
 

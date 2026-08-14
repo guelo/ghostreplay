@@ -33,9 +33,9 @@ export function formatGames(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
-// The g-xnv7 boundaries remain intentionally frozen through sm-v2-5 while
+// The g-xnv7 boundaries remain intentionally frozen through sm-v2-6 while
 // representative post-release population data accumulates. Coverage varies by
-// opening (and sm-v2-5 corrects its route-exposure semantics), so no global
+// opening (and sm-v2-6 changes it to depth-weighted visited-node breadth), so no global
 // algebraic remap can preserve grades. Recalibration is separate,
 // reviewed follow-up work; these exact A/B/C/D/F and tone thresholds stay pinned
 // here and in format.test.ts until then. See docs/openingscore_final.md.

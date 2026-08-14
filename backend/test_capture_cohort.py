@@ -38,6 +38,16 @@ from sqlalchemy.orm import sessionmaker
 
 import scripts.calibrate_opening_scores_v2 as cal
 import test_calibrate_opening_scores as tc
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
+
+
+@pytest.fixture(autouse=True)
+def _explicit_empty_calibration_routing_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        cal,
+        "load_strict_densified_edges",
+        lambda _graph: EMPTY_DENSIFIED_EDGES,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +87,8 @@ def _stub_scorer(*, quantile_pool=(40.0,), quantile_pools_by_pair=None):
     named scores (or a per-pair override keyed by pair_id)."""
 
     def stub(user_id, player_color, graph, overlay, roots, config=None, *,
-             as_of, pair_id=None, subject_id=None, cohort_role=None):
+             as_of, pair_id=None, subject_id=None, cohort_role=None,
+             routing_snapshot=EMPTY_DENSIFIED_EDGES):
         if cohort_role == "release_guard":
             nsm = {cal.RELEASE_GUARD_OPENING_KEY: 50.0}
             if player_color == "black":

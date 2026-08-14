@@ -12,6 +12,13 @@ from app.game_phase import is_middlegame_position
 from app.opening_evidence import EvidenceOverlay, observed_off_book_fens
 from app.opening_graph import OpeningGraph
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import (
+    DensificationError,
+    DensifiedEdges,
+    EMPTY_DENSIFIED_EDGES,
+    coverage_structural_edge_is_eligible,
+    longest_path_depths,
+)
 
 
 # Standard chess initial position (normalized 4-field FEN). This is the graph
@@ -30,9 +37,9 @@ COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 # Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). The identity
 # values (report_fold_p=0.0, report_fold_scope="all", report_self_term="keep")
 # remain available for historical comparison and keep their pre-Phase-1
-# fingerprint (see root_calc_config_fingerprint). The served sm-v2-5 default
+# fingerprint (see root_calc_config_fingerprint). The served sm-v2-6 default
 # retains the user-turn-only square-root fold while changing the evidence-derived
-# coverage channel from completed-path mass to opponent-reply exposure mass.
+# coverage channel to depth-weighted binary visited-node breadth.
 #
 #   - report_fold_scope: which turns the report-time coverage fold applies to.
 #     "all" folds both turns; "user" folds only user-turn rows (g-report-fold-score).
@@ -226,6 +233,9 @@ class RootCalcConfig:
     k_evidence: float = 5.0
     half_life_days: float = 45.0
     coverage_live_threshold: int = 1
+    # Independent geometric decay for visited-node breadth.  This is selected
+    # from committed-book synthetic anchors; it is intentionally not ``gamma``.
+    coverage_depth_decay: float = 0.79
     # Readiness folds (g-zc3p/g-xnv7). The calibrated defaults make the displayed
     # score read as an earned readiness number.
     #   - lcb_z: strictness of the lower-confidence bound on mastery. 1.0 is the
@@ -237,7 +247,7 @@ class RootCalcConfig:
     lcb_z: float = 1.0
     coverage_fold: str = "gate"
     # Report-stage axes (see REPORT_FOLD_SCOPES / REPORT_SELF_TERM_MODES).
-    # sm-v2-5 folds only user-turn reported rows by sqrt(coverage), preserving
+    # sm-v2-6 folds only user-turn reported rows by sqrt(coverage), preserving
     # opponent-turn rows already governed by the recursive coverage gate. The
     # historical p=0 identity remains fingerprint-compatible with sm-v2-3.
     report_fold_p: float = 0.5
@@ -290,12 +300,45 @@ class RootCalcConfig:
                 f"report_self_term must be one of {sorted(REPORT_SELF_TERM_MODES)}; "
                 f"got {self.report_self_term!r}"
             )
+        decay = self.coverage_depth_decay
+        if isinstance(decay, bool):
+            raise TypeError(
+                "coverage_depth_decay must be a real number, not bool; "
+                f"got {decay!r}"
+            )
+        if not isinstance(decay, (int, float)):
+            raise TypeError(
+                "coverage_depth_decay must be a real number; "
+                f"got {type(decay).__name__}"
+            )
+        try:
+            canonical_decay = float(decay)
+        except OverflowError:
+            raise ValueError(
+                "coverage_depth_decay must be finite; "
+                f"got out-of-range int {decay!r}"
+            ) from None
+        if not math.isfinite(canonical_decay):
+            raise ValueError(
+                f"coverage_depth_decay must be finite; got {canonical_decay!r}"
+            )
+        if not 0.0 <= canonical_decay < 1.0:
+            raise ValueError(
+                "coverage_depth_decay must satisfy 0 <= decay < 1; "
+                f"got {canonical_decay!r}"
+            )
+        object.__setattr__(self, "coverage_depth_decay", canonical_decay)
 
 
 # The report-fold axes are appended to the fingerprint payload ONLY when active, so
 # a config at their identity defaults hashes byte-identically to the pre-Phase-1
 # payload (the legacy fields alone). See _report_fold_fingerprint_tokens.
-_REPORT_FOLD_FIELD_NAMES = ("report_fold_p", "report_fold_scope", "report_self_term")
+_COMPATIBILITY_FIELD_NAMES = (
+    "coverage_depth_decay",
+    "report_fold_p",
+    "report_fold_scope",
+    "report_self_term",
+)
 
 
 def _report_fold_fingerprint_tokens(config: RootCalcConfig) -> list[str]:
@@ -313,6 +356,8 @@ def _report_fold_fingerprint_tokens(config: RootCalcConfig) -> list[str]:
       at p == 0, so it is emitted whenever it is not the ``"keep"`` identity.
     """
     tokens: list[str] = []
+    if config.coverage_depth_decay != RootCalcConfig.coverage_depth_decay:
+        tokens.append(f"coverage_depth_decay={config.coverage_depth_decay!r}")
     p = config.report_fold_p
     # p == 0 (including -0.0, since -0.0 == 0.0) leaves the fold off, so BOTH p and
     # the now-inert scope are omitted — signed/plain zero and any scope collapse to
@@ -345,7 +390,7 @@ def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
     legacy = [
         f"{config_field.name}={getattr(config, config_field.name)!r}"
         for config_field in fields(config)
-        if config_field.name not in _REPORT_FOLD_FIELD_NAMES
+        if config_field.name not in _COMPATIBILITY_FIELD_NAMES
     ]
     payload = "|".join(legacy + _report_fold_fingerprint_tokens(config))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -372,7 +417,7 @@ class NodeDebug:
     subtree_live_attempts: int
     subtree_review_attempts: int
     # Historical debug/API field name. This is the score-readiness evidence gate,
-    # not the sm-v2-5 route-exposure Coverage definition.
+    # not the sm-v2-6 visited-node Coverage definition.
     covered_locally: bool
     raw_score: float
     raw_confidence: float
@@ -527,6 +572,7 @@ class _SharedCalculator:
         now: datetime,
         debug: bool = False,
         seeds: list[str] | None = None,
+        routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
     ) -> None:
         self.player_color = player_color
         self.graph = graph
@@ -535,6 +581,7 @@ class _SharedCalculator:
         self.config = config
         self.now = now
         self.debug = debug
+        self.routing_snapshot = routing_snapshot
         self._graph_nodes = {
             _normalized(fen): node for fen, node in graph._nodes.items()
         }
@@ -549,6 +596,19 @@ class _SharedCalculator:
         self._observed_children: dict[str, set[str]] = {}
         for parent, child in self._overlay_edges:
             self._observed_children.setdefault(parent, set()).add(child)
+        self._traversed_children: dict[str, set[str]] = {}
+        self._visited_nodes: set[str] = set()
+        for (parent, child), evidence in self._overlay_edges.items():
+            if evidence.traversal_count <= 0:
+                continue
+            self._traversed_children.setdefault(parent, set()).add(child)
+            self._visited_nodes.update((parent, child))
+
+        self._routing_children: dict[str, set[str]] = {}
+        for raw_parent, _uci, raw_child in routing_snapshot.edges:
+            parent = _normalized(raw_parent)
+            child = _normalized(raw_child)
+            self._routing_children.setdefault(parent, set()).add(child)
 
         self._reference_cache: dict[str, tuple[str, ...]] = {}
         self._structural_cache: dict[str, tuple[str, ...]] = {}
@@ -556,9 +616,14 @@ class _SharedCalculator:
         self._coverage_totals_cache: dict[str, tuple[int, int]] = {}
         self._middlegame_cache: dict[str, bool] = {}
         self._weights_cache: dict[str, dict[str, float]] = {}
+        self._coverage_structural_cache: dict[str, tuple[str, ...]] = {}
+        self._coverage_selected_cache: dict[str, tuple[str, ...]] = {}
+        self._coverage_off_book_cache: dict[str, tuple[str, ...]] = {}
         self._coverage_weights_cache: dict[str, dict[str, float]] = {}
         self._coverage_masses: dict[str, tuple[float, float]] = {}
         self._coverage_failures: dict[str, _CoverageFailure] = {}
+        self._coverage_active: set[str] = set()
+        self._coverage_reachable_cache: dict[str, set[str]] = {}
         self._score_reachable_cache: dict[str, set[str]] = {}
         self._metrics: dict[tuple[str, bool], tuple[float, float, float, float]] = {}
         self.debug_nodes: dict[str, NodeDebug] = {}
@@ -586,17 +651,10 @@ class _SharedCalculator:
             fen: self._base_weights(fen, self._structural_children(fen))
             for fen in self._domain
         }
-        self._coverage_precut_weights = {
-            fen: self._coverage_base_weights(fen, self._structural_children(fen))
-            for fen in self._domain
-        }
         self._scc_index, self._scc_order = self._build_scc_cut(
             self._precut_weights
         )
-        (
-            self._coverage_scc_index,
-            self._coverage_scc_order,
-        ) = self._build_scc_cut(self._coverage_precut_weights)
+        self._validate_routing_forward_potential()
 
     def _is_middlegame(self, fen: str) -> bool:
         if fen not in self._middlegame_cache:
@@ -724,61 +782,85 @@ class _SharedCalculator:
         edge = self._overlay_edges.get((fen, child))
         return edge is not None and edge.traversal_count > 0
 
-    def _coverage_base_weights(
-        self, fen: str, children: tuple[str, ...] | list[str]
-    ) -> dict[str, float]:
-        """Pre-cut route weights for opponent-reply exposure coverage.
+    def _coverage_structural_children(self, fen: str) -> tuple[str, ...]:
+        """Coverage-only ``T(v)`` from reference plus routing destinations."""
 
-        Coverage follows only actually traversed user moves. At opponent nodes,
-        every reference reply retains one equal bucket; traversed off-reference
-        replies collectively occupy one additional bucket. With no reference
-        replies, traversed observed replies share the full mass uniformly.
-
-        These weights are intentionally independent from score/preparation
-        weights: ghost-only preparation and unchosen user alternatives must not
-        create route breadth, while an observed off-book opponent reply must not
-        disappear merely because reference replies coexist at the same FEN.
-        """
-        if self._is_user_turn(fen):
-            traversed = [
-                child for child in children if self._edge_was_traversed(fen, child)
-            ]
-            if not traversed:
-                return {}
-            bases = {
-                child: self._overlay_edges[(fen, child)].traversal_count
-                + self.config.rho
-                for child in traversed
-            }
-            total = sum(bases.values())
-            return {child: basis / total for child, basis in bases.items()}
-
-        reference_children = set(self._reference_children(fen))
-        traversed_off_reference = [
+        fen = _normalized(fen)
+        cached = self._coverage_structural_cache.get(fen)
+        if cached is not None:
+            return cached
+        children = set(self._reference_children(fen))
+        children.update(self._routing_children.get(fen, ()))
+        result = tuple(
             child
-            for child in children
-            if child not in reference_children
-            and self._edge_was_traversed(fen, child)
-        ]
-        if reference_children:
-            bucket_count = len(reference_children) + bool(traversed_off_reference)
-            bucket_weight = 1.0 / bucket_count
-            weights = {
-                child: bucket_weight for child in sorted(reference_children)
-            }
-            if traversed_off_reference:
-                other_weight = bucket_weight / len(traversed_off_reference)
-                weights.update(
-                    {
-                        child: other_weight
-                        for child in sorted(traversed_off_reference)
-                    }
+            for child in sorted(children)
+            if coverage_structural_edge_is_eligible(
+                fen, child, is_middlegame=self._is_middlegame
+            )
+        )
+        self._coverage_structural_cache[fen] = result
+        return result
+
+    def _coverage_selected_structural_children(self, fen: str) -> tuple[str, ...]:
+        """Chosen structural routes ``S(v)`` under the user/opponent rules."""
+
+        fen = _normalized(fen)
+        cached = self._coverage_selected_cache.get(fen)
+        if cached is not None:
+            return cached
+        structural = self._coverage_structural_children(fen)
+        traversed = self._traversed_children.get(fen, set())
+        if self._is_user_turn(fen) and traversed:
+            chosen_structural = tuple(
+                child for child in structural if child in traversed
+            )
+            # An off-book-only move is not a chosen structural route. Keep the
+            # known-book denominator and add the one flat novelty bucket instead
+            # of letting leaving book collapse Coverage to a terminal 100%.
+            result = chosen_structural or structural
+        else:
+            result = structural
+        self._coverage_selected_cache[fen] = result
+        return result
+
+    def _coverage_off_book_children(self, fen: str) -> tuple[str, ...]:
+        """Traversed destinations ``O(v)`` sharing one terminal bucket."""
+
+        fen = _normalized(fen)
+        cached = self._coverage_off_book_cache.get(fen)
+        if cached is not None:
+            return cached
+        structural = set(self._coverage_structural_children(fen))
+        result = tuple(
+            sorted(self._traversed_children.get(fen, set()) - structural)
+        )
+        self._coverage_off_book_cache[fen] = result
+        return result
+
+    def _validate_routing_forward_potential(self) -> None:
+        """Fail closed unless every routing edge moves forward in the base DAG.
+
+        Base edges define ``longest_path_depths`` and therefore already increase
+        that potential by construction. Strict artifact loading validates routing
+        edges too, but calculator-level validation keeps direct immutable snapshots
+        fail-closed without scanning and phase-parsing every base edge.
+        """
+
+        if not self.routing_snapshot.edges:
+            return
+        depths = longest_path_depths(self.graph)
+        for raw_parent, _uci, raw_child in self.routing_snapshot.edges:
+            parent = _normalized(raw_parent)
+            child = _normalized(raw_child)
+            if parent not in depths or child not in depths:
+                raise DensificationError(
+                    "coverage routing edge references a position outside the graph"
                 )
-            return weights
-        if not traversed_off_reference:
-            return {}
-        weight = 1.0 / len(traversed_off_reference)
-        return {child: weight for child in sorted(traversed_off_reference)}
+            if depths[child] <= depths[parent]:
+                raise DensificationError(
+                    "coverage routing edge does not strictly increase the "
+                    "graph longest-path potential"
+                )
 
     def _build_scc_cut(
         self, precut_weights: dict[str, dict[str, float]]
@@ -859,44 +941,29 @@ class _SharedCalculator:
             )
         return self._weights_cache[fen]
 
-    def _coverage_children(self, fen: str) -> tuple[str, ...]:
-        result: list[str] = []
-        for child in self._coverage_precut_weights.get(fen, {}):
-            same_scc = self._coverage_scc_index.get(
-                fen
-            ) == self._coverage_scc_index.get(child)
-            backward = same_scc and self._coverage_scc_order.get(
-                child, 0
-            ) <= self._coverage_scc_order.get(fen, 0)
-            if not backward:
-                result.append(child)
-        return tuple(result)
-
     def _get_coverage_weights(self, fen: str) -> dict[str, float]:
+        """Uniform structural buckets plus one shared flat off-book bucket."""
+
+        fen = _normalized(fen)
         if fen not in self._coverage_weights_cache:
-            survivors = {
-                child: self._coverage_precut_weights[fen][child]
-                for child in self._coverage_children(fen)
-            }
-            total = sum(survivors.values())
-            self._coverage_weights_cache[fen] = (
-                {
-                    child: weight / total
-                    for child, weight in survivors.items()
-                }
-                if total > 0
-                else {}
-            )
+            structural = self._coverage_selected_structural_children(fen)
+            off_book = self._coverage_off_book_children(fen)
+            bucket_count = len(structural) + bool(off_book)
+            if not bucket_count:
+                self._coverage_weights_cache[fen] = {}
+            else:
+                bucket_weight = 1.0 / bucket_count
+                weights = {child: bucket_weight for child in structural}
+                if off_book:
+                    off_book_weight = bucket_weight / len(off_book)
+                    weights.update(
+                        {child: off_book_weight for child in off_book}
+                    )
+                self._coverage_weights_cache[fen] = weights
         return self._coverage_weights_cache[fen]
 
     def _coverage_opportunity_mass(self, fen: str) -> tuple[float, float]:
-        """Return memoized ``(earned, available)`` opponent-reply opportunity mass.
-
-        Opponent replies earn one local unit when their exact edge was traversed.
-        Descendant opportunity mass is admitted only through such a traversal, so
-        evidence below a transposed child cannot credit an untraversed parent edge.
-        User nodes add no local unit and only average actually traversed routes.
-        """
+        """Return inclusive geometric ``(earned, available)`` visit breadth."""
         fen = _normalized(fen)
         cached = self._coverage_masses.get(fen)
         if cached is not None:
@@ -904,41 +971,45 @@ class _SharedCalculator:
         failed = self._coverage_failures.get(fen)
         if failed is not None:
             raise OpeningCoverageValidationError(failed)
+        if fen in self._coverage_active:
+            failure = _CoverageFailure(
+                cause="opportunity_invariant",
+                normalized_fen=fen,
+            )
+            self._coverage_failures[fen] = failure
+            raise OpeningCoverageValidationError(failure)
 
+        self._coverage_active.add(fen)
         try:
-            earned = 0.0
-            available = 0.0
+            earned = float(fen in self._visited_nodes)
+            available = 1.0
             weights = self._get_coverage_weights(fen)
-            if self._is_user_turn(fen):
-                for child, weight in weights.items():
+            off_book = set(self._coverage_off_book_children(fen))
+            for child, weight in weights.items():
+                if child in off_book:
+                    child_earned, child_available = 1.0, 1.0
+                else:
                     child_earned, child_available = self._coverage_opportunity_mass(
                         child
                     )
-                    earned += weight * child_earned
-                    available += weight * child_available
-            else:
-                for child, weight in weights.items():
-                    if self._edge_was_traversed(fen, child):
-                        child_earned, child_available = (
-                            self._coverage_opportunity_mass(child)
-                        )
-                        earned += weight * (1.0 + child_earned)
-                        available += weight * (1.0 + child_available)
-                    else:
-                        available += weight
+                earned += self.config.coverage_depth_decay * weight * child_earned
+                available += (
+                    self.config.coverage_depth_decay * weight * child_available
+                )
         except OpeningCoverageValidationError as error:
             # Negative-memo every ancestor in the affected dependency closure. The
             # immutable descriptor keeps the originating cause without retaining a
             # traceback; no positive mass is stored for this FEN.
             self._coverage_failures[fen] = error.failure
             raise OpeningCoverageValidationError(error.failure) from None
+        finally:
+            self._coverage_active.discard(fen)
 
+        geometric_cap = 1.0 / (1.0 - self.config.coverage_depth_decay)
         if not (
-            -_REPORT_FOLD_COVERAGE_EPSILON
-            <= earned
-            <= available + _REPORT_FOLD_COVERAGE_EPSILON
-            and available
-            <= 1.0 + earned + _REPORT_FOLD_COVERAGE_EPSILON
+            -_REPORT_FOLD_COVERAGE_EPSILON <= earned
+            and earned <= available + _REPORT_FOLD_COVERAGE_EPSILON
+            and available < geometric_cap + _REPORT_FOLD_COVERAGE_EPSILON
         ):
             failure = _CoverageFailure(
                 cause="opportunity_invariant",
@@ -953,24 +1024,104 @@ class _SharedCalculator:
         return result
 
     def _coverage_fraction(self, fen: str) -> float:
-        """Observed opponent-reply exposure for one normalized position.
+        """Depth-weighted visited-node breadth below one card root.
 
-        Zero-opportunity structural/SCC leaves, and selected user routes that end
-        before another opponent opportunity, are fully covered. A non-leaf user
-        node with no traversed route remains uncovered rather than inheriting the
-        leaf identity.
+        The root's own visit bit and local unit are excluded.  A true structural
+        leaf (and no traversed off-book bucket) is vacuously fully covered.
         """
         fen = _normalized(fen)
-        earned, available = self._coverage_opportunity_mass(fen)
-        if available > 0.0:
-            return earned / available
-        if (
-            self._is_user_turn(fen)
-            and self._structural_children(fen)
-            and not self._coverage_precut_weights.get(fen)
-        ):
-            return 0.0
-        return 1.0
+        weights = self._get_coverage_weights(fen)
+        if not weights:
+            return 1.0
+        off_book = set(self._coverage_off_book_children(fen))
+        earned = available = 0.0
+        for child, weight in weights.items():
+            child_earned, child_available = (
+                (1.0, 1.0)
+                if child in off_book
+                else self._coverage_opportunity_mass(child)
+            )
+            earned += weight * child_earned
+            available += weight * child_available
+        if available <= 0.0:
+            return 1.0
+        fraction = earned / available
+        return min(1.0, max(0.0, fraction))
+
+    def _coverage_fraction_at_decay(self, fen: str, decay: float) -> float:
+        """Evaluate the already-built coverage relation at another decay.
+
+        Calibration uses this to sweep the public synthetic anchors without rebuilding
+        and revalidating the 15k-node topology for every hundredth. The relation, visit
+        bits, bucket weights, terminal off-book rule, and card-root exclusion are the same
+        objects used by :meth:`_coverage_fraction`.
+        """
+
+        memo: dict[str, tuple[float, float]] = {}
+        active: set[str] = set()
+
+        def inclusive_mass(child_fen: str) -> tuple[float, float]:
+            child_fen = _normalized(child_fen)
+            cached = memo.get(child_fen)
+            if cached is not None:
+                return cached
+            if child_fen in active:
+                raise DensificationError(
+                    "coverage structural relation is cyclic during decay sweep"
+                )
+            active.add(child_fen)
+            try:
+                earned = float(child_fen in self._visited_nodes)
+                available = 1.0
+                weights = self._get_coverage_weights(child_fen)
+                off_book = set(self._coverage_off_book_children(child_fen))
+                for descendant, weight in weights.items():
+                    descendant_mass = (
+                        (1.0, 1.0)
+                        if descendant in off_book
+                        else inclusive_mass(descendant)
+                    )
+                    earned += decay * weight * descendant_mass[0]
+                    available += decay * weight * descendant_mass[1]
+            finally:
+                active.discard(child_fen)
+            result = earned, available
+            memo[child_fen] = result
+            return result
+
+        fen = _normalized(fen)
+        weights = self._get_coverage_weights(fen)
+        if not weights:
+            return 1.0
+        off_book = set(self._coverage_off_book_children(fen))
+        earned = available = 0.0
+        for child, weight in weights.items():
+            child_mass = (
+                (1.0, 1.0) if child in off_book else inclusive_mass(child)
+            )
+            earned += weight * child_mass[0]
+            available += weight * child_mass[1]
+        if available <= 0.0:
+            return 1.0
+        return min(1.0, max(0.0, earned / available))
+
+    def _coverage_reachable(self, fen: str) -> set[str]:
+        """Structural positions reachable under the selected Coverage relation."""
+
+        fen = _normalized(fen)
+        cached = self._coverage_reachable_cache.get(fen)
+        if cached is not None:
+            return cached
+        reachable: set[str] = set()
+        queue = deque([fen])
+        while queue:
+            current = queue.popleft()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            queue.extend(self._coverage_selected_structural_children(current))
+        self._coverage_reachable_cache[fen] = reachable
+        return reachable
 
     def _mastery(self, fen: str) -> float:
         """Local mastery: the lower-confidence bound on the Beta posterior mean.
@@ -1141,7 +1292,7 @@ class _SharedCalculator:
             # unprepared book reply no longer falls back to the ~0.33 mastery prior
             # (g-zc3p Part 2). Applies at opponent nodes ONLY (user-turn breadth is
             # not penalized). The coverage channel is computed independently from
-            # traversed opponent-reply opportunities; this readiness gate remains a
+            # depth-weighted visited-node breadth; this readiness gate remains a
             # score-only mechanism.
             #
             # branch_cov factors:
@@ -1523,6 +1674,9 @@ class _SharedCalculator:
                 continue
             score = scores[root.opening_key]
             score_reachable = self._score_reachable(_normalized(root.opening_key))
+            coverage_reachable = self._coverage_reachable(
+                _normalized(root.opening_key)
+            )
             immediate = [
                 scores[key]
                 for key in sorted(root.child_keys)
@@ -1539,11 +1693,11 @@ class _SharedCalculator:
                 else None
             )
             underexposed_candidates = [
-                scores[descendant.opening_key]
-                for descendant in self.roots.get_descendants(root.opening_key)
-                if descendant.opening_key in scores
-                and _normalized(descendant.opening_key) in score_reachable
-                and scores[descendant.opening_key].coverage
+                scores[child_key]
+                for child_key in sorted(root.child_keys)
+                if child_key in scores
+                and _normalized(child_key) in coverage_reachable
+                and scores[child_key].coverage
                 < 100.0 * (1.0 - _REPORT_FOLD_COVERAGE_EPSILON)
             ]
             underexposed = (
@@ -1643,13 +1797,14 @@ def _compute_scores(
     position_telemetry: PositionCalcTelemetry | None,
     failure_policy: CoverageFailurePolicy,
     row_isolation: RowIsolationTelemetry | None,
+    routing_snapshot: DensifiedEdges,
 ) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
     """Build one shared calculator and derive named-root and direct position rows.
 
     Single source of truth behind ``compute_all_root_scores`` (root rows only) and
     ``compute_all_scores`` (root + position rows). One ``_SharedCalculator`` per call
     means the named rows, the synthetic repertoire row, and the direct FEN rows all
-    reuse the same ``_metrics``, SCC cut, weights, and reachable caches.
+    reuse the same ``_metrics``, score SCC cut, weights, and reachable caches.
     """
     config = config or RootCalcConfig()
     row_isolation = _row_isolation_collector(failure_policy, row_isolation)
@@ -1676,7 +1831,14 @@ def _compute_scores(
                 telemetry.unscored_root_count = len(named_roots)
             return {}, set(), []
     calculator = _SharedCalculator(
-        player_color, graph, overlay, roots, config, now, debug=debug
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        now,
+        debug=debug,
+        routing_snapshot=routing_snapshot,
     )
     if has_quality:
         selected, eligible = _select_named_roots(
@@ -1720,6 +1882,7 @@ def compute_all_root_scores(
     include_branch_summaries: bool = True,
     include_synthetic_root: bool = False,
     telemetry: CalcTelemetry | None = None,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> tuple[dict[str, RootScore], set[str]]:
     result, eligible, _ = _compute_scores(
         player_color,
@@ -1736,6 +1899,7 @@ def compute_all_root_scores(
         position_telemetry=None,
         failure_policy="raise",
         row_isolation=None,
+        routing_snapshot=routing_snapshot,
     )
     return result, eligible
 
@@ -1748,6 +1912,8 @@ def compute_scoped_root_scores(
     opening_keys: list[str] | tuple[str, ...],
     config: RootCalcConfig | None = None,
     now: datetime | None = None,
+    *,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> dict[str, RootScore]:
     """Score only the requested named roots from one reachability-closed domain.
 
@@ -1788,6 +1954,7 @@ def compute_scoped_root_scores(
         config,
         now,
         seeds=[root.opening_key for root in requested],
+        routing_snapshot=routing_snapshot,
     )
     selected = [
         root
@@ -1815,6 +1982,7 @@ def compute_all_scores(
     position_telemetry: PositionCalcTelemetry | None = None,
     failure_policy: CoverageFailurePolicy = "raise",
     row_isolation: RowIsolationTelemetry | None = None,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
     """Named-root scores plus direct position-score rows from one shared traversal.
 
@@ -1841,6 +2009,7 @@ def compute_all_scores(
         position_telemetry=position_telemetry,
         failure_policy=failure_policy,
         row_isolation=row_isolation,
+        routing_snapshot=routing_snapshot,
     )
 
 
@@ -1854,6 +2023,7 @@ def compute_root_score(
     now: datetime | None = None,
     debug: bool = False,
     include_branch_summaries: bool = True,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> RootScore:
     root = roots.get_root(opening_key)
     if root is None:
@@ -1869,6 +2039,7 @@ def compute_root_score(
         now,
         debug=debug,
         seeds=[opening_key],
+        routing_snapshot=routing_snapshot,
     )
     selected = [
         candidate
@@ -1883,3 +2054,38 @@ def compute_root_score(
     return calculator.compute_roots(
         selected, include_branch_summaries=include_branch_summaries
     )[opening_key]
+
+
+def compute_root_coverage_decay_sweep(
+    opening_key: str,
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    decays: tuple[float, ...],
+    *,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
+) -> dict[float, float]:
+    """Evaluate one immutable coverage topology across calibration decays."""
+
+    if roots.get_root(opening_key) is None:
+        raise ValueError(f"Unknown root: {opening_key}")
+    canonical_decays = tuple(
+        RootCalcConfig(coverage_depth_decay=decay).coverage_depth_decay
+        for decay in decays
+    )
+    calculator = _SharedCalculator(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        datetime.now(timezone.utc),
+        debug=False,
+        seeds=[opening_key],
+        routing_snapshot=routing_snapshot,
+    )
+    return {
+        decay: calculator._coverage_fraction_at_decay(opening_key, decay)
+        for decay in canonical_decays
+    }

@@ -631,6 +631,30 @@ def _db_override():
 
 
 @pytest.fixture(autouse=True)
+def _explicit_empty_score_routing_snapshot():
+    """Keep synthetic score tests independent of the committed routing artifact.
+
+    Production scoring resolves the artifact strictly. Most backend tests replace
+    the graph with a tiny synthetic topology, so their equally explicit score
+    input is the immutable empty snapshot. Artifact and fail-closed tests override
+    this cache-module seam locally.
+    """
+    from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
+
+    with patch(
+        "app.opening_cache.load_strict_densified_edges",
+        return_value=EMPTY_DENSIFIED_EDGES,
+    ), patch(
+        "app.opening_score_delta.load_strict_densified_edges",
+        return_value=EMPTY_DENSIFIED_EDGES,
+    ), patch(
+        "app.api.openings.load_strict_densified_edges",
+        return_value=EMPTY_DENSIFIED_EDGES,
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _no_op_recompute_scheduler():
     """Stop API endpoints from touching the real opening-score scheduler.
 

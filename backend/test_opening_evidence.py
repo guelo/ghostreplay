@@ -1588,7 +1588,9 @@ class TestPhaseExclusion:
 
         assert calculator._coverage_opportunity_mass(
             terminal_parent
-        ) == pytest.approx((1.0, 1.0))
+        ) == pytest.approx(
+            (1.0 + RootCalcConfig().coverage_depth_decay,) * 2
+        )
         assert calculator._coverage_fraction(terminal_parent) == pytest.approx(1.0)
 
 

@@ -1,7 +1,7 @@
 # Opening-score calibration tooling
 
 This directory keeps the reproducible evidence tools used to develop and inspect opening
-score candidates. It does not provide a release-authorization workflow. The shipped sm-v2-5
+score candidates. It does not provide a release-authorization workflow. The shipped sm-v2-6
 score semantics were reviewed as a product change; a future score, default, or cutoff change needs
 ordinary reviewed evidence and its own implementation plan.
 

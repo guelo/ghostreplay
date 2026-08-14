@@ -80,10 +80,11 @@ from app.opening_rootcalc import (
     root_calc_config_fingerprint,
 )
 from app.opening_roots import get_opening_roots, played_opening_chain
+from app.opening_transposition_artifact import load_strict_densified_edges
 
 logger = logging.getLogger(__name__)
 
-OPENING_BASELINE_SCHEMA_VERSION = 1
+OPENING_BASELINE_SCHEMA_VERSION = 2
 
 
 class BaselineSnapshotSource(str, Enum):
@@ -124,13 +125,31 @@ class BaselineWatermarkMismatch(str, Enum):
     EPOCH_CORRUPTION = "epoch_corruption"
 
 
-def _serialize_baseline(scores: dict[str, float]) -> str:
+def _serialize_baseline(
+    scores: dict[str, float], *, registry_fingerprint: str | None = None
+) -> str:
     """Serialize a baseline with the score model/config compatibility boundary."""
+    graph = get_opening_graph()
+    routing_snapshot = load_strict_densified_edges(graph)
+    routing_edge_fingerprint = routing_snapshot.fingerprint
+    if (
+        registry_fingerprint is not None
+        and registry_fingerprint
+        != opening_score_inputs_fingerprint(
+            graph,
+            get_opening_roots(),
+            routing_snapshot,
+        )
+    ):
+        raise RuntimeError(
+            "Opening baseline routing snapshot does not match the scored batch"
+        )
     return json.dumps(
         {
             "schema_version": OPENING_BASELINE_SCHEMA_VERSION,
             "model_version": SCORE_MODEL_VERSION,
             "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+            "routing_edge_fingerprint": routing_edge_fingerprint,
             "scores": scores,
         }
     )
@@ -187,6 +206,8 @@ def _parse_compatible_baseline(payload: str | None) -> dict[str, float] | None:
         or parsed.get("model_version") != SCORE_MODEL_VERSION
         or parsed.get("root_calc_config_fingerprint")
         != root_calc_config_fingerprint()
+        or parsed.get("routing_edge_fingerprint")
+        != load_strict_densified_edges(get_opening_graph()).fingerprint
     ):
         return None
     scores = parsed.get("scores")
@@ -234,8 +255,10 @@ def capture_baseline_watermark(
             evidence_seq, evidence_epoch = db.execute(
                 select(func.coalesce(seq_value, 0), epoch_value)
             ).one()
+            graph = get_opening_graph()
+            routing_snapshot = load_strict_densified_edges(graph)
             registry_fingerprint = opening_score_inputs_fingerprint(
-                get_opening_graph(), get_opening_roots()
+                graph, get_opening_roots(), routing_snapshot
             )
         if evidence_epoch is None:
             logger.warning("opening baseline watermark capture source=missing_epoch")
@@ -478,7 +501,8 @@ def _capture_baseline_json(
     if _is_evidence_backed_empty_baseline(db, user_id, player_color, rows):
         return None, BaselineSnapshotSource.SKIPPED_QUARANTINED_EMPTY.value
     return _serialize_baseline(
-        {row.opening_key: row.opening_score for row in rows}
+        {row.opening_key: row.opening_score for row in rows},
+        registry_fingerprint=batch.registry_fingerprint,
     ), "cached_fresh"
 
 
@@ -647,8 +671,10 @@ def _empty_start_mismatch(
     watermark_seq, _watermark_epoch, watermark_fingerprint = watermark
     if current_evidence_seq(db, session.user_id, session.player_color) != watermark_seq:
         return BaselineWatermarkMismatch.SEQ
+    graph = get_opening_graph()
+    routing_snapshot = load_strict_densified_edges(graph)
     current_fingerprint = opening_score_inputs_fingerprint(
-        get_opening_graph(), get_opening_roots()
+        graph, get_opening_roots(), routing_snapshot
     )
     if current_fingerprint != watermark_fingerprint:
         return BaselineWatermarkMismatch.REGISTRY
@@ -709,7 +735,8 @@ def run_baseline_snapshot_job(
                 source = BaselineSnapshotSource.SKIPPED_QUARANTINED_EMPTY.value
                 return source
             baseline_json = _serialize_baseline(
-                {row.opening_key: row.opening_score for row in rows}
+                {row.opening_key: row.opening_score for row in rows},
+                registry_fingerprint=batch.registry_fingerprint,
             )
             source = BaselineSnapshotSource.CACHED_FRESH.value
 
@@ -786,7 +813,8 @@ def fill_opening_baselines_for_batch(
             return 0
 
         baseline_json = _serialize_baseline(
-            {row.opening_key: row.opening_score for row in rows}
+            {row.opening_key: row.opening_score for row in rows},
+            registry_fingerprint=batch.registry_fingerprint,
         )
         candidates = (
             db.query(GameSession)
@@ -934,6 +962,7 @@ def publish_scoped_opening_score_deltas(
 
     graph = get_opening_graph()
     roots = get_opening_roots()
+    routing_snapshot = load_strict_densified_edges(graph)
     stage_started = time.perf_counter()
     for request in sorted(requests, key=lambda item: str(item.session_id)):
         if not is_scoped_delta_request_current(request):
@@ -970,7 +999,9 @@ def publish_scoped_opening_score_deltas(
 
     # Immutable lower-bound stamp BEFORE every overlay/shared-evidence read.
     stage_started = time.perf_counter()
-    registry_fingerprint = opening_score_inputs_fingerprint(graph, roots)
+    registry_fingerprint = opening_score_inputs_fingerprint(
+        graph, roots, routing_snapshot
+    )
     evidence_seq = current_evidence_seq(db, user_id, player_color)
     cache_epoch = current_cache_epoch(db)
     stage_ms["counter"] = round(
@@ -1024,6 +1055,7 @@ def publish_scoped_opening_score_deltas(
         requested_keys,
         RootCalcConfig(),
         computed_at,
+        routing_snapshot=routing_snapshot,
     )
     stage_ms["score"] = round(
         (time.perf_counter() - stage_started) * 1000.0, 3
@@ -1085,8 +1117,9 @@ def _validated_scoped_score_map(
 
     graph = get_opening_graph()
     roots = get_opening_roots()
+    routing_snapshot = load_strict_densified_edges(graph)
     if publication.registry_fingerprint != opening_score_inputs_fingerprint(
-        graph, roots
+        graph, roots, routing_snapshot
     ):
         return None
     if (

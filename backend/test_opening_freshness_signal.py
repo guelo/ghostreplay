@@ -57,6 +57,7 @@ from app.opening_evidence import EvidenceOverlay, raw_evidence_inputs_digest
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import PositionScore, RootScore
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 USER = 4242
 
@@ -247,7 +248,12 @@ def _semantic_snapshot(
     if computed_at.tzinfo is None:
         computed_at = computed_at.replace(tzinfo=timezone.utc)
     scores, position_scores = oc._build_cached_scores(
-        color, graph, overlay, roots, computed_at
+        color,
+        graph,
+        overlay,
+        roots,
+        computed_at,
+        EMPTY_DENSIFIED_EDGES,
     )
     return overlay, tuple(scores), tuple(position_scores)
 

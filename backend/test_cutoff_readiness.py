@@ -11,10 +11,20 @@ import pytest
 
 import scripts.calibrate_opening_scores_v2 as cal
 import test_calibrate_opening_scores as tc
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 
 AS_OF = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 SCORES = (1.0, 3.0, 7.0, 10.0, 20.0, 30.0, 45.0, 55.0)
+
+
+@pytest.fixture(autouse=True)
+def _explicit_empty_calibration_routing_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        cal,
+        "load_strict_densified_edges",
+        lambda _graph: EMPTY_DENSIFIED_EDGES,
+    )
 
 
 def _pairs(
@@ -52,7 +62,7 @@ def _report(
         artifact_as_of=as_of,
         captured_model_version=captured_model or cal.SCORE_MODEL_VERSION,
         scored_model_version=cal.SCORE_MODEL_VERSION,
-        config_fingerprint=cal._cfg_fp(cal.SM_V2_5_DEFAULT_CELL),
+        config_fingerprint=cal._cfg_fp(cal.SM_V2_6_DEFAULT_CELL),
         scorer_source_digest_value="3" * 64,
         pairs=_pairs() if pairs is None else pairs,
         baseline_report=baseline,
@@ -162,7 +172,7 @@ def test_stale_capture_model_is_visible_as_its_own_reason():
         captured_model="sm-v2-4",
     )
     assert "captured_model_current" in report["reason_codes"]
-    assert report["identity"]["scored_model_version"] == "sm-v2-5"
+    assert report["identity"]["scored_model_version"] == "sm-v2-6"
 
 
 @pytest.mark.parametrize(

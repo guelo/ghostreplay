@@ -29,6 +29,15 @@ from app.opening_cache import evidence_derivation_fingerprint
 UTC = timezone.utc
 AS_OF = datetime(2025, 6, 1, tzinfo=UTC)
 HEX = "abcdef0123456789" * 4  # 64-char lowercase hex
+ROUTING_SNAPSHOT = cal.load_strict_densified_edges(cal.get_opening_graph())
+ROUTING_FP = ROUTING_SNAPSHOT.fingerprint
+
+
+@pytest.fixture(autouse=True)
+def _selection_uses_the_stamped_routing_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        cal, "load_strict_densified_edges", lambda _graph: ROUTING_SNAPSHOT
+    )
 
 
 @pytest.fixture
@@ -76,7 +85,8 @@ def _fold_ops(cell, *, cov, opp_cov, root_score, opp_score):
     um = cov ** p
     # A scope="user" fold never reaches the OPPONENT report -> its multiplier stays 1.0.
     om = opp_cov ** p if cell.report_fold_scope == "all" else 1.0
-    mirror_um = cal.FOLD_MIRROR_COVERAGE ** p
+    mirror_coverage = 0.5
+    mirror_um = mirror_coverage ** p
     return dict(
         synth_root_coverage_fraction=cov,
         synth_opp_root_coverage_fraction=opp_cov,
@@ -88,8 +98,8 @@ def _fold_ops(cell, *, cov, opp_cov, root_score, opp_score):
         synth_opp_turn_pre_fold_quality=opp_score / om,
         # The turn-symmetry mirror: equal coverage on both turns by construction, so the
         # two multipliers coincide exactly whenever the fold reaches both reports.
-        fold_mirror_user_coverage_fraction=cal.FOLD_MIRROR_COVERAGE,
-        fold_mirror_opp_coverage_fraction=cal.FOLD_MIRROR_COVERAGE,
+        fold_mirror_user_coverage_fraction=mirror_coverage,
+        fold_mirror_opp_coverage_fraction=mirror_coverage,
         fold_mirror_user_multiplier=mirror_um,
         fold_mirror_opp_multiplier=mirror_um if cell.report_fold_scope == "all" else 1.0,
     )
@@ -218,6 +228,7 @@ def _cohort(pairs=None, **overrides):
         source_revision=None,
         source_dirty_paths=(),
         scorer_source_digest=HEX,
+        routing_edge_fingerprint=ROUTING_FP,
         provenance_record_sha256=HEX,
         runtime_python=platform.python_version(),
         runtime_chess_version=chess.__version__,
@@ -1438,15 +1449,15 @@ class TestFoldSymmetryOnRealOperands:
     @pytest.mark.parametrize("cell", cal.ARM1.cells, ids=lambda c: f"p={c.report_fold_p}")
     def test_mirror_is_the_only_equal_coverage_fixture(self, cell):
         dcr = self._real_dcr(cell)
-        assert dcr.fold_mirror_user_coverage_fraction == cal.FOLD_MIRROR_COVERAGE
-        assert dcr.fold_mirror_opp_coverage_fraction == cal.FOLD_MIRROR_COVERAGE
+        assert dcr.fold_mirror_user_coverage_fraction == 0.5
+        assert dcr.fold_mirror_opp_coverage_fraction == 0.5
         # Equal coverage on both turns -> bit-identical multipliers under scope="all".
         assert dcr.fold_mirror_user_multiplier == dcr.fold_mirror_opp_multiplier
 
     def test_fold_gate_catches_opponent_report_skipping_the_fold(self):
         cell = cal.ARM1.cells[0]
         # The opponent report never folded: multiplier 1.0 where the mirror's coverage
-        # says it should be 0.5**p. This is the defect the gate exists to catch.
+        # says it should be coverage**p. This is the defect the gate exists to catch.
         dcr = dataclasses.replace(self._real_dcr(cell), fold_mirror_opp_multiplier=1.0)
         outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
         assert [c.name for c in outcome.checks if not c.passed] == [
@@ -1516,7 +1527,7 @@ class TestFoldSymmetryOnRealOperands:
         )
         outcome = cal._fold_symmetry(dcr, cal.ARM1, cell.report_fold_p)
         assert [c.name for c in outcome.checks if not c.passed] == [
-            "fold_mirror_coverage_pinned"
+            "fold_mirror_coverage_nondegenerate"
         ]
         assert _fold_check(outcome, "fold_multiplier_equal").passed  # vacuously
 
@@ -1674,7 +1685,7 @@ class TestSummaryAllowlist:
         assert list(cal._SUMMARY_BINDING_KEYS) == [
             f.name for f in dataclasses.fields(cal.WinnerBinding)
         ]
-        assert len(cal._SUMMARY_BINDING_KEYS) == 15
+        assert len(cal._SUMMARY_BINDING_KEYS) == 16
 
     def test_fitness_key_sets_match_their_dataclasses(self):
         # Same tripwire as the binding keys: a field added to CohortFitness must be

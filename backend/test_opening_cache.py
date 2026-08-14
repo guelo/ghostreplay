@@ -69,6 +69,11 @@ from app.opening_rootcalc import (
 from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import (
+    DensificationError,
+    DensifiedEdges,
+    EMPTY_DENSIFIED_EDGES,
+)
 
 START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 KINGS_PAWN_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
@@ -157,6 +162,14 @@ def _mock_opening_cache_singletons():
     with (
         patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
         patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
+        patch(
+            "app.opening_cache.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
+        patch(
+            "app.opening_score_delta.load_strict_densified_edges",
+            return_value=EMPTY_DENSIFIED_EDGES,
+        ),
     ):
         yield
 
@@ -1132,7 +1145,7 @@ def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
     )
     current_config_fp = root_calc_config_fingerprint()
     assert old_config_fp != current_config_fp
-    assert oc.SCORE_MODEL_VERSION == "sm-v2-5"
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-6"
     first.registry_fingerprint = first.registry_fingerprint.replace(
         current_config_fp, old_config_fp
     ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-3")
@@ -1149,16 +1162,16 @@ def test_sm_v2_3_config_and_model_version_recomputes_once(db_session):
     )
 
 
-def test_sm_v2_4_batch_recomputes_once_under_sm_v2_5(db_session):
-    """The coverage semantic bump invalidates an otherwise current-config batch."""
+def test_sm_v2_5_batch_recomputes_once_under_sm_v2_6(db_session):
+    """The visit-breadth cutover invalidates an otherwise current-config batch."""
     _seed_black_opening_session(db_session)
     first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
     assert first is not None
-    assert oc.SCORE_MODEL_VERSION == "sm-v2-5"
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-6"
     assert root_calc_config_fingerprint() in first.registry_fingerprint
 
     first.registry_fingerprint = first.registry_fingerprint.replace(
-        oc.SCORE_MODEL_VERSION, "sm-v2-4"
+        oc.SCORE_MODEL_VERSION, "sm-v2-5"
     )
     db_session.commit()
 
@@ -1171,6 +1184,47 @@ def test_sm_v2_4_batch_recomputes_once_under_sm_v2_5(db_session):
     assert second.registry_fingerprint == opening_score_inputs_fingerprint(
         _make_graph(), _make_roots()
     )
+
+
+def test_routing_edge_drift_rebuilds_once_with_the_exact_snapshot(
+    db_session, monkeypatch
+):
+    _seed_black_opening_session(db_session)
+    graph = _make_graph()
+    roots = _make_roots()
+    first_routing = EMPTY_DENSIFIED_EDGES
+    second_routing = DensifiedEdges(
+        ((KINGS_PAWN_FEN, "d7d5", KNIGHT_OPENING_FEN),)
+    )
+    assert opening_score_inputs_fingerprint(
+        graph, roots, first_routing
+    ) != opening_score_inputs_fingerprint(graph, roots, second_routing)
+
+    monkeypatch.setattr(oc, "load_strict_densified_edges", lambda _graph: first_routing)
+    first = _rebuilt_batch(db_session, 123, "black", reason="cache_miss")
+    assert first_routing.fingerprint in first.registry_fingerprint
+
+    monkeypatch.setattr(oc, "load_strict_densified_edges", lambda _graph: second_routing)
+    with patch("app.opening_cache.compute_all_scores", wraps=oc.compute_all_scores) as scorer:
+        second = _rebuilt_batch(db_session, 123, "black", reason="registry_drift")
+    assert scorer.call_args.kwargs["routing_snapshot"] is second_routing
+    assert second_routing.fingerprint in second.registry_fingerprint
+    assert second.id != first.id
+
+    third = _cached_batch(db_session, 123, "black")
+    assert third.id == second.id
+
+
+def test_strict_routing_failure_persists_no_batch(db_session, monkeypatch):
+    _seed_black_opening_session(db_session)
+
+    def fail_closed(_graph):
+        raise DensificationError("injected missing routing artifact")
+
+    monkeypatch.setattr(oc, "load_strict_densified_edges", fail_closed)
+    with pytest.raises(DensificationError, match="injected missing"):
+        recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert _count_batches(db_session, 123, "black") == 0
 
 
 def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkeypatch):
@@ -1207,7 +1261,7 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
 # ---------------------------------------------------------------------------
 # Report-fold config compatibility at the cache boundary.
 #
-# The sm-v2-5 default embeds its active user-scope fold fingerprint. A batch
+# The sm-v2-6 default embeds its active user-scope fold fingerprint. A batch
 # stamped under any non-default report-stage shape is registry drift and
 # recomputes once.
 # ---------------------------------------------------------------------------
@@ -1218,12 +1272,13 @@ GOLDEN = "301c3130cad49253aa87df8f68f578ab7a320c5bc3401170ff5498d7986c1090"
 
 
 def test_registry_fingerprint_composes_golden_config():
-    # Pin the exact sm-v2-5 registry composition, with GOLDEN as the config-fp segment.
+    # Pin the exact sm-v2-6 registry composition, with GOLDEN as the config-fp segment.
     graph = _make_graph()
     roots = _make_roots()
     assert root_calc_config_fingerprint() == GOLDEN
     expected = (
         f"{graph.fingerprint}:{roots.fingerprint}:{GOLDEN}"
+        f":{EMPTY_DENSIFIED_EDGES.fingerprint}"
         f":{oc.SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
         f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
         f":{oc.OPENING_SCORE_CACHE_SCHEMA_VERSION}"
@@ -1641,9 +1696,10 @@ def test_active_only_user_baseline_is_empty_no_evidence(db_session):
     )
     assert source == "empty_no_evidence"
     assert json.loads(json_str) == {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_version": oc.SCORE_MODEL_VERSION,
         "root_calc_config_fingerprint": root_calc_config_fingerprint(),
+        "routing_edge_fingerprint": EMPTY_DENSIFIED_EDGES.fingerprint,
         "scores": {},
     }
 

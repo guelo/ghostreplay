@@ -58,6 +58,11 @@ from app.opening_rootcalc import (
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
+from app.opening_transposition_artifact import (
+    DensifiedEdges,
+    EMPTY_DENSIFIED_EDGES,
+    load_strict_densified_edges,
+)
 from app.posthog_client import capture
 
 logger = logging.getLogger(__name__)
@@ -81,9 +86,10 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # quality by sqrt(coverage); opponent-turn rows retain the recursive coverage
 # gate without a second report-time fold.
 #
-# sm-v2-5: Coverage measures route-specific opponent-reply exposure using local
-# traversed-edge credit plus descendant opportunity mass instead of recursively
-# completed global-DAG path mass. The sm-v2-4 report fold remains configured.
+# sm-v2-6: Coverage is depth-weighted binary visited-position breadth over the
+# validated reference+routing topology, with selected user routes, full opponent
+# breadth, and one flat off-book bucket. The sm-v2-4 report fold now consumes
+# that public/persisted channel.
 #
 # sm-v2-3: readiness fold calibration (lcb_z=1.0, coverage_fold="gate",
 # coverage_live_threshold=1) shifts the public score semantics from posterior
@@ -95,7 +101,7 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # (recompute_opening_scores_if_needed) would serve them with no direct rows. The
 # bump changes registry_fingerprint -> registry drift -> exactly one recompute per
 # (user, color) on first read after deploy, backfilling position rows.
-SCORE_MODEL_VERSION = "sm-v2-5"
+SCORE_MODEL_VERSION = "sm-v2-6"
 
 # Persisted-read-model schema version. Bump when the SET of persisted batch
 # read-model tables/columns changes (NOT the scoring math — that is
@@ -146,6 +152,7 @@ def _utcnow() -> datetime:
 def opening_score_inputs_fingerprint(
     graph: OpeningGraph,
     roots: OpeningRoots,
+    routing_snapshot: DensifiedEdges = EMPTY_DENSIFIED_EDGES,
 ) -> str:
     """Registry fingerprint — every VERSION/semantic surface, all O(1).
 
@@ -156,6 +163,7 @@ def opening_score_inputs_fingerprint(
     """
     return (
         f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
+        f":{routing_snapshot.fingerprint}"
         f":{SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
         f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
         f":{OPENING_SCORE_CACHE_SCHEMA_VERSION}"
@@ -224,7 +232,8 @@ def opening_score_raw_inputs_fingerprint(
     _validate_player_color(player_color)
     graph = get_opening_graph()
     roots = get_opening_roots()
-    registry_fp = opening_score_inputs_fingerprint(graph, roots)
+    routing_snapshot = load_strict_densified_edges(graph)
+    registry_fp = opening_score_inputs_fingerprint(graph, roots, routing_snapshot)
     row_digest = raw_evidence_inputs_digest(db, user_id, player_color)
     return _compose_raw_fingerprint(registry_fp, row_digest)
 
@@ -296,6 +305,7 @@ def _build_cached_scores(
     overlay: EvidenceOverlay,
     roots: OpeningRoots,
     computed_at: datetime,
+    routing_snapshot: DensifiedEdges,
     *,
     row_isolation: RowIsolationTelemetry | None = None,
 ) -> tuple[list[RootScore], list[PositionScore]]:
@@ -321,6 +331,7 @@ def _build_cached_scores(
         position_telemetry=position_telemetry,
         failure_policy="isolate_rows",
         row_isolation=row_isolation,
+        routing_snapshot=routing_snapshot,
     )
     logger.info(
         "opening position-score rows computed",
@@ -561,6 +572,8 @@ def capture_freshness_snapshot(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
+    *,
+    routing_snapshot: DensifiedEdges | None = None,
 ) -> FreshnessSnapshot:
     """One evidence read → the full raw freshness bundle.
 
@@ -570,7 +583,12 @@ def capture_freshness_snapshot(
     an unavailable shared epoch. Warm freshness verdicts never call either.
     """
     _validate_player_color(player_color)
-    registry_fp = opening_score_inputs_fingerprint(get_opening_graph(), get_opening_roots())
+    graph = get_opening_graph()
+    if routing_snapshot is None:
+        routing_snapshot = load_strict_densified_edges(graph)
+    registry_fp = opening_score_inputs_fingerprint(
+        graph, get_opening_roots(), routing_snapshot
+    )
     # Counters BEFORE the evidence read (lower-bound discipline — see
     # FreshnessSnapshot). A legacy/partial missing epoch stamps NULL, never 0, and
     # remains unprovable. Current infrastructure prevents such a window.
@@ -592,6 +610,7 @@ def _capture_operational_rebuild_inputs(
     user_id: int,
     player_color: PlayerColor,
     graph: OpeningGraph,
+    routing_snapshot: DensifiedEdges,
 ) -> tuple[FreshnessSnapshot, EvidenceOverlay, FreshnessCapturePath]:
     """Capture one scheduler rebuild's overlay + cheap freshness proof.
 
@@ -624,7 +643,12 @@ def _capture_operational_rebuild_inputs(
             "opening rebuild freshness capture fallback freshness_capture=%s",
             capture_path,
         )
-        freshness = capture_freshness_snapshot(db, user_id, player_color)
+        freshness = capture_freshness_snapshot(
+            db,
+            user_id,
+            player_color,
+            routing_snapshot=routing_snapshot,
+        )
         fallback_overlay = overlay_evidence(db, user_id, player_color, graph)
         if discarded_overlay is not None:
             fallback_overlay.replay_cache_stats = (
@@ -940,8 +964,10 @@ def _is_batch_fresh(
     ``recompute_opening_scores_if_needed``; if that gate's freshness predicate
     changes, update this helper to match.
     """
+    graph = get_opening_graph()
+    routing_snapshot = load_strict_densified_edges(graph)
     registry_fingerprint = opening_score_inputs_fingerprint(
-        get_opening_graph(), get_opening_roots()
+        graph, get_opening_roots(), routing_snapshot
     )
     if batch.registry_fingerprint != registry_fingerprint:
         return False
@@ -1089,7 +1115,10 @@ def ensure_tree_cache(
         request_recompute,
     )
 
-    current_registry = opening_score_inputs_fingerprint(graph, roots)
+    routing_snapshot = load_strict_densified_edges(graph)
+    current_registry = opening_score_inputs_fingerprint(
+        graph, roots, routing_snapshot
+    )
     batch = get_latest_opening_score_batch(db, user_id, player_color)
     warm_fresh = batch is not None and batch.registry_fingerprint == current_registry
     if warm_fresh:
@@ -1181,7 +1210,10 @@ def resolve_tree_cache_state(
         request_recompute,
     )
 
-    current_registry = opening_score_inputs_fingerprint(graph, roots)
+    routing_snapshot = load_strict_densified_edges(graph)
+    current_registry = opening_score_inputs_fingerprint(
+        graph, roots, routing_snapshot
+    )
     batch = get_latest_opening_score_batch(db, user_id, player_color)
     if batch is not None and batch.registry_fingerprint == current_registry:
         return "warm"
@@ -1421,6 +1453,7 @@ def recompute_opening_scores(
     freshness: FreshnessSnapshot | None = None,
     computed_at: datetime | None = None,
     row_isolation: RowIsolationTelemetry | None = None,
+    routing_snapshot: DensifiedEdges | None = None,
 ) -> OpeningScoreBatch:
     """Atomically publish one full score/position/edge generation.
 
@@ -1439,16 +1472,23 @@ def recompute_opening_scores(
         # their overlay evidence read). Checked before any side effects
         # (generation reservation) so misuse cannot leave dangling state.
         raise ValueError("freshness snapshot is required when overlay is provided")
-    generation = reserve_opening_score_generation(db, user_id, player_color)
     graph = get_opening_graph()
+    if routing_snapshot is None:
+        routing_snapshot = load_strict_densified_edges(graph)
     roots = get_opening_roots()
+    generation = reserve_opening_score_generation(db, user_id, player_color)
     if freshness is None:
         # Capture the freshness bundle BEFORE building the overlay so the stored
         # fingerprint/signal can never be newer than the scored inputs. If
         # evidence changes in the gap, the overlay is at-or-newer than the stamp,
         # so the next read recomputes (at most one redundant pass) rather than
         # fast-pathing over stale scores.
-        freshness = capture_freshness_snapshot(db, user_id, player_color)
+        freshness = capture_freshness_snapshot(
+            db,
+            user_id,
+            player_color,
+            routing_snapshot=routing_snapshot,
+        )
     if overlay is None:
         overlay = overlay_evidence(db, user_id, player_color, graph)
     # Release the checked-out DB connection before the CPU-heavy scoring pass.
@@ -1472,6 +1512,7 @@ def recompute_opening_scores(
         overlay,
         roots,
         computed_at,
+        routing_snapshot,
         row_isolation=row_isolation,
     )
 
@@ -1479,7 +1520,9 @@ def recompute_opening_scores(
         user_id=user_id,
         player_color=player_color,
         generation=generation,
-        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        registry_fingerprint=opening_score_inputs_fingerprint(
+            graph, roots, routing_snapshot
+        ),
         inputs_fingerprint=freshness.inputs_fingerprint,
         evidence_seq=freshness.evidence_seq,
         cache_epoch=freshness.cache_epoch,
@@ -1869,7 +1912,10 @@ def recompute_opening_scores_if_needed(
     """
     now = datetime.now(timezone.utc)
     graph = get_opening_graph()
-    registry_fingerprint = opening_score_inputs_fingerprint(graph, get_opening_roots())
+    routing_snapshot = load_strict_densified_edges(graph)
+    registry_fingerprint = opening_score_inputs_fingerprint(
+        graph, get_opening_roots(), routing_snapshot
+    )
 
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
@@ -1883,7 +1929,7 @@ def recompute_opening_scores_if_needed(
         # The stable path skips the redundant full raw-evidence digest; a race
         # falls back to the legacy full-snapshot-before-overlay sequence.
         freshness, overlay, freshness_capture = _capture_operational_rebuild_inputs(
-            db, user_id, player_color, graph
+            db, user_id, player_color, graph, routing_snapshot
         )
         # Do NOT pass computed_at=now: the writer samples it AFTER the freshness
         # + overlay reads above so it stays an upper bound on the batch's evidence
@@ -1896,6 +1942,7 @@ def recompute_opening_scores_if_needed(
             overlay=overlay,
             freshness=freshness,
             row_isolation=row_isolation,
+            routing_snapshot=routing_snapshot,
         )
         isolation_summary = row_isolation.snapshot()
         _emit_opening_scores_recomputed(
@@ -1965,7 +2012,7 @@ def recompute_opening_scores_if_needed(
     # skips the redundant full raw-evidence digest; a race falls back to it.
     started = time.monotonic()
     freshness, overlay, freshness_capture = _capture_operational_rebuild_inputs(
-        db, user_id, player_color, graph
+        db, user_id, player_color, graph, routing_snapshot
     )
     # As in the cache-miss branch: let the writer sample computed_at after these
     # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
@@ -1978,6 +2025,7 @@ def recompute_opening_scores_if_needed(
         overlay=overlay,
         freshness=freshness,
         row_isolation=row_isolation,
+        routing_snapshot=routing_snapshot,
     )
     isolation_summary = row_isolation.snapshot()
     _emit_opening_scores_recomputed(

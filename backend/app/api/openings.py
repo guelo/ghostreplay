@@ -12,7 +12,7 @@ from typing import Literal
 
 import chess
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
@@ -35,6 +35,10 @@ from app.opening_cache import (
     resolve_tree_cache_state,
 )
 from app.opening_densify import RoutingView, routing_view
+from app.opening_transposition_artifact import (
+    coverage_structural_edge_is_eligible,
+    load_strict_densified_edges,
+)
 from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import mate_to_cp
@@ -59,6 +63,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/openings", tags=["openings"])
 
 TreeTiming = dict[str, bool | float | int | str | None]
+
+COVERAGE_DESCRIPTION = (
+    "Depth-weighted percentage (0-100) of visited opening positions below the card. "
+    "User turns follow chosen structural routes after a live choice; an off-book-only "
+    "choice retains known breadth. Opponent turns retain all eligible reference and "
+    "transposition breadth. FEN visits share across move orders, and observed off-book "
+    "continuations share one terminal branch bucket."
+)
 
 
 def _elapsed_ms(start: float) -> float:
@@ -133,11 +145,11 @@ class NodeDebugResponse(BaseModel):
     weights: dict[str, float]
     subtree_live_attempts: int
     subtree_review_attempts: int
-    # Historical wire name: score-readiness gate, not route-exposure Coverage.
+    # Historical wire name: score-readiness gate, not visited-node Coverage.
     covered_locally: bool
     raw_score: float
     raw_confidence: float
-    raw_coverage: float
+    raw_coverage: float  # New visited-node fraction before conversion to 0-100.
     raw_depth: float
     is_leaf: bool
     # Report-stage observability (g-report-debug-api). Null for a FEN that was
@@ -157,7 +169,7 @@ class RootScoreResponse(BaseModel):
     player_color: str
     opening_score: float
     confidence: float
-    coverage: float
+    coverage: float = Field(description=COVERAGE_DESCRIPTION)
     weighted_depth: float
     sample_size: int
     game_count: int
@@ -193,7 +205,9 @@ class FamilyScoreItem(BaseModel):
     root_count: int
     family_score: float
     family_confidence: float
-    family_coverage: float
+    family_coverage: float = Field(
+        description=f"Equal-root mean. {COVERAGE_DESCRIPTION}"
+    )
     root_sample_size_sum: int
     last_practiced_at: datetime | None
     weakest_root_name: str
@@ -222,7 +236,7 @@ class DrillDownRootItem(BaseModel):
     eco: str | None
     opening_score: float | None
     confidence: float | None
-    coverage: float | None
+    coverage: float | None = Field(description=COVERAGE_DESCRIPTION)
     weighted_depth: float | None
     sample_size: int | None
     game_count: int | None
@@ -465,6 +479,7 @@ def compute_opening_score(
 
     if roots.get_root(body.opening_key) is None:
         raise HTTPException(status_code=404, detail="Unknown opening root")
+    routing_snapshot = load_strict_densified_edges(graph)
 
     overlay = overlay_evidence(db, user.user_id, body.player_color, graph)
     db.rollback()
@@ -475,6 +490,7 @@ def compute_opening_score(
         overlay,
         roots,
         debug=debug,
+        routing_snapshot=routing_snapshot,
     )
     return _root_score_to_response(score)
 
@@ -591,7 +607,7 @@ class TreeNode(BaseModel):
     encounter_count: int
     opening_score: float | None
     confidence: float | None
-    coverage: float | None
+    coverage: float | None = Field(description=COVERAGE_DESCRIPTION)
     sample_size: int | None
     game_count: int | None
     last_practiced_at: datetime | None
@@ -620,7 +636,7 @@ class TreeResponse(BaseModel):
     root_eval_cp: int | None           # column-0 start position best_eval (white-rel)
     root_eval_mate: int | None
     root_opening_score: float | None   # start-position metrics from position_rows (None when no evidence)
-    root_coverage: float | None
+    root_coverage: float | None = Field(description=COVERAGE_DESCRIPTION)
     root_game_count: int | None
     root_confidence: float | None
     columns: list[TreeColumn]
@@ -866,9 +882,9 @@ class _OpeningTreeBuilder:
         """Navigable moves out of ``norm_fen``, merged by UCI (mirrors the scorer).
 
         Observed edges are ALWAYS included (phase-authoritative); book edges are
-        included only when their child is not a middlegame position. This is the
-        navigable set — exactly the scorer's ``_structural_children`` domain — and
-        the only set a move in ``canonical_line`` may come from.
+        included only when both endpoints are not middlegame positions. This is
+        the navigable set — exactly the scorer's ``_structural_children`` domain —
+        and the only set a move in ``canonical_line`` may come from.
         """
         cached = self._struct_cache.get(norm_fen)
         if cached is not None:
@@ -885,9 +901,13 @@ class _OpeningTreeBuilder:
                 is_observed=True,
                 edge=edge,
             )
-        # Reference (book) children whose child is not a middlegame position.
+        # Reference (book) children whose endpoints stay inside the opening
+        # boundary. This is the same predicate the score-only coverage topology
+        # uses for reference and routing-transposition edges.
         for uci, child_fen in book.items():
-            if self._is_middlegame(child_fen):
+            if not coverage_structural_edge_is_eligible(
+                norm_fen, child_fen, is_middlegame=self._is_middlegame
+            ):
                 continue
             if uci not in result:
                 result[uci] = _ChildEdge(
@@ -941,20 +961,21 @@ class _OpeningTreeBuilder:
         }
         # Eligibility, by contrast, is filtered: the overlay only volunteers NEW
         # forward-progress edges, and never past the opening boundary.
-        if not self._is_middlegame(norm_fen):
-            for uci, child_fen in overlay.items():
-                if uci in result:
-                    continue
-                if self._is_middlegame(child_fen):
-                    continue  # boundary-crossing: display-only, added by the column
-                result[uci] = _ChildEdge(
-                    uci=uci,
-                    child_fen=child_fen,
-                    in_book=False,
-                    is_observed=False,
-                    edge=None,
-                    is_transposition=True,
-                )
+        for uci, child_fen in overlay.items():
+            if uci in result:
+                continue
+            if not coverage_structural_edge_is_eligible(
+                norm_fen, child_fen, is_middlegame=self._is_middlegame
+            ):
+                continue  # boundary-crossing: display-only, added by the column
+            result[uci] = _ChildEdge(
+                uci=uci,
+                child_fen=child_fen,
+                in_book=False,
+                is_observed=False,
+                edge=None,
+                is_transposition=True,
+            )
         self._nav_cache[norm_fen] = result
         return result
 

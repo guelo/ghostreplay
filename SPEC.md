@@ -117,6 +117,17 @@ edges still converge in the same current generation. The exact relational
 schema, constraints, and migration history remain authoritative in the backend
 model and migration layer, not in this overview.
 
+Opening Coverage is the depth-weighted breadth of opening positions visited in
+live play. It follows the player's chosen structural routes once a structural
+choice exists, retains known breadth when the only choice was off-book, retains
+known opponent breadth, shares normalized-position credit across transpositions,
+and treats off-book continuations as one terminal branch. The
+validated generated transposition artifact is therefore an immutable input to
+both score-cache identity and browsing; scoring fails closed if that input is
+missing or incompatible, while browsing may explicitly fall back to the base
+book. Games remains a distinct descendant-session count rather than a Coverage
+numerator.
+
 ## Major end-to-end flows
 
 ### Play, steer, and review

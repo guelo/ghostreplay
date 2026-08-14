@@ -34,6 +34,7 @@ from app.opening_densify import DensifiedEdges, RoutingView
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.tree_eval import MoveEval
 
 # --- normalized 4-field FENs along the synthetic graph ------------------------
@@ -51,6 +52,14 @@ SICILIAN = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
 BISHOP = "rnbqkbnr/pppp1ppp/8/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR b KQkq -"
 
 TREE_URL = "/api/openings/tree"
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_tree_uses_an_explicit_empty_score_routing_snapshot(monkeypatch):
+    monkeypatch.setattr(
+        "app.opening_cache.load_strict_densified_edges",
+        lambda _graph: EMPTY_DENSIFIED_EDGES,
+    )
 
 
 def _node(fen: str, name: str | None = None, eco: str | None = None) -> OpeningGraphNode:
@@ -255,6 +264,10 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     if mid_fens is not None:
         cms.append(patch("app.api.openings.is_middlegame_position",
                          side_effect=lambda fen: fen in mid_fens))
+        cms.append(patch(
+            "app.opening_transposition_artifact.is_middlegame_position",
+            side_effect=lambda fen: fen in mid_fens,
+        ))
     with contextlib.ExitStack() as stack:
         for cm in cms:
             stack.enter_context(cm)
@@ -329,6 +342,10 @@ def _run_build(graph, roots, overlay, moves, *, player_color="white", batch_id=1
         if mid_fens is not None:
             stack.enter_context(patch("app.api.openings.is_middlegame_position",
                                       side_effect=lambda fen: fen in mid_fens))
+            stack.enter_context(patch(
+                "app.opening_transposition_artifact.is_middlegame_position",
+                side_effect=lambda fen: fen in mid_fens,
+            ))
         response = builder.build(moves, None)
     return builder, response, requested_parents
 
@@ -375,7 +392,7 @@ def test_tree_default_root_lists_book_first_move(client, auth_headers):
     assert data["selected_fen"] == START
     assert data["selected_ply"] == 0
     assert data["selected_is_terminal"] is False
-    assert data["model_version"] == "sm-v2-5"
+    assert data["model_version"] == "sm-v2-6"
     assert len(data["columns"]) == 1
     col = data["columns"][0]
     assert col["position_fen"] == START
@@ -1037,24 +1054,38 @@ def test_structural_children_parity_with_scorer(client, auth_headers):
 
     now = datetime(2026, 6, 1, tzinfo=timezone.utc)
     builder, observed_patch = _make_builder(graph, roots, overlay)
-    # Patch the phase predicate in BOTH namespaces so API and scorer agree that
+    # Patch the shared boundary predicate dependency so API and scorer agree that
     # NC6 is a middlegame position (excluded from the navigable domain).
     with (
         observed_patch,
-        patch("app.api.openings.is_middlegame_position", side_effect=lambda f: f == NC6),
-        patch("app.opening_rootcalc.is_middlegame_position", side_effect=lambda f: f == NC6),
+        patch(
+            "app.opening_rootcalc.is_middlegame_position",
+            side_effect=lambda f: f == NC6,
+        ) as scorer_mid,
+        patch(
+            "app.api.openings.is_middlegame_position",
+            side_effect=lambda f: f == NC6,
+        ) as api_mid,
     ):
         calc = _SharedCalculator("white", graph, overlay, roots, RootCalcConfig(), now)
         for position in [START, E4, E4E5, NF3]:
             api_set = {ce.child_fen for ce in builder._structural_children(position).values()}
             scorer_set = set(calc._structural_children(position))
             assert api_set == scorer_set, position
+            # Exercise both shared-predicate call sites repeatedly. Each routes
+            # through its owner's memoized phase classifier.
+            builder._navigable_children(position)
+            builder._navigable_children(position)
+            calc._coverage_structural_children(position)
+            calc._coverage_structural_children(position)
         # NF3's middlegame book child (NC6) is excluded from the navigable set...
         assert NC6 not in {
             ce.child_fen for ce in builder._structural_children(NF3).values()
         }
         # ...but present as a display-only column node.
         assert NC6 in {ce.child_fen for ce in builder._column_children(NF3).values()}
+        assert api_mid.call_count == len(builder._mid_cache)
+        assert scorer_mid.call_count == len(calc._middlegame_cache)
 
 
 # --- end-to-end: real position-row + eval lookups against a seeded DB ---------

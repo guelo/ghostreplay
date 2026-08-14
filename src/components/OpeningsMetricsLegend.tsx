@@ -50,10 +50,15 @@ function OpeningsMetricsLegend() {
           role="tooltip"
         >
           <dl className="openings-metrics-legend__list">
-                            <dt>Opening Score</dt>
-                            <dd>Readiness grade from move quality, sample size, and opponent replies.</dd>
-                            <dt>Coverage</dt>
-                            <dd>How much of the opponent-response tree has live evidence.</dd>
+            <dt>Opening Score</dt>
+            <dd>Readiness grade from move quality, sample size, and opponent replies.</dd>
+            <dt>Coverage</dt>
+            <dd>
+              Depth-weighted share of opening positions you’ve visited. It follows
+              your chosen book routes, keeps known breadth when you leave book,
+              keeps every known opponent reply, shares credit across transpositions,
+              and counts off-book continuations as one branch.
+            </dd>
           </dl>
           <p className="openings-metrics-legend__section-title">Move types</p>
           <ul className="openings-metrics-legend__types">
