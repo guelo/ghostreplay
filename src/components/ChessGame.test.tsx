@@ -5970,11 +5970,17 @@ describe("ChessGame blunder board rewind", () => {
     };
   };
 
-  const resolveMoveTwoAsBlunder = async () => {
+  const resolveMoveTwoAsBlunder = async ({
+    move = "g1f3",
+    bestMove = "d2d4",
+  }: {
+    move?: string;
+    bestMove?: string;
+  } = {}) => {
     const result = {
-      id: "analysis-2-g1f3",
-      move: "g1f3",
-      bestMove: "d2d4",
+      id: `analysis-2-${move}`,
+      move,
+      bestMove,
       bestEval: 50,
       playedEval: -150,
       currentPositionEval: -150,
@@ -5998,6 +6004,95 @@ describe("ChessGame blunder board rewind", () => {
       });
       await Promise.resolve();
     });
+  };
+
+  const foolsMateFens = () => {
+    const line = new Chess();
+    line.move("f3");
+    line.move("e5");
+    const sourceFenBeforeBlunder = line.fen();
+    line.move("g4");
+    const fenAfterBlunder = line.fen();
+    line.move("Qh4#");
+    const checkmateFen = line.fen();
+
+    return {
+      sourceFenBeforeBlunder,
+      fenAfterBlunder,
+      checkmateFen,
+    };
+  };
+
+  const startFoolsMate = async ({ deferMate }: { deferMate: boolean }) => {
+    const fens = foolsMateFens();
+
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-checkmate-rewind",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    getNextOpponentMoveMock.mockReset();
+
+    let resolveMateReply: (() => void) | null = null;
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      mode: "engine",
+      move: { uci: "e7e5", san: "e5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    if (deferMate) {
+      getNextOpponentMoveMock.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveMateReply = () =>
+            resolve({
+              mode: "engine",
+              move: { uci: "d8h4", san: "Qh4#" },
+              target_blunder_id: null,
+              decision_source: "backend_engine",
+            });
+        }),
+      );
+    } else {
+      getNextOpponentMoveMock.mockResolvedValueOnce({
+        mode: "engine",
+        move: { uci: "d8h4", san: "Qh4#" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+    }
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "f2", targetSquare: "f3" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /e5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g2", targetSquare: "g4" });
+    });
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    });
+
+    return {
+      ...fens,
+      resolveMateReply: () => {
+        if (!resolveMateReply) {
+          throw new Error("Mate reply was not deferred");
+        }
+        resolveMateReply();
+      },
+    };
   };
 
   beforeEach(() => {
@@ -6202,6 +6297,130 @@ describe("ChessGame blunder board rewind", () => {
       fenAfterBlunder,
     );
     expect(screen.getByTestId("chessboard")).toHaveAttribute("data-arrow-count", "2");
+  });
+
+  it("keeps a completed checkmate visible when the preceding blunder analysis lands late", async () => {
+    let resolveEndGame!: () => void;
+    endGameMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveEndGame = () => resolve({});
+      }),
+    );
+    const { fenAfterBlunder, checkmateFen } = await startFoolsMate({
+      deferMate: false,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /qh4/i })).toBeInTheDocument();
+    });
+    expect(new Chess(useGameStore.getState().liveFen).isCheckmate()).toBe(true);
+    expect(useGameStore.getState().isGameActive).toBe(true);
+
+    vi.useFakeTimers();
+    await resolveMoveTwoAsBlunder({ move: "g2g4", bestMove: "e2e4" });
+
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(useGameStore.getState().moveHistory.map((move) => move.san)).toEqual([
+      "f3",
+      "e5",
+      "g4",
+      "Qh4#",
+    ]);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+
+    await act(async () => {
+      resolveEndGame();
+    });
+    expect(useGameStore.getState().isGameActive).toBe(false);
+    expect(useGameStore.getState().gameResult?.type).toBe("checkmate_loss");
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+
+    const blunderMoveButton = screen.getByRole("button", { name: /g4/i });
+    fireEvent.click(blunderMoveButton);
+
+    expect(useGameStore.getState().viewIndex).toBe(2);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      fenAfterBlunder,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "2",
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+    expect(useGameStore.getState().viewIndex).toBe(2);
+  });
+
+  it("returns to a late checkmate and cancels an in-progress blunder rewind", async () => {
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    const {
+      sourceFenBeforeBlunder,
+      checkmateFen,
+      resolveMateReply,
+    } = await startFoolsMate({ deferMate: true });
+
+    expect(screen.queryByRole("button", { name: /qh4/i })).not.toBeInTheDocument();
+
+    vi.useFakeTimers();
+    await resolveMoveTwoAsBlunder({ move: "g2g4", bestMove: "e2e4" });
+    act(() => {
+      vi.advanceTimersByTime(365);
+    });
+
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+
+    await act(async () => {
+      resolveMateReply();
+    });
+
+    expect(new Chess(useGameStore.getState().liveFen).isCheckmate()).toBe(true);
+    expect(useGameStore.getState().isGameActive).toBe(true);
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(useGameStore.getState().moveHistory.map((move) => move.san)).toEqual([
+      "f3",
+      "e5",
+      "g4",
+      "Qh4#",
+    ]);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
   });
 
   // g-i9v8: the failing ordering the other tests never exercise — analysis

@@ -1967,6 +1967,36 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setViewIndex,
   ]);
 
+  useEffect(() => {
+    if (!blunderAlert?.shouldRewind) {
+      return;
+    }
+    // `fen` intentionally signals mutations of the stable `chess` object. The
+    // inclusive index guard tolerates a render torn between the separate live
+    // FEN and move-history writes.
+    if (blunderAlert.moveIndex < moveHistory.length - 2) {
+      return;
+    }
+    if (!chess.isCheckmate()) {
+      return;
+    }
+
+    // The mating reply is the position the player needs to see. This effect is
+    // intentionally separate from the rewind scheduler: it handles both a late
+    // alert after mate and a mating reply that lands during an active rewind.
+    clearBlunderBoardOverride();
+    setBoardInstanceKey((current) => current + 1);
+    setViewIndex(null);
+    setBlunderAlert(null);
+  }, [
+    blunderAlert,
+    chess,
+    clearBlunderBoardOverride,
+    fen,
+    moveHistory.length,
+    setViewIndex,
+  ]);
+
   // Auto-dismiss re-hook toast after 3 seconds
   useEffect(() => {
     if (!showRehookToast) return;
