@@ -5,22 +5,21 @@ import { GAME_MOBILE_MAX_WIDTH } from "./breakpoints";
 
 // Guard against TS/CSS breakpoint drift: the JS media query in
 // AnalysisConnectors and the .game-page mobile layout must switch at the same
-// width. During the mechanical CSS split, that layout block lives in the
-// temporary legacy game-responsive partial. CSS can't import the constant, so
-// assert the partial references the same pixel value. If you intentionally move
-// the breakpoint, update both GAME_MOBILE_MAX_WIDTH and the matching @media
-// block in the partial.
+// width. The final CSS ownership split puts page chrome in GamePage.css and the
+// game component layout in ChessGame.css. CSS can't import the constant, so
+// assert both owners reference the same pixel value. If you intentionally move
+// the breakpoint, update GAME_MOBILE_MAX_WIDTH and both matching @media blocks.
 describe("game mobile breakpoint", () => {
-  const gameResponsiveCssPath = path.resolve(
-    process.cwd(),
-    "src/styles/legacy/008-game-responsive.css",
-  );
-  const gameResponsiveCss = readFileSync(gameResponsiveCssPath, "utf8");
+  const ownerPaths = [
+    "src/pages/GamePage.css",
+    "src/components/chess-game/ChessGame.css",
+  ];
 
-  it("matches the .game-page mobile @media block in the legacy partial", () => {
+  it.each(ownerPaths)("matches the mobile @media block in %s", (ownerPath) => {
+    const ownerCss = readFileSync(path.resolve(process.cwd(), ownerPath), "utf8");
     const mobileBlock = new RegExp(
       `@media \\(max-width: ${GAME_MOBILE_MAX_WIDTH}px\\)`,
     );
-    expect(gameResponsiveCss).toMatch(mobileBlock);
+    expect(ownerCss).toMatch(mobileBlock);
   });
 });

@@ -1,0 +1,72 @@
+/* Anchor for the absolutely-positioned legend popover. */
+.openings-metrics-legend {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+.openings-metrics-legend__btn {
+    gap: 0.3rem;
+    color: var(--text-secondary);
+}
+.openings-metrics-legend__label {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+.openings-metrics-legend__list {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.openings-metrics-legend__list dt {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.openings-metrics-legend__list dd {
+    margin: 0.1rem 0 0;
+}
+/* "Move types" sub-section (g-obh5): explains the three connector/chip types. */
+.openings-metrics-legend__section-title {
+    margin: 0.75rem 0 0.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.openings-metrics-legend__types {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+.openings-metrics-legend__types li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+}
+.openings-metrics-legend__swatch {
+    flex: 0 0 auto;
+    width: 0.8rem;
+    height: 0.8rem;
+    margin-top: 0.15rem;
+    border-radius: 0.2rem;
+    border: 1px solid color-mix(in srgb, var(--swatch-color) 60%, transparent);
+    background: color-mix(in srgb, var(--swatch-color) 30%, transparent);
+}
+.openings-metrics-legend__swatch--book {
+    --swatch-color: var(--brand-primary);
+}
+.openings-metrics-legend__swatch--off-book {
+    --swatch-color: var(--color-violet-500);
+}
+.openings-metrics-legend__swatch--transposition {
+    --swatch-color: var(--color-emerald-500);
+}
+.openings-metrics-legend__swatch--selected {
+    --swatch-color: var(--color-sky-500);
+}
+@media (max-width: 720px) {
+    .openings-metrics-legend__label {
+        display: none;
+    }
+}

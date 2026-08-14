@@ -1,0 +1,29 @@
+/* Material Display */
+.material-display {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 2rem;
+    padding: 0 0.5rem;
+}
+/* Only the narrow /game + /history layout, which sits both sides on one row,
+   needs to name them; everywhere else position already says whose captures
+   these are. */
+.material-label {
+    display: none;
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--text-tertiary);
+}
+.material-icons {
+    font-size: 32px;
+    line-height: 1;
+    letter-spacing: -0.08em;
+}
+.material-score {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--text-secondary);
+}

@@ -1,0 +1,111 @@
+.chess-button {
+    border: 1px solid var(--border-color-strong);
+    background: var(--button-secondary-bg);
+    color: var(--text-primary);
+    padding: 0.6rem 1.25rem;
+    border-radius: 999px;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+        border-color 200ms ease,
+        background 200ms ease;
+}
+
+.chess-button.primary {
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    border-color: transparent;
+    box-shadow: var(--shadow-md);
+}
+
+/* Opening-score freshness is an aria-disabled, event-capable wait state so
+   attempted repeat activations remain measurable (g-lcy0). */
+
+.chess-button.primary.drill-again-waiting {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    border-color: var(--border-color-strong);
+    box-shadow: none;
+    cursor: progress;
+}
+
+.chess-button.primary.drill-again-waiting:hover {
+    border-color: var(--border-color-strong);
+}
+
+.chess-button.danger {
+    background: var(--gradient-error);
+    color: var(--text-on-gradient);
+    border-color: transparent;
+    box-shadow: var(--shadow-md);
+}
+
+.chess-button.danger:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    box-shadow: none;
+    cursor: not-allowed;
+}
+
+.chess-button:hover {
+    border-color: var(--text-primary);
+}
+
+/* Segmented toggle: a single inset track holding equal-width segments with a
+   raised, brand-accented active thumb (g-lgi5). */
+
+.segmented-toggle {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+}
+
+/* Standalone toggle (e.g. Blunder Library filter): pill with its own border. */
+
+.chess-button.toggle {
+    border-color: var(--border-color-strong);
+    background: var(--bg-tertiary);
+}
+
+.chess-button.toggle.active {
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    border-color: transparent;
+    box-shadow: var(--shadow-md);
+}
+
+/* Inside a segmented track the toggle becomes a borderless segment / thumb. */
+
+.segmented-toggle .chess-button.toggle {
+    flex: 1 1 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 0.4rem 1rem;
+    box-shadow: none;
+    text-align: center;
+}
+
+.segmented-toggle .chess-button.toggle:hover:not(.active) {
+    color: var(--text-primary);
+}
+
+.segmented-toggle .chess-button.toggle.active {
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    box-shadow: var(--shadow-md);
+}
+
+.segmented-toggle .chess-button.toggle:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.mode-toggle-row {
+    /* Layout comes from .segmented-toggle; keep only the centering intent. */
+    justify-content: center;
+}

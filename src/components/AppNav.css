@@ -1,27 +1,10 @@
-
 /* Nav Bar */
-/* Final owner: src/components/AppNav.css. */
 .nav-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     margin-bottom: 0;
 }
-
-/* Final owner: src/pages/HomePage.css. */
-
-.home-page .nav-bar {
-    align-items: flex-start;
-}
-
-/* Final owner: src/pages/HomePage.css. */
-
-.home-page .nav-bar__brand--logo {
-    align-items: flex-start;
-}
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__brand {
     text-transform: uppercase;
     letter-spacing: 0.2em;
@@ -29,9 +12,6 @@
     color: var(--text-tertiary);
     text-decoration: none;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__brand--logo {
     display: inline-flex;
     align-items: center;
@@ -39,16 +19,10 @@
     text-transform: none;
     letter-spacing: 0.02em;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__logo {
     width: clamp(72px, 10vw, 112px);
     height: clamp(72px, 10vw, 112px);
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__actions {
     display: flex;
     align-items: center;
@@ -56,9 +30,6 @@
     justify-content: flex-end;
     gap: 1rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__menu-button {
     display: none;
     width: 2.5rem;
@@ -74,9 +45,6 @@
     flex-direction: column;
     gap: 0.22rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__menu-button span {
     display: block;
     width: 1.1rem;
@@ -84,17 +52,11 @@
     border-radius: 999px;
     background: currentColor;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__btn {
     text-decoration: none;
     font-size: 0.85rem;
     padding: 0.45rem 1rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__link {
     color: var(--text-tertiary);
     text-decoration: none;
@@ -106,31 +68,19 @@
     padding: 0;
     cursor: pointer;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__link:hover {
     color: var(--text-primary);
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__user {
     color: var(--text-secondary);
     font-size: 0.85rem;
     font-weight: 500;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer-shell {
     position: fixed;
     inset: 0;
     z-index: 40;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer-backdrop {
     position: absolute;
     inset: 0;
@@ -139,9 +89,6 @@
     background: var(--overlay-scrim);
     cursor: pointer;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer {
     position: absolute;
     top: 0;
@@ -158,26 +105,17 @@
     flex-direction: column;
     gap: 1rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__title {
     color: var(--text-primary);
     font-size: 0.9rem;
     font-weight: 700;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__close {
     width: 2.2rem;
     height: 2.2rem;
@@ -189,18 +127,12 @@
     line-height: 1;
     cursor: pointer;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__actions {
     display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 0.25rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__link,
 .nav-drawer__user {
     display: block;
@@ -216,75 +148,47 @@
     font-size: 0.95rem;
     font-weight: 600;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__link {
     cursor: pointer;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__link:hover {
     color: var(--text-primary);
     background: var(--bg-tertiary);
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__user {
     color: var(--text-tertiary);
     font-size: 0.85rem;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__btn {
     justify-content: center;
     text-align: center;
     text-decoration: none;
     margin: 0.25rem 0;
 }
-
 /* Feedback nav action — accent color + a periodically wiggling chat icon so it
    stands out from the muted route links and invites users to leave feedback. */
-/* Final owner: src/components/AppNav.css. */
 .nav-feedback {
     align-items: center;
     gap: 0.4rem;
     color: var(--brand-primary);
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__link.nav-feedback {
     display: inline-flex;
     font-weight: 600;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-drawer__link.nav-feedback {
     display: flex;
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-bar__link.nav-feedback:hover,
 .nav-drawer__link.nav-feedback:hover {
     color: var(--brand-secondary);
 }
-
-/* Final owner: src/components/AppNav.css. */
-
 .nav-feedback__icon {
     flex: none;
     transform-origin: center 70%;
     animation: feedback-attention 3.2s ease-in-out infinite;
 }
-
 /* Mostly at rest, then a quick friendly wiggle to catch the eye. */
-/* Final owner: src/components/AppNav.css. */
 @keyframes feedback-attention {
     0%,
     62%,
@@ -304,10 +208,28 @@
         transform: scale(1.08) rotate(0deg);
     }
 }
-
 @media (prefers-reduced-motion: reduce) {
-    /* Final owner: src/components/AppNav.css. */
     .nav-feedback__icon {
         animation: none;
+    }
+}
+@media (max-width: 720px) {
+    .nav-bar {
+        align-items: center;
+        flex-direction: row;
+        gap: 0.75rem;
+    }
+
+    .nav-bar__actions {
+        display: none;
+    }
+
+    .nav-bar__menu-button {
+        display: inline-flex;
+    }
+}
+@media (min-width: 721px) {
+    .nav-drawer-shell {
+        display: none;
     }
 }

@@ -1,0 +1,173 @@
+/* History stats pane: two-column (player vs opponent) */
+.history-stats-pane {
+    background: #fff;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+}
+.history-stats-pane__grid {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr;
+    gap: 0.15rem 0.75rem;
+    align-items: center;
+}
+.history-stats-pane__header {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding-bottom: 0.2rem;
+}
+/* Interactive You/Ghost headers (g-9xjd). Fully reset the native button box so
+   grid sizing stays identical to the plain <div> header; the base block above
+   still supplies font-size/weight/color/uppercase. */
+.history-stats-pane__header--interactive {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: 0;
+    margin: 0;
+    padding: 0 0 0.2rem; /* replaces UA button padding; matches base padding-bottom */
+    font-family: inherit;
+    line-height: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.15s, outline-color 0.15s;
+}
+.history-stats-pane__header--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+.history-stats-pane__header--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+.history-stats-pane__header--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+.history-stats-pane__label {
+    all: unset;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    text-align: left;
+}
+.history-stats-pane__label-copy--compact,
+.history-stats-pane__accuracy-copy--compact {
+    display: none;
+}
+.history-stats-pane__label--accuracy {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.history-stats-pane__info-btn {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    border-radius: 50%;
+    transition: color 0.15s;
+}
+.history-stats-pane__info-btn:hover {
+    color: var(--text-primary);
+}
+.history-stats-pane__info-btn:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+.history-stats-pane__info-popup {
+    position: absolute;
+    top: calc(100% + 0.4rem);
+    left: 0;
+    z-index: 10;
+    width: 240px;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-elevated, var(--bg-secondary, #2a2a2a));
+    border: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-size: 0.72rem;
+    font-weight: 400;
+    line-height: 1.45;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text-secondary);
+}
+.history-stats-pane__info-popup p {
+    margin: 0;
+}
+.history-stats-pane__info-popup p + p {
+    margin-top: 0.5rem;
+}
+.history-stats-pane__label--blunder { color: var(--eval-blunder); }
+.history-stats-pane__label--mistake { color: var(--eval-mistake); }
+.history-stats-pane__label--inaccuracy { color: var(--eval-inaccuracy); }
+/* Movelist classification pill (?!/?/??), sized down for the compact stats
+   labels. Reuses `.move-icon` + `.move-icon--{cls}` so the badge stays in sync
+   with the move list; this only trims the padding/scale for the small grid. */
+.history-stats-pane__label-icon.move-icon {
+    font-size: 0.9em;
+    padding: 0.05em 0.4em;
+    margin-right: 0.35em;
+}
+.history-stats-pane__label--interactive {
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0.1rem 0.15rem;
+    transition: background 0.15s, outline-color 0.15s;
+    display: inline-flex;
+    align-items: center;
+}
+.history-stats-pane__label--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+.history-stats-pane__label--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+.history-stats-pane__label--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+.history-stats-pane__value {
+    all: unset;
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-align: center;
+    color: var(--text-primary);
+    padding: 0.1rem 0.25rem;
+    border-radius: 4px;
+}
+.history-stats-pane__value--blunder { color: var(--eval-blunder); }
+.history-stats-pane__value--mistake { color: var(--eval-mistake); }
+.history-stats-pane__value--inaccuracy { color: var(--eval-inaccuracy); }
+.history-stats-pane__value--interactive {
+    cursor: pointer;
+    transition: background 0.15s, outline-color 0.15s;
+}
+.history-stats-pane__value--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+.history-stats-pane__value--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+.history-stats-pane__value--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+.history-stats-pane__value--span {
+    grid-column: 2 / -1;
+}
+.history-stats-pane__value--you {
+    grid-column: 2;
+}
+.history-stats-pane__value--pending {
+    font-size: 0.78em;
+    font-style: italic;
+    opacity: 0.6;
+}

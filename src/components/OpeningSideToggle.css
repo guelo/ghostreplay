@@ -1,0 +1,37 @@
+/* Size the toggle to its content (not full width) and lay the king icon
+   inline with the label inside each segment. */
+.opening-side-toggle {
+    flex: 0 0 auto;
+    width: fit-content;
+    max-width: 100%;
+}
+.opening-side-toggle .chess-button.toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+}
+.opening-side-toggle__piece {
+    display: inline-flex;
+    width: 1.25rem;
+    height: 1.25rem;
+    flex-shrink: 0;
+}
+@media (max-width: 720px) {
+    /* Tighter segments so toggle + title + legend clear ~320px of content box. */
+    .segmented-toggle.opening-side-toggle .chess-button.toggle {
+        padding: 0.3rem 0.6rem;
+        font-size: 0.85rem;
+    }
+}
+@media (max-width: 720px) and (max-height: 640px), (max-width: 320px) {
+    .segmented-toggle.opening-side-toggle .chess-button.toggle {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.8rem;
+    }
+
+    .opening-side-toggle__piece {
+        width: 1rem;
+        height: 1rem;
+    }
+}

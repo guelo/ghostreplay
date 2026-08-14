@@ -1,0 +1,56 @@
+/* Game opening lineage (compact chips on /history analysis footer) */
+.game-opening-lineage {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+}
+.game-opening-lineage__label {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+.game-opening-lineage__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+.game-opening-lineage__item {
+    /* The card now owns its score-change treatment, so it gets the full row
+       width rather than making space for a sibling diff annotation. */
+    display: flex;
+    align-items: center;
+    padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
+}
+.game-opening-lineage__item > .tree-node-card,
+.game-opening-lineage__item > .opening-lineage-card {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+/* Expanded lineage entry: the tree-node card plus a re-homed "View in Openings"
+   footer link (the /openings card has no such link). The link sits below the
+   card as a sibling, so it is outside the card's collapse overlay and stays
+   clickable. */
+.opening-lineage-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    min-width: 0;
+}
+.opening-lineage-card__openings-link {
+    align-self: flex-start;
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--accent, var(--text-primary));
+    text-decoration: none;
+}
+.opening-lineage-card__openings-link:hover,
+.opening-lineage-card__openings-link:focus-visible {
+    text-decoration: underline;
+}

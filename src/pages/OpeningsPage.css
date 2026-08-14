@@ -1,0 +1,92 @@
+/* Openings page */
+
+/* "Playing as" picker: the page label sits outside the shared side toggle. */
+
+.openings-color-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.openings-selection-gate {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(1rem, 4vw, 2rem);
+}
+
+.openings-selection-gate__card {
+    width: min(100%, 32rem);
+    box-sizing: border-box;
+    text-align: center;
+}
+
+/* Viewport-height chain: bound the page main to a DEFINITE 100dvh and let the
+   available height flow down through constrained-content → tree → workspace so
+   the columns fill to the bottom of the viewport instead of stopping at content
+   height (which left body bg showing below as a phantom margin). Must be
+   `height`, not `min-height`: min-height lets the main grow with content, which
+   gives the % chain no ceiling to resolve against — the page scrolls instead of
+   each column. The mobile block below restores `auto` so the stacked layout
+   keeps its intended page-scroll. */
+
+/* Compound .app-shell.openings-page (0,2,0) so these beat the .app-shell
+   padding shorthands — including the @media(max-width:1099px) override, which is
+   a later same-specificity rule that would otherwise reset padding-bottom. */
+
+.app-shell.openings-page {
+    height: 100dvh;
+    /* .app-shell's bottom padding lives inside the border-box 100dvh, so it
+       renders as dead space below the columns. Drop it so content sits flush to
+       the viewport bottom in every layout (mobile only overrides height:auto,
+       inheriting this padding-bottom:0). */
+    padding-bottom: 0;
+}
+
+.openings-page .constrained-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.openings-page .openings-tree,
+.openings-page .openings-tree-explorer,
+.openings-page .openings-tree-workspace {
+    flex: 1;
+    min-height: 0;
+}
+
+/* The workspace is align-items:flex-start (keeps the board square), so the
+   scroller must opt back into stretching to fill the workspace height. The
+   canvas then fills the scroller so the columns' max-height:100% resolves. */
+
+.openings-page .openings-tree-scroll {
+    align-self: stretch;
+}
+
+.openings-page .openings-tree-canvas {
+    height: 100%;
+}
+
+/* Narrow: board stacks above the tree and un-sticks (the whole page scrolls
+   vertically); the tree still scrolls horizontally with one next column
+   peeking. */
+
+@media (max-width: 720px) {
+    /* Drop the definite 100dvh ceiling so the stacked layout grows with content
+       and the whole page scrolls (board un-sticks; each column keeps its dvh
+       band below). */
+    /* padding-top + gap are the dead band above the header (nav -> header);
+       trimmed here because every pixel above the fold belongs to the tree. The
+       compound .app-shell.openings-page (0,2,0) beats the later
+       @media(max-width:1099px) `.app-shell { padding: ... }` shorthand, so the
+       padding-top longhand survives despite coming earlier in the file. */
+    .app-shell.openings-page {
+        height: auto;
+        padding-top: 0.4rem;
+        gap: 0.45rem;
+    }
+}

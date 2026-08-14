@@ -1,14 +1,32 @@
-/* Frozen App.css baseline SHA-256: 425b784b0316d4dfe7d84b2ad39c536d486c5b9ba1b8937b64cbc6c03150c7e7.
- * Import order is the load-bearing cascade; do not reorder or add partials.
- * This temporary aggregator may change only through the g-oewc migration. */
-@import "./styles/legacy/001-home-original.css";
-@import "./styles/legacy/002-live-game-core.css";
-@import "./styles/legacy/003-history-analysis.css";
-@import "./styles/legacy/004-analysis-and-moves.css";
-@import "./styles/legacy/005-navigation.css";
-@import "./styles/legacy/006-auth.css";
-@import "./styles/legacy/007-pages.css";
-@import "./styles/legacy/008-game-responsive.css";
-@import "./styles/legacy/009-game-ui-additions.css";
-@import "./styles/legacy/010-home-current.css";
-@import "./styles/legacy/011-opening-tree-card.css";
+/* Global-loading checkpoint for g-css-owner-files.
+ * Keep shared primitives first and every owner imported exactly once until the
+ * TypeScript import cutover moves these files to their runtime owners. */
+@import "./styles/app-shell.css";
+@import "./styles/shared-controls.css";
+@import "./styles/shared-effects.css";
+
+@import "./pages/HomePage.css";
+@import "./pages/GamePage.css";
+@import "./components/chess-game/ChessGame.css";
+@import "./components/EvalBar.css";
+@import "./pages/HistoryPage.css";
+@import "./components/AnalysisBoard.css";
+@import "./components/GameSelector.css";
+@import "./components/GameReviewStats.css";
+@import "./components/InfoHelpButton.css";
+@import "./components/AnalysisGraph.css";
+@import "./components/MoveList.css";
+@import "./components/MaterialDisplay.css";
+@import "./components/ControlsRow.css";
+@import "./components/AppNav.css";
+@import "./components/AuthForm.css";
+@import "./pages/BlundersPage.css";
+@import "./pages/OpeningsPage.css";
+@import "./components/OpeningSideToggle.css";
+@import "./components/OpeningsTreeExplorer.css";
+@import "./components/OpeningsMetricsLegend.css";
+@import "./pages/StatsPage.css";
+@import "./components/RatingGraph.css";
+@import "./components/TimeRangeSlider.css";
+@import "./components/GameOpeningLineage.css";
+@import "./components/OpeningTreeNodeCard.css";

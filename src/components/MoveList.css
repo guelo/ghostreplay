@@ -1,20 +1,85 @@
-
+/* Analyst speech bubble in move list */
+.move-bubble {
+    grid-column: 1 / -1;
+    margin: 0.15rem 0 0.25rem 2rem;
+    padding: 0.35rem 0.6rem;
+    border-radius: 0.5rem;
+    font-size: 0.78rem;
+    font-weight: 500;
+    animation: blunder-toast-in 200ms ease-out;
+    position: relative;
+}
+.move-bubble::before {
+    content: "";
+    position: absolute;
+    top: -10px;
+    left: 0.8rem;
+    width: 20px;
+    height: 10px;
+    background: inherit;
+    clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}
+.move-bubble--arrow-right::before {
+    left: auto;
+    right: 0.8rem;
+}
+/* Inline move quality icons (pills) */
+.move-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    margin-right: 0.4em;
+    font-size: 1.05em;
+    line-height: 1;
+    vertical-align: middle;
+    padding: 0.15em 0.5em;
+    border-radius: 999px;
+    font-weight: 700;
+    border: 1px solid;
+    position: relative;
+    z-index: 2;
+}
+.move-icon--best {
+    color: #ffd700;
+    background: rgba(37, 99, 235, 0.4);
+    border-color: #60a5fa;
+    text-shadow: 0 0 3px rgba(255, 215, 0, 0.6);
+    font-size: 1.15em;
+    font-weight: 900;
+}
+.move-icon--excellent {
+    color: var(--eval-excellent);
+    background: color-mix(in srgb, var(--eval-excellent) 15%, transparent);
+    border-color: var(--eval-excellent);
+}
+.move-icon--good {
+    color: var(--text-tertiary);
+    background: color-mix(in srgb, var(--text-tertiary) 12%, transparent);
+    border-color: var(--text-tertiary);
+}
+.move-icon--inaccuracy {
+    color: var(--eval-inaccuracy);
+    background: color-mix(in srgb, var(--eval-inaccuracy) 15%, transparent);
+}
+.move-icon--mistake {
+    color: var(--eval-mistake);
+    background: color-mix(in srgb, var(--eval-mistake) 15%, transparent);
+    border-color: var(--eval-mistake);
+}
+.move-icon--blunder {
+    color: var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 15%, transparent);
+    border-color: var(--eval-blunder);
+}
 /* Pop entrance animation for analysis icons */
-/* Final owner: src/components/MoveList.css. */
 @keyframes move-icon-pop {
     0%   { transform: scale(0); opacity: 0; }
     60%  { transform: scale(1.25); opacity: 1; }
     100% { transform: scale(1); }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon--pop {
     animation: move-icon-pop 400ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-button {
     0% {
         opacity: 0;
@@ -58,9 +123,6 @@
             0 0 24px 0 color-mix(in srgb, #f59e0b 0%, transparent);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-san {
     0% {
         transform: translate3d(0, 0, 0);
@@ -86,9 +148,6 @@
         text-shadow: none;
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-icon {
     0% {
         transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
@@ -123,9 +182,6 @@
         filter: saturate(1);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-burst {
     0% {
         opacity: 0;
@@ -144,9 +200,6 @@
         transform: translate(-50%, -50%) scale(2.95) rotate(24deg);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-tail {
     0% {
         opacity: 0;
@@ -181,9 +234,6 @@
             0 0 72px 12px color-mix(in srgb, #fff8d6 0%, transparent);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-spark-1 {
     0% {
         opacity: 0;
@@ -198,9 +248,6 @@
         transform: translate(-34px, -40px) scale(0.32);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-spark-2 {
     0% {
         opacity: 0;
@@ -215,9 +262,6 @@
         transform: translate(40px, -24px) scale(0.28);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-spark-3 {
     0% {
         opacity: 0;
@@ -232,9 +276,6 @@
         transform: translate(18px, 38px) scale(0.26);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-best-connector {
     0% {
         opacity: 0;
@@ -256,37 +297,22 @@
         box-shadow: 0 0 18px 0 color-mix(in srgb, #fde68a 0%, transparent);
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-button.move-button--celebrate-best {
     overflow: visible;
     z-index: 3;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-san__text--celebrate-best {
     animation: move-best-san 620ms cubic-bezier(0.2, 0.9, 0.25, 1.12) both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon--celebrate-best {
     animation: move-best-icon 620ms cubic-bezier(0.18, 0.88, 0.28, 1.18) both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-best-fx {
     position: absolute;
     inset: -1.1rem -1.4rem -1.2rem -0.9rem;
     pointer-events: none;
     z-index: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage {
     position: relative;
     display: inline-flex;
@@ -294,15 +320,9 @@
     justify-content: center;
     margin-right: 0.4em;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage--celebrate-best {
     z-index: 1;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-best-fx__plate {
     position: absolute;
     inset: 0;
@@ -313,17 +333,11 @@
     filter: blur(8px);
     animation: move-best-button 620ms cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage > .move-icon {
     position: relative;
     z-index: 2;
     margin-right: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__burst,
 .move-icon-stage__ring,
 .move-icon-stage__tail,
@@ -334,17 +348,11 @@
     pointer-events: none;
     z-index: 1;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__burst,
 .move-icon-stage__ring,
 .move-icon-stage__tail {
     border-radius: 999px;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__burst {
     width: 3.8rem;
     height: 3.8rem;
@@ -379,18 +387,12 @@
     filter: drop-shadow(0 0 10px color-mix(in srgb, #facc15 70%, transparent));
     animation: move-best-burst 480ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__ring {
     width: 3.4rem;
     height: 3.4rem;
     border: 1px solid color-mix(in srgb, #fde68a 86%, transparent);
     animation: move-best-tail 860ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__tail {
     width: 5rem;
     height: 5rem;
@@ -398,9 +400,6 @@
         radial-gradient(circle, color-mix(in srgb, #fff8d6 26%, transparent) 0, color-mix(in srgb, #fde68a 10%, transparent) 34%, transparent 72%);
     animation: move-best-tail 860ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__spark {
     width: 0.5rem;
     height: 0.5rem;
@@ -408,27 +407,15 @@
     background: radial-gradient(circle, #fff 0 34%, #fde68a 48%, transparent 72%);
     opacity: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__spark--1 {
     animation: move-best-spark-1 760ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__spark--2 {
     animation: move-best-spark-2 780ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-icon-stage__spark--3 {
     animation: move-best-spark-3 740ms ease-out both;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-bubble--srs-pass {
     display: flex;
     align-items: baseline;
@@ -437,110 +424,6 @@
     border: 1px solid var(--success);
     color: var(--text-primary);
 }
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats {
-    display: flex;
-    gap: 0.4rem;
-    margin-top: 0.3rem;
-    white-space: nowrap;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-width: 2.2rem;
-    padding: 0.15rem 0.35rem;
-    border-radius: 6px;
-    background: var(--bg-primary);
-    border: 1px solid color-mix(in srgb, var(--text-primary) 12%, transparent);
-    line-height: 1.05;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__value {
-    font-size: 1rem;
-    font-weight: 800;
-    font-variant-numeric: tabular-nums;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__caption {
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__item--pass .srs-stats__value {
-    color: color-mix(in srgb, var(--success) 80%, white);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__item--fail .srs-stats__value {
-    color: color-mix(in srgb, var(--eval-blunder) 75%, white);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-stats__item--streak .srs-stats__value {
-    color: var(--text-primary);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.panel-header {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 24px;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.panel-settings {
-    display: inline-flex;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.panel-sound-toggle {
-    width: 24px;
-    height: 24px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    cursor: pointer;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.panel-sound-toggle:hover {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.panel-sound-toggle[aria-pressed="true"] {
-    color: var(--text-primary);
-    background: var(--bg-tertiary);
-}
-/* Final owner: src/components/MoveList.css. */
 .move-bubble--srs-fail {
     display: flex;
     align-items: flex-start;
@@ -549,92 +432,12 @@
     border: 1px solid var(--eval-blunder);
     color: var(--eval-blunder);
 }
-/* Animated pulsing icon for SRS fail */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.srs-fail-icon {
-    flex: 0 0 auto;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    border: 2px solid var(--eval-blunder);
-    background: color-mix(in srgb, var(--eval-blunder) 25%, var(--bg-tertiary));
-    cursor: pointer;
-    animation: srs-fail-pulse 1.2s ease-in-out infinite;
-    transition:
-        background 200ms,
-        border-color 200ms;
-    padding: 0;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-fail-icon:hover {
-    background: color-mix(in srgb, var(--eval-blunder) 40%, var(--bg-tertiary));
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-fail-icon--revealed {
-    animation: none;
-    opacity: 0.6;
-    cursor: default;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-fail-icon__symbol {
-    font-size: 1.1rem;
-    font-weight: 900;
-    line-height: 1;
-    color: var(--eval-blunder);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-@keyframes srs-fail-pulse {
-    0%,
-    100% {
-        transform: scale(1);
-        box-shadow: 0 0 0 0
-            color-mix(in srgb, var(--eval-blunder) 40%, transparent);
-    }
-    50% {
-        transform: scale(1.12);
-        box-shadow: 0 0 0 6px
-            color-mix(in srgb, var(--eval-blunder) 0%, transparent);
-    }
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-fail-body {
-    flex: 1;
-    min-width: 0;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.srs-fail-body__label {
-    font-weight: 700;
-    font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-placeholder-dots {
     color: var(--text-tertiary);
     font-size: 0.85rem;
     padding: 0.35rem 0.3rem;
     text-align: center;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-analyzing-spinner {
     display: inline-block;
     width: 0.7em;
@@ -646,413 +449,7 @@
     animation: spin 0.8s linear infinite;
     vertical-align: middle;
 }
-
-/* Final owner: src/styles/shared-effects.css. */
-
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.chess-meta-strong {
-    color: var(--text-primary);
-    font-weight: 600;
-}
-
-/* Ghost mode indicator */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.chess-meta--ghost {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.chess-meta--engine {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-mode-label {
-    color: var(--status-ghost);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-icon {
-    display: block;
-    color: var(--status-ghost);
-    animation: ghost-float 2s ease-in-out infinite;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-@keyframes ghost-float {
-    0%,
-    100% {
-        transform: translateY(0);
-    }
-    50% {
-        transform: translateY(-2px);
-    }
-}
-
-/* Ghost info anchor (positions the popover below the button) */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.ghost-info-anchor {
-    position: relative;
-    display: flex;
-    align-items: center;
-}
-
-/* Ghost info button */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.ghost-info-btn {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--status-ghost);
-    padding: 0;
-    display: flex;
-    align-items: center;
-    opacity: 0.7;
-    transition: opacity 0.15s;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-btn:hover {
-    opacity: 1;
-}
-
-/* Ghost info box */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.ghost-info-box {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    margin-top: 0.35rem;
-    padding: 0.6rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--status-ghost);
-    background: var(--card-bg);
-    box-shadow: var(--shadow-md);
-    z-index: 10;
-    min-width: 150px;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.4rem;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__title {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--status-ghost);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__close {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: 1.1rem;
-    padding: 0 0.15rem;
-    line-height: 1;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__close:hover {
-    color: var(--text-primary);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__board {
-    width: 200px;
-    height: 200px;
-    margin: 0 auto 0.4rem;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board {
-    display: grid;
-    grid-template-columns: repeat(8, 1fr);
-    grid-template-rows: repeat(8, 1fr);
-    width: 100%;
-    height: 100%;
-    border-radius: 4px;
-    overflow: hidden;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board__sq {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #f0d9b5;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board__sq--dark {
-    background: #b58863;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board__piece {
-    position: relative;
-    font-size: 1.45rem;
-    line-height: 1;
-    user-select: none;
-    /* Nudge up so the glyph sits centered within the square. */
-    transform: translateY(-8%);
-}
-
-/* White backdrop copy of the glyph fills the otherwise see-through interior. */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.static-mini-board__piece::before {
-    content: attr(data-glyph);
-    position: absolute;
-    inset: 0;
-    color: #fff;
-    z-index: -1;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board__piece--white {
-    color: #fff;
-    text-shadow:
-        -1px -1px 0 #000,
-        1px -1px 0 #000,
-        -1px 1px 0 #000,
-        1px 1px 0 #000;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.static-mini-board__piece--black {
-    color: #000;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.ghost-info-box__srs {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-}
-
-/* Game End Banner */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.game-end-banner {
-    margin-top: 1rem;
-    padding: 1rem 1.25rem;
-    border-radius: 1rem;
-    border: 1px solid var(--border-color-strong);
-    background: var(--card-bg);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    box-shadow: var(--shadow-md);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.game-end-banner-message {
-    margin: 0;
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.rating-delta {
-    margin: 0.25rem 0 0;
-    font-size: 1.05rem;
-    font-weight: 700;
-    animation: rating-delta-in 0.4s ease-out;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.rating-delta--up {
-    color: #4caf50;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.rating-delta--down {
-    color: #ef5350;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.rating-delta__value {
-    font-weight: 400;
-    font-size: 0.85rem;
-    opacity: 0.8;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-@keyframes rating-delta-in {
-    from {
-        opacity: 0;
-        transform: translateY(8px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-/* Moves Column (material + move list) */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.moves-column {
-    grid-area: moves;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    align-self: stretch;
-    max-height: calc(100dvh - var(--game-viewport-chrome));
-    height: 0;
-    min-height: 100%;
-}
-
-@media (max-height: 760px) {
-    /* Final owner: src/components/chess-game/ChessGame.css. */
-    .chess-layout {
-        --game-viewport-chrome: 6.5rem;
-    }
-}
-
-@media (max-height: 680px) {
-    /* Final owner: src/components/chess-game/ChessGame.css. */
-    .chess-layout {
-        --game-viewport-chrome: 8.5rem;
-    }
-}
-
-/*
- * 2-col /play, short viewports (≤760px tall, ≥768px wide — the band where the
- * board sits left of a full-width analysis graph). The board is capped by
- * --game-board-max-width while its column still has horizontal slack, and the
- * 6.5rem/8.5rem chrome bumps above over-reserve vertical space — leaving dead
- * margin below the graph. Those bumps were sized for the old fixed-220px graph;
- * now that the graph shrinks with viewport height (clamp at line ~7560), the
- * reservation is doubly stale. Shrink the reserved chrome to roughly the real
- * top offset so the board grows into that margin. Because raising the board's
- * max-width only enlarges a width-constrained board, this is a no-op once the
- * board already fills its column (narrower viewports) — matching "grow only
- * when the board isn't using all its width" — and once the board hits its 300px
- * floor at very short heights. The larger board pushes the graph down to the
- * viewport bottom. Must follow the max-height bumps above so source order wins
- * (equal specificity). See g-jth2 / g-9g1y.
- */
-@media (min-width: 768px) and (max-width: 1099px) and (max-height: 760px) {
-    /* Final owner: src/components/chess-game/ChessGame.css. */
-    .chess-layout {
-        --game-viewport-chrome: 3rem;
-    }
-}
-
-/* Turn labels */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.turn-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4em;
-    font-size: 0.7rem;
-    color: var(--text-secondary, #888);
-    padding: 0 0.5rem;
-    letter-spacing: 0.02em;
-}
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.turn-label-spinner {
-    display: inline-block;
-    width: 0.7em;
-    height: 0.7em;
-    border: 2px solid var(--text-tertiary);
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-
-/* Material Display */
-/* Final owner: src/components/MaterialDisplay.css. */
-.material-display {
-    display: flex;
-    align-items: center;
-    gap: 0.25rem;
-    min-height: 2rem;
-    padding: 0 0.5rem;
-}
-
-/* Only the narrow /game + /history layout, which sits both sides on one row,
-   needs to name them; everywhere else position already says whose captures
-   these are. */
-/* Final owner: src/components/MaterialDisplay.css. */
-.material-label {
-    display: none;
-    flex: 0 0 auto;
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    color: var(--text-tertiary);
-}
-
-/* Final owner: src/components/MaterialDisplay.css. */
-
-.material-icons {
-    font-size: 32px;
-    line-height: 1;
-    letter-spacing: -0.08em;
-}
-
-/* Final owner: src/components/AnalysisBoard.css. */
-
-.analysis-board .material-icons {
-    font-size: 16px;
-}
-
-/* Final owner: src/components/MaterialDisplay.css. */
-
-.material-score {
-    font-weight: 600;
-    font-size: 1rem;
-    color: var(--text-secondary);
-}
-
 /* Move List */
-/* Final owner: src/components/MoveList.css. */
 .move-list-container {
     padding: 0;
     border-radius: 1rem;
@@ -1063,135 +460,33 @@
     gap: 0.75rem;
     max-height: 600px;
 }
-
-/* Final owner: src/components/chess-game/ChessGame.css. */
-
-.moves-column > .move-list-container {
-    max-height: none;
-    flex: 1;
-    min-height: 0;
-}
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-title {
     font-size: 0.95rem;
     font-weight: 600;
     color: var(--text-primary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-viewing {
     font-size: 0.8rem;
     color: var(--brand-secondary);
     font-weight: 500;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-viewing.hidden {
     visibility: hidden;
 }
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-list-actions {
-    display: flex;
-    gap: 0.35rem;
-    justify-content: center;
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-action-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 2rem;
-    height: 2rem;
-    border: 1px solid var(--border-color);
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    border-radius: 0.5rem;
-    cursor: pointer;
-    transition:
-        border-color 150ms ease,
-        background 150ms ease,
-        color 150ms ease;
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-action-button:hover:not(:disabled) {
-    border-color: var(--border-color-strong);
-    background: var(--bg-tertiary);
-    color: var(--text-primary);
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-action-button:disabled {
-    color: var(--text-tertiary);
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-action-button.danger {
-    color: var(--text-secondary);
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.move-action-button.danger:hover:not(:disabled) {
-    color: var(--error);
-    border-color: var(--error);
-}
-
 /* ---------------------------------------------------------------------------
    Horizontal mobile move list (HorizontalMoveList)
    --------------------------------------------------------------------------- */
-/* Final owner: src/components/MoveList.css. */
 .h-move-list {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
 }
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.controls-row {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-}
-
-/* Relocated material (mobile portrait only) is hidden by default; the 659px
-   block opts these in and hides the moves-column originals. */
-/* Final owner: src/components/chess-game/ChessGame.css. */
-.chess-panel__material {
-    display: none;
-}
-
-/* Final owner: src/components/ControlsRow.css. */
-
-.controls-row__material {
-    display: none;
-}
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__row {
     display: flex;
     align-items: stretch;
     gap: 0.25rem;
     min-width: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-arrow {
     flex: 0 0 auto;
     display: inline-flex;
@@ -1206,27 +501,19 @@
     line-height: 1;
     cursor: pointer;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-arrow:hover:not(:disabled) {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-arrow:disabled {
     color: var(--text-tertiary);
     opacity: 0.4;
     cursor: not-allowed;
 }
-
 /* g-1y68 A2 (mobile) — return-to-live emphasis for the horizontal move strip.
    The vertical list dramatizes its ⟩⟩ button; the horizontal list has no
    jump-to-latest arrow, so surface a dedicated brand-filled pill that only
    appears while reviewing a past ply of a live game. */
-/* Final owner: src/components/MoveList.css. */
 .h-move-arrow--return-live {
     width: auto;
     gap: 0.3rem;
@@ -1237,25 +524,16 @@
     font-size: 1rem;
     animation: move-nav-return-live-pulse 2s ease-in-out infinite;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-arrow--return-live:hover:not(:disabled) {
     border-color: transparent;
     background: var(--gradient-brand);
     filter: brightness(1.06);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-arrow__live-label {
     font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0.06em;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__strip {
     flex: 1 1 auto;
     min-width: 0;
@@ -1271,22 +549,14 @@
     border-radius: 0.5rem;
     color: #1a1a1a;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__strip .h-move {
     color: #1a1a1a;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__strip .h-move-num {
     color: #6b7280;
 }
-
 /* Classification badge floats above-left of the move like a thought bubble,
    reusing the vertical list's pill shape (.move-icon) for the oval. */
-/* Final owner: src/components/MoveList.css. */
 .h-move-badge {
     position: absolute;
     top: 7px;
@@ -1299,48 +569,31 @@
     padding: 0.02rem 0.32rem;
     font-weight: 800;
 }
-
 /* White moves carry a leading move number, so shift the badge right to sit over
    the move button (matching black moves, which have no number). */
-/* Final owner: src/components/MoveList.css. */
 .h-move-badge--numbered {
     left: 0.95rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__strip::-webkit-scrollbar {
     height: 6px;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-list__strip::-webkit-scrollbar-thumb {
     background: var(--border-color);
     border-radius: 3px;
 }
-
 @media (hover: none) and (pointer: coarse) {
-    /* Final owner: src/components/MoveList.css. */
     .h-move-list__strip {
         scrollbar-width: none;
     }
-    /* Final owner: src/components/MoveList.css. */
     .h-move-list__strip::-webkit-scrollbar {
         display: none;
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-empty {
     color: var(--text-tertiary);
     font-size: 0.85rem;
     padding: 0 0.5rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-token {
     position: relative;
     display: inline-flex;
@@ -1352,9 +605,6 @@
     padding-top: 0.95rem;
     padding-bottom: 0.2rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-num {
     flex-shrink: 0;
     color: var(--text-tertiary);
@@ -1364,9 +614,6 @@
     margin-left: 0.25rem;
     user-select: none;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move {
     flex-shrink: 0;
     display: inline-flex;
@@ -1381,37 +628,22 @@
     cursor: pointer;
     white-space: nowrap;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move:hover:not(:disabled) {
     background: var(--bg-tertiary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move.selected {
     background: var(--accent, var(--bg-tertiary));
     border-color: var(--border-color-strong);
     font-weight: 600;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move.branch-point {
     border-color: var(--border-color-strong);
     border-style: dashed;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-spinner {
     width: 0.6rem;
     height: 0.6rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-msg {
     flex-shrink: 0;
     display: inline-flex;
@@ -1426,9 +658,6 @@
     font-size: 1rem;
     line-height: 1;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-popup {
     z-index: 50;
     background: var(--bg-secondary);
@@ -1437,9 +666,6 @@
     padding: 0.5rem 0.75rem;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .h-move-popup__close {
     position: absolute;
     top: 0.15rem;
@@ -1451,16 +677,10 @@
     line-height: 1;
     cursor: pointer;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-nav {
     display: flex;
     gap: 0.5rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-nav-button {
     flex: 1;
     padding: 0.25rem 0.5rem;
@@ -1475,25 +695,17 @@
         border-color 150ms ease,
         background 150ms ease;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-nav-button:hover:not(:disabled) {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-nav-button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
 }
-
 /* g-1y68 A2 — reinforce the return-to-live action for eyes in the move list.
    While reviewing a past ply of a live game the ⟩⟩ button fills with the brand
    color, grows to fit a "LIVE" label, and pulses to draw the eye. */
-/* Final owner: src/components/MoveList.css. */
 .move-nav-button--return-live {
     flex: 1.9 1 auto;
     display: inline-flex;
@@ -1505,25 +717,16 @@
     color: var(--text-on-gradient);
     animation: move-nav-return-live-pulse 2s ease-in-out infinite;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-nav-button--return-live:hover:not(:disabled) {
     border-color: transparent;
     background: var(--gradient-brand);
     filter: brightness(1.06);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-nav-button__live-label {
     font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0.06em;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 @keyframes move-nav-return-live-pulse {
     0%,
     100% {
@@ -1533,52 +736,24 @@
         box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 0%, transparent);
     }
 }
-
-/* g-1y68 — honor reduced-motion: keep the cues (color/frame/label) but drop the
-   pulses, shake, and slide-in entrances. */
 @media (prefers-reduced-motion: reduce) {
-    /* Final owner: src/components/chess-game/ChessGame.css. */
-    .board-return-live,
-    .chessboard-square-measure--nudge {
-        animation: none;
-    }
-
-    /* Final owner: src/components/chess-game/ChessGame.css. */
-
-    .board-return-live,
-    .board-return-live__label {
-        transition: none;
-    }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    /* Final owner: src/components/MoveList.css. */
     .move-nav-button--return-live,
     .h-move-arrow--return-live {
         animation: none;
     }
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-scroll {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
     min-height: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-empty {
     margin: 0;
     color: var(--text-tertiary);
     font-size: 0.9rem;
     font-style: italic;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-grid {
     display: grid;
     grid-template-columns: 2.5rem 1fr 1fr;
@@ -1586,21 +761,13 @@
     position: relative;
     isolation: isolate;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-grid[data-player-col="white"] {
     grid-template-columns: 2.5rem 1.4fr 1fr;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-grid[data-player-col="black"] {
     grid-template-columns: 2.5rem 1fr 1.4fr;
 }
-
 /* Continuous tint band behind the player's column */
-/* Final owner: src/components/MoveList.css. */
 .move-list-grid[data-player-col]::before {
     content: "";
     position: absolute;
@@ -1610,23 +777,14 @@
     pointer-events: none;
     z-index: -1;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-grid[data-player-col="white"]::before {
     left: 2.5rem;
     width: calc((100% - 2.5rem) * 0.5833);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-grid[data-player-col="black"]::before {
     right: 0;
     width: calc((100% - 2.5rem) * 0.5833);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-header {
     display: flex;
     align-items: center;
@@ -1644,18 +802,13 @@
     background: var(--bg-secondary);
     z-index: 1;
 }
-
 /* "You" header — prominent treatment */
-/* Final owner: src/components/MoveList.css. */
 .move-list-header--you {
     color: var(--text-primary);
     font-size: 0.8rem;
     border-bottom: 2px solid var(--brand-secondary);
     background: color-mix(in srgb, var(--brand-secondary) 6%, var(--bg-secondary));
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-list-header-eval {
     text-transform: none;
     font-variant-numeric: tabular-nums;
@@ -1665,9 +818,6 @@
     color: var(--text-primary);
     background: rgba(59, 130, 246, 0.2);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-number {
     grid-column: 1;
     color: var(--text-tertiary);
@@ -1678,9 +828,6 @@
     overflow: visible;
     white-space: nowrap;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-button {
     display: flex;
     flex-direction: column;
@@ -1704,9 +851,6 @@
         border-color 150ms ease,
         color 150ms ease;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-san {
     position: relative;
     z-index: 1;
@@ -1714,9 +858,6 @@
     align-items: center;
     min-width: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-san__connector {
     flex: 0 0 0.78rem;
     align-self: center;
@@ -1727,52 +868,33 @@
     animation: move-best-connector 560ms ease-out both;
     border-radius: 999px;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-san__text {
     display: inline-block;
     min-width: 0;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-col-white {
     grid-column: 2;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-col-black,
 .move-button-placeholder {
     grid-column: 3;
     border-left: 1px solid var(--border-color);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-button:hover {
     background: var(--hover-overlay);
     border-color: var(--border-color);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-button.selected {
     background: var(--card-bg-selected);
     border-color: var(--brand-secondary);
     color: var(--text-primary);
 }
-
 /* Player column: bigger move text */
-/* Final owner: src/components/MoveList.css. */
 .move-list-grid[data-player-col="white"] .move-col-white.move-button,
 .move-list-grid[data-player-col="black"] .move-col-black.move-button {
     font-size: 1rem;
 }
-
 /* Eval formula below move */
-/* Final owner: src/components/MoveList.css. */
 .move-eval {
     font-size: 0.6rem;
     font-weight: 600;
@@ -1784,66 +906,46 @@
     position: relative;
     z-index: 1;
 }
-
 /* Player column: slightly bigger eval */
-/* Final owner: src/components/MoveList.css. */
 .move-list-grid[data-player-col="white"] .move-col-white .move-eval,
 .move-list-grid[data-player-col="black"] .move-col-black .move-eval {
     font-size: 0.65rem;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-eval:empty {
     display: none;
 }
-
 /* Move classification colors */
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-blunder {
     color: var(--eval-blunder);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-mistake {
     color: var(--eval-mistake);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-inaccuracy {
     color: var(--eval-inaccuracy);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-excellent {
     color: var(--eval-excellent);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-best {
     color: var(--brand-primary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .move-button.move-blunder.selected {
     color: var(--eval-blunder);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-mistake.selected {
     color: var(--eval-mistake);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-inaccuracy.selected {
     color: var(--eval-inaccuracy);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-excellent.selected {
     color: var(--eval-excellent);
 }
-/* Final owner: src/components/MoveList.css. */
 .move-button.move-best.selected {
     color: var(--brand-primary);
 }
-
 /* Variation lines (what-if branches in MoveList) */
-/* Final owner: src/components/MoveList.css. */
 .variation-line {
     grid-column: 1 / -1;
     min-width: 0;
@@ -1856,44 +958,26 @@
     padding: 0.1rem 0.5rem 0.1rem 2.5rem;
     background: var(--card-bg);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-prefix {
     color: var(--text-tertiary);
     user-select: none;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-ply {
     cursor: pointer;
     padding: 0.05em 0.2em;
     border-radius: 3px;
     white-space: nowrap;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-ply:hover {
     background: var(--hover-overlay);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-ply--selected {
     background: rgba(59, 130, 246, 0.7);
     color: white;
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-move-number {
     color: var(--text-tertiary);
 }
-
-/* Final owner: src/components/MoveList.css. */
-
 .variation-ply--selected .variation-move-number {
     color: white;
 }

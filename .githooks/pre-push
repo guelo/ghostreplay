@@ -87,6 +87,16 @@ run_gate \
   true \
   npm run build
 
+# The repository-owned pre-refactor baseline deliberately stays in the gate
+# through the CSS import and lazy-route cutovers. Those slices must adapt the
+# candidate assembly under test; removing this check would hide load-order loss.
+run_gate \
+  "CSS cascade parity" \
+  "CSS computed-cascade parity against the frozen owner-migration baseline" \
+  "$output_dir/css-cascade-parity.out" \
+  true \
+  npm run css:check-cascade
+
 run_gate \
   "Frontend tests" \
   "Frontend unit and component tests" \

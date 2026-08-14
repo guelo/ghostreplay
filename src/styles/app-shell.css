@@ -1,0 +1,21 @@
+.app-shell {
+    padding: clamp(0.8rem, 2vw, 1.5rem) clamp(1rem, 2vw, 25px)
+        clamp(1rem, 2vw, 25px);
+    display: flex;
+    flex-direction: column;
+    gap: clamp(0.75rem, 2vw, 1.25rem);
+}
+
+.constrained-content {
+    width: 100%;
+}
+
+/* ── Game layout: responsive breakpoints ── */
+
+@media (max-width: 1099px) {
+    /* Keep the late legacy breakpoint winner after shared CSS moves ahead of
+       equal-specificity route classes such as .home-page. */
+    .app-shell.app-shell {
+        padding: clamp(0.6rem, 2vw, 1rem);
+    }
+}

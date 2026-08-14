@@ -1,0 +1,170 @@
+/* Analysis graph highlight dots */
+.analysis-graph__highlight-dot {
+    stroke: white;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+.analysis-graph__highlight-dot--blunder { fill: var(--eval-blunder); }
+.analysis-graph__highlight-dot--mistake { fill: var(--eval-mistake); }
+.analysis-graph__highlight-dot--inaccuracy { fill: var(--eval-inaccuracy); }
+/* Analysis evaluation graph */
+.analysis-graph {
+    position: relative;
+    cursor: crosshair;
+    border-radius: 0.5rem;
+    border: 1px solid var(--bg-tertiary);
+    margin-top: 0.5rem;
+}
+/* ⓘ help button pinned to the graph's top-right corner (over the eval area). */
+.analysis-graph__info {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.4rem;
+    z-index: 3;
+    display: inline-flex;
+}
+.analysis-graph__info .info-help-btn {
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--graph-bg) 70%, transparent);
+    padding: 0.1rem;
+}
+.analysis-graph__info .info-help-btn:hover {
+    color: var(--text-primary);
+    background: var(--graph-bg);
+}
+.analysis-graph > svg {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 0.5rem;
+    background: var(--graph-bg);
+}
+.analysis-graph__zero-line {
+    stroke: var(--graph-line);
+    stroke-width: 1.5;
+}
+.analysis-graph__area-white {
+    fill: var(--graph-area-dark);
+}
+.analysis-graph__area-black {
+    fill: var(--graph-area-light);
+}
+.analysis-graph__line {
+    fill: none;
+    stroke: var(--graph-line);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+}
+.analysis-graph__line--streaming {
+    stroke: var(--graph-line);
+    opacity: 0.7;
+}
+.analysis-graph__line-dot {
+    fill: var(--graph-line);
+}
+.analysis-graph__streaming-dot {
+    fill: var(--graph-line);
+    opacity: 0.8;
+}
+.analysis-graph__pending-dot {
+    fill: none;
+    stroke: var(--graph-line);
+    stroke-width: 1;
+    opacity: 0.5;
+}
+.analysis-graph__line--variation {
+    fill: none;
+    stroke: #b07cff;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    opacity: 0.85;
+}
+.analysis-graph__streaming-dot--variation {
+    fill: #b07cff;
+    opacity: 0.9;
+}
+.analysis-graph__pending-dot--variation {
+    stroke: #b07cff;
+    opacity: 0.7;
+}
+.analysis-graph__indicator {
+    stroke: var(--error);
+    stroke-width: 2;
+}
+/*
+ * The y-axis lives INSIDE the graph's box (pinned to its right edge) and the
+ * SVG gives up that much width. Reserving the axis with an outside margin
+ * instead (margin-right + left:100%) breaks wherever a layout forces
+ * width:100% on the graph — the axis then spills past the container and off
+ * narrow screens (see g-graph-axis-mobile).
+ */
+.analysis-graph--with-axis {
+    --graph-axis-width: 2.8rem;
+    position: relative;
+    align-self: stretch;
+}
+.analysis-graph--with-axis > svg {
+    width: calc(100% - var(--graph-axis-width));
+    border-radius: 0.5rem 0 0 0.5rem;
+}
+/* Keep the ⓘ over the plot area, not on top of the axis. */
+.analysis-graph--with-axis .analysis-graph__info {
+    right: calc(var(--graph-axis-width) + 0.4rem);
+}
+.analysis-graph__y-axis {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--graph-axis-width);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 0.35rem 0.3rem;
+    background: #fff;
+    border-radius: 0 0.5rem 0.5rem 0;
+    border-left: 1px solid var(--border-color);
+    overflow: hidden;
+}
+.analysis-graph__y-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.1rem;
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    flex-shrink: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+.analysis-graph__y-eval {
+    position: absolute;
+    left: 0.3rem;
+    right: 0.3rem;
+    transform: translateY(-50%);
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1;
+    pointer-events: none;
+    border-radius: 0.15rem;
+    padding: 0.12rem 0.1rem;
+    text-align: center;
+    white-space: nowrap;
+}
+.analysis-graph__y-arrow {
+    width: 0.5rem;
+    height: 1.5rem;
+    flex-shrink: 1;
+    color: var(--text-tertiary);
+}

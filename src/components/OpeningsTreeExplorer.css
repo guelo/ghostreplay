@@ -1,0 +1,454 @@
+.openings-state {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 1rem 1.05rem;
+    border-radius: 1.1rem;
+}
+
+.openings-state__title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.openings-state__body {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.94rem;
+}
+
+.openings-state--loading {
+    padding: 0;
+}
+
+.openings-state--error {
+    border: 1px solid var(--error-light);
+    background: var(--error-bg);
+}
+
+/* One-time cold-cache setup (g-k4z2): restore header padding the --loading
+ * modifier zeroes, keeping the skeleton workspace below flush. */
+
+.openings-state--initializing {
+    gap: 0.55rem;
+    padding: 1rem 1.05rem 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Opening tree workspace (g-tree-layout) — production viewport layout.
+ * Viewport-bounded columns with independent per-column vertical scroll +
+ * horizontal tree scroll (no whole-tree vertical scroll), a square sticky board
+ * that does not drive column height, measured selected-path SVG connectors, and
+ * a <=720px stacked layout. Connector geometry is measured in useTreeConnectors;
+ * connector style (dashed book-only / solid observed / encounter thickness) is
+ * applied at render from the model.
+ * ------------------------------------------------------------------------- */
+
+.openings-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.openings-tree-explorer {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.openings-tree__header {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.openings-tree__title {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--text-primary);
+}
+
+/* Color toggle on the left, metrics legend pushed to the right edge. */
+
+.openings-tree__controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+}
+
+.openings-tree__color-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    padding-left: 0.2rem;
+}
+
+.openings-tree__nodata-banner {
+    margin: 0;
+    padding: 0.6rem 0.85rem;
+    border-radius: 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 22%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 6%, var(--card-bg));
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-workspace {
+    display: flex;
+    align-items: flex-start;
+    gap: clamp(1rem, 2vw, 1.5rem);
+}
+
+/* Square sticky board, clamped 280-380 (< the 420px column floor) so it never
+   dictates column height. */
+
+.openings-tree-board {
+    width: clamp(280px, 30vw, 380px);
+    aspect-ratio: 1 / 1;
+    flex: 0 0 auto;
+    position: sticky;
+    top: 1rem;
+}
+
+.openings-tree-board--skeleton {
+    aspect-ratio: 1 / 1;
+    border-radius: 0.6rem;
+    background: var(--bg-secondary);
+}
+
+/* While a move-triggered refetch is in flight the board is locked (you can't
+   move until the new tree column settles), so a veil + centered spinner sit on
+   top to signal the wait. Anchored to the sticky/relative board box; intercepts
+   pointer events so an attempted drag/click reads as blocked, not ignored. */
+
+.openings-tree-board__loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.6rem;
+    background: rgba(255, 255, 255, 0.45);
+    z-index: 3;
+}
+
+/* Horizontal tree scroller — the ONLY horizontally-scrolling axis. overflow-y
+   is hidden so the whole tree never scrolls vertically (each column does). */
+
+.openings-tree-scroll {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 0.5rem;
+    padding-left: 1rem;
+    margin-bottom: 0.75rem;
+    /* White background + reversed (inset) shading so this full-width,
+       horizontally-scrollable area reads as a distinct sunken surface. */
+    background: #fff;
+    border-radius: 0.6rem;
+    box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.28),
+                inset 0 0 0 1px rgba(0, 0, 0, 0.1);
+}
+
+/* Positioned/measured frame: the SVG overlay + connector coordinates are
+   relative to this, so they survive both scroll axes. width:max-content lets
+   the canvas span the full scroll width so the SVG covers every column. */
+
+.openings-tree-canvas {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 2rem;
+    width: max-content;
+}
+
+.openings-tree-connectors {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+    z-index: 5;
+    /* currentColor for strokes/markers → theme-aware connectors. */
+    color: var(--brand-primary);
+}
+
+/* Third move type (g-obh5): a move explored on the board. Recolor the whole
+   connector group so its stroke + clamp tips inherit, and color the dedicated
+   arrowhead marker the same way (a marker's currentColor resolves against the
+   marker, not the referencing group). Sky distinguishes it from the
+   brand-primary book/observed connectors and the violet off-book chip. */
+
+.openings-tree-connector-group--selected,
+.openings-tree-arrowhead-selected {
+    color: var(--color-sky-500);
+}
+
+.openings-tree-column {
+    flex: 0 0 9.25rem; /* 148px compact */
+    width: 9.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    /* Bounded to the canvas which the .openings-page flex chain stretches to
+       fill the viewport; min-height:0 lets the inner nodes scroller shrink and
+       scroll. The header is a non-scrolling sibling — only __nodes scrolls (so
+       the scrollbar never runs alongside the header). The mobile block below
+       overrides max-height with a dvh band for the stacked layout. */
+    max-height: 100%;
+    min-height: 0;
+}
+
+/* The per-column vertical scroller: holds the node cards while the header stays
+   pinned above it. Pin overflow-x so the browser does not auto-promote it to
+   "auto" (which it does when only overflow-y is non-visible) and give every
+   column a spurious horizontal scrollbar. Borrowed from the prototype. */
+
+.openings-tree-column__nodes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* The active column hosts the expanded card. The column immediately right of it
+   gets the same wider width so its collapsed opening names are easier to read;
+   columns further out stay compact. */
+
+.openings-tree-column--active,
+.openings-tree-column--next {
+    flex-basis: 14.5rem; /* 232px */
+    width: 14.5rem;
+}
+
+/* Per-column move header (ported from the tree prototype): the move chosen in
+   this column with its move number. A non-scrolling sibling above __nodes, so
+   its underline spans the full column width (no scrollbar gutter). */
+
+.openings-tree-column__header {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 0.1rem 0 0.3rem;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 700;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+/* A column on the selected path gets the brand accent; the frontier
+   "Choose one" header keeps the muted default and is disabled (non-navigable). */
+
+.openings-tree-column__header--active {
+    color: var(--brand-primary);
+    border-bottom-color: var(--brand-primary);
+}
+
+.openings-tree-column__header:disabled {
+    cursor: default;
+}
+
+.openings-tree-column--skeleton {
+    flex: 0 0 9.25rem;
+    min-height: 6rem;
+    border-radius: 0.6rem;
+    background: var(--bg-secondary);
+}
+
+.openings-tree-append {
+    align-items: flex-start;
+    gap: 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-append__label {
+    margin: 0;
+}
+
+/* Loading column: a real-looking header (move label + underline) pinned on top
+   like every column, with the spinner + label centered in the body below. The
+   column's max-height:100% resolves against the stretched canvas, so the body
+   fills the rest of the column height and centers the indicator. */
+
+.openings-tree-append--loading {
+    align-items: stretch;
+    height: 100%;
+}
+
+.openings-tree-append__body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
+.openings-tree-append__spinner {
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 50%;
+    border: 3px solid color-mix(in srgb, var(--brand-primary) 22%, transparent);
+    border-top-color: var(--brand-primary);
+    animation: spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .openings-tree-append__spinner {
+        animation: none;
+    }
+}
+
+.openings-tree-append--error {
+    color: var(--error-text, var(--text-primary));
+}
+
+/* Off-tree move loading footer (g-42md): the new card will settle into this
+   frontier column, so the spinner sits below the existing cards instead of as a
+   standalone column. A hairline + padding sets it off from the sibling cards. */
+
+.openings-tree-column__loading-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.3rem;
+    padding-top: 0.6rem;
+    border-top: 1px dashed var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-column__loading-footer .openings-tree-append__spinner {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-width: 2px;
+}
+
+@media (max-width: 720px) {
+    .openings-tree-workspace {
+        flex-direction: column;
+    }
+
+    /* The tree — not the board — is the point of this page, so on narrow
+       viewports the board gives up ~110px of the fold (360 -> 250) and the
+       columns below take it. Centered because the workspace is a column now,
+       so a left-aligned 250px board would leave a lopsided gutter. */
+    .openings-tree-board {
+        width: min(100%, 250px);
+        align-self: center;
+        /* relative (not static) un-sticks the board the same way while keeping
+           it a positioning context for the loading overlay. */
+        position: relative;
+    }
+
+    /* Header collapses from two stacked rows (title / controls) to one: the
+       title, the color toggle, and the legend button share a line, wrapping
+       only if the text genuinely doesn't fit. Both text labels below are
+       dropped because their controls already carry equivalent aria-labels. */
+    /* Gap below the header (header -> workspace). */
+    .openings-tree {
+        gap: 0.4rem;
+    }
+
+    .openings-tree-explorer {
+        gap: 0.4rem;
+    }
+
+    .openings-tree__header {
+        flex-direction: row;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.4rem 0.6rem;
+    }
+
+    .openings-tree__title {
+        font-size: 1.05rem;
+    }
+
+    .openings-tree__controls-row {
+        width: auto;
+        flex: 1 1 auto;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+
+    .openings-tree__color-label {
+        display: none;
+    }
+}
+
+@media (max-width: 720px) {
+    /* Stacked layout. Two axis flips bite here:
+       - The workspace's base align-items:flex-start is a cross-axis (now width)
+         value, so without width:100% the scroller shrinks to its max-content
+         canvas — defeating the internal h-scroll and overflowing the page.
+       - The base flex:1 1 0 now sizes the MAIN axis (height): flex-basis 0 with
+         no free space in the (content-height) column workspace collapses the
+         scroller to ~0 (just its padding), and overflow-y:hidden clips the
+         canvas to that sliver. flex:0 0 auto lets the height follow the canvas. */
+    .openings-tree-scroll {
+        width: 100%;
+        flex: 0 0 auto;
+    }
+
+    /* Spend the height freed by the smaller board + one-line header on the
+       columns, so more of the tree is readable before you scroll a column. */
+    .openings-tree-column {
+        min-height: 17.5rem; /* 280px tree band */
+        max-height: 55dvh;
+    }
+}
+
+/* Smallest phones and short viewports. Either axis being this tight starves the
+   tree on its own — at 320x640 the 250px board plus a wrapped header pushes the
+   first column past the halfway mark — so 180px is the floor there. Must follow
+   the block above: same specificity, so it wins on order. */
+
+@media (max-width: 720px) and (max-height: 640px), (max-width: 320px) {
+    .openings-tree-board {
+        width: min(100%, 180px);
+    }
+
+    /* At 320px the one-line header is ~20px over budget and wraps, costing a
+       whole row. Shaving the title and the toggle segments buys it back; if a
+       longer translation or larger text size still overflows it just wraps
+       again, same as before. */
+    .openings-tree__title {
+        font-size: 0.95rem;
+    }
+}
+
+@media (max-width: 720px) and (max-height: 640px), (max-width: 320px) {
+    /* Last ~6px: at 320px the row lands within a pixel of the content box, so
+       the inter-control gaps decide whether it wraps. */
+    .openings-tree__header {
+        column-gap: 0.4rem;
+    }
+
+    .openings-tree__controls-row {
+        gap: 0.35rem;
+    }
+}

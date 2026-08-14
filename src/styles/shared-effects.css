@@ -1,0 +1,16 @@
+/* Shared toast entrance animation (used by .streak-toast, .board-notice, etc.) */
+@keyframes blunder-toast-in {
+    0% {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    100% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

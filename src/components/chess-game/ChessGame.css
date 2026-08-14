@@ -1,0 +1,2736 @@
+.chess-section {
+    background: var(--surface-elevated);
+    border: 1px solid var(--border-color-strong);
+    border-radius: 1.5rem;
+    padding: clamp(0.75rem, 2vw, 1.25rem);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.chess-layout {
+    --game-viewport-chrome: 4.5rem;
+    --game-panel-width: 240px;
+    --game-moves-width: 300px;
+    --game-layout-gap: 1.5rem;
+    /* Graph is always 220px; board yields space down to 300px, then content scrolls */
+    --game-graph-height: 220px;
+    --game-board-max-width: max(300px, calc(100dvh - var(--game-viewport-chrome) - var(--game-graph-height) - 1rem));
+    display: grid;
+    grid-template-columns:
+        var(--game-panel-width)
+        minmax(0, 1fr)
+        minmax(220px, var(--game-moves-width));
+    grid-template-areas: "panel board moves";
+    gap: var(--game-layout-gap);
+    align-items: start;
+    width: min(
+        100%,
+        calc(
+            var(--game-panel-width) + var(--game-board-max-width) +
+                var(--game-moves-width) + (var(--game-layout-gap) * 2)
+        )
+    );
+    margin: 0 auto;
+    max-width: 100%;
+}
+
+.chess-layout.has-graph {
+    /*
+     * "moves" spans both rows so the move list stretches the full board+graph
+     * height (≈ down to the viewport bottom, since the board grows to fill
+     * --game-board-max-width above the graph) instead of stopping at the
+     * board's height. It fills what was an empty cell, so nothing is displaced.
+     * Combined with the .moves-column height:0/min-height:100% trick, the column
+     * fills this taller track WITHOUT inflating either row — keeping the graph
+     * in place. On shorter viewports the board+graph track shrinks, so the move
+     * list shrinks with it; once they hit their floors it extends past the fold.
+     */
+    grid-template-areas:
+        "panel board moves"
+        "panel graph moves";
+}
+
+.chess-graph-area {
+    grid-area: graph;
+    width: 100%;
+    /* No margin-top here; we rely on game-layout-gap from chess-layout */
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.chess-graph-area .analysis-graph,
+.chess-graph-area .game-end-banner {
+    margin-top: 0;
+}
+
+.chess-panel {
+    grid-area: panel;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    color: var(--text-secondary);
+}
+
+.chess-status {
+    margin: 0;
+    font-size: 1.2rem;
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+.chess-status__drill-label {
+    color: var(--text-tertiary);
+}
+
+.chess-meta {
+    margin: 0;
+    color: var(--text-tertiary);
+    font-size: 0.95rem;
+}
+
+.chess-panel__active-matchup,
+.chess-panel__inactive-summary {
+    display: contents;
+}
+
+.chess-panel__mobile-label,
+.chess-panel__mobile-versus {
+    display: none;
+}
+
+.perfect-streak {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    width: fit-content;
+    max-width: 100%;
+}
+
+.perfect-streak__label {
+    color: var(--text-tertiary);
+    font-size: 0.82rem;
+    font-weight: 800;
+    line-height: 1;
+    text-transform: uppercase;
+}
+
+.perfect-streak-badge {
+    --streak-fire-aura-opacity: 0;
+    --streak-fire-flame-opacity: 0;
+    --streak-fire-ember-opacity: 0;
+    --streak-fire-flame-height: 1rem;
+    --streak-fire-flame-scale: 0.7;
+    --streak-fire-glow: 0;
+    --streak-fire-core-opacity-scale: 0.48;
+    --streak-fire-speed: 1300ms;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 3.15rem;
+    max-width: 100%;
+    min-height: 2.08rem;
+    padding: 0.42rem 0.55rem;
+    border: 1px solid #60a5fa;
+    border-radius: 999px;
+    background: rgba(37, 99, 235, 0.4);
+    color: #ffd700;
+    text-shadow: 0 0 3px rgba(255, 215, 0, 0.6);
+    font-size: 1rem;
+    font-weight: 900;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+    isolation: isolate;
+    overflow: visible;
+}
+
+.perfect-streak-badge[data-fire-intensity="ember"] {
+    --streak-fire-aura-opacity: 0.36;
+    --streak-fire-ember-opacity: 0.45;
+    --streak-fire-glow: 0.35;
+}
+
+.perfect-streak-badge[data-fire-intensity="flame"] {
+    --streak-fire-aura-opacity: 0.52;
+    --streak-fire-flame-opacity: 0.72;
+    --streak-fire-ember-opacity: 0.55;
+    --streak-fire-flame-height: 1.55rem;
+    --streak-fire-flame-scale: 0.86;
+    --streak-fire-glow: 0.55;
+}
+
+.perfect-streak-badge[data-fire-intensity="hot"] {
+    --streak-fire-aura-opacity: 0.68;
+    --streak-fire-flame-opacity: 0.88;
+    --streak-fire-ember-opacity: 0.74;
+    --streak-fire-flame-height: 1.9rem;
+    --streak-fire-flame-scale: 1;
+    --streak-fire-glow: 0.72;
+    --streak-fire-speed: 1100ms;
+}
+
+.perfect-streak-badge[data-fire-intensity="inferno"] {
+    --streak-fire-aura-opacity: 0.82;
+    --streak-fire-flame-opacity: 1;
+    --streak-fire-ember-opacity: 0.95;
+    --streak-fire-flame-height: 2.2rem;
+    --streak-fire-flame-scale: 1.12;
+    --streak-fire-glow: 0.9;
+    --streak-fire-core-opacity-scale: 0.78;
+    --streak-fire-speed: 950ms;
+}
+
+.perfect-streak-badge__content {
+    position: relative;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.24rem;
+    min-width: 0;
+    white-space: nowrap;
+}
+
+.perfect-streak-badge__content strong {
+    color: var(--text-primary);
+    text-shadow: none;
+}
+
+.perfect-streak-badge--pulse {
+    animation: perfect-streak-pulse 900ms ease-out;
+}
+
+.perfect-streak-badge--hot {
+    box-shadow:
+        0 0 0 1px color-mix(in srgb, #f97316 28%, transparent),
+        0 0 calc(1.2rem * var(--streak-fire-glow)) rgba(249, 115, 22, 0.6);
+}
+
+.perfect-streak-badge__fire,
+.perfect-streak-badge__aura,
+.perfect-streak-badge__flame,
+.perfect-streak-badge__ember {
+    position: absolute;
+    pointer-events: none;
+}
+
+.perfect-streak-badge__fire {
+    z-index: 1;
+    inset: -1.25rem -0.75rem -0.25rem;
+}
+
+.perfect-streak-badge__aura {
+    inset: 0.2rem 0.25rem 0;
+    border-radius: 999px;
+    background:
+        radial-gradient(ellipse at 50% 12%, rgba(255, 247, 178, 0.85), transparent 28%),
+        radial-gradient(ellipse at 50% 35%, rgba(251, 146, 60, 0.78), transparent 52%),
+        radial-gradient(ellipse at 50% 62%, rgba(220, 38, 38, 0.42), transparent 70%);
+    filter: blur(8px);
+    opacity: var(--streak-fire-aura-opacity);
+}
+
+.perfect-streak-badge__flame {
+    bottom: 0.84rem;
+    left: 50%;
+    width: 1.12rem;
+    height: var(--streak-fire-flame-height);
+    border-radius: 60% 12% 58% 42%;
+    opacity: var(--streak-fire-flame-opacity);
+    transform: translate3d(-50%, 0, 0) scale(var(--streak-fire-flame-scale)) rotate(45deg);
+    transform-origin: 50% 100%;
+    filter: drop-shadow(0 0 0.45rem rgba(249, 115, 22, 0.6));
+}
+
+.perfect-streak-badge__flame--outer {
+    left: 46%;
+    width: 1.45rem;
+    background: linear-gradient(135deg, #b91c1c 10%, #f97316 58%, #facc15 100%);
+}
+
+.perfect-streak-badge__flame--middle {
+    left: 55%;
+    width: 1.05rem;
+    height: calc(var(--streak-fire-flame-height) * 0.78);
+    background: linear-gradient(135deg, #fb923c 10%, #facc15 72%, #fef3c7 100%);
+}
+
+.perfect-streak-badge__flame--core {
+    --streak-fire-layer-opacity-scale: var(--streak-fire-core-opacity-scale);
+    left: 50%;
+    width: 0.64rem;
+    height: calc(var(--streak-fire-flame-height) * 0.54);
+    background: linear-gradient(135deg, #facc15 8%, #fef3c7 72%, #ffffff 100%);
+    opacity: calc(var(--streak-fire-flame-opacity) * var(--streak-fire-core-opacity-scale));
+}
+
+.perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame,
+.perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame,
+.perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__flame {
+    animation: perfect-streak-flame var(--streak-fire-speed) ease-in-out infinite;
+}
+
+.perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame--middle,
+.perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame--middle,
+.perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__flame--middle {
+    animation-delay: -340ms;
+    animation-duration: calc(var(--streak-fire-speed) * 0.86);
+}
+
+.perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame--core,
+.perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame--core,
+.perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__flame--core {
+    animation-delay: -620ms;
+    animation-duration: calc(var(--streak-fire-speed) * 0.74);
+}
+
+.perfect-streak-badge__ember {
+    bottom: 0.72rem;
+    width: 0.2rem;
+    height: 0.2rem;
+    border-radius: 999px;
+    background: #fde68a;
+    box-shadow: 0 0 0.35rem rgba(250, 204, 21, 0.75);
+    opacity: var(--streak-fire-ember-opacity);
+}
+
+.perfect-streak-badge[data-fire-intensity="ember"] .perfect-streak-badge__ember,
+.perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__ember,
+.perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__ember,
+.perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__ember {
+    animation: perfect-streak-ember calc(var(--streak-fire-speed) * 1.35) ease-out infinite;
+}
+
+.perfect-streak-badge__ember--one {
+    left: 20%;
+    animation-delay: -220ms;
+}
+
+.perfect-streak-badge__ember--two {
+    left: 72%;
+    width: 0.16rem;
+    height: 0.16rem;
+    animation-delay: -680ms;
+}
+
+.perfect-streak-badge__ember--three {
+    left: 84%;
+    display: none;
+    animation-delay: -1020ms;
+}
+
+.perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__ember--three,
+.perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__ember--three {
+    display: block;
+}
+
+@keyframes perfect-streak-pulse {
+    0% { transform: scale(1); }
+    35% { transform: scale(1.04); }
+    100% { transform: scale(1); }
+}
+
+@keyframes perfect-streak-flame {
+    0%, 100% {
+        transform: translate3d(-50%, 0.08rem, 0) scale(var(--streak-fire-flame-scale)) rotate(38deg) skew(-5deg, -2deg);
+        opacity: calc(var(--streak-fire-flame-opacity) * var(--streak-fire-layer-opacity-scale, 0.82));
+    }
+    45% {
+        transform: translate3d(-50%, -0.28rem, 0) scale(calc(var(--streak-fire-flame-scale) * 1.16)) rotate(52deg) skew(7deg, 2deg);
+        opacity: calc(var(--streak-fire-flame-opacity) * var(--streak-fire-layer-opacity-scale, 1));
+    }
+}
+
+@keyframes perfect-streak-ember {
+    0% {
+        transform: translate3d(0, 0.2rem, 0) scale(0.65);
+        opacity: 0;
+    }
+    22% {
+        opacity: var(--streak-fire-ember-opacity);
+    }
+    100% {
+        transform: translate3d(0.24rem, -1.4rem, 0) scale(1);
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .perfect-streak-badge--pulse,
+    .perfect-streak-badge__flame,
+    .perfect-streak-badge__ember {
+        animation: none;
+    }
+
+    .perfect-streak-badge__flame {
+        opacity: calc(var(--streak-fire-flame-opacity) * 0.72);
+    }
+
+    .perfect-streak-badge__ember {
+        opacity: calc(var(--streak-fire-ember-opacity) * 0.72);
+    }
+}
+
+/* Start Drill is gated until an opening AND a strictness tier are picked
+   (g-09mu); the gate must read as disabled, not as a clickable primary. */
+
+.chess-start-panel .chess-button.primary:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    box-shadow: none;
+    cursor: not-allowed;
+}
+
+/* Again + settings-gear pairing — keep the gear visually tied to its button. */
+
+.drill-again-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+}
+
+.drill-settings-gear {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+    transition:
+        border-color 200ms ease,
+        background 200ms ease,
+        color 200ms ease;
+}
+
+.drill-settings-gear:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.drill-settings-gear:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.chessboard-wrapper {
+    grid-area: board;
+    position: relative;
+    width: 100%;
+    max-width: var(--game-board-max-width);
+}
+
+.chess-graph-area .analysis-graph > svg {
+    height: var(--game-graph-height);
+}
+
+@media (max-width: 767px) {
+    .chess-graph-area .analysis-graph > svg {
+        height: var(--game-graph-height);
+    }
+}
+
+.chessboard-board-with-eval {
+    display: flex;
+    align-items: stretch;
+    gap: 0.4rem;
+}
+
+.chessboard-board-area {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+}
+
+/* Blunder flash overlay */
+
+.blunder-flash {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+    background: var(--eval-blunder-flash);
+    animation: blunder-flash-anim 400ms ease-out forwards;
+}
+
+@keyframes blunder-flash-anim {
+    0% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+.streak-toast {
+    position: absolute;
+    bottom: 0.75rem;
+    right: 0.75rem;
+    z-index: 8;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--success) 55%, var(--warning));
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    animation: blunder-toast-in 250ms ease-out;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    pointer-events: none;
+}
+
+.streak-toast--record {
+    border-color: var(--warning);
+}
+
+.streak-toast__label {
+    font-weight: 800;
+    font-size: 0.95rem;
+    color: var(--success);
+}
+
+.streak-toast--record .streak-toast__label {
+    color: var(--warning);
+}
+
+.streak-toast__detail {
+    color: var(--text-tertiary);
+    font-size: 0.8rem;
+}
+
+.copy-position-toast {
+    position: absolute;
+    bottom: 0.75rem;
+    left: 0.75rem;
+    z-index: 8;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 0.75rem;
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 700;
+    pointer-events: none;
+    animation: blunder-toast-in 250ms ease-out;
+}
+
+.copy-position-toast__icon {
+    font-size: 1rem;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.copy-position-toast--success {
+    border-color: var(--success);
+}
+
+.copy-position-toast--success .copy-position-toast__icon {
+    color: var(--success);
+}
+
+.copy-position-toast--error {
+    border-color: var(--error);
+}
+
+.copy-position-toast--error .copy-position-toast__icon {
+    color: var(--error);
+}
+
+/* Last-drill opening-score notification (g-f3m4). Its own slot, top-right, so
+   it never competes with the single-slot board notice (top-left) or the streak
+   toast (bottom-right). Interactive (dismissable), so unlike its siblings it
+   keeps pointer events. */
+
+.last-drill-delta-toast {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    z-index: 8;
+    max-width: 15rem;
+    padding: 0.6rem 1.6rem 0.6rem 0.85rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color);
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    animation: blunder-toast-in 250ms ease-out;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.last-drill-delta-toast__dismiss {
+    position: absolute;
+    top: 0.15rem;
+    right: 0.3rem;
+    border: none;
+    background: none;
+    color: var(--text-tertiary);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.2rem;
+    cursor: pointer;
+}
+
+.last-drill-delta-toast__label {
+    font-weight: 800;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+}
+
+.last-drill-delta-toast__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.last-drill-delta-toast__item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.last-drill-delta-toast__opening {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.last-drill-delta-toast__delta {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.last-drill-delta-toast__item--up .last-drill-delta-toast__delta {
+    color: var(--success);
+}
+
+.last-drill-delta-toast__item--down .last-drill-delta-toast__delta {
+    color: var(--error);
+}
+
+/* Shared warning-triangle icon (board notice + revert/resign dialogs) */
+
+.warning-triangle-icon {
+    flex: 0 0 auto;
+    color: var(--warning-dark);
+}
+
+/*
+ * Single board-anchored notice, top-left of the board area. Exactly one shows
+ * at a time (see useBoardNotice); each kind auto-dismisses on its own timer.
+ * Top-left so it never collides with the bottom-right streak toast.
+ */
+
+.board-notice {
+    position: absolute;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 8;
+    max-width: min(70%, 22rem);
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.75rem;
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    pointer-events: none;
+    animation: blunder-toast-in 250ms ease-out;
+}
+
+.board-notice__header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.board-notice .warning-triangle-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+.board-notice__label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.board-notice__detail {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.board-notice--review-warning {
+    border: 2px solid var(--warning);
+    border-left: 4px solid var(--warning-dark);
+    /* Opaque tint: this notice sits over the board, so --warning-bg's 50%
+       transparency would let pieces bleed through and hurt legibility. */
+    background: color-mix(in srgb, var(--warning) 24%, var(--card-bg));
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--warning) 25%, transparent);
+}
+
+.board-notice__result {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.board-notice__result-icon {
+    font-size: 1.75rem;
+    font-weight: 900;
+    line-height: 1;
+    animation: review-overlay-in 300ms ease-out;
+}
+
+.board-notice__result-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.board-notice--pass {
+    border: 2px solid var(--success);
+    background: color-mix(in srgb, var(--success) 12%, var(--overlay-bg));
+}
+
+.board-notice--pass .board-notice__result-icon,
+.board-notice--pass .board-notice__result-label {
+    color: var(--success);
+}
+
+.board-notice--fail {
+    border: 2px solid var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 12%, var(--overlay-bg));
+}
+
+.board-notice--fail .board-notice__result-icon,
+.board-notice--fail .board-notice__result-label {
+    color: var(--eval-blunder);
+}
+
+.board-notice--rehook {
+    border: 1px solid color-mix(in srgb, var(--status-ghost) 45%, transparent 55%);
+    background: color-mix(in srgb, var(--status-ghost) 12%, var(--overlay-bg));
+}
+
+.board-notice--rehook .board-notice__label {
+    color: var(--status-ghost);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.85rem;
+}
+
+/* Review fail panel (side panel) */
+
+@keyframes review-overlay-in {
+    0% { opacity: 0; transform: scale(0.8); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+/* g-1y68 A1 — floating "Return to live" pill, tucked into the bottom-right
+   corner of the board so most of the bottom-right squares stay visible. The
+   primary fix for "I don't know how to get back": pulses gently and returns to
+   the latest move on click. pointer-events must be auto — the sibling toast
+   layer above it may be click-through. */
+
+.board-return-live {
+    position: absolute;
+    bottom: 0.25rem;
+    right: 0.25rem;
+    z-index: 9;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    height: 1.25rem;
+    padding: 0 1.1rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    font-size: 0.9rem;
+    line-height: 1;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    pointer-events: auto;
+    white-space: nowrap;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    transition: width 200ms ease, height 200ms ease, padding 200ms ease,
+        gap 200ms ease;
+    /* Entrance is a plain rise (no horizontal centering to preserve now that the
+       pill is corner-anchored); the pulse animates only box-shadow. */
+    animation:
+        blunder-toast-in 250ms ease-out,
+        board-return-live-pulse 2s ease-in-out 250ms infinite;
+}
+
+.board-return-live--tucked {
+    width: var(--board-return-live-size);
+    height: var(--board-return-live-height);
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+}
+
+.board-return-live__label {
+    max-width: 8rem;
+    opacity: 1;
+    overflow: hidden;
+    transition: max-width 200ms ease, opacity 150ms ease;
+}
+
+.board-return-live--tucked .board-return-live__label {
+    max-width: 0;
+    opacity: 0;
+}
+
+.board-return-live:hover {
+    filter: brightness(1.06);
+}
+
+.board-return-live:focus-visible {
+    outline: 2px solid var(--text-on-gradient);
+    outline-offset: 2px;
+}
+
+.board-return-live__glyph {
+    font-size: 1rem;
+    line-height: 1;
+}
+
+@keyframes board-return-live-pulse {
+    0%,
+    100% {
+        box-shadow:
+            var(--shadow-lg),
+            0 0 0 0 color-mix(in srgb, var(--brand-primary) 55%, transparent);
+    }
+    50% {
+        box-shadow:
+            var(--shadow-lg),
+            0 0 0 8px color-mix(in srgb, var(--brand-primary) 0%, transparent);
+    }
+}
+
+.chessboard-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--overlay-scrim);
+    backdrop-filter: blur(2px);
+}
+
+.chess-start-panel {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    align-items: center;
+    text-align: center;
+    padding: 1.5rem 2rem;
+    border-radius: 1.25rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
+    /* The overlay is fixed and center-aligned, so an uncapped panel overflows
+       equally above and below a short landscape viewport. Let the mode-specific
+       content scroller absorb that shortfall instead. */
+    max-height: min(100%, calc(100dvh - 2rem));
+    box-sizing: border-box;
+}
+
+.chess-start-close {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    width: 1.5rem;
+    height: 1.5rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--error);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    transition:
+        color 0.2s,
+        transform 0.2s;
+}
+
+.chess-start-close:hover:not(:disabled) {
+    color: var(--error-dark);
+    transform: scale(1.1);
+}
+
+.chess-start-close:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.chess-start-title {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.chess-elo-selector {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.chess-elo-slider-row {
+    display: flex;
+    width: 100%;
+}
+
+.chess-elo-bot-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
+.chess-elo-slider {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+    height: 6px;
+}
+
+.chess-elo-label {
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.opponent-avatar {
+    border-radius: 4px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.elo-stakes {
+    margin: 0.25rem 0 0;
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.85;
+}
+
+.elo-stakes__win {
+    color: #4caf50;
+}
+
+.elo-stakes__loss {
+    color: #ef5350;
+}
+
+.chess-start-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+}
+
+/* Play-side buttons: a king piece above a small label (g-lgi5). */
+
+.play-side-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.75rem 1rem;
+    min-width: 5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.play-side-button:hover:not(:disabled) {
+    border-color: var(--brand-primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.play-side-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.play-side-button__piece {
+    width: 3rem;
+    height: 3rem;
+}
+
+.play-side-button__label {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.play-side-button__piece--split {
+    position: relative;
+}
+
+.play-side-king {
+    position: absolute;
+    inset: 0;
+}
+
+.play-side-king--left {
+    clip-path: inset(0 50% 0 0);
+}
+
+.play-side-king--right {
+    clip-path: inset(0 0 0 50%);
+}
+
+.chess-start-error {
+    margin: 0;
+    font-size: 0.9rem;
+    color: var(--error-light);
+    max-width: 260px;
+}
+
+.revert-warning-dialog__pending-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.revert-warning-dialog__spinner {
+    display: inline-block;
+    width: 0.95rem;
+    height: 0.95rem;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+/* Subtle scrim over board when game has ended */
+
+.chessboard-ended-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    pointer-events: none;
+    background: var(--scrim-ended);
+}
+
+.chess-post-game-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: center;
+}
+
+/* Game status badge */
+
+.game-status-badge {
+    display: inline-block;
+    align-self: flex-start;
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.game-status-badge--live {
+    background: var(--status-live-light);
+    color: var(--status-live);
+    border: 1px solid var(--status-live);
+}
+
+.game-status-badge--win {
+    background: var(--success-bg);
+    color: var(--success);
+    border: 1px solid var(--success-border);
+}
+
+.game-status-badge--loss {
+    background: var(--error-bg-subtle);
+    color: var(--error-dark);
+    border: 1px solid var(--error);
+}
+
+.game-status-badge--other {
+    background: var(--status-other-bg);
+    color: var(--status-other);
+    border: 1px solid var(--status-other-border);
+}
+
+/* Unrated badge */
+
+.unrated-badge {
+    display: inline-block;
+    align-self: flex-start;
+    padding: 0.25rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    background: var(--status-other-bg);
+    color: var(--status-other);
+    border: 1px solid var(--status-other-border);
+}
+
+/* Revert confirmation dialog */
+
+.revert-warning-dialog {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.75rem;
+    padding: 1.5rem 2rem;
+    border-radius: 1.25rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
+    max-width: 20rem;
+}
+
+.revert-warning-dialog__title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.revert-warning-dialog__body {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: 1.4;
+}
+
+.revert-warning-dialog__actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+}
+
+/* Reviewing a past move during a LIVE game: a lighter cousin of the what-if wash
+   (same board-sized backdrop-filter overlay), but noticeably LESS desaturated so the
+   live game still reads as in-progress, not a disabled hypothetical. */
+
+.chessboard-square-measure--reviewing [id$="-board"] {
+    isolation: isolate;
+}
+
+.chessboard-square-measure--reviewing [id$="-board"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    pointer-events: none;
+    -webkit-backdrop-filter: saturate(0.58) brightness(1.03) contrast(0.97);
+    backdrop-filter: saturate(0.58) brightness(1.03) contrast(0.97);
+    transition: -webkit-backdrop-filter 0.2s ease, backdrop-filter 0.2s ease;
+}
+
+/* g-1y68 B2 — amber frame while reviewing: reads as "different mode" more
+   legibly than the wash alone. Ring lives on the measuring wrapper via
+   box-shadow (NOT border/outline that would alter the measured box and shift
+   the board). Coexists with the inner board's drop shadow set in boardStyle. */
+
+.chessboard-square-measure--reviewing {
+    border-radius: 3px;
+    box-shadow:
+        0 0 0 3px color-mix(in srgb, var(--warning) 78%, transparent),
+        0 0 18px 2px color-mix(in srgb, var(--warning) 32%, transparent);
+    transition: box-shadow 0.2s ease;
+}
+
+/* g-1y68 A3 — brief shake on a board interaction (click or drag) during review,
+   answering "why can't I move?". Transform on the wrapper (not the filter wash on
+   the squares), so the two animations don't fight. Self-clears when the class is
+   removed (BoardStage timeout). */
+
+.chessboard-square-measure--nudge {
+    animation: board-review-nudge 320ms ease-in-out;
+}
+
+@keyframes board-review-nudge {
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+    15% {
+        transform: translateX(-7px);
+    }
+    30% {
+        transform: translateX(6px);
+    }
+    45% {
+        transform: translateX(-5px);
+    }
+    60% {
+        transform: translateX(4px);
+    }
+    75% {
+        transform: translateX(-2px);
+    }
+}
+
+.srs-stats {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
+    white-space: nowrap;
+}
+
+.srs-stats__item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 2.2rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: 6px;
+    background: var(--bg-primary);
+    border: 1px solid color-mix(in srgb, var(--text-primary) 12%, transparent);
+    line-height: 1.05;
+}
+
+.srs-stats__value {
+    font-size: 1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+.srs-stats__caption {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.srs-stats__item--pass .srs-stats__value {
+    color: color-mix(in srgb, var(--success) 80%, white);
+}
+
+.srs-stats__item--fail .srs-stats__value {
+    color: color-mix(in srgb, var(--eval-blunder) 75%, white);
+}
+
+.srs-stats__item--streak .srs-stats__value {
+    color: var(--text-primary);
+}
+
+.panel-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.panel-settings {
+    display: inline-flex;
+}
+
+.panel-sound-toggle {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+}
+
+.panel-sound-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.panel-sound-toggle[aria-pressed="true"] {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+/* Animated pulsing icon for SRS fail */
+
+.srs-fail-icon {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    border: 2px solid var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 25%, var(--bg-tertiary));
+    cursor: pointer;
+    animation: srs-fail-pulse 1.2s ease-in-out infinite;
+    transition:
+        background 200ms,
+        border-color 200ms;
+    padding: 0;
+}
+
+.srs-fail-icon:hover {
+    background: color-mix(in srgb, var(--eval-blunder) 40%, var(--bg-tertiary));
+}
+
+.srs-fail-icon--revealed {
+    animation: none;
+    opacity: 0.6;
+    cursor: default;
+}
+
+.srs-fail-icon__symbol {
+    font-size: 1.1rem;
+    font-weight: 900;
+    line-height: 1;
+    color: var(--eval-blunder);
+}
+
+@keyframes srs-fail-pulse {
+    0%,
+    100% {
+        transform: scale(1);
+        box-shadow: 0 0 0 0
+            color-mix(in srgb, var(--eval-blunder) 40%, transparent);
+    }
+    50% {
+        transform: scale(1.12);
+        box-shadow: 0 0 0 6px
+            color-mix(in srgb, var(--eval-blunder) 0%, transparent);
+    }
+}
+
+.srs-fail-body {
+    flex: 1;
+    min-width: 0;
+}
+
+.srs-fail-body__label {
+    font-weight: 700;
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.chess-meta-strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Ghost mode indicator */
+
+.chess-meta--ghost {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.chess-meta--engine {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.ghost-mode-label {
+    color: var(--status-ghost);
+}
+
+.ghost-icon {
+    display: block;
+    color: var(--status-ghost);
+    animation: ghost-float 2s ease-in-out infinite;
+}
+
+@keyframes ghost-float {
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-2px);
+    }
+}
+
+/* Ghost info anchor (positions the popover below the button) */
+
+.ghost-info-anchor {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+/* Ghost info button */
+
+.ghost-info-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--status-ghost);
+    padding: 0;
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+
+.ghost-info-btn:hover {
+    opacity: 1;
+}
+
+/* Ghost info box */
+
+.ghost-info-box {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 0.35rem;
+    padding: 0.6rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--status-ghost);
+    background: var(--card-bg);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    min-width: 150px;
+}
+
+.ghost-info-box__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+}
+
+.ghost-info-box__title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--status-ghost);
+}
+
+.ghost-info-box__close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    padding: 0 0.15rem;
+    line-height: 1;
+}
+
+.ghost-info-box__close:hover {
+    color: var(--text-primary);
+}
+
+.ghost-info-box__board {
+    width: 200px;
+    height: 200px;
+    margin: 0 auto 0.4rem;
+}
+
+.static-mini-board {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    width: 100%;
+    height: 100%;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.static-mini-board__sq {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f0d9b5;
+}
+
+.static-mini-board__sq--dark {
+    background: #b58863;
+}
+
+.static-mini-board__piece {
+    position: relative;
+    font-size: 1.45rem;
+    line-height: 1;
+    user-select: none;
+    /* Nudge up so the glyph sits centered within the square. */
+    transform: translateY(-8%);
+}
+
+/* White backdrop copy of the glyph fills the otherwise see-through interior. */
+
+.static-mini-board__piece::before {
+    content: attr(data-glyph);
+    position: absolute;
+    inset: 0;
+    color: #fff;
+    z-index: -1;
+}
+
+.static-mini-board__piece--white {
+    color: #fff;
+    text-shadow:
+        -1px -1px 0 #000,
+        1px -1px 0 #000,
+        -1px 1px 0 #000,
+        1px 1px 0 #000;
+}
+
+.static-mini-board__piece--black {
+    color: #000;
+}
+
+.ghost-info-box__srs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+/* Game End Banner */
+
+.game-end-banner {
+    margin-top: 1rem;
+    padding: 1rem 1.25rem;
+    border-radius: 1rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--card-bg);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    box-shadow: var(--shadow-md);
+}
+
+.game-end-banner-message {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.rating-delta {
+    margin: 0.25rem 0 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    animation: rating-delta-in 0.4s ease-out;
+}
+
+.rating-delta--up {
+    color: #4caf50;
+}
+
+.rating-delta--down {
+    color: #ef5350;
+}
+
+.rating-delta__value {
+    font-weight: 400;
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+@keyframes rating-delta-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Moves Column (material + move list) */
+
+.moves-column {
+    grid-area: moves;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    align-self: stretch;
+    max-height: calc(100dvh - var(--game-viewport-chrome));
+    height: 0;
+    min-height: 100%;
+}
+
+@media (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 6.5rem;
+    }
+}
+
+@media (max-height: 680px) {
+    .chess-layout {
+        --game-viewport-chrome: 8.5rem;
+    }
+}
+
+/*
+ * 2-col /play, short viewports (≤760px tall, ≥768px wide — the band where the
+ * board sits left of a full-width analysis graph). The board is capped by
+ * --game-board-max-width while its column still has horizontal slack, and the
+ * 6.5rem/8.5rem chrome bumps above over-reserve vertical space — leaving dead
+ * margin below the graph. Those bumps were sized for the old fixed-220px graph;
+ * now that the graph shrinks with viewport height (clamp at line ~7560), the
+ * reservation is doubly stale. Shrink the reserved chrome to roughly the real
+ * top offset so the board grows into that margin. Because raising the board's
+ * max-width only enlarges a width-constrained board, this is a no-op once the
+ * board already fills its column (narrower viewports) — matching "grow only
+ * when the board isn't using all its width" — and once the board hits its 300px
+ * floor at very short heights. The larger board pushes the graph down to the
+ * viewport bottom. Must follow the max-height bumps above so source order wins
+ * (equal specificity). See g-jth2 / g-9g1y.
+ */
+
+@media (min-width: 768px) and (max-width: 1099px) and (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 3rem;
+    }
+}
+
+/* Turn labels */
+
+.turn-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+    padding: 0 0.5rem;
+    letter-spacing: 0.02em;
+}
+
+.turn-label-spinner {
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.moves-column > .move-list-container {
+    max-height: none;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Relocated material (mobile portrait only) is hidden by default; the 659px
+   block opts these in and hides the moves-column originals. */
+
+.chess-panel__material {
+    display: none;
+}
+
+/* g-1y68 — honor reduced-motion: keep the cues (color/frame/label) but drop the
+   pulses, shake, and slide-in entrances. */
+
+@media (prefers-reduced-motion: reduce) {
+    .board-return-live,
+    .chessboard-square-measure--nudge {
+        animation: none;
+    }
+
+    .board-return-live,
+    .board-return-live__label {
+        transition: none;
+    }
+}
+
+@media (max-width: 1099px) {
+    .chess-section {
+        padding: clamp(0.5rem, 2vw, 1rem);
+    }
+
+    .chess-layout {
+        /*
+         * Shrink the graph proportionally to viewport height so it stays above
+         * the fold on short viewports. Tied to dvh (the independent variable)
+         * because board height depends on graph height. Caps at the desktop
+         * 220px above ~1100px tall; floors at 110px to stay readable and keep
+         * the graph in view down to ~600px. See g-9g1y.
+         */
+        --game-graph-height: clamp(110px, 20dvh, 220px);
+        grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
+        grid-template-areas:
+            "board moves"
+            "panel panel";
+    }
+
+    /*
+     * Panel drops into the bottom-right cell — below the move list and to the
+     * right of the graph. This frees the top row so the board can grow taller,
+     * and isolates the board from height changes when status/warning messages
+     * appear in the panel (they only reflow the panel's own row).
+     */
+    .chess-layout.has-graph {
+        grid-template-areas:
+            "board moves"
+            "graph panel";
+    }
+
+    /* Panel stays a vertical column (like desktop) in its narrow cell. */
+    .chess-panel {
+        align-self: start;
+    }
+
+    /*
+     * Panel now hugs the right edge, so the ghost-info popup must open to the
+     * left instead of the right to stay on screen.
+     */
+    .ghost-info-box {
+        left: auto;
+        right: 0;
+    }
+}
+
+/*
+ * Below 768px the two-column mid-sized layout gets cramped, so drop the eval
+ * bar to give the board more horizontal room. The layout itself stays
+ * two-column all the way down to 660px (the mobile block below takes over at
+ * 659px).
+ */
+
+@media (max-width: 767px) {
+    .game-page .eval-bar {
+        display: none;
+    }
+
+    .game-page .chessboard-board-with-eval {
+        gap: 0;
+    }
+}
+
+@media (max-width: 659px) {
+    .game-page .chess-section {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+    }
+
+    .game-page .chess-layout {
+        --game-layout-gap: 0.4rem;
+        --game-graph-height: 130px;
+        width: 100%;
+        gap: var(--game-layout-gap);
+        min-width: 0;
+    }
+
+    .game-page .chess-panel,
+    .game-page .chessboard-wrapper,
+    .game-page .chess-graph-area,
+    .game-page .moves-column {
+        min-width: 0;
+    }
+
+    .game-page .chessboard-wrapper {
+        width: 100%;
+        max-width: 100vw;
+        justify-self: center;
+    }
+
+    .game-page .chess-panel {
+        position: relative;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0 0.5rem;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35rem 0.45rem;
+    }
+
+    .game-page .chess-panel__material {
+        display: flex;
+        order: 4;
+        flex: 0 1 auto;
+        min-width: 0;
+        max-width: 5.5rem;
+        overflow: hidden;
+        flex-wrap: nowrap;
+    }
+
+    .game-page .chess-status {
+        display: none;
+    }
+
+    .game-page .panel-header {
+        display: contents;
+    }
+
+    .game-page .panel-settings {
+        order: 5;
+        margin-left: auto;
+    }
+
+    .game-page .chess-panel__active-matchup {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex: 1 1 11rem;
+        min-width: 0;
+        order: 3;
+    }
+
+    .game-page .chess-panel__inactive-summary {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+    }
+
+    .game-page .chess-panel__desktop-label,
+    .game-page .chess-panel__opening,
+    .game-page .chess-panel__openings {
+        display: none;
+    }
+
+    .game-page .chess-panel__mobile-label,
+    .game-page .chess-panel__mobile-versus {
+        display: inline;
+    }
+
+    .game-page .perfect-streak {
+        flex: 0 0 5.65rem;
+        order: 4;
+    }
+
+    .game-page .perfect-streak__label {
+        font-size: 0.7rem;
+    }
+
+    .game-page .perfect-streak-badge {
+        width: 2.65rem;
+        min-height: 1.72rem;
+        padding: 0.32rem 0.42rem;
+        font-size: 0.9rem;
+        white-space: nowrap;
+    }
+
+    .game-page .perfect-streak-badge__fire {
+        inset: -0.8rem -0.45rem -0.18rem;
+    }
+
+    .game-page .perfect-streak-badge[data-fire-intensity="flame"] {
+        --streak-fire-flame-height: 1.35rem;
+    }
+
+    .game-page .perfect-streak-badge[data-fire-intensity="hot"] {
+        --streak-fire-flame-height: 1.52rem;
+    }
+
+    .game-page .perfect-streak-badge[data-fire-intensity="inferno"] {
+        --streak-fire-flame-height: 1.7rem;
+    }
+
+    .game-page .chess-panel__player-rating,
+    .game-page .chess-panel__opponent {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        min-width: 0;
+    }
+
+    .game-page .chess-panel__player-rating {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    .game-page .chess-panel__opponent {
+        flex: 1 1 auto;
+    }
+
+    .game-page .chess-panel__opponent .opponent-avatar {
+        width: 36px;
+        height: 36px;
+    }
+
+    .game-page .chess-panel__opponent .chess-meta-strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .game-page .game-status-badge,
+    .game-page .unrated-badge {
+        align-self: center;
+        padding: 0.18rem 0.45rem;
+        border-radius: 0.4rem;
+        font-size: 0.7rem;
+        letter-spacing: 0;
+    }
+
+    .game-page .ghost-info-box {
+        position: fixed;
+        top: calc(3.25rem + env(safe-area-inset-top));
+        left: max(0.5rem, env(safe-area-inset-left));
+        right: max(0.5rem, env(safe-area-inset-right));
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        box-sizing: border-box;
+        z-index: 20;
+    }
+
+    .game-page .ghost-info-box__board {
+        width: min(200px, calc(100vw - 2.75rem));
+        height: min(200px, calc(100vw - 2.75rem));
+    }
+
+    .game-page .chessboard-overlay {
+        box-sizing: border-box;
+        padding: max(0.5rem, env(safe-area-inset-top))
+            max(0.5rem, env(safe-area-inset-right))
+            max(0.5rem, env(safe-area-inset-bottom))
+            max(0.5rem, env(safe-area-inset-left));
+    }
+
+    .game-page .chess-start-panel,
+    .game-page .revert-warning-dialog {
+        width: min(calc(100vw - 2rem), 22rem);
+        max-width: 100%;
+        box-sizing: border-box;
+        padding: 1rem;
+        gap: 0.75rem;
+        border-radius: 0.8rem;
+    }
+
+    .game-page .chess-start-options {
+        gap: 0.5rem;
+    }
+
+    .game-page .chess-start-options .chess-button {
+        padding: 0.5rem 0.75rem;
+    }
+
+    .game-page .chess-graph-area {
+        gap: 0.35rem;
+        padding: 0 0.5rem;
+        box-sizing: border-box;
+    }
+
+    .game-page .chess-graph-area .analysis-graph > svg {
+        height: var(--game-graph-height);
+    }
+
+    .game-page .moves-column {
+        max-height: clamp(310px, 42dvh, 440px);
+        height: auto;
+        min-height: 280px;
+        padding: 0 0.5rem;
+        box-sizing: border-box;
+    }
+
+    .game-page .moves-column > .move-list-container {
+        min-height: 0;
+    }
+
+    /* Horizontal list is content-sized — collapse the tall column floor. */
+    .game-page .moves-column:has(.h-move-list) {
+        min-height: 0;
+        max-height: none;
+    }
+
+    /* Material relocated into the panel + controls row; hide the originals. */
+    .game-page .moves-column > .material-display {
+        display: none;
+    }
+
+    .game-page .controls-row {
+        flex-wrap: nowrap;
+        min-width: 0;
+    }
+
+    .game-page .controls-row__material {
+        display: flex;
+        margin-left: auto;
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        flex-wrap: nowrap;
+    }
+
+    .game-page .move-list-container {
+        gap: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+
+    .game-page .move-list-nav {
+        order: -2;
+        padding: 0.5rem 0.5rem 0;
+    }
+
+    .game-page .move-list-actions {
+        order: -1;
+        padding: 0 0.5rem;
+    }
+
+    .game-page .move-list-scroll {
+        flex: 1 1 auto;
+        min-height: 96px;
+    }
+
+    .game-page .material-display {
+        min-height: 1.5rem;
+        padding: 0 0.35rem;
+    }
+
+    .game-page .material-icons {
+        font-size: 26px;
+        line-height: 1;
+    }
+
+    .chess-layout {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+            "panel"
+            "board"
+            "moves";
+    }
+
+    .chess-layout.has-graph {
+        grid-template-areas:
+            "panel"
+            "board"
+            "moves"
+            "graph";
+    }
+
+    .chess-panel {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .moves-column {
+        max-height: 300px;
+        height: auto;
+        min-height: 0;
+    }
+}
+
+/*
+ * Phone-portrait squeeze. The mobile panel row above already packs the streak
+ * into a fixed 5.65rem slot (label + badge); below 500px that slot crowds the
+ * rating and opponent cells, so drop the "Streak" caption and shrink the slot
+ * to the badge alone (2.65rem, matching .perfect-streak-badge width above).
+ * The caption is aria-hidden — the accessible name lives on .perfect-streak's
+ * aria-label — so hiding it costs screen readers nothing.
+ */
+
+@media (max-width: 499px) {
+    .game-page .perfect-streak__label {
+        display: none;
+    }
+
+    .game-page .perfect-streak {
+        flex: 0 0 2.65rem;
+    }
+}
+
+.promotion-picker-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    background: rgba(0, 0, 0, 0.45);
+    cursor: default;
+}
+
+.promotion-picker-square {
+    position: absolute;
+    z-index: 10;
+    width: 12.5%;
+    height: 12.5%;
+    padding: 4%;
+    border: none;
+    background: var(--overlay-bg);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+    transition: background 120ms;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.promotion-picker-square:hover {
+    background: var(--surface-hover, rgba(255, 255, 255, 0.12));
+}
+
+.promotion-picker-square svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* ---- Drill setup panel additions ---- */
+
+.chess-start-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    align-items: center;
+    width: 100%;
+}
+
+/* Play keeps the mode toggle and side actions reachable while its difficulty
+   controls take the remaining height and scroll on short landscape screens. */
+
+.chess-start-scroll:not(.chess-start-scroll--drill) {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: thin;
+}
+
+/* Drill mode splits into a scrolling fields region and a pinned action row, so
+   this wrapper only has to hand its leftover height down (g-drill-cta-clip). */
+
+.chess-start-scroll--drill {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+/* The only thing that scrolls. min-height:0 lets it shrink below its content
+   inside the height-capped panel; the Start button sits outside it. */
+
+.drill-setup__fields {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    align-items: center;
+    width: 100%;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    /* Bottom padding swallows the range thumb's ~3px overhang past its 6px
+       track — without it the box reports scrollable overflow (and paints a
+       scrollbar) even when every field fits. */
+    padding: 0 0.5rem 0.5rem 0;
+    box-sizing: border-box;
+}
+
+.drill-setup__actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    flex: 0 0 auto;
+}
+
+.strictness-slider-row {
+    display: flex;
+    width: 100%;
+}
+
+/* Forced strictness tier choice (g-09mu): three cards, none active until the
+   user picks one — the natural "unset" state a slider can't express. */
+
+.strictness-tier-grid {
+    /* auto-fit keeps the tiers equal-width and reflows them to 2-up (or 1-up)
+       when the control column can't seat three. As a nowrap flex row they
+       could not: flex:1 sets basis 0 but min-width stayed auto, so the tiers
+       refused to shrink and "Strict" spilled ~22px past the column at 375px
+       and was clipped by the scroll box (g-drill-cta-clip). */
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(4rem, 1fr));
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.strictness-tier-button {
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.strictness-tier-button:hover:not(:disabled) {
+    border-color: var(--brand-primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.strictness-tier-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.strictness-tier-button--active {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    box-shadow: var(--shadow-md);
+}
+
+.strictness-tier-button--active:disabled {
+    opacity: 0.7;
+}
+
+.strictness-label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    /* One line reserved: both the unset prompt and the stop-condition copy are
+       kept short enough to fit the ~180px control column on mobile, so unset →
+       set must not shift the layout below. */
+    min-height: 1.25rem;
+    display: block;
+    margin-top: 0.4rem;
+}
+
+/* ---- Drill setup: short/wide left-labeled rows (g-pr8z) ---- */
+
+.chess-start-panel--drill {
+    width: min(calc(100vw - 2rem), 30rem);
+    max-width: 100%;
+}
+
+/* Fixed chrome: the mode toggle and Play side actions do not give up height. */
+
+.chess-start-panel > .mode-toggle-row,
+.chess-start-panel > .chess-start-options,
+.chess-start-panel > .chess-start-error {
+    flex: 0 0 auto;
+}
+
+.drill-field {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    text-align: left;
+}
+
+.drill-field__label {
+    flex: 0 0 96px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.drill-field__control {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* ---- Opening picker (anchored List popover + near-fullscreen Tree dialog) ---- */
+
+.opening-picker {
+    width: 100%;
+}
+
+.opening-picker__trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.opening-picker__trigger:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.opening-picker__trigger-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.opening-picker__popover {
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.opening-picker__popover--list {
+    position: fixed;
+}
+
+.opening-picker__toggle {
+    /* Layout comes from .segmented-toggle; keep only the centering intent. */
+    justify-content: center;
+}
+
+.opening-picker__search {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    box-sizing: border-box;
+}
+
+.opening-picker__list {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    flex: 1 1 auto;
+}
+
+.opening-picker__group-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 0.35rem 0.5rem 0.15rem;
+    position: sticky;
+    top: 0;
+    background: var(--modal-bg);
+}
+
+.opening-picker__row {
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.opening-picker__row--active {
+    background: var(--bg-secondary);
+}
+
+.opening-picker__row--selected {
+    font-weight: 700;
+    color: var(--text-on-gradient);
+    background: var(--gradient-brand);
+}
+
+.opening-picker__empty {
+    padding: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--text-tertiary);
+    text-align: center;
+}
+
+.opening-picker__tree-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(15, 23, 42, 0.62);
+}
+
+.opening-picker__tree-modal {
+    position: fixed;
+    top: max(1rem, env(safe-area-inset-top));
+    right: max(1rem, env(safe-area-inset-right));
+    bottom: max(1rem, env(safe-area-inset-bottom));
+    left: max(1rem, env(safe-area-inset-left));
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-width: 0;
+    min-height: 0;
+    padding: 0.75rem;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid var(--border-color-strong);
+    border-radius: 0.9rem;
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
+}
+
+.opening-picker__tree-chrome {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.opening-picker__tree-chrome .opening-picker__toggle {
+    min-width: 0;
+}
+
+.opening-picker__tree-body {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    overflow: hidden;
+}
+
+.opening-picker__tree-body .openings-tree-explorer,
+.opening-picker__tree-body .openings-tree-workspace {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+
+.opening-picker__tree-body .openings-tree-workspace {
+    width: 100%;
+}
+
+.opening-picker__tree-body .openings-tree-scroll {
+    align-self: stretch;
+    /* Keep the horizontal overflow owner inside the modal's height budget.
+       Without an explicit border-box, its padding + scrollbar can extend past
+       the clipped flex body even though the canvas itself still scrolls. */
+    box-sizing: border-box;
+}
+
+.opening-picker__tree-body .openings-tree-canvas {
+    height: 100%;
+}
+
+@media (max-width: 767px) {
+    /* No max-height override here: the old min(60vh, 380px) cut 38px off the
+       418px of drill content and the Start button — last child of the scroll
+       box — was what disappeared (g-drill-cta-clip). The panel-level cap plus
+       the pinned action row size the fields region to the real viewport. */
+
+    /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
+    .game-page .chess-start-panel--drill {
+        width: min(calc(100vw - 1.5rem), 30rem);
+    }
+
+    .opening-picker__tree-modal {
+        padding: 0.55rem;
+    }
+}
+
+@media (max-width: 720px) {
+    .opening-picker__tree-chrome {
+        grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .opening-picker__tree-chrome .opening-picker__toggle {
+        grid-column: 1 / -1;
+    }
+
+    .opening-picker__tree-body {
+        display: block;
+        overflow-y: auto;
+        overflow-x: hidden;
+    }
+
+    .opening-picker__tree-body .openings-tree-explorer {
+        width: 100%;
+        min-height: min-content;
+    }
+
+    .opening-picker__tree-body .openings-tree-explorer,
+    .opening-picker__tree-body .openings-tree-workspace {
+        flex: 0 0 auto;
+    }
+
+    .opening-picker__tree-body .openings-tree-workspace {
+        width: 100%;
+    }
+}
+
+/* ---- Live game chess-panel: opening lineage compact fit ----
+   The lineage shares /history's tree-node cards but lives in the ~240px
+   (--game-panel-width) game panel. Reset min-width and trim the depth step so
+   deep cards fit the narrower inner panel. Scoped to .chess-panel__openings so
+   /history (wider) is untouched. (The metrics grid is two-up globally, so no
+   panel-scoped override is needed for it.) */
+
+.chess-panel__openings {
+    min-width: 0;
+}
+
+/* Smaller depth step so deep cards don't run off the right edge of the panel.
+   The badge pins to the card's top-right (flex-start) in the narrow panel so an
+   expanded card keeps the diff visible without widening the 240px column. */
+
+.chess-panel__openings .game-opening-lineage__item {
+    align-items: flex-start;
+    padding-left: calc(var(--lineage-depth, 0) * 0.4rem);
+}
+
+/* ---- SRS repeat-mistake spotlight (full-screen, board stays lit) ---- */
+
+/* Wrapper that lets us measure the live board square for the clip-path hole.
+   Sizes to the square board (a block box the same size as the board). */
+
+.chessboard-square-measure {
+    line-height: 0;
+}
+
+/* Scrim dims the whole viewport except the board (clip-path hole set inline). */
+
+.srs-fail-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.6);
+    opacity: 1;
+    cursor: pointer;
+    animation: srs-fail-scrim-in 200ms ease;
+}
+
+.srs-fail-scrim--shrink {
+    opacity: 0;
+    transition: opacity 500ms ease;
+}
+
+@keyframes srs-fail-scrim-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* Glyph + headline pinned to the top of the board, centered, no background. */
+
+.srs-fail-content {
+    position: fixed;
+    z-index: 51;
+    cursor: pointer;
+}
+
+.srs-fail-content__inner {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.6rem 1rem;
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.62);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
+    transform: translateX(-50%);
+    transform-origin: top center;
+    animation: srs-fail-content-in 220ms ease-out;
+}
+
+.srs-fail-content__inner--shrink {
+    transform: translateX(-50%) scale(0.12);
+    opacity: 0;
+    transition: transform 500ms cubic-bezier(0.5, 0, 0.75, 0), opacity 500ms ease;
+}
+
+.srs-fail-content__glyph {
+    flex: 0 0 auto;
+    width: clamp(40px, 8vw, 58px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: #b91c1c;
+    color: #fff;
+    font-weight: 800;
+    font-size: clamp(24px, 5vw, 34px);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.srs-fail-content__headline {
+    margin: 0;
+    font-size: clamp(18px, 3.2vw, 26px);
+    font-weight: 800;
+    color: #fff;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 2px rgba(0, 0, 0, 0.9);
+}
+
+@keyframes srs-fail-content-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) scale(1);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .srs-fail-scrim,
+    .srs-fail-scrim--shrink {
+        animation: none;
+        transition: opacity 300ms ease;
+    }
+    .srs-fail-content__inner {
+        animation: none;
+    }
+    .srs-fail-content__inner--shrink {
+        transform: translateX(-50%);
+        transition: opacity 300ms ease;
+    }
+}
+
+/* ---- End-game fanfare (g-8079): dramatic win/loss/draw over the board ---- */
+
+/* Centered card over the already-dimmed board (clips to .chessboard-board-area,
+   sits above .chessboard-ended-scrim). Borrows the SrsFail visual language —
+   scale-in → hold → shrink-out, click-to-skip — without the portal machinery. */
+
+.end-game-fanfare {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    display: grid;
+    place-items: center;
+    pointer-events: auto;
+    cursor: pointer;
+    animation: end-game-fanfare-fade-in 200ms ease;
+}
+
+.end-game-fanfare--shrink {
+    opacity: 0;
+    transition: opacity 450ms ease;
+}
+
+@keyframes end-game-fanfare-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* A real <button> for the focus + keyboard dismiss path — reset the UA chrome
+   and inherit the app font so the headline/reason spans render unchanged. */
+
+.end-game-fanfare__inner {
+    appearance: none;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 1.1rem 2.4rem;
+    border-radius: 18px;
+    border: 2px solid var(--border-color);
+    border-top-width: 5px;
+    background: var(--overlay-bg);
+    box-shadow: 0 18px 48px rgba(2, 6, 23, 0.5);
+    backdrop-filter: blur(4px);
+    text-align: center;
+    transform-origin: center;
+    animation: review-overlay-in 300ms ease-out;
+}
+
+.end-game-fanfare__inner--shrink {
+    transform: scale(0.12);
+    opacity: 0;
+    transition: transform 450ms cubic-bezier(0.5, 0, 0.75, 0), opacity 450ms ease;
+}
+
+.end-game-fanfare__headline {
+    font-size: clamp(2.1rem, 6vw, 3.4rem);
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.01em;
+}
+
+.end-game-fanfare__reason {
+    font-size: clamp(0.95rem, 2.4vw, 1.2rem);
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+/* Outcome accents: border-top + headline color. */
+
+.end-game-fanfare--win .end-game-fanfare__inner {
+    border-top-color: var(--success);
+}
+
+.end-game-fanfare--win .end-game-fanfare__headline {
+    color: var(--success);
+}
+
+.end-game-fanfare--loss .end-game-fanfare__inner {
+    border-top-color: var(--eval-blunder);
+}
+
+.end-game-fanfare--loss .end-game-fanfare__headline {
+    color: var(--eval-blunder);
+}
+
+.end-game-fanfare--draw .end-game-fanfare__inner {
+    border-top-color: var(--warning);
+}
+
+.end-game-fanfare--draw .end-game-fanfare__headline {
+    color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .end-game-fanfare,
+    .end-game-fanfare--shrink {
+        animation: none;
+        transition: opacity 300ms ease;
+    }
+    .end-game-fanfare__inner {
+        animation: none;
+    }
+    .end-game-fanfare__inner--shrink {
+        transform: none;
+        transition: opacity 300ms ease;
+    }
+}

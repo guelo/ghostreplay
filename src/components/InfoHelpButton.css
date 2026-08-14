@@ -1,0 +1,52 @@
+/* Shared info (ⓘ) button + popover. Used by the game-review accuracy help and
+   the openings metrics legend; legacy `.history-stats-pane__info-*` selectors
+   are kept as aliases so existing markup keeps working. */
+.info-help-btn {
+    all: unset;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    color: var(--text-tertiary);
+    border-radius: 50%;
+    transition: color 0.15s;
+}
+.info-help-btn:hover {
+    color: var(--text-primary);
+}
+.info-help-btn:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+.info-help-popup {
+    position: absolute;
+    top: calc(100% + 0.4rem);
+    left: 0;
+    z-index: 10;
+    width: 240px;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-elevated, var(--bg-secondary, #2a2a2a));
+    border: 1px solid color-mix(in srgb, var(--text-primary) 15%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-size: 0.72rem;
+    font-weight: 400;
+    line-height: 1.45;
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--text-secondary);
+}
+.info-help-popup--wide {
+    width: 300px;
+}
+/* Open leftward when the trigger sits near the right page edge. */
+.info-help-popup--right {
+    left: auto;
+    right: 0;
+}
+.info-help-popup p {
+    margin: 0;
+}
+.info-help-popup p + p {
+    margin-top: 0.5rem;
+}
