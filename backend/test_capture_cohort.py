@@ -29,6 +29,7 @@ import json
 import os
 import stat
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -780,6 +781,80 @@ class TestArgumentValidation:
         assert exc.value.code == 2  # argparse usage error, never the retry loop
 
 
+class TestSessionModeSampling:
+    class _Query:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, _criterion):
+            return self
+
+        def all(self):
+            return list(self.rows)
+
+    class _DB:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query(self, *_columns):
+            return TestSessionModeSampling._Query(self.rows)
+
+    @staticmethod
+    def _overlay(count):
+        overlay = tc._fz_overlay(2, "black", count)
+        session_ids = {str(uuid.uuid4()) for _ in range(count)}
+        for node in overlay.nodes.values():
+            node.session_ids = set(session_ids)
+        return overlay
+
+    def test_counts_distinct_contributing_sessions_and_fingerprint_is_order_stable(self):
+        overlay = self._overlay(3)
+        session_ids = sorted(cal._contributing_session_ids(overlay))
+        rows = [(session_ids[0], "normal"), (session_ids[1], "drill"), (session_ids[2], "normal")]
+        sample = cal._collect_session_mode_sample(self._DB(rows), overlay)
+        reversed_sample = cal._collect_session_mode_sample(self._DB(reversed(rows)), overlay)
+        assert sample.counts == cal.SessionModeCounts(normal=2, drill=1)
+        assert sample.fingerprint == reversed_sample.fingerprint
+
+    def test_empty_overlay_has_bound_zero_counts(self):
+        sample = cal._collect_session_mode_sample(
+            self._DB([]), tc.EvidenceOverlay(2, "black")
+        )
+        assert sample.counts == cal.SessionModeCounts(0, 0)
+        assert len(sample.fingerprint) == 64
+
+    def test_missing_or_unknown_session_mode_fails_closed_without_id_in_message(self):
+        overlay = self._overlay(2)
+        session_ids = sorted(cal._contributing_session_ids(overlay))
+        with pytest.raises(cal.CaptureSessionMixError) as missing:
+            cal._collect_session_mode_sample(self._DB([(session_ids[0], "normal")]), overlay)
+        assert all(session_id not in str(missing.value) for session_id in session_ids)
+        with pytest.raises(cal.CaptureSessionMixError) as unknown:
+            cal._collect_session_mode_sample(
+                self._DB([(session_ids[0], "normal"), (session_ids[1], "other")]), overlay
+            )
+        assert all(session_id not in str(unknown.value) for session_id in session_ids)
+
+    def test_post_snapshot_missing_mapping_is_retryable_movement(self, monkeypatch):
+        pairs = ((2, "white"), (3, "black"))
+        overlays = {pair: self._overlay(1) for pair in pairs}
+        stable = cal._SessionModeSample(
+            counts=cal.SessionModeCounts(1, 0), fingerprint="a" * 64
+        )
+
+        def sample(_db, overlay):
+            if overlay is overlays[pairs[1]]:
+                raise cal.CaptureSessionMixError("row vanished")
+            return stable
+
+        monkeypatch.setattr(cal, "_collect_session_mode_sample", sample)
+        samples, unclassifiable = cal._collect_post_snapshot_session_mode_samples(
+            object(), overlays, pairs
+        )
+        assert samples == {pairs[0]: stable}
+        assert unclassifiable == {pairs[1]}
+
+
 class TestOrphanDetection:
     def test_mismatch_is_orphan(self, tmp_path, capsys):
         output = tmp_path / "cohort.json"
@@ -912,6 +987,7 @@ class TestOperationSurface:
             "CaptureIsolationError", "CaptureWorktreeError", "CaptureGovernanceError",
             "CaptureDialectError", "CaptureLockError", "CaptureSourceError",
             "CaptureFenceExhaustedError", "CaptureEpochUnavailableError",
+            "CaptureSessionMixError",
             "CaptureReleaseGuardShapeError", "CaptureSelfCheckError",
             "CapturePublicationError", "CaptureInterRenameError",
         ):

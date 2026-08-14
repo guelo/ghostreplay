@@ -67,12 +67,15 @@ def _reset(engine):
         conn.execute(text(f"TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE"))
 
 
-def _seed_pair(db, user_id: int, color: str, n_moves: int = 1) -> None:
+def _seed_pair(
+    db, user_id: int, color: str, n_moves: int = 1, *, session_mode: str = "normal"
+) -> uuid.UUID:
     if db.get(User, user_id) is None:
         db.add(User(id=user_id, username=f"user{user_id}", is_anonymous=True))
         db.flush()
+    session_id = uuid.uuid4()
     session = GameSession(
-        id=uuid.uuid4(),
+        id=session_id,
         user_id=user_id,
         started_at=datetime(2026, 1, 1, 10, 0, tzinfo=timezone.utc),
         ended_at=datetime(2026, 1, 1, 11, 0, tzinfo=timezone.utc),
@@ -80,8 +83,10 @@ def _seed_pair(db, user_id: int, color: str, n_moves: int = 1) -> None:
         result="checkmate_win",
         engine_elo=1500,
         player_color=color,
-        is_rated=True,
-        session_mode="normal",
+        is_rated=session_mode == "normal",
+        session_mode=session_mode,
+        drill_state="failed" if session_mode == "drill" else None,
+        drill_terminal_reason="accuracy" if session_mode == "drill" else None,
     )
     db.add(session)
     db.flush()
@@ -89,9 +94,10 @@ def _seed_pair(db, user_id: int, color: str, n_moves: int = 1) -> None:
         db.add(SessionMove(
             session_id=session.id, move_number=i + 1, color=color,
             move_san="e4", fen_before=START_FULL, fen_after=KINGS_PAWN_FULL,
-            eval_delta=10,
+            eval_delta=10, segment=session_mode,
         ))
     db.commit()
+    return session_id
 
 
 def _seed_default_cohort(session_factory) -> None:
@@ -191,6 +197,57 @@ def test_quiescent_run_completes_first_attempt(capenv, monkeypatch):
     assert capenv.provenance.exists()
     # header cache_epoch is the epoch observed INSIDE the snapshot
     assert result.snapshot_cache_epoch is not None
+
+
+@pg_required
+def test_schema_v3_captures_distinct_contributing_sessions_by_mode(capenv, monkeypatch):
+    with capenv.session_factory() as db:
+        _seed_pair(db, GUARD_USER, "white")
+        _seed_pair(db, GUARD_USER, "black")
+        for _ in range(cal.DEFAULT_MIN_OBSERVATIONS):
+            _seed_pair(db, 2, "white", session_mode="normal")
+            _seed_pair(db, 3, "white", session_mode="drill")
+    _stub_validate_ok(monkeypatch)
+    _capture(capenv)
+    payload = json.loads(capenv.output.read_bytes())
+    quantiles = [pair for pair in payload["pairs"] if pair["cohort_role"] == "quantile"]
+    assert [pair["session_mode_counts"] for pair in quantiles] == [
+        {"normal": cal.DEFAULT_MIN_OBSERVATIONS, "drill": 0},
+        {"normal": 0, "drill": cal.DEFAULT_MIN_OBSERVATIONS},
+    ]
+
+
+@pg_required
+def test_session_mode_mapping_movement_retries_even_when_scorer_freshness_does_not(
+    capenv, monkeypatch
+):
+    with capenv.session_factory() as db:
+        _seed_pair(db, GUARD_USER, "white")
+        _seed_pair(db, GUARD_USER, "black")
+        target_session = _seed_pair(db, 2, "white")
+        _seed_pair(db, 3, "white")
+    _stub_validate_ok(monkeypatch)
+    real = cal._collect_session_mode_sample
+    state = {"fired": False}
+
+    def move_after_snapshot_sample(db, overlay):
+        sample = real(db, overlay)
+        if not state["fired"] and str(target_session) in cal._contributing_session_ids(overlay):
+            state["fired"] = True
+            with capenv.session_factory() as separate:
+                separate.execute(text("""
+                    UPDATE game_sessions
+                    SET session_mode = 'drill', drill_state = 'failed',
+                        drill_terminal_reason = 'accuracy', is_rated = false
+                    WHERE id = :session_id
+                """), {"session_id": target_session})
+                separate.commit()
+        return sample
+
+    monkeypatch.setattr(cal, "_collect_session_mode_sample", move_after_snapshot_sample)
+    result = _capture(capenv, max_attempts=2)
+    assert state["fired"] is True
+    assert result.attempts == 2
 
 
 @pg_required

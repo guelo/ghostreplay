@@ -1385,14 +1385,28 @@ def _fz_overlay(uid: int, color: str, n: int, *, last_days: int = 2) -> Evidence
     return overlay
 
 
+def _fz_captured(overlay, role, evidence_seq, fingerprint, *, normal=None, drill=0):
+    session_total = len({
+        sid for node in overlay.nodes.values() for sid in node.session_ids
+    })
+    normal = session_total - drill if normal is None else normal
+    return cal.CapturedPairInput(
+        overlay,
+        role,
+        evidence_seq,
+        fingerprint,
+        cal.SessionModeCounts(normal=normal, drill=drill),
+    )
+
+
 def _fz_inputs(quantile_obs=(25, 22), guard_obs=(15, 15)):
     """The canonical cohort shape: two User-14 release-guard records (both colors, one
     subject) + two quantile pairs (users 2 & 3)."""
     return [
-        cal.CapturedPairInput(_fz_overlay(14, "white", guard_obs[0]), "release_guard", 5, "fp-14w"),
-        cal.CapturedPairInput(_fz_overlay(14, "black", guard_obs[1]), "release_guard", 5, "fp-14b"),
-        cal.CapturedPairInput(_fz_overlay(2, "black", quantile_obs[0]), "quantile", 3, "fp-2b"),
-        cal.CapturedPairInput(_fz_overlay(3, "white", quantile_obs[1]), "quantile", 3, "fp-3w"),
+        _fz_captured(_fz_overlay(14, "white", guard_obs[0]), "release_guard", 5, "fp-14w"),
+        _fz_captured(_fz_overlay(14, "black", guard_obs[1]), "release_guard", 5, "fp-14b"),
+        _fz_captured(_fz_overlay(2, "black", quantile_obs[0]), "quantile", 3, "fp-2b"),
+        _fz_captured(_fz_overlay(3, "white", quantile_obs[1]), "quantile", 3, "fp-3w"),
     ]
 
 
@@ -1587,7 +1601,7 @@ class TestReleaseGuardKeys:
         assert cal.RELEASE_GUARD_CHILD_OPENING_KEY == normalize_fen(board.fen())
 
     def test_pinned_module_constants(self):
-        assert cal.ARTIFACT_SCHEMA_VERSION == 2
+        assert cal.ARTIFACT_SCHEMA_VERSION == 3
         assert cal.COHORT_RULES_ID == "opening-cohort-rules-v1"
         assert cal.DEFAULT_MIN_OBSERVATIONS == 20
         assert cal.TIMESTAMP_FLOOR == datetime(2000, 1, 1, tzinfo=timezone.utc)
@@ -1605,6 +1619,11 @@ class TestFreezeByteStability:
         guards = [p for p in cohort.pairs if p.cohort_role == "release_guard"]
         assert {g.player_color for g in guards} == {"white", "black"}
         assert len({g.subject_id for g in guards}) == 1
+        assert all(
+            pair.session_mode_counts
+            == cal.SessionModeCounts(normal=_fz_game_count(pair.overlay), drill=0)
+            for pair in cohort.pairs
+        )
 
     def test_byte_identity_across_two_serializations(self):
         assert _fz_freeze() == _fz_freeze()
@@ -1617,7 +1636,7 @@ class TestFreezeByteStability:
         node.quality_sum = 0.1 + 0.2  # 0.30000000000000004
         overlay.edges[(_fz_root(), _fz_e4())].quality_sum = 2.0
         inputs = _fz_inputs()
-        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        inputs[2] = _fz_captured(overlay, "quantile", 3, "fp-2b")
         # node qc=3, edge qc=3, source_counts=3 still hold (only quality_sum changed).
         bs = _fz_freeze(inputs)
         assert b'"quality_sum":0.30000000000000004' in bs
@@ -1664,12 +1683,12 @@ class TestFreezeByteStability:
         overlay = _fz_overlay(2, "black", 25)
         next(iter(overlay.nodes.values())).last_live_at = datetime(2026, 6, 1, 0, 0, 0)  # naive
         inputs = _fz_inputs()
-        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        inputs[2] = _fz_captured(overlay, "quantile", 3, "fp-2b")
         with pytest.raises(cal.ArtifactSemanticError, match="timezone-aware"):
             _fz_freeze(inputs)
 
     def test_distinct_source_precondition(self):
-        dup = _fz_inputs() + [cal.CapturedPairInput(_fz_overlay(2, "black", 25), "quantile", 3, "dup")]
+        dup = _fz_inputs() + [_fz_captured(_fz_overlay(2, "black", 25), "quantile", 3, "dup")]
         with pytest.raises(cal.ArtifactSemanticError, match="duplicate source pair"):
             _fz_freeze(dup)
 
@@ -1677,7 +1696,7 @@ class TestFreezeByteStability:
         overlay = _fz_overlay(14, "white", 15)
         overlay.phase_samples = [PhaseSample(4, 8, None), PhaseSample(4, 8, None)]
         inputs = _fz_inputs()
-        inputs[0] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14w")
+        inputs[0] = _fz_captured(overlay, "release_guard", 5, "fp-14w")
         cohort = _fz_load(_fz_freeze(inputs))
         white_guard = next(p for p in cohort.pairs if p.player_color == "white" and p.cohort_role == "release_guard")
         assert len(white_guard.overlay.phase_samples) == 2
@@ -1702,6 +1721,22 @@ class TestSemanticRejectionTable:
         def p(pl):
             self._q_node(pl)["live_fails"] = -1
         _fz_reject(p, "live_fails")
+
+    @pytest.mark.parametrize("value", [True, -1, 1.5, "1"])
+    def test_session_mode_count_requires_non_negative_exact_int(self, value):
+        def p(pl):
+            pl["pairs"][2]["session_mode_counts"]["normal"] = value
+        _fz_reject(p, "session_mode_counts")
+
+    def test_session_mode_count_keys_are_closed(self):
+        def p(pl):
+            pl["pairs"][2]["session_mode_counts"]["other"] = 0
+        _fz_reject(p, "session_mode_counts")
+
+    def test_session_mode_total_must_match_frozen_session_tokens(self):
+        def p(pl):
+            pl["pairs"][2]["session_mode_counts"] = {"normal": 24, "drill": 0}
+        _fz_reject(p, "distinct session-token count")
 
     def test_quality_sum_gt_quality_count(self):
         def p(pl):
@@ -1896,7 +1931,7 @@ class TestSemanticRejectionTable:
 
     def test_unsupported_schema_version(self):
         def p(pl):
-            pl["header"]["schema_version"] = 3
+            pl["header"]["schema_version"] = 4
         _fz_reject(p, "unsupported schema", exc=cal.UnsupportedArtifactSchemaError)
 
     def test_format_malformed_cohort_rules(self):
@@ -1914,7 +1949,7 @@ class TestSemanticRejectionTable:
         overlay = _fz_overlay(2, "black", 25)
         next(iter(overlay.nodes.values())).last_live_at = None
         inputs = _fz_inputs()
-        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        inputs[2] = _fz_captured(overlay, "quantile", 3, "fp-2b")
         early = datetime(1999, 1, 1, tzinfo=timezone.utc)
         bs = _fz_freeze(inputs, header=_fz_header_input(as_of=early))
         _fz_reject_bytes(bs, _fz_prov(bs, header=json.loads(bs)["header"]), "TIMESTAMP_FLOOR")
@@ -1971,7 +2006,7 @@ def _fz_two_node_inputs():
     )
     overlay.source_counts["session_eval"] = 25
     inputs = _fz_inputs()
-    inputs[1] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14b")
+    inputs[1] = _fz_captured(overlay, "release_guard", 5, "fp-14b")
     return inputs
 
 
@@ -2011,7 +2046,7 @@ def _fz_shared_session_inputs():
     )
     overlay.source_counts["session_eval"] = 3
     inputs = _fz_inputs()
-    inputs[1] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14b")
+    inputs[1] = _fz_captured(overlay, "release_guard", 5, "fp-14b")
     return inputs
 
 
@@ -2103,7 +2138,7 @@ class TestProducerCanonicalStructure:
         # g10 before g2 → not strictly ascending by NUMERIC k.
         overlay = _fz_overlay(2, "black", 25)
         inputs = _fz_inputs()
-        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        inputs[2] = _fz_captured(overlay, "quantile", 3, "fp-2b")
         payload = json.loads(_fz_freeze(inputs))
         node = payload["pairs"][2]["nodes"][0]
         node["session_tokens"] = ["pair-02-g10", "pair-02-g2"]
@@ -2353,6 +2388,27 @@ class TestCaptureAttestation:
                                cal.UnsupportedArtifactSchemaError)
         assert "missing required" not in msg
 
+    def test_genuine_v2_artifact_requires_fresh_capture_not_missing_key_error(self):
+        payload = json.loads(_fz_freeze())
+        payload["header"]["schema_version"] = 2
+        for pair in payload["pairs"]:
+            del pair["session_mode_counts"]
+        bs = cal._canonical_dumps(payload)
+        msg = _fz_reject_bytes(
+            bs, _fz_prov(bs), "unsupported schema", cal.UnsupportedArtifactSchemaError
+        )
+        assert "missing required" not in msg
+
+    def test_genuine_v2_record_gets_version_diagnostic(self):
+        bs = _fz_freeze()
+        record = json.loads(_fz_prov(bs))
+        record["schema_version"] = 2
+        msg = _fz_reject_bytes(
+            bs, cal._canonical_dumps(record), "unsupported schema",
+            cal.UnsupportedArtifactSchemaError,
+        )
+        assert "missing required" not in msg
+
 
 class TestCohortMembership:
     def test_below_threshold_quantile_pair_rejected(self):
@@ -2385,7 +2441,7 @@ class TestOverlayTelemetryRoundtrip:
         overlay.phase_samples = [PhaseSample(4, 8, 20), PhaseSample(6, None, None)]
         overlay.source_counts = Counter({"session_eval": 20, "analysis_cache": 5})
         inputs = _fz_inputs()
-        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        inputs[2] = _fz_captured(overlay, "quantile", 3, "fp-2b")
         cohort = _fz_load(_fz_freeze(inputs))
         loaded = next(p for p in cohort.pairs if p.surrogate_user_id == 1).overlay
         assert loaded.excluded_sessions == 4
@@ -2470,7 +2526,9 @@ class TestArtifactShapeGuard:
             pairs.append(cal.LoadedPair(
                 pair_id=f"pair-{i:02d}", subject_id=subject, cohort_role=role,
                 surrogate_user_id=i + 1, player_color=color, evidence_seq=0,
-                inputs_fingerprint="fp", overlay=EvidenceOverlay(i + 1, color),
+                inputs_fingerprint="fp",
+                session_mode_counts=cal.SessionModeCounts(0, 0),
+                overlay=EvidenceOverlay(i + 1, color),
             ))
         return pairs
 
@@ -2492,10 +2550,10 @@ class TestArtifactShapeGuard:
 
     def test_split_guard_subjects_rejected(self):
         pairs = [
-            cal.LoadedPair("pair-00", "subject-00", "quantile", 1, "white", 0, "fp", EvidenceOverlay(1, "white")),
-            cal.LoadedPair("pair-01", "subject-01", "quantile", 2, "black", 0, "fp", EvidenceOverlay(2, "black")),
-            cal.LoadedPair("pair-02", "subject-02", "release_guard", 3, "white", 0, "fp", EvidenceOverlay(3, "white")),
-            cal.LoadedPair("pair-03", "subject-03", "release_guard", 4, "black", 0, "fp", EvidenceOverlay(4, "black")),
+            cal.LoadedPair("pair-00", "subject-00", "quantile", 1, "white", 0, "fp", cal.SessionModeCounts(0, 0), EvidenceOverlay(1, "white")),
+            cal.LoadedPair("pair-01", "subject-01", "quantile", 2, "black", 0, "fp", cal.SessionModeCounts(0, 0), EvidenceOverlay(2, "black")),
+            cal.LoadedPair("pair-02", "subject-02", "release_guard", 3, "white", 0, "fp", cal.SessionModeCounts(0, 0), EvidenceOverlay(3, "white")),
+            cal.LoadedPair("pair-03", "subject-03", "release_guard", 4, "black", 0, "fp", cal.SessionModeCounts(0, 0), EvidenceOverlay(4, "black")),
         ]
         with pytest.raises(cal.ReleaseGuardShapeError, match="share one subject_id"):
             cal.assert_artifact_shape(pairs)
@@ -2688,10 +2746,10 @@ def _bsi_inputs(quantile_colors=("black", "black")):
     zero named roots. That is the real shape the builder must reject — see
     TestPooledQuantilePrecondition, which uses exactly those inputs."""
     return [
-        cal.CapturedPairInput(_fz_overlay(14, "white", 15), "release_guard", 5, "fp-14w"),
-        cal.CapturedPairInput(_fz_overlay(14, "black", 15), "release_guard", 5, "fp-14b"),
-        cal.CapturedPairInput(_fz_overlay(2, quantile_colors[0], 25), "quantile", 3, "fp-2"),
-        cal.CapturedPairInput(_fz_overlay(3, quantile_colors[1], 22), "quantile", 3, "fp-3"),
+        _fz_captured(_fz_overlay(14, "white", 15), "release_guard", 5, "fp-14w"),
+        _fz_captured(_fz_overlay(14, "black", 15), "release_guard", 5, "fp-14b"),
+        _fz_captured(_fz_overlay(2, quantile_colors[0], 25), "quantile", 3, "fp-2"),
+        _fz_captured(_fz_overlay(3, quantile_colors[1], 22), "quantile", 3, "fp-3"),
     ]
 
 
@@ -3359,10 +3417,10 @@ class TestClockDeterminism:
         import app.opening_rootcalc as orc
         # Two quantile pairs BOTH black so >= 2 named scores pool per cell for cutoffs.
         inputs = [
-            cal.CapturedPairInput(_fz_overlay(14, "white", 22), "release_guard", 5, "fp-14w"),
-            cal.CapturedPairInput(_fz_overlay(14, "black", 21), "release_guard", 5, "fp-14b"),
-            cal.CapturedPairInput(_fz_overlay(2, "black", 25), "quantile", 3, "fp-2b"),
-            cal.CapturedPairInput(_fz_overlay(3, "black", 22), "quantile", 3, "fp-3b"),
+            _fz_captured(_fz_overlay(14, "white", 22), "release_guard", 5, "fp-14w"),
+            _fz_captured(_fz_overlay(14, "black", 21), "release_guard", 5, "fp-14b"),
+            _fz_captured(_fz_overlay(2, "black", 25), "quantile", 3, "fp-2b"),
+            _fz_captured(_fz_overlay(3, "black", 22), "quantile", 3, "fp-3b"),
         ]
         graph, roots, ap, pp, as_of, _prov = _bsi_artifact(tmp_path, inputs=inputs)
 

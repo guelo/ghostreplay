@@ -2,9 +2,10 @@
 """Historical opening-score v2 calibration tooling and synthetic regression.
 
 The report and release-selection paths preserve the evidence used to develop v2,
-but are not authority for the explicit sm-v2-4 product decision. The
-``emit-user14-fixture`` mode regenerates its shared synthetic regression without
-reading a database.
+but are not authority for the explicit sm-v2-5 product semantics. The
+``cutoff-readiness`` mode writes a private, non-authoritative population-readiness
+assessment, and ``emit-user14-fixture`` regenerates the shared synthetic regression
+without reading a database.
 
 Safety:
   * The default run performs **zero database writes**. It only reads evidence via
@@ -34,12 +35,14 @@ import math
 import os
 import platform
 import re
+import random
 import secrets
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import dataclasses
 from collections import Counter
 from dataclasses import InitVar, dataclass, field, replace
@@ -185,6 +188,7 @@ import chess  # noqa: E402
 
 from app.db import DATABASE_URL  # noqa: E402
 from app.fen import active_color, normalize_fen  # noqa: E402
+from app.models import GameSession  # noqa: E402
 from app.opening_evidence import (  # noqa: E402
     EdgeEvidence,
     EvidenceOverlay,
@@ -1332,7 +1336,12 @@ def build_grid_report(
 # capture_python_version / capture_chess_version). The key sets are closed, so widening
 # them is a schema bump: a v1 artifact/record is refused with
 # UnsupportedArtifactSchemaError, never a missing-keys error.
-ARTIFACT_SCHEMA_VERSION: int = 2
+#
+# v3 (g-cutoff-readiness): every pair carries exact distinct contributing-session
+# counts by persisted game_sessions.session_mode. A v2 artifact cannot reconstruct this
+# after the fact and is refused with UnsupportedArtifactSchemaError; readiness capture
+# must publish fresh v3 bytes.
+ARTIFACT_SCHEMA_VERSION: int = 3
 # The pinned lower instant used only to bound the offset range and keep offset
 # reconstruction (as_of - timedelta(us)) total. A fixed aware-UTC constant, never a
 # per-run value.
@@ -1458,6 +1467,18 @@ class RuntimeBinding:
 
 
 @dataclass(frozen=True)
+class SessionModeCounts:
+    """Distinct score-contributing sessions, classified by persisted session_mode."""
+
+    normal: int
+    drill: int
+
+    @property
+    def total(self) -> int:
+        return self.normal + self.drill
+
+
+@dataclass(frozen=True)
 class CapturedPairInput:
     """One raw production overlay plus the freeze-side metadata that does NOT ride on
     the bare ``EvidenceOverlay``. The pseudonyms are assigned INSIDE the freeze."""
@@ -1466,6 +1487,7 @@ class CapturedPairInput:
     cohort_role: str  # "quantile" | "release_guard"
     evidence_seq: int  # per-pair freshness sequence (>= 0)
     inputs_fingerprint: str  # per-pair freshness fingerprint (non-empty)
+    session_mode_counts: SessionModeCounts
 
 
 @dataclass(frozen=True)
@@ -1522,6 +1544,7 @@ class LoadedPair:
     player_color: str
     evidence_seq: int
     inputs_fingerprint: str
+    session_mode_counts: SessionModeCounts
     overlay: EvidenceOverlay
 
 
@@ -1723,6 +1746,10 @@ def _freeze_pair(
         "surrogate_user_id": surrogate,
         "evidence_seq": cp.evidence_seq,
         "inputs_fingerprint": cp.inputs_fingerprint,
+        "session_mode_counts": {
+            "normal": cp.session_mode_counts.normal,
+            "drill": cp.session_mode_counts.drill,
+        },
         # Zero-valued labels are OMITTED (unary-plus drops non-positive counts) so the
         # bytes are a pure function of which SOURCE_* labels actually fired.
         "source_counts": dict(+Counter(overlay.source_counts)),
@@ -1771,7 +1798,7 @@ def _freeze_edge(edge: EdgeEvidence) -> dict:
 # ---- Decode hardening + type/shape primitives (bool-is-not-int) ----
 
 
-def _hardened_loads(raw: bytes, err: type[FrozenArtifactError]):
+def _hardened_loads(raw: bytes, err: type[ValueError]):
     """``json.loads`` with a parse_constant raiser (Infinity/NaN refused, symmetric with
     the encoder's ``allow_nan=False``) and a duplicate-object-key hook (``json.loads``
     otherwise silently last-write-wins). ``json.loads`` accepts bytes directly."""
@@ -1884,8 +1911,8 @@ _HEADER_KEYS = frozenset({
 })
 _PAIR_KEYS = frozenset({
     "pair_id", "player_color", "subject_id", "cohort_role", "surrogate_user_id",
-    "evidence_seq", "inputs_fingerprint", "source_counts", "excluded_sessions",
-    "phase_samples", "nodes", "edges",
+    "evidence_seq", "inputs_fingerprint", "session_mode_counts", "source_counts",
+    "excluded_sessions", "phase_samples", "nodes", "edges",
 })
 _NODE_KEYS = frozenset({
     "fen", "quality_sum", "quality_count", "live_attempts", "live_passes",
@@ -2033,6 +2060,14 @@ def _validate_source_counts(obj: object, label: str) -> dict[str, int]:
         # (or negative) is non-canonical and REJECTS here (its own diagnostic).
         result[key] = _check_int(value, f"{label}[{key!r}]", minimum=1)
     return result
+
+
+def _validate_session_mode_counts(obj: object, label: str) -> SessionModeCounts:
+    values = _require_keys(obj, frozenset({"normal", "drill"}), label)
+    return SessionModeCounts(
+        normal=_check_int(values["normal"], f"{label}.normal", minimum=0),
+        drill=_check_int(values["drill"], f"{label}.drill", minimum=0),
+    )
 
 
 def _validate_phase_samples(arr: object, label: str) -> list[PhaseSample]:
@@ -2257,6 +2292,9 @@ def _validate_pair(pair: object, index: int, header: LoadedHeader) -> LoadedPair
         )
     evidence_seq = _check_int(obj["evidence_seq"], f"{label}.evidence_seq", minimum=0)
     inputs_fingerprint = _check_nonempty_str(obj["inputs_fingerprint"], f"{label}.inputs_fingerprint")
+    session_mode_counts = _validate_session_mode_counts(
+        obj["session_mode_counts"], f"{label}.session_mode_counts"
+    )
     source_counts = _validate_source_counts(obj["source_counts"], f"{label}.source_counts")
     excluded_sessions = _check_int(obj["excluded_sessions"], f"{label}.excluded_sessions", minimum=0)
     phase_samples = _validate_phase_samples(obj["phase_samples"], f"{label}.phase_samples")
@@ -2318,6 +2356,11 @@ def _validate_pair(pair: object, index: int, header: LoadedHeader) -> LoadedPair
             f"{label}: session-token union is not the contiguous zero-based set "
             f"{{{pair_id}-g0 … {pair_id}-g{len(token_union) - 1}}}"
         )
+    if session_mode_counts.total != len(token_union):
+        raise ArtifactSemanticError(
+            f"{label}: session_mode_counts total {session_mode_counts.total} != "
+            f"distinct session-token count {len(token_union)}"
+        )
 
     overlay = EvidenceOverlay(user_id=surrogate, player_color=player_color)
     overlay.nodes = {fen: ev for fen, ev, _ in node_items}
@@ -2334,6 +2377,7 @@ def _validate_pair(pair: object, index: int, header: LoadedHeader) -> LoadedPair
         player_color=player_color,
         evidence_seq=evidence_seq,
         inputs_fingerprint=inputs_fingerprint,
+        session_mode_counts=session_mode_counts,
         overlay=overlay,
     )
 
@@ -4331,6 +4375,10 @@ class CaptureEpochUnavailableError(CaptureError):
     value can vouch for quiescence — a hard fail, never treated as quiescence."""
 
 
+class CaptureSessionMixError(CaptureError):
+    """A contributing session cannot be classified exactly as normal or drill."""
+
+
 class CaptureReleaseGuardShapeError(CaptureError):
     """The release-guard query returned other than exactly two {white, black} pairs."""
 
@@ -4382,6 +4430,12 @@ class _PairSample:
     evidence_seq: int
     inputs_fingerprint: str
     cache_epoch: int | None
+
+
+@dataclass(frozen=True)
+class _SessionModeSample:
+    counts: SessionModeCounts
+    fingerprint: str
 
 
 # ---- Precondition refusals (each a separate function so the fence/publication
@@ -4994,6 +5048,86 @@ def _collect_pair_samples(db, pairs) -> dict[tuple[int, str], _PairSample]:
     return out
 
 
+def _contributing_session_ids(overlay: EvidenceOverlay) -> tuple[str, ...]:
+    """Raw session ids that actually materialised score evidence in this overlay."""
+    return tuple(sorted({sid for node in overlay.nodes.values() for sid in node.session_ids}))
+
+
+def _collect_session_mode_sample(db, overlay: EvidenceOverlay) -> _SessionModeSample:
+    """Classify every score-contributing session and bind the exact mapping.
+
+    The artifact retains counts only. The fingerprint exists solely for capture's
+    post-snapshot fence: comparing the complete sorted mapping catches a compensating
+    normal→drill / drill→normal change that would leave aggregate counts unchanged.
+    """
+    session_ids = _contributing_session_ids(overlay)
+    if not session_ids:
+        return _SessionModeSample(
+            counts=SessionModeCounts(normal=0, drill=0),
+            fingerprint=hashlib.sha256(_canonical_dumps([])).hexdigest(),
+        )
+
+    try:
+        database_ids = [uuid.UUID(session_id) for session_id in session_ids]
+    except (TypeError, ValueError) as exc:
+        raise CaptureSessionMixError(
+            "a score-contributing session id is not a canonical UUID; the readiness "
+            "artifact was not published"
+        ) from exc
+
+    rows = (
+        db.query(GameSession.id, GameSession.session_mode)
+        .filter(GameSession.id.in_(database_ids))
+        .all()
+    )
+    mapping = {str(session_id): str(mode) for session_id, mode in rows}
+    if set(mapping) != set(session_ids):
+        raise CaptureSessionMixError(
+            "a score-contributing session could not be resolved while sampling "
+            "session_mode; the readiness artifact was not published"
+        )
+    if any(mode not in {"normal", "drill"} for mode in mapping.values()):
+        raise CaptureSessionMixError(
+            "a score-contributing session has an unsupported session_mode; the readiness "
+            "artifact was not published"
+        )
+
+    counts = Counter(mapping.values())
+    canonical_mapping = [[session_id, mapping[session_id]] for session_id in session_ids]
+    return _SessionModeSample(
+        counts=SessionModeCounts(
+            normal=counts["normal"],
+            drill=counts["drill"],
+        ),
+        fingerprint=hashlib.sha256(_canonical_dumps(canonical_mapping)).hexdigest(),
+    )
+
+
+def _collect_post_snapshot_session_mode_samples(
+    db,
+    overlays: Mapping[tuple[int, str], EvidenceOverlay],
+    pairs: Sequence[tuple[int, str]],
+) -> tuple[
+    dict[tuple[int, str], _SessionModeSample],
+    set[tuple[int, str]],
+]:
+    """Re-read mode mappings, classifying newly invalid mappings as movement.
+
+    Snapshot-time invalidity is a hard refusal in ``_collect_session_mode_sample``.
+    Here the same mappings were already valid inside the snapshot, so a missing or
+    unsupported row means they moved after it closed and the bounded capture loop should
+    retry like it does for every other scoped movement signal.
+    """
+    samples: dict[tuple[int, str], _SessionModeSample] = {}
+    unclassifiable: set[tuple[int, str]] = set()
+    for pair in pairs:
+        try:
+            samples[pair] = _collect_session_mode_sample(db, overlays[pair])
+        except CaptureSessionMixError:
+            unclassifiable.add(pair)
+    return samples, unclassifiable
+
+
 def capture_cohort(
     *,
     session_factory: Callable[[], "object"],
@@ -5047,6 +5181,9 @@ def capture_cohort(
                 fence_pairs = list(dict.fromkeys([*raw_pairs, *guard_pairs]))
                 snap_samples = _collect_pair_samples(db, fence_pairs)
                 overlays = {p: overlay_evidence(db, p[0], p[1], graph) for p in fence_pairs}
+                session_mode_samples = {
+                    p: _collect_session_mode_sample(db, overlays[p]) for p in fence_pairs
+                }
                 obs_totals = {
                     p: sum(node.quality_count for node in overlays[p].nodes.values())
                     for p in fence_pairs
@@ -5079,6 +5216,12 @@ def capture_cohort(
                 re_present = set(re_raw) | set(re_guard)
                 common = [p for p in fence_pairs if p in re_present]
                 re_samples = _collect_pair_samples(re_db, common)
+                (
+                    re_session_mode_samples,
+                    re_session_mode_unclassifiable,
+                ) = _collect_post_snapshot_session_mode_samples(
+                    re_db, overlays, common
+                )
                 post_epoch = current_cache_epoch(re_db)
 
             reasons: list[str] = []
@@ -5093,6 +5236,19 @@ def capture_cohort(
                     reasons.append(
                         f"pair at surrogate position {fence_pairs.index(p)} moved "
                         "(evidence_seq / inputs_fingerprint)"
+                    )
+                if p in re_session_mode_unclassifiable:
+                    reasons.append(
+                        f"pair at surrogate position {fence_pairs.index(p)} moved "
+                        "(score-contributing session_mode mapping became unclassifiable)"
+                    )
+                elif (
+                    session_mode_samples[p].fingerprint
+                    != re_session_mode_samples[p].fingerprint
+                ):
+                    reasons.append(
+                        f"pair at surrogate position {fence_pairs.index(p)} moved "
+                        "(score-contributing session_mode mapping)"
                     )
             scoped_moved = bool(reasons)
 
@@ -5166,12 +5322,14 @@ def capture_cohort(
             CapturedPairInput(
                 overlays[p], "release_guard",
                 snap_samples[p].evidence_seq, snap_samples[p].inputs_fingerprint,
+                session_mode_samples[p].counts,
             )
             for p in guard_pairs
         ] + [
             CapturedPairInput(
                 overlays[p], "quantile",
                 snap_samples[p].evidence_seq, snap_samples[p].inputs_fingerprint,
+                session_mode_samples[p].counts,
             )
             for p in quantile_pairs
         ]
@@ -7895,6 +8053,1491 @@ def _path_redactor(paths: Sequence[str]) -> Callable[[str], str]:
 
 
 # ---------------------------------------------------------------------------
+# Private cutoff-cohort readiness report (g-cutoff-readiness)
+# ---------------------------------------------------------------------------
+
+READINESS_REPORT_SCHEMA_VERSION = 2
+READINESS_POLICY_VERSION = 2
+READINESS_BOOTSTRAP_REPLICATES = 1_000
+READINESS_MIN_SUBJECTS = 20
+READINESS_MIN_SUBJECTS_PER_COLOR = 6
+READINESS_MIN_NORMAL_SUBJECTS = 12
+READINESS_MIN_NORMAL_SUBJECTS_PER_COLOR = 4
+READINESS_MIN_NORMAL_SESSION_SHARE = 0.60
+READINESS_MAX_SUBJECT_SESSION_SHARE = 0.20
+READINESS_MAX_SUBJECT_SCORE_SHARE = 0.15
+READINESS_MAX_LOO_GRADE_REASSIGNMENT = 0.05
+READINESS_MAX_BOOTSTRAP_COLLISION_RATE = 0.01
+READINESS_MAX_BOOTSTRAP_P95_GRADE_REASSIGNMENT = 0.10
+READINESS_MIN_BASELINE_AGE_DAYS = 14.0
+READINESS_MAX_TEMPORAL_GRADE_REASSIGNMENT = 0.05
+
+_READINESS_CHECK_NAMES: tuple[str, ...] = (
+    "captured_model_current",
+    "subject_count",
+    "white_subject_count",
+    "black_subject_count",
+    "normal_subject_count",
+    "normal_white_subject_count",
+    "normal_black_subject_count",
+    "normal_session_share",
+    "subject_session_concentration",
+    "subject_score_concentration",
+    "base_cutoffs_derivable",
+    "leave_one_out_complete",
+    "leave_one_out_grade_stability",
+    "bootstrap_sample_sufficiency",
+    "bootstrap_collision_stability",
+    "bootstrap_grade_stability",
+    "temporal_baseline_compatible",
+    "temporal_baseline_age",
+    "temporal_grade_stability",
+)
+
+
+class ReadinessReportError(ValueError):
+    """A private readiness report cannot be produced or consumed honestly."""
+
+
+class ReadinessReportSchemaError(ReadinessReportError):
+    """A full or redacted readiness payload violates its closed schema."""
+
+
+class BaselineReadinessReportError(ReadinessReportError):
+    """An archived readiness report cannot safely serve as a baseline input."""
+
+
+@dataclass(frozen=True)
+class CutoffReadinessPair:
+    pair_id: str
+    subject_id: str
+    player_color: str
+    session_mode_counts: SessionModeCounts
+    named_scores: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pair_id, str) or not _PAIR_ID_RE.match(self.pair_id):
+            raise ReadinessReportError("readiness pair_id has invalid format")
+        if not isinstance(self.subject_id, str) or not _SUBJECT_ID_RE.match(self.subject_id):
+            raise ReadinessReportError("readiness subject_id has invalid format")
+        if self.player_color not in _VALID_COLORS:
+            raise ReadinessReportError("readiness pair player_color must be white or black")
+        if not isinstance(self.session_mode_counts, SessionModeCounts):
+            raise ReadinessReportError("readiness pair session_mode_counts has the wrong type")
+        if any(
+            type(value) is not int or value < 0
+            for value in (
+                self.session_mode_counts.normal,
+                self.session_mode_counts.drill,
+            )
+        ):
+            raise ReadinessReportError(
+                "readiness pair session-mode counts must be non-negative exact integers"
+            )
+        if any(
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or not 0.0 <= float(score) <= 100.0
+            for score in self.named_scores
+        ):
+            raise ReadinessReportError("readiness pair named scores must be finite numbers in [0,100]")
+        object.__setattr__(self, "named_scores", tuple(float(s) for s in self.named_scores))
+
+
+def _readiness_policy_payload() -> dict[str, object]:
+    return {
+        "version": READINESS_POLICY_VERSION,
+        "bootstrap_replicates": READINESS_BOOTSTRAP_REPLICATES,
+        "min_subjects": READINESS_MIN_SUBJECTS,
+        "min_subjects_per_color": READINESS_MIN_SUBJECTS_PER_COLOR,
+        "min_normal_subjects": READINESS_MIN_NORMAL_SUBJECTS,
+        "min_normal_subjects_per_color": READINESS_MIN_NORMAL_SUBJECTS_PER_COLOR,
+        "min_normal_session_share": READINESS_MIN_NORMAL_SESSION_SHARE,
+        "max_subject_session_share": READINESS_MAX_SUBJECT_SESSION_SHARE,
+        "max_subject_score_share": READINESS_MAX_SUBJECT_SCORE_SHARE,
+        "max_leave_one_out_grade_reassignment": READINESS_MAX_LOO_GRADE_REASSIGNMENT,
+        "max_bootstrap_collision_rate": READINESS_MAX_BOOTSTRAP_COLLISION_RATE,
+        "max_bootstrap_p95_grade_reassignment": (
+            READINESS_MAX_BOOTSTRAP_P95_GRADE_REASSIGNMENT
+        ),
+        "min_baseline_age_days": READINESS_MIN_BASELINE_AGE_DAYS,
+        "max_temporal_grade_reassignment": READINESS_MAX_TEMPORAL_GRADE_REASSIGNMENT,
+    }
+
+
+def _cutoffs_payload(cutoffs: Cutoffs | None) -> dict[str, int] | None:
+    return dataclasses.asdict(cutoffs) if cutoffs is not None else None
+
+
+def _readiness_keyset(
+    obj: object, expected: frozenset[str], label: str
+) -> dict[str, object]:
+    if not isinstance(obj, dict) or set(obj) != expected:
+        raise ReadinessReportSchemaError(f"{label} does not match its closed key inventory")
+    return obj
+
+
+def _readiness_int(value: object, label: str, *, minimum: int | None = None) -> int:
+    if type(value) is not int or (minimum is not None and value < minimum):
+        raise ReadinessReportSchemaError(f"{label} must be an exact integer in range")
+    return value
+
+
+def _cutoffs_from_payload(payload: object) -> Cutoffs:
+    obj = _readiness_keyset(
+        payload, frozenset({"a", "b", "c", "d", "alert", "watch"}),
+        "candidate_cutoffs",
+    )
+    values = {
+        key: _readiness_int(obj[key], f"candidate_cutoffs.{key}")
+        for key in ("a", "b", "c", "d", "alert", "watch")
+    }
+    cutoffs = Cutoffs(**values)
+    if not (cutoffs.d < cutoffs.c < cutoffs.b < cutoffs.a):
+        raise ReadinessReportSchemaError("candidate_cutoffs grade ordering is not strict")
+    if not cutoffs.alert < cutoffs.watch:
+        raise ReadinessReportSchemaError("candidate_cutoffs tone ordering is not strict")
+    return cutoffs
+
+
+def _grade_reassignment_rate(
+    scores: Sequence[float], baseline: Cutoffs, comparison: Cutoffs
+) -> float:
+    if not scores:
+        return 1.0
+    changed = sum(
+        provisional_grade(score, baseline) != provisional_grade(score, comparison)
+        for score in scores
+    )
+    return changed / len(scores)
+
+
+def _effective_subject_count(shares: Iterable[float]) -> float:
+    denominator = sum(share * share for share in shares)
+    return 0.0 if denominator == 0.0 else 1.0 / denominator
+
+
+def _readiness_check(
+    name: str,
+    measured: float | int | str,
+    limit: float | int | str,
+    op: str,
+) -> dict[str, object]:
+    passed = bool(_eval_op(measured, op, limit))
+    check = GateCheck(name=name, measured=measured, limit=limit, op=op, passed=passed)
+    return dataclasses.asdict(check)
+
+
+def _readiness_optional_max_check(
+    name: str,
+    measured: float | None,
+    limit: float,
+    *,
+    unavailable_reason: str = "not_attempted",
+    unavailable_requirement: str = "attempted",
+) -> dict[str, object]:
+    """Fail closed without inventing a number for unavailable analysis output."""
+    if measured is None:
+        return _readiness_check(
+            name, unavailable_reason, unavailable_requirement, "=="
+        )
+    return _readiness_check(name, measured, limit, "<=")
+
+
+def _build_readiness_checks(
+    *,
+    captured_model_version: str,
+    subject_count: int,
+    white_subject_count: int,
+    black_subject_count: int,
+    normal_subject_count: int,
+    normal_white_subject_count: int,
+    normal_black_subject_count: int,
+    normal_session_share: float,
+    max_subject_session_share: float,
+    max_subject_score_share: float,
+    base_cutoffs_derivable: bool,
+    loo_successful_subjects: int,
+    loo_expected_subjects: int,
+    max_loo_grade_reassignment: float,
+    bootstrap_sufficient_replicates: int,
+    bootstrap_attempted_replicates: int,
+    bootstrap_collision_rate: float | None,
+    bootstrap_grade_reassignment_p95: float | None,
+    temporal_compatible: bool,
+    temporal_age_days: float,
+    temporal_grade_reassignment: float,
+) -> list[dict[str, object]]:
+    """Build the one pinned check inventory used by producer and validator."""
+    checks = [
+        _readiness_check(
+            "captured_model_current",
+            captured_model_version,
+            SCORE_MODEL_VERSION,
+            "==",
+        ),
+        _readiness_check("subject_count", subject_count, READINESS_MIN_SUBJECTS, ">="),
+        _readiness_check(
+            "white_subject_count",
+            white_subject_count,
+            READINESS_MIN_SUBJECTS_PER_COLOR,
+            ">=",
+        ),
+        _readiness_check(
+            "black_subject_count",
+            black_subject_count,
+            READINESS_MIN_SUBJECTS_PER_COLOR,
+            ">=",
+        ),
+        _readiness_check(
+            "normal_subject_count",
+            normal_subject_count,
+            READINESS_MIN_NORMAL_SUBJECTS,
+            ">=",
+        ),
+        _readiness_check(
+            "normal_white_subject_count",
+            normal_white_subject_count,
+            READINESS_MIN_NORMAL_SUBJECTS_PER_COLOR,
+            ">=",
+        ),
+        _readiness_check(
+            "normal_black_subject_count",
+            normal_black_subject_count,
+            READINESS_MIN_NORMAL_SUBJECTS_PER_COLOR,
+            ">=",
+        ),
+        _readiness_check(
+            "normal_session_share",
+            normal_session_share,
+            READINESS_MIN_NORMAL_SESSION_SHARE,
+            ">=",
+        ),
+        _readiness_check(
+            "subject_session_concentration",
+            max_subject_session_share,
+            READINESS_MAX_SUBJECT_SESSION_SHARE,
+            "<=",
+        ),
+        _readiness_check(
+            "subject_score_concentration",
+            max_subject_score_share,
+            READINESS_MAX_SUBJECT_SCORE_SHARE,
+            "<=",
+        ),
+        _readiness_check(
+            "base_cutoffs_derivable", int(base_cutoffs_derivable), 1, "=="
+        ),
+        _readiness_check(
+            "leave_one_out_complete",
+            loo_successful_subjects,
+            loo_expected_subjects,
+            "==",
+        ),
+        _readiness_check(
+            "leave_one_out_grade_stability",
+            max_loo_grade_reassignment,
+            READINESS_MAX_LOO_GRADE_REASSIGNMENT,
+            "<=",
+        ),
+        _readiness_check(
+            "bootstrap_sample_sufficiency",
+            bootstrap_sufficient_replicates,
+            READINESS_BOOTSTRAP_REPLICATES,
+            "==",
+        ),
+        _readiness_optional_max_check(
+            "bootstrap_collision_stability",
+            bootstrap_collision_rate,
+            READINESS_MAX_BOOTSTRAP_COLLISION_RATE,
+        ),
+        _readiness_optional_max_check(
+            "bootstrap_grade_stability",
+            bootstrap_grade_reassignment_p95,
+            READINESS_MAX_BOOTSTRAP_P95_GRADE_REASSIGNMENT,
+            unavailable_reason=(
+                "not_attempted"
+                if bootstrap_attempted_replicates == 0
+                else "no_successful_replicates"
+            ),
+            unavailable_requirement=(
+                "attempted"
+                if bootstrap_attempted_replicates == 0
+                else "successful_replicates"
+            ),
+        ),
+        _readiness_check(
+            "temporal_baseline_compatible", int(temporal_compatible), 1, "=="
+        ),
+        _readiness_check(
+            "temporal_baseline_age",
+            temporal_age_days,
+            READINESS_MIN_BASELINE_AGE_DAYS,
+            ">=",
+        ),
+        _readiness_check(
+            "temporal_grade_stability",
+            temporal_grade_reassignment,
+            READINESS_MAX_TEMPORAL_GRADE_REASSIGNMENT,
+            "<=",
+        ),
+    ]
+    if tuple(check["name"] for check in checks) != _READINESS_CHECK_NAMES:
+        raise AssertionError("readiness check inventory drift")
+    return checks
+
+
+def _parse_readiness_as_of(value: object, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise ReadinessReportSchemaError(f"{label} must be a canonical timestamp string")
+    try:
+        parsed = datetime.strptime(value, _AS_OF_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ReadinessReportSchemaError(f"{label} must use canonical UTC spelling") from exc
+    if _canonical_as_of(parsed) != value:
+        raise ReadinessReportSchemaError(f"{label} must use canonical UTC spelling")
+    return parsed
+
+
+def _bootstrap_readiness(
+    *,
+    subject_scores: Mapping[str, tuple[float, ...]],
+    full_scores: tuple[float, ...],
+    base_cutoffs: Cutoffs | None,
+    artifact_sha256: str,
+) -> dict[str, object]:
+    if base_cutoffs is None or len(subject_scores) < 2:
+        return {
+            "requested_replicates": READINESS_BOOTSTRAP_REPLICATES,
+            "attempted_replicates": 0,
+            "successful_replicates": 0,
+            "cutoff_collision_count": 0,
+            "insufficient_score_count": 0,
+            "collision_rate": None,
+            "grade_reassignment_p95": None,
+            "cutoff_intervals": None,
+        }
+
+    seed_material = f"{artifact_sha256}:{READINESS_POLICY_VERSION}".encode("ascii")
+    rng = random.Random(int.from_bytes(hashlib.sha256(seed_material).digest()[:8], "big"))
+    subject_ids = tuple(sorted(subject_scores))
+    reassignments: list[float] = []
+    cutoff_samples: dict[str, list[float]] = {
+        key: [] for key in ("a", "b", "c", "d", "alert", "watch")
+    }
+    collisions = 0
+    insufficient_scores = 0
+    for _ in range(READINESS_BOOTSTRAP_REPLICATES):
+        drawn = [rng.choice(subject_ids) for _ in subject_ids]
+        sample_scores = [score for subject in drawn for score in subject_scores[subject]]
+        if len(sample_scores) < 2:
+            insufficient_scores += 1
+            continue
+        try:
+            sample_cutoffs = derive_cutoffs(sample_scores)
+        except CutoffCollision:
+            collisions += 1
+            continue
+        reassignments.append(
+            _grade_reassignment_rate(full_scores, base_cutoffs, sample_cutoffs)
+        )
+        for key in cutoff_samples:
+            cutoff_samples[key].append(float(getattr(sample_cutoffs, key)))
+
+    intervals = None
+    if reassignments:
+        intervals = {
+            key: {
+                "p025": percentile(sorted(values), 2.5),
+                "p975": percentile(sorted(values), 97.5),
+            }
+            for key, values in cutoff_samples.items()
+        }
+    return {
+        "requested_replicates": READINESS_BOOTSTRAP_REPLICATES,
+        "attempted_replicates": READINESS_BOOTSTRAP_REPLICATES,
+        "successful_replicates": len(reassignments),
+        "cutoff_collision_count": collisions,
+        "insufficient_score_count": insufficient_scores,
+        "collision_rate": collisions / READINESS_BOOTSTRAP_REPLICATES,
+        "grade_reassignment_p95": (
+            percentile(sorted(reassignments), 95.0) if reassignments else None
+        ),
+        "cutoff_intervals": intervals,
+    }
+
+
+def build_cutoff_readiness_report(
+    *,
+    artifact_sha256: str,
+    provenance_record_sha256: str,
+    artifact_as_of: datetime,
+    captured_model_version: str,
+    scored_model_version: str,
+    config_fingerprint: str,
+    scorer_source_digest_value: str,
+    pairs: Sequence[CutoffReadinessPair],
+    baseline_report: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Pure population assessment over pseudonymous quantile pairs.
+
+    The resulting candidate cutoffs and every measured operand remain private. The
+    caller validates and publishes this payload before emitting a redacted summary.
+    """
+    _require_aware(artifact_as_of, "artifact_as_of")
+    quantile_pairs = tuple(pairs)
+    if not quantile_pairs:
+        raise ReadinessReportError("readiness assessment requires at least one quantile pair")
+    if len({p.pair_id for p in quantile_pairs}) != len(quantile_pairs):
+        raise ReadinessReportError("readiness assessment received duplicate pair ids")
+
+    by_subject: dict[str, list[CutoffReadinessPair]] = {}
+    for pair in quantile_pairs:
+        by_subject.setdefault(pair.subject_id, []).append(pair)
+    subject_ids = tuple(sorted(by_subject))
+    subject_scores = {
+        subject: tuple(score for pair in by_subject[subject] for score in pair.named_scores)
+        for subject in subject_ids
+    }
+    full_scores = tuple(score for subject in subject_ids for score in subject_scores[subject])
+
+    colors = {
+        color: {pair.subject_id for pair in quantile_pairs if pair.player_color == color}
+        for color in _VALID_COLORS
+    }
+    normal_subjects = {
+        subject for subject in subject_ids
+        if sum(pair.session_mode_counts.normal for pair in by_subject[subject]) > 0
+    }
+    normal_colors = {
+        color: {
+            pair.subject_id for pair in quantile_pairs
+            if pair.player_color == color and pair.session_mode_counts.normal > 0
+        }
+        for color in _VALID_COLORS
+    }
+    normal_colors_by_subject = {
+        subject: sorted({
+            pair.player_color
+            for pair in by_subject[subject]
+            if pair.session_mode_counts.normal > 0
+        })
+        for subject in subject_ids
+    }
+    subject_sessions = {
+        subject: sum(pair.session_mode_counts.total for pair in by_subject[subject])
+        for subject in subject_ids
+    }
+    subject_score_counts = {subject: len(subject_scores[subject]) for subject in subject_ids}
+    normal_sessions = sum(
+        pair.session_mode_counts.normal for pair in quantile_pairs
+    )
+    drill_sessions = sum(pair.session_mode_counts.drill for pair in quantile_pairs)
+    total_sessions = normal_sessions + drill_sessions
+    total_score_count = len(full_scores)
+    session_shares = {
+        subject: (subject_sessions[subject] / total_sessions if total_sessions else 1.0)
+        for subject in subject_ids
+    }
+    score_shares = {
+        subject: (
+            subject_score_counts[subject] / total_score_count if total_score_count else 1.0
+        )
+        for subject in subject_ids
+    }
+    normal_session_share = normal_sessions / total_sessions if total_sessions else 0.0
+    max_session_share = max(session_shares.values(), default=1.0)
+    max_score_share = max(score_shares.values(), default=1.0)
+
+    base_cutoffs: Cutoffs | None = None
+    if len(full_scores) < 2:
+        cutoff_derivation_status = "insufficient_scores"
+    else:
+        try:
+            base_cutoffs = derive_cutoffs(list(full_scores))
+            cutoff_derivation_status = "success"
+        except CutoffCollision:
+            cutoff_derivation_status = "cutoff_collision"
+
+    leave_one_out: list[dict[str, object]] = []
+    loo_success = 0
+    max_loo_reassignment = 1.0
+    if base_cutoffs is not None:
+        rates: list[float] = []
+        for subject in subject_ids:
+            sample = [
+                score for other in subject_ids if other != subject
+                for score in subject_scores[other]
+            ]
+            if len(sample) < 2:
+                leave_one_out.append({
+                    "subject_id": subject,
+                    "failure_reason": "insufficient_scores",
+                    "grade_reassignment_rate": None,
+                    "cutoffs": None,
+                })
+                continue
+            try:
+                cutoffs = derive_cutoffs(sample)
+            except CutoffCollision:
+                leave_one_out.append({
+                    "subject_id": subject,
+                    "failure_reason": "cutoff_collision",
+                    "grade_reassignment_rate": None,
+                    "cutoffs": None,
+                })
+                continue
+            rate = _grade_reassignment_rate(full_scores, base_cutoffs, cutoffs)
+            rates.append(rate)
+            loo_success += 1
+            leave_one_out.append({
+                "subject_id": subject,
+                "failure_reason": None,
+                "grade_reassignment_rate": rate,
+                "cutoffs": _cutoffs_payload(cutoffs),
+            })
+        max_loo_reassignment = max(rates, default=1.0)
+
+    bootstrap = _bootstrap_readiness(
+        subject_scores=subject_scores,
+        full_scores=full_scores,
+        base_cutoffs=base_cutoffs,
+        artifact_sha256=artifact_sha256,
+    )
+
+    temporal_compatible = False
+    temporal_age_days = 0.0
+    temporal_reassignment = 1.0
+    baseline_digest = None
+    if baseline_report is not None:
+        try:
+            baseline = _validate_readiness_baseline_envelope(baseline_report)
+        except ReadinessReportError as exc:
+            raise BaselineReadinessReportError(
+                "the archived readiness baseline failed envelope validation"
+            ) from exc
+        baseline_identity = baseline["identity"]
+        assert isinstance(baseline_identity, dict)
+        baseline_digest = baseline["report_sha256"]
+        baseline_cutoffs_payload = baseline["candidate_cutoffs"]
+        baseline_claims_current_contract = bool(
+            baseline["schema_version"] == READINESS_REPORT_SCHEMA_VERSION
+            and baseline["policy"] == _readiness_policy_payload()
+            and baseline_identity["scored_model_version"] == SCORE_MODEL_VERSION
+            and baseline_identity["config_fingerprint"]
+            == _cfg_fp(SM_V2_5_DEFAULT_CELL)
+        )
+        if baseline_claims_current_contract:
+            try:
+                validate_cutoff_readiness_report(baseline)
+            except ReadinessReportError as exc:
+                raise BaselineReadinessReportError(
+                    "the archived readiness baseline claimed the current contract but "
+                    "failed full validation"
+                ) from exc
+        temporal_compatible = bool(
+            baseline_claims_current_contract
+            and baseline_identity["captured_model_version"] == captured_model_version
+            and baseline_identity["scored_model_version"] == scored_model_version
+            and baseline_identity["config_fingerprint"] == config_fingerprint
+            and baseline_identity["artifact_sha256"] != artifact_sha256
+            and baseline_cutoffs_payload is not None
+            and base_cutoffs is not None
+        )
+        baseline_as_of = _parse_readiness_as_of(
+            baseline_identity["artifact_as_of"], "baseline.identity.artifact_as_of"
+        )
+        temporal_age_days = (artifact_as_of - baseline_as_of).total_seconds() / 86_400.0
+        if temporal_compatible:
+            temporal_reassignment = _grade_reassignment_rate(
+                full_scores,
+                _cutoffs_from_payload(baseline_cutoffs_payload),
+                base_cutoffs,
+            )
+
+    checks = _build_readiness_checks(
+        captured_model_version=captured_model_version,
+        subject_count=len(subject_ids),
+        white_subject_count=len(colors["white"]),
+        black_subject_count=len(colors["black"]),
+        normal_subject_count=len(normal_subjects),
+        normal_white_subject_count=len(normal_colors["white"]),
+        normal_black_subject_count=len(normal_colors["black"]),
+        normal_session_share=normal_session_share,
+        max_subject_session_share=max_session_share,
+        max_subject_score_share=max_score_share,
+        base_cutoffs_derivable=base_cutoffs is not None,
+        loo_successful_subjects=loo_success,
+        loo_expected_subjects=len(subject_ids),
+        max_loo_grade_reassignment=max_loo_reassignment,
+        bootstrap_sufficient_replicates=(
+            int(bootstrap["successful_replicates"])
+            + int(bootstrap["cutoff_collision_count"])
+        ),
+        bootstrap_attempted_replicates=int(bootstrap["attempted_replicates"]),
+        bootstrap_collision_rate=(
+            float(bootstrap["collision_rate"])
+            if bootstrap["collision_rate"] is not None else None
+        ),
+        bootstrap_grade_reassignment_p95=(
+            float(bootstrap["grade_reassignment_p95"])
+            if bootstrap["grade_reassignment_p95"] is not None else None
+        ),
+        temporal_compatible=temporal_compatible,
+        temporal_age_days=temporal_age_days,
+        temporal_grade_reassignment=temporal_reassignment,
+    )
+    reason_codes = sorted(
+        str(check["name"]) for check in checks if not check["passed"]
+    )
+
+    report_without_digest: dict[str, object] = {
+        "schema_version": READINESS_REPORT_SCHEMA_VERSION,
+        "policy": _readiness_policy_payload(),
+        "identity": {
+            "artifact_sha256": artifact_sha256,
+            "provenance_record_sha256": provenance_record_sha256,
+            "artifact_as_of": _canonical_as_of(artifact_as_of),
+            "captured_model_version": captured_model_version,
+            "scored_model_version": scored_model_version,
+            "config_fingerprint": config_fingerprint,
+            "scorer_source_digest": scorer_source_digest_value,
+        },
+        "cohort": {
+            "subject_count": len(subject_ids),
+            "subjects_per_color": {color: len(colors[color]) for color in _VALID_COLORS},
+            "normal_subject_count": len(normal_subjects),
+            "normal_subjects_per_color": {
+                color: len(normal_colors[color]) for color in _VALID_COLORS
+            },
+            "session_mode_counts": {"normal": normal_sessions, "drill": drill_sessions},
+            "normal_session_share": normal_session_share,
+            "max_subject_session_share": max_session_share,
+            "effective_session_subject_count": _effective_subject_count(session_shares.values()),
+            "named_score_count": total_score_count,
+            "max_subject_named_score_share": max_score_share,
+            "effective_score_subject_count": _effective_subject_count(score_shares.values()),
+            "subjects": [
+                {
+                    "subject_id": subject,
+                    "colors": sorted({pair.player_color for pair in by_subject[subject]}),
+                    "normal_colors": normal_colors_by_subject[subject],
+                    "normal_sessions": sum(pair.session_mode_counts.normal for pair in by_subject[subject]),
+                    "drill_sessions": sum(pair.session_mode_counts.drill for pair in by_subject[subject]),
+                    "session_share": session_shares[subject],
+                    "named_score_count": subject_score_counts[subject],
+                    "named_score_share": score_shares[subject],
+                }
+                for subject in subject_ids
+            ],
+        },
+        "cutoff_derivation_status": cutoff_derivation_status,
+        "candidate_cutoffs": _cutoffs_payload(base_cutoffs),
+        "stability": {
+            "leave_one_subject_out": {
+                "successful_subjects": loo_success,
+                "expected_subjects": len(subject_ids),
+                "max_grade_reassignment_rate": max_loo_reassignment,
+                "subjects": leave_one_out,
+            },
+            "bootstrap": bootstrap,
+            "temporal": {
+                "baseline_report_sha256": baseline_digest,
+                "compatible": temporal_compatible,
+                "age_days": temporal_age_days,
+                "grade_reassignment_rate": temporal_reassignment,
+            },
+        },
+        "checks": checks,
+        "ready_for_recalibration": not reason_codes,
+        "reason_codes": reason_codes,
+        "authorizes_cutoff_emission": False,
+    }
+    report_sha256 = hashlib.sha256(_canonical_dumps(report_without_digest)).hexdigest()
+    return {**report_without_digest, "report_sha256": report_sha256}
+
+
+def _readiness_number(
+    value: object,
+    label: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        raise ReadinessReportSchemaError(f"{label} must be a finite number")
+    number = float(value)
+    if minimum is not None and number < minimum:
+        raise ReadinessReportSchemaError(f"{label} is below its allowed range")
+    if maximum is not None and number > maximum:
+        raise ReadinessReportSchemaError(f"{label} is above its allowed range")
+    return number
+
+
+def _validate_readiness_json_tree(value: object, label: str = "report") -> None:
+    """Reject non-JSON values and non-finite floats before canonical serialization."""
+    if value is None or isinstance(value, (str, bool)) or type(value) is int:
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ReadinessReportSchemaError(f"{label} contains a non-finite float")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_readiness_json_tree(item, f"{label}[{index}]")
+        return
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ReadinessReportSchemaError(f"{label} contains a non-string object key")
+        for key, item in value.items():
+            _validate_readiness_json_tree(item, f"{label}.{key}")
+        return
+    raise ReadinessReportSchemaError(f"{label} contains a non-JSON value")
+
+
+def _validate_readiness_baseline_envelope(payload: object) -> dict[str, object]:
+    """Validate only what is safe to read before deciding historical compatibility.
+
+    An archived schema or policy cannot be re-derived with today's constants. Its
+    self-digest and minimal identity/cutoff envelope can still be authenticated, and
+    none of its statistical operands are used unless it subsequently passes the full
+    current-contract validator.
+    """
+    _validate_readiness_json_tree(payload)
+    if not isinstance(payload, dict):
+        raise ReadinessReportSchemaError("baseline report must be a JSON object")
+    required = frozenset({
+        "schema_version", "policy", "identity", "candidate_cutoffs",
+        "authorizes_cutoff_emission", "report_sha256",
+    })
+    if not required <= set(payload):
+        raise ReadinessReportSchemaError(
+            "baseline report is missing its authenticated compatibility envelope"
+        )
+    _readiness_int(payload["schema_version"], "schema_version", minimum=1)
+    if not isinstance(payload["policy"], dict):
+        raise ReadinessReportSchemaError("baseline policy must be a JSON object")
+    identity = payload["identity"]
+    if not isinstance(identity, dict):
+        raise ReadinessReportSchemaError("baseline identity must be a JSON object")
+    identity_required = frozenset({
+        "artifact_sha256", "provenance_record_sha256", "artifact_as_of",
+        "captured_model_version", "scored_model_version", "config_fingerprint",
+        "scorer_source_digest",
+    })
+    if not identity_required <= set(identity):
+        raise ReadinessReportSchemaError(
+            "baseline identity is missing a compatibility field"
+        )
+    for key in (
+        "artifact_sha256", "provenance_record_sha256", "config_fingerprint",
+        "scorer_source_digest",
+    ):
+        if not isinstance(identity[key], str) or not _SHA256_RE.match(identity[key]):
+            raise ReadinessReportSchemaError(f"baseline identity.{key} is not a SHA-256")
+    _parse_readiness_as_of(identity["artifact_as_of"], "baseline.identity.artifact_as_of")
+    for key in ("captured_model_version", "scored_model_version"):
+        if (
+            not isinstance(identity[key], str)
+            or not _CAPTURED_MODEL_VERSION_RE.match(identity[key])
+        ):
+            raise ReadinessReportSchemaError(
+                f"baseline identity.{key} has invalid model-version format"
+            )
+    if payload["candidate_cutoffs"] is not None:
+        _cutoffs_from_payload(payload["candidate_cutoffs"])
+    if payload["authorizes_cutoff_emission"] is not False:
+        raise ReadinessReportSchemaError(
+            "an archived readiness report may never authorize cutoff emission"
+        )
+    report_sha = payload["report_sha256"]
+    if not isinstance(report_sha, str) or not _SHA256_RE.match(report_sha):
+        raise ReadinessReportSchemaError("baseline report_sha256 is invalid")
+    without_digest = {
+        key: value for key, value in payload.items() if key != "report_sha256"
+    }
+    if hashlib.sha256(_canonical_dumps(without_digest)).hexdigest() != report_sha:
+        raise ReadinessReportSchemaError(
+            "baseline report_sha256 does not bind the archived payload"
+        )
+    return payload
+
+
+def validate_cutoff_readiness_report(payload: object) -> dict[str, object]:
+    """Validate the complete private report, including its self-digest."""
+    _validate_readiness_json_tree(payload)
+    top_keys = frozenset({
+        "schema_version", "policy", "identity", "cohort",
+        "cutoff_derivation_status", "candidate_cutoffs", "stability", "checks",
+        "ready_for_recalibration", "reason_codes", "authorizes_cutoff_emission",
+        "report_sha256",
+    })
+    obj = _readiness_keyset(payload, top_keys, "report")
+    if _readiness_int(obj["schema_version"], "schema_version") != READINESS_REPORT_SCHEMA_VERSION:
+        raise ReadinessReportSchemaError("unsupported readiness report schema")
+    expected_policy = _readiness_policy_payload()
+    policy = _readiness_keyset(
+        obj["policy"], frozenset(expected_policy), "policy"
+    )
+    if any(
+        type(policy[key]) is not type(expected) or policy[key] != expected
+        for key, expected in expected_policy.items()
+    ):
+        raise ReadinessReportSchemaError(
+            f"readiness policy does not match policy v{READINESS_POLICY_VERSION}"
+        )
+
+    identity = _readiness_keyset(
+        obj["identity"],
+        frozenset({
+            "artifact_sha256", "provenance_record_sha256", "artifact_as_of",
+            "captured_model_version", "scored_model_version", "config_fingerprint",
+            "scorer_source_digest",
+        }),
+        "identity",
+    )
+    for key in (
+        "artifact_sha256", "provenance_record_sha256", "config_fingerprint",
+        "scorer_source_digest",
+    ):
+        if not isinstance(identity[key], str) or not _SHA256_RE.match(identity[key]):
+            raise ReadinessReportSchemaError(f"identity.{key} is not a SHA-256")
+    _parse_readiness_as_of(identity["artifact_as_of"], "identity.artifact_as_of")
+    for key in ("captured_model_version", "scored_model_version"):
+        if not isinstance(identity[key], str) or not _CAPTURED_MODEL_VERSION_RE.match(identity[key]):
+            raise ReadinessReportSchemaError(f"identity.{key} has invalid model-version format")
+    if identity["scored_model_version"] != SCORE_MODEL_VERSION:
+        raise ReadinessReportSchemaError(
+            "the current report was not scored under the running model version"
+        )
+    if identity["config_fingerprint"] != _cfg_fp(SM_V2_5_DEFAULT_CELL):
+        raise ReadinessReportSchemaError(
+            "the current report was not scored under the running default-cell config"
+        )
+
+    cohort = _readiness_keyset(
+        obj["cohort"],
+        frozenset({
+            "subject_count", "subjects_per_color", "normal_subject_count",
+            "normal_subjects_per_color", "session_mode_counts", "normal_session_share",
+            "max_subject_session_share", "effective_session_subject_count",
+            "named_score_count", "max_subject_named_score_share",
+            "effective_score_subject_count", "subjects",
+        }),
+        "cohort",
+    )
+    subject_count = _readiness_int(
+        cohort["subject_count"], "cohort.subject_count", minimum=1
+    )
+    normal_subject_count = _readiness_int(
+        cohort["normal_subject_count"], "cohort.normal_subject_count", minimum=0
+    )
+    named_score_count = _readiness_int(
+        cohort["named_score_count"], "cohort.named_score_count", minimum=0
+    )
+    subjects_per_color = _readiness_keyset(
+        cohort["subjects_per_color"],
+        frozenset({"white", "black"}),
+        "cohort.subjects_per_color",
+    )
+    normal_subjects_per_color = _readiness_keyset(
+        cohort["normal_subjects_per_color"],
+        frozenset({"white", "black"}),
+        "cohort.normal_subjects_per_color",
+    )
+    session_mode_counts = _readiness_keyset(
+        cohort["session_mode_counts"],
+        frozenset({"normal", "drill"}),
+        "cohort.session_mode_counts",
+    )
+    for label, values in (
+        ("subjects_per_color", subjects_per_color),
+        ("normal_subjects_per_color", normal_subjects_per_color),
+        ("session_mode_counts", session_mode_counts),
+    ):
+        for key, value in values.items():
+            _readiness_int(value, f"cohort.{label}.{key}", minimum=0)
+    normal_session_share_value = _readiness_number(
+        cohort["normal_session_share"],
+        "cohort.normal_session_share",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    max_session_share_value = _readiness_number(
+        cohort["max_subject_session_share"],
+        "cohort.max_subject_session_share",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    max_score_share_value = _readiness_number(
+        cohort["max_subject_named_score_share"],
+        "cohort.max_subject_named_score_share",
+        minimum=0.0,
+        maximum=1.0,
+    )
+    effective_session_count_value = _readiness_number(
+        cohort["effective_session_subject_count"],
+        "cohort.effective_session_subject_count",
+        minimum=0.0,
+    )
+    effective_score_count_value = _readiness_number(
+        cohort["effective_score_subject_count"],
+        "cohort.effective_score_subject_count",
+        minimum=0.0,
+    )
+    subjects = cohort["subjects"]
+    if not isinstance(subjects, list) or len(subjects) != subject_count:
+        raise ReadinessReportSchemaError("cohort.subjects length disagrees with subject_count")
+    subject_ids: list[str] = []
+    validated_subjects: list[dict[str, object]] = []
+    for index, raw_subject in enumerate(subjects):
+        subject = _readiness_keyset(
+            raw_subject,
+            frozenset({
+                "subject_id", "colors", "normal_colors", "normal_sessions",
+                "drill_sessions", "session_share", "named_score_count",
+                "named_score_share",
+            }),
+            f"cohort.subjects[{index}]",
+        )
+        if (
+            not isinstance(subject["subject_id"], str)
+            or not _SUBJECT_ID_RE.match(subject["subject_id"])
+        ):
+            raise ReadinessReportSchemaError("cohort subject_id has invalid format")
+        subject_ids.append(subject["subject_id"])
+        colors = subject["colors"]
+        if (
+            not isinstance(colors, list)
+            or not colors
+            or colors != sorted(set(colors))
+            or any(color not in _VALID_COLORS for color in colors)
+        ):
+            raise ReadinessReportSchemaError("cohort subject colors are invalid")
+        normal_colors = subject["normal_colors"]
+        if (
+            not isinstance(normal_colors, list)
+            or normal_colors != sorted(set(normal_colors))
+            or any(color not in colors for color in normal_colors)
+        ):
+            raise ReadinessReportSchemaError("cohort subject normal colors are invalid")
+        for key in ("normal_sessions", "drill_sessions", "named_score_count"):
+            _readiness_int(subject[key], f"cohort.subjects[{index}].{key}", minimum=0)
+        for key in ("session_share", "named_score_share"):
+            _readiness_number(
+                subject[key], f"cohort.subjects[{index}].{key}", minimum=0.0, maximum=1.0
+            )
+        if bool(normal_colors) != (subject["normal_sessions"] > 0):
+            raise ReadinessReportSchemaError(
+                "cohort subject normal colors disagree with normal session count"
+            )
+        validated_subjects.append(subject)
+    if subject_ids != sorted(set(subject_ids)):
+        raise ReadinessReportSchemaError("cohort subjects must be sorted and unique")
+
+    expected_subjects_per_color = {
+        color: sum(color in subject["colors"] for subject in validated_subjects)
+        for color in _VALID_COLORS
+    }
+    expected_normal_subjects_per_color = {
+        color: sum(color in subject["normal_colors"] for subject in validated_subjects)
+        for color in _VALID_COLORS
+    }
+    expected_normal_subject_count = sum(
+        subject["normal_sessions"] > 0 for subject in validated_subjects
+    )
+    expected_normal_sessions = sum(
+        subject["normal_sessions"] for subject in validated_subjects
+    )
+    expected_drill_sessions = sum(
+        subject["drill_sessions"] for subject in validated_subjects
+    )
+    expected_named_score_count = sum(
+        subject["named_score_count"] for subject in validated_subjects
+    )
+    if subjects_per_color != expected_subjects_per_color:
+        raise ReadinessReportSchemaError("subjects_per_color disagrees with subject detail")
+    if normal_subjects_per_color != expected_normal_subjects_per_color:
+        raise ReadinessReportSchemaError(
+            "normal_subjects_per_color disagrees with subject detail"
+        )
+    if normal_subject_count != expected_normal_subject_count:
+        raise ReadinessReportSchemaError(
+            "normal_subject_count disagrees with subject detail"
+        )
+    if session_mode_counts != {
+        "normal": expected_normal_sessions,
+        "drill": expected_drill_sessions,
+    }:
+        raise ReadinessReportSchemaError(
+            "session_mode_counts disagree with subject detail"
+        )
+    if named_score_count != expected_named_score_count:
+        raise ReadinessReportSchemaError("named_score_count disagrees with subject detail")
+
+    total_sessions = expected_normal_sessions + expected_drill_sessions
+    expected_normal_share = (
+        expected_normal_sessions / total_sessions if total_sessions else 0.0
+    )
+    session_shares = [
+        (
+            (subject["normal_sessions"] + subject["drill_sessions"]) / total_sessions
+            if total_sessions
+            else 1.0
+        )
+        for subject in validated_subjects
+    ]
+    score_shares = [
+        (
+            subject["named_score_count"] / expected_named_score_count
+            if expected_named_score_count
+            else 1.0
+        )
+        for subject in validated_subjects
+    ]
+    if any(
+        subject["session_share"] != expected
+        for subject, expected in zip(validated_subjects, session_shares, strict=True)
+    ):
+        raise ReadinessReportSchemaError("subject session shares are inconsistent")
+    if any(
+        subject["named_score_share"] != expected
+        for subject, expected in zip(validated_subjects, score_shares, strict=True)
+    ):
+        raise ReadinessReportSchemaError("subject named-score shares are inconsistent")
+    if normal_session_share_value != expected_normal_share:
+        raise ReadinessReportSchemaError("normal_session_share is inconsistent")
+    if max_session_share_value != max(session_shares, default=1.0):
+        raise ReadinessReportSchemaError("max_subject_session_share is inconsistent")
+    if max_score_share_value != max(score_shares, default=1.0):
+        raise ReadinessReportSchemaError("max_subject_named_score_share is inconsistent")
+    if effective_session_count_value != _effective_subject_count(session_shares):
+        raise ReadinessReportSchemaError(
+            "effective_session_subject_count is inconsistent"
+        )
+    if effective_score_count_value != _effective_subject_count(score_shares):
+        raise ReadinessReportSchemaError("effective_score_subject_count is inconsistent")
+
+    cutoff_derivation_status = obj["cutoff_derivation_status"]
+    if cutoff_derivation_status not in {
+        "success", "insufficient_scores", "cutoff_collision"
+    }:
+        raise ReadinessReportSchemaError("cutoff_derivation_status is invalid")
+    candidate_cutoffs = obj["candidate_cutoffs"]
+    if candidate_cutoffs is not None:
+        _cutoffs_from_payload(candidate_cutoffs)
+    if (candidate_cutoffs is not None) != (cutoff_derivation_status == "success"):
+        raise ReadinessReportSchemaError(
+            "candidate_cutoffs disagree with cutoff_derivation_status"
+        )
+
+    stability = _readiness_keyset(
+        obj["stability"],
+        frozenset({"leave_one_subject_out", "bootstrap", "temporal"}),
+        "stability",
+    )
+    loo = _readiness_keyset(
+        stability["leave_one_subject_out"],
+        frozenset({
+            "successful_subjects", "expected_subjects", "max_grade_reassignment_rate",
+            "subjects",
+        }),
+        "stability.leave_one_subject_out",
+    )
+    loo_successful = _readiness_int(
+        loo["successful_subjects"], "loo.successful_subjects", minimum=0
+    )
+    loo_expected = _readiness_int(
+        loo["expected_subjects"], "loo.expected_subjects", minimum=1
+    )
+    if loo_expected != subject_count:
+        raise ReadinessReportSchemaError("loo.expected_subjects disagrees with cohort")
+    max_loo_reassignment = _readiness_number(
+        loo["max_grade_reassignment_rate"], "loo.max_grade_reassignment_rate",
+        minimum=0.0, maximum=1.0,
+    )
+    loo_subjects = loo["subjects"]
+    expected_loo_length = subject_count if candidate_cutoffs is not None else 0
+    if not isinstance(loo_subjects, list) or len(loo_subjects) != expected_loo_length:
+        raise ReadinessReportSchemaError("loo subject detail length is invalid")
+    successful_loo_rates: list[float] = []
+    for index, raw_loo in enumerate(loo_subjects):
+        entry = _readiness_keyset(
+            raw_loo,
+            frozenset({"subject_id", "failure_reason", "grade_reassignment_rate", "cutoffs"}),
+            f"loo.subjects[{index}]",
+        )
+        if entry["subject_id"] != subject_ids[index]:
+            raise ReadinessReportSchemaError("loo subject identity/order is invalid")
+        if entry["failure_reason"] not in {
+            None, "insufficient_scores", "cutoff_collision"
+        }:
+            raise ReadinessReportSchemaError("loo failure_reason is invalid")
+        if entry["grade_reassignment_rate"] is not None:
+            rate = _readiness_number(
+                entry["grade_reassignment_rate"], "loo.grade_reassignment_rate",
+                minimum=0.0, maximum=1.0,
+            )
+            successful_loo_rates.append(rate)
+        if entry["cutoffs"] is not None:
+            _cutoffs_from_payload(entry["cutoffs"])
+        if entry["failure_reason"] is not None:
+            if entry["grade_reassignment_rate"] is not None or entry["cutoffs"] is not None:
+                raise ReadinessReportSchemaError(
+                    "loo failed detail carries successful operands"
+                )
+        elif entry["grade_reassignment_rate"] is None or entry["cutoffs"] is None:
+            raise ReadinessReportSchemaError(
+                "loo successful detail is missing operands"
+            )
+    if loo_successful != len(successful_loo_rates):
+        raise ReadinessReportSchemaError("loo successful count disagrees with subject detail")
+    if max_loo_reassignment != max(successful_loo_rates, default=1.0):
+        raise ReadinessReportSchemaError("loo maximum disagrees with subject detail")
+
+    bootstrap = _readiness_keyset(
+        stability["bootstrap"],
+        frozenset({
+            "requested_replicates", "attempted_replicates", "successful_replicates",
+            "cutoff_collision_count", "insufficient_score_count", "collision_rate",
+            "grade_reassignment_p95", "cutoff_intervals",
+        }),
+        "stability.bootstrap",
+    )
+    requested = _readiness_int(
+        bootstrap["requested_replicates"], "bootstrap.requested_replicates"
+    )
+    if requested != READINESS_BOOTSTRAP_REPLICATES:
+        raise ReadinessReportSchemaError("bootstrap replicate count is not policy-pinned")
+    attempted = _readiness_int(
+        bootstrap["attempted_replicates"], "bootstrap.attempted_replicates", minimum=0
+    )
+    if attempted not in {0, requested}:
+        raise ReadinessReportSchemaError(
+            "bootstrap must be wholly attempted or explicitly not attempted"
+        )
+    successful = _readiness_int(
+        bootstrap["successful_replicates"], "bootstrap.successful_replicates", minimum=0
+    )
+    collisions = _readiness_int(
+        bootstrap["cutoff_collision_count"],
+        "bootstrap.cutoff_collision_count",
+        minimum=0,
+    )
+    insufficient = _readiness_int(
+        bootstrap["insufficient_score_count"],
+        "bootstrap.insufficient_score_count",
+        minimum=0,
+    )
+    if successful + collisions + insufficient != attempted:
+        raise ReadinessReportSchemaError(
+            "bootstrap outcomes do not partition attempted replicates"
+        )
+    collision_rate_raw = bootstrap["collision_rate"]
+    reassignment_p95_raw = bootstrap["grade_reassignment_p95"]
+    if attempted == 0:
+        if (
+            candidate_cutoffs is not None and subject_count >= 2
+        ):
+            raise ReadinessReportSchemaError(
+                "bootstrap was not attempted despite sufficient base inputs"
+            )
+        if collision_rate_raw is not None or reassignment_p95_raw is not None:
+            raise ReadinessReportSchemaError(
+                "unattempted bootstrap carries measured rates"
+            )
+        bootstrap_collision_rate = None
+        bootstrap_reassignment_p95 = None
+    else:
+        bootstrap_collision_rate = _readiness_number(
+            collision_rate_raw,
+            "bootstrap.collision_rate",
+            minimum=0.0,
+            maximum=1.0,
+        )
+        if bootstrap_collision_rate != collisions / attempted:
+            raise ReadinessReportSchemaError(
+                "bootstrap collision rate disagrees with counts"
+            )
+        bootstrap_reassignment_p95 = (
+            _readiness_number(
+                reassignment_p95_raw,
+                "bootstrap.grade_reassignment_p95",
+                minimum=0.0,
+                maximum=1.0,
+            )
+            if reassignment_p95_raw is not None else None
+        )
+        if (bootstrap_reassignment_p95 is None) != (successful == 0):
+            raise ReadinessReportSchemaError(
+                "bootstrap reassignment p95 disagrees with successful replicate count"
+            )
+    intervals = bootstrap["cutoff_intervals"]
+    if (intervals is None) != (successful == 0):
+        raise ReadinessReportSchemaError(
+            "bootstrap cutoff intervals disagree with successful replicate count"
+        )
+    if intervals is not None:
+        interval_obj = _readiness_keyset(
+            intervals, frozenset({"a", "b", "c", "d", "alert", "watch"}),
+            "bootstrap.cutoff_intervals",
+        )
+        for key, raw_interval in interval_obj.items():
+            interval = _readiness_keyset(
+                raw_interval, frozenset({"p025", "p975"}),
+                f"bootstrap.cutoff_intervals.{key}",
+            )
+            low = _readiness_number(interval["p025"], f"interval.{key}.p025")
+            high = _readiness_number(interval["p975"], f"interval.{key}.p975")
+            if low > high:
+                raise ReadinessReportSchemaError("bootstrap cutoff interval is reversed")
+
+    temporal = _readiness_keyset(
+        stability["temporal"],
+        frozenset({"baseline_report_sha256", "compatible", "age_days", "grade_reassignment_rate"}),
+        "stability.temporal",
+    )
+    if temporal["baseline_report_sha256"] is not None and (
+        not isinstance(temporal["baseline_report_sha256"], str)
+        or not _SHA256_RE.match(temporal["baseline_report_sha256"])
+    ):
+        raise ReadinessReportSchemaError("temporal baseline digest is invalid")
+    if type(temporal["compatible"]) is not bool:
+        raise ReadinessReportSchemaError("temporal.compatible must be bool")
+    temporal_compatible = temporal["compatible"]
+    temporal_age_days = _readiness_number(
+        temporal["age_days"], "temporal.age_days"
+    )
+    temporal_reassignment = _readiness_number(
+        temporal["grade_reassignment_rate"], "temporal.grade_reassignment_rate",
+        minimum=0.0, maximum=1.0,
+    )
+    if temporal["baseline_report_sha256"] is None:
+        if temporal_compatible or temporal_age_days != 0.0:
+            raise ReadinessReportSchemaError(
+                "temporal state without a baseline digest is inconsistent"
+            )
+    if temporal_compatible and candidate_cutoffs is None:
+        raise ReadinessReportSchemaError(
+            "temporal compatibility requires current candidate cutoffs"
+        )
+    if not temporal_compatible and temporal_reassignment != 1.0:
+        raise ReadinessReportSchemaError(
+            "incompatible temporal evidence must retain the fail-closed rate"
+        )
+
+    checks = obj["checks"]
+    if not isinstance(checks, list) or len(checks) != len(_READINESS_CHECK_NAMES):
+        raise ReadinessReportSchemaError("readiness checks do not match the pinned inventory")
+    validated_checks: list[GateCheck] = []
+    for index, raw_check in enumerate(checks):
+        check_obj = _readiness_keyset(
+            raw_check, frozenset({"name", "measured", "limit", "op", "passed"}),
+            f"checks[{index}]",
+        )
+        try:
+            check = GateCheck(**check_obj)
+        except (TypeError, ValueError) as exc:
+            raise ReadinessReportSchemaError("readiness check is self-inconsistent") from exc
+        validated_checks.append(check)
+    if tuple(check.name for check in validated_checks) != _READINESS_CHECK_NAMES:
+        raise ReadinessReportSchemaError("readiness check names/order drifted")
+    expected_checks = _build_readiness_checks(
+        captured_model_version=identity["captured_model_version"],
+        subject_count=subject_count,
+        white_subject_count=subjects_per_color["white"],
+        black_subject_count=subjects_per_color["black"],
+        normal_subject_count=normal_subject_count,
+        normal_white_subject_count=normal_subjects_per_color["white"],
+        normal_black_subject_count=normal_subjects_per_color["black"],
+        normal_session_share=normal_session_share_value,
+        max_subject_session_share=max_session_share_value,
+        max_subject_score_share=max_score_share_value,
+        base_cutoffs_derivable=candidate_cutoffs is not None,
+        loo_successful_subjects=loo_successful,
+        loo_expected_subjects=loo_expected,
+        max_loo_grade_reassignment=max_loo_reassignment,
+        bootstrap_sufficient_replicates=successful + collisions,
+        bootstrap_attempted_replicates=attempted,
+        bootstrap_collision_rate=bootstrap_collision_rate,
+        bootstrap_grade_reassignment_p95=bootstrap_reassignment_p95,
+        temporal_compatible=temporal_compatible,
+        temporal_age_days=temporal_age_days,
+        temporal_grade_reassignment=temporal_reassignment,
+    )
+    if _canonical_dumps(checks) != _canonical_dumps(expected_checks):
+        raise ReadinessReportSchemaError(
+            "readiness checks disagree with their private report operands"
+        )
+    failed = sorted(check.name for check in validated_checks if not check.passed)
+    if obj["reason_codes"] != failed:
+        raise ReadinessReportSchemaError("reason_codes do not equal the failed checks")
+    if type(obj["ready_for_recalibration"]) is not bool or obj["ready_for_recalibration"] != (not failed):
+        raise ReadinessReportSchemaError("ready_for_recalibration contradicts checks")
+    if obj["authorizes_cutoff_emission"] is not False:
+        raise ReadinessReportSchemaError("a readiness report may never authorize cutoff emission")
+
+    report_sha = obj["report_sha256"]
+    if not isinstance(report_sha, str) or not _SHA256_RE.match(report_sha):
+        raise ReadinessReportSchemaError("report_sha256 is invalid")
+    without_digest = {key: value for key, value in obj.items() if key != "report_sha256"}
+    if hashlib.sha256(_canonical_dumps(without_digest)).hexdigest() != report_sha:
+        raise ReadinessReportSchemaError("report_sha256 does not bind the report payload")
+    return obj
+
+
+def _build_redacted_readiness_summary_from_validated(
+    validated: Mapping[str, object],
+) -> dict[str, object]:
+    identity = validated["identity"]
+    assert isinstance(identity, dict)
+    checks = validated["checks"]
+    assert isinstance(checks, list)
+    summary = {
+        "schema_version": READINESS_REPORT_SCHEMA_VERSION,
+        "policy_version": READINESS_POLICY_VERSION,
+        "artifact_sha256": identity["artifact_sha256"],
+        "provenance_record_sha256": identity["provenance_record_sha256"],
+        "report_sha256": validated["report_sha256"],
+        "model_version": identity["scored_model_version"],
+        "config_fingerprint": identity["config_fingerprint"],
+        "checks": [
+            {"name": check["name"], "passed": check["passed"]}
+            for check in checks
+        ],
+        "ready_for_recalibration": validated["ready_for_recalibration"],
+        "reason_codes": validated["reason_codes"],
+        "authorizes_cutoff_emission": False,
+    }
+    validate_redacted_readiness_summary(summary, validated)
+    return summary
+
+
+def build_redacted_readiness_summary(report: Mapping[str, object]) -> dict[str, object]:
+    return _build_redacted_readiness_summary_from_validated(
+        validate_cutoff_readiness_report(report)
+    )
+
+
+def validate_redacted_readiness_summary(
+    payload: object, report: Mapping[str, object]
+) -> dict[str, object]:
+    obj = _readiness_keyset(
+        payload,
+        frozenset({
+            "schema_version", "policy_version", "artifact_sha256",
+            "provenance_record_sha256", "report_sha256", "model_version",
+            "config_fingerprint", "checks", "ready_for_recalibration",
+            "reason_codes", "authorizes_cutoff_emission",
+        }),
+        "redacted_summary",
+    )
+    identity = report["identity"]
+    assert isinstance(identity, dict)
+    expected_scalars = {
+        "schema_version": READINESS_REPORT_SCHEMA_VERSION,
+        "policy_version": READINESS_POLICY_VERSION,
+        "artifact_sha256": identity["artifact_sha256"],
+        "provenance_record_sha256": identity["provenance_record_sha256"],
+        "report_sha256": report["report_sha256"],
+        "model_version": identity["scored_model_version"],
+        "config_fingerprint": identity["config_fingerprint"],
+        "ready_for_recalibration": report["ready_for_recalibration"],
+        "reason_codes": report["reason_codes"],
+        "authorizes_cutoff_emission": False,
+    }
+    for key, expected in expected_scalars.items():
+        if obj[key] != expected:
+            raise ReadinessReportSchemaError(f"redacted_summary.{key} disagrees with report")
+    checks = obj["checks"]
+    report_checks = report["checks"]
+    if not isinstance(checks, list) or not isinstance(report_checks, list):
+        raise ReadinessReportSchemaError("redacted summary checks must be arrays")
+    expected_checks = [
+        {"name": check["name"], "passed": check["passed"]}
+        for check in report_checks
+    ]
+    if checks != expected_checks or any(
+        not isinstance(check, dict) or set(check) != {"name", "passed"}
+        for check in checks
+    ):
+        raise ReadinessReportSchemaError("redacted summary checks leaked or disagreed")
+    return obj
+
+
+def _load_private_readiness_report(path: Path) -> dict[str, object]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise BaselineReadinessReportError(
+            "the archived readiness baseline could not be read"
+        ) from exc
+    try:
+        payload = _hardened_loads(raw, ReadinessReportSchemaError)
+        return _validate_readiness_baseline_envelope(payload)
+    except ReadinessReportError as exc:
+        raise BaselineReadinessReportError(
+            "the archived readiness baseline failed validation"
+        ) from exc
+
+
+def _build_cutoff_readiness_from_artifact(
+    artifact_path: Path,
+    baseline_report: Mapping[str, object] | None,
+) -> dict[str, object]:
+    inputs = build_selection_inputs(artifact_path)
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    artifact_bytes = artifact_path.read_bytes()
+    provenance_bytes = COHORT_PROVENANCE_PATH.read_bytes()
+    loaded = load_frozen_artifact(
+        artifact_bytes, provenance_bytes, _current_runtime_binding(graph, roots)
+    )
+    cohort = inputs.cohort
+    if loaded.artifact_sha256 != cohort.provenance.artifact_sha256:
+        raise ReadinessReportError("the loaded artifact identity moved during readiness scoring")
+    loaded_by_id = {pair.pair_id: pair for pair in loaded.pairs}
+    pairs: list[CutoffReadinessPair] = []
+    for scored in cohort.pairs:
+        if scored.cohort_role != "quantile":
+            continue
+        loaded_pair = loaded_by_id.get(scored.pair_id)
+        if loaded_pair is None or loaded_pair.subject_id != scored.subject_id:
+            raise ReadinessReportError("the scored and loaded pair manifests disagree")
+        cell_score = scored.grid.get(SM_V2_5_DEFAULT_CELL)
+        if cell_score is None:
+            raise ReadinessReportError("the current default cell is absent from the scored grid")
+        pairs.append(CutoffReadinessPair(
+            pair_id=scored.pair_id,
+            subject_id=scored.subject_id,
+            player_color=scored.player_color,
+            session_mode_counts=loaded_pair.session_mode_counts,
+            named_scores=cell_score.named_scores,
+        ))
+    final_digest = scorer_source_digest()
+    if final_digest != cohort.scorer_source_digest:
+        raise ScorerSourceUnstableError(
+            "scorer source changed while the readiness report was assembled"
+        )
+    return build_cutoff_readiness_report(
+        artifact_sha256=cohort.provenance.artifact_sha256,
+        provenance_record_sha256=cohort.provenance_record_sha256,
+        artifact_as_of=cohort.as_of,
+        captured_model_version=cohort.provenance.captured_model_version,
+        scored_model_version=cohort.model_version,
+        config_fingerprint=_cfg_fp(SM_V2_5_DEFAULT_CELL),
+        scorer_source_digest_value=cohort.scorer_source_digest,
+        pairs=pairs,
+        baseline_report=baseline_report,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -7908,6 +9551,7 @@ _SUBCOMMANDS: tuple[str, ...] = (
     "report",
     "capture-cohort",
     "select-candidates",
+    "cutoff-readiness",
     "emit-user14-fixture",
 )
 
@@ -8104,6 +9748,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         argv := [ "report" ] REPORT_OPTS*
               | "capture-cohort" CAPTURE_OPTS*
               | "select-candidates" SELECT_OPTS*
+              | "cutoff-readiness" READINESS_OPTS*
               | "emit-user14-fixture"
 
     The ROOT parser carries NO options at all. Keeping the report options on the root would
@@ -8197,6 +9842,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--result-output", required=True, type=Path,
         help="ABSOLUTE path the FULL SelectionResult JSON is written to, OUTSIDE every "
              "worktree. Never overwritten: an existing file is a refusal, not a republish.",
+    )
+    readiness = subparsers.add_parser(
+        "cutoff-readiness",
+        help="Write a private current-model population-readiness report and print only "
+             "its redacted verdict; never approves or emits cutoffs.",
+    )
+    readiness.add_argument(
+        "--artifact", required=True, type=Path,
+        help="ABSOLUTE path to a schema-v3 frozen artifact outside every worktree.",
+    )
+    readiness.add_argument(
+        "--report-output", required=True, type=Path,
+        help="ABSOLUTE private path for the full readiness report; never overwritten.",
+    )
+    readiness.add_argument(
+        "--baseline-report", type=Path, default=None,
+        help="Optional ABSOLUTE path to a prior private readiness report for the required "
+             "two-snapshot temporal-stability check.",
     )
     subparsers.add_parser(
         "emit-user14-fixture",
@@ -8487,12 +10150,114 @@ def _run_select_candidates(args: argparse.Namespace) -> int:
             os.close(parent_fd)
 
 
+def _run_cutoff_readiness(args: argparse.Namespace) -> int:
+    """Write the full report privately and emit only a schema-checked redacted verdict."""
+    raw_paths = [str(args.artifact), str(args.report_output)]
+    if args.baseline_report is not None:
+        raw_paths.append(str(args.baseline_report))
+    redact = _path_redactor(raw_paths)
+
+    def refuse(code: int, message: str) -> int:
+        print(f"[cutoff-readiness] {redact(message)}", file=sys.stderr)
+        return code
+
+    stage = "input"
+    parent_fd: int | None = None
+    try:
+        artifact_path = _refuse_repo_interior_path(Path(args.artifact), option="--artifact")
+        report_path = _refuse_repo_interior_path(
+            Path(args.report_output), option="--report-output"
+        )
+        baseline_path = None
+        if args.baseline_report is not None:
+            baseline_path = _refuse_repo_interior_path(
+                Path(args.baseline_report), option="--baseline-report"
+            )
+        if not artifact_path.is_file():
+            return refuse(2, "--artifact must name an existing regular file.")
+        if baseline_path is not None and not baseline_path.is_file():
+            return refuse(2, "--baseline-report must name an existing regular file.")
+        try:
+            parent_fd = _open_judged_output_parent(report_path)
+        except OSError:
+            return refuse(
+                2,
+                "--report-output's parent directory must exist, be a directory, and not "
+                "be a symlink.",
+            )
+
+        baseline = (
+            _load_private_readiness_report(baseline_path)
+            if baseline_path is not None else None
+        )
+        report = _build_cutoff_readiness_from_artifact(artifact_path, baseline)
+        report_bytes = _canonical_dumps(report)
+        # Round-trip the bytes that will be published, not merely the in-memory mapping.
+        validated_report = validate_cutoff_readiness_report(
+            _hardened_loads(report_bytes, ReadinessReportSchemaError)
+        )
+        summary = _build_redacted_readiness_summary_from_validated(validated_report)
+
+        stage = "output"
+        publish_no_clobber(report_bytes.decode("ascii"), report_path, dir_fd=parent_fd)
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    except (ScorerSourceUnstableError, ScorerSourceManifestError):
+        return refuse(3, "the scorer source is unstable; re-run from a stable checkout.")
+    except CaptureGovernanceError:
+        return refuse(
+            2,
+            "--artifact, --report-output, and --baseline-report must be ABSOLUTE "
+            "restricted-store paths outside every registered worktree. The rejected value "
+            "is not echoed.",
+        )
+    except FrozenArtifactError as exc:
+        return refuse(
+            4,
+            "the artifact and committed provenance record were rejected by the load guard "
+            f"({type(exc).__name__}).",
+        )
+    except SelectionBindingError as exc:
+        return refuse(
+            4,
+            f"a fail-closed artifact binding check refused the input ({type(exc).__name__}).",
+        )
+    except BaselineReadinessReportError as exc:
+        return refuse(
+            4,
+            f"the archived readiness baseline was rejected ({type(exc).__name__}).",
+        )
+    except ReadinessReportSchemaError:
+        return refuse(
+            5,
+            "the readiness result failed its own serialization or redaction schema; "
+            "nothing was published and nothing was printed.",
+        )
+    except ReadinessReportError:
+        return refuse(
+            4,
+            "the artifact's scored and frozen readiness inputs were inconsistent; "
+            "nothing was published and nothing was printed.",
+        )
+    except (CapturePublicationError, FileExistsError):
+        return refuse(5, "the restricted report could not be published without clobbering.")
+    except OSError as exc:
+        return refuse(4 if stage == "input" else 5, exc.strerror or "I/O error")
+    except Exception as exc:  # pragma: no cover - final privacy boundary
+        return refuse(6, f"unexpected {type(exc).__name__}")
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
 def main(argv: list[str] | None = None, *, session_factory=None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     if args.mode == "capture-cohort":
         return _run_capture_cohort(args, session_factory=session_factory)
     if args.mode == "select-candidates":
         return _run_select_candidates(args)
+    if args.mode == "cutoff-readiness":
+        return _run_cutoff_readiness(args)
     if args.mode == "emit-user14-fixture":
         payload = build_user14_fixture(SM_V2_5_DEFAULT_CELL, SCORE_MODEL_VERSION)
         write_user14_fixture(payload)
