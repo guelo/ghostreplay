@@ -1,30 +1,4 @@
-
-.status-card {
-    background: var(--teal-bg);
-    border: 1px solid var(--teal-border);
-    border-radius: 1rem;
-    padding: 1.25rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    color: var(--teal-dark);
-}
-
-.status-card span {
-    font-size: 0.85rem;
-    color: var(--teal);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-}
-
-.status-card code {
-    font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-    font-size: 0.85rem;
-    background: var(--bg-tertiary);
-    padding: 0.1rem 0.4rem;
-    border-radius: 0.4rem;
-    color: var(--text-primary);
-}
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-section {
     background: var(--surface-elevated);
@@ -36,25 +10,7 @@
     align-items: center;
 }
 
-.game-page__intro {
-}
-
-.game-page__hero {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-}
-
-.game-page__hero h1 {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: clamp(1.5rem, 3vw, 2rem);
-}
-
-.game-page__hero p {
-    margin: 0;
-    color: var(--text-tertiary);
-}
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-layout {
     --game-viewport-chrome: 4.5rem;
@@ -83,6 +39,8 @@
     max-width: 100%;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-layout.has-graph {
     /*
      * "moves" spans both rows so the move list stretches the full board+graph
@@ -99,6 +57,8 @@
         "panel graph moves";
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-graph-area {
     grid-area: graph;
     width: 100%;
@@ -108,10 +68,14 @@
     gap: 1rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-graph-area .analysis-graph,
 .chess-graph-area .game-end-banner {
     margin-top: 0;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-panel {
     grid-area: panel;
@@ -121,6 +85,8 @@
     color: var(--text-secondary);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-status {
     margin: 0;
     font-size: 1.2rem;
@@ -128,9 +94,13 @@
     font-weight: 600;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-status__drill-label {
     color: var(--text-tertiary);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-meta {
     margin: 0;
@@ -138,15 +108,21 @@
     font-size: 0.95rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-panel__active-matchup,
 .chess-panel__inactive-summary {
     display: contents;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-panel__mobile-label,
 .chess-panel__mobile-versus {
     display: none;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak {
     display: inline-flex;
@@ -156,6 +132,8 @@
     max-width: 100%;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak__label {
     color: var(--text-tertiary);
     font-size: 0.82rem;
@@ -163,6 +141,8 @@
     line-height: 1;
     text-transform: uppercase;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge {
     --streak-fire-aura-opacity: 0;
@@ -194,11 +174,15 @@
     overflow: visible;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="ember"] {
     --streak-fire-aura-opacity: 0.36;
     --streak-fire-ember-opacity: 0.45;
     --streak-fire-glow: 0.35;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge[data-fire-intensity="flame"] {
     --streak-fire-aura-opacity: 0.52;
@@ -209,6 +193,8 @@
     --streak-fire-glow: 0.55;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="hot"] {
     --streak-fire-aura-opacity: 0.68;
     --streak-fire-flame-opacity: 0.88;
@@ -218,6 +204,8 @@
     --streak-fire-glow: 0.72;
     --streak-fire-speed: 1100ms;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge[data-fire-intensity="inferno"] {
     --streak-fire-aura-opacity: 0.82;
@@ -230,6 +218,8 @@
     --streak-fire-speed: 950ms;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__content {
     position: relative;
     z-index: 2;
@@ -241,20 +231,28 @@
     white-space: nowrap;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__content strong {
     color: var(--text-primary);
     text-shadow: none;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge--pulse {
     animation: perfect-streak-pulse 900ms ease-out;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge--hot {
     box-shadow:
         0 0 0 1px color-mix(in srgb, #f97316 28%, transparent),
         0 0 calc(1.2rem * var(--streak-fire-glow)) rgba(249, 115, 22, 0.6);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__fire,
 .perfect-streak-badge__aura,
@@ -264,10 +262,14 @@
     pointer-events: none;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__fire {
     z-index: 1;
     inset: -1.25rem -0.75rem -0.25rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__aura {
     inset: 0.2rem 0.25rem 0;
@@ -279,6 +281,8 @@
     filter: blur(8px);
     opacity: var(--streak-fire-aura-opacity);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__flame {
     bottom: 0.84rem;
@@ -292,11 +296,15 @@
     filter: drop-shadow(0 0 0.45rem rgba(249, 115, 22, 0.6));
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__flame--outer {
     left: 46%;
     width: 1.45rem;
     background: linear-gradient(135deg, #b91c1c 10%, #f97316 58%, #facc15 100%);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__flame--middle {
     left: 55%;
@@ -304,6 +312,8 @@
     height: calc(var(--streak-fire-flame-height) * 0.78);
     background: linear-gradient(135deg, #fb923c 10%, #facc15 72%, #fef3c7 100%);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__flame--core {
     --streak-fire-layer-opacity-scale: var(--streak-fire-core-opacity-scale);
@@ -314,11 +324,15 @@
     opacity: calc(var(--streak-fire-flame-opacity) * var(--streak-fire-core-opacity-scale));
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame,
 .perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame,
 .perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__flame {
     animation: perfect-streak-flame var(--streak-fire-speed) ease-in-out infinite;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame--middle,
 .perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame--middle,
@@ -327,12 +341,16 @@
     animation-duration: calc(var(--streak-fire-speed) * 0.86);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__flame--core,
 .perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__flame--core,
 .perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__flame--core {
     animation-delay: -620ms;
     animation-duration: calc(var(--streak-fire-speed) * 0.74);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__ember {
     bottom: 0.72rem;
@@ -344,6 +362,8 @@
     opacity: var(--streak-fire-ember-opacity);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="ember"] .perfect-streak-badge__ember,
 .perfect-streak-badge[data-fire-intensity="flame"] .perfect-streak-badge__ember,
 .perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__ember,
@@ -351,10 +371,14 @@
     animation: perfect-streak-ember calc(var(--streak-fire-speed) * 1.35) ease-out infinite;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__ember--one {
     left: 20%;
     animation-delay: -220ms;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .perfect-streak-badge__ember--two {
     left: 72%;
@@ -363,22 +387,30 @@
     animation-delay: -680ms;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge__ember--three {
     left: 84%;
     display: none;
     animation-delay: -1020ms;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .perfect-streak-badge[data-fire-intensity="hot"] .perfect-streak-badge__ember--three,
 .perfect-streak-badge[data-fire-intensity="inferno"] .perfect-streak-badge__ember--three {
     display: block;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes perfect-streak-pulse {
     0% { transform: scale(1); }
     35% { transform: scale(1.04); }
     100% { transform: scale(1); }
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes perfect-streak-flame {
     0%, 100% {
@@ -390,6 +422,8 @@
         opacity: calc(var(--streak-fire-flame-opacity) * var(--streak-fire-layer-opacity-scale, 1));
     }
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes perfect-streak-ember {
     0% {
@@ -406,26 +440,27 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .perfect-streak-badge--pulse,
     .perfect-streak-badge__flame,
     .perfect-streak-badge__ember {
         animation: none;
     }
 
+    /* Final owner: src/components/chess-game/ChessGame.css. */
+
     .perfect-streak-badge__flame {
         opacity: calc(var(--streak-fire-flame-opacity) * 0.72);
     }
+
+    /* Final owner: src/components/chess-game/ChessGame.css. */
 
     .perfect-streak-badge__ember {
         opacity: calc(var(--streak-fire-ember-opacity) * 0.72);
     }
 }
 
-.chess-controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-}
+/* Final owner: src/styles/shared-controls.css. */
 
 .chess-button {
     border: 1px solid var(--border-color-strong);
@@ -440,6 +475,8 @@
         background 200ms ease;
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .chess-button.primary {
     background: var(--gradient-brand);
     color: var(--text-on-gradient);
@@ -449,6 +486,7 @@
 
 /* Opening-score freshness is an aria-disabled, event-capable wait state so
    attempted repeat activations remain measurable (g-lcy0). */
+/* Final owner: src/styles/shared-controls.css. */
 .chess-button.primary.drill-again-waiting {
     background: var(--bg-tertiary);
     color: var(--text-tertiary);
@@ -457,9 +495,13 @@
     cursor: progress;
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .chess-button.primary.drill-again-waiting:hover {
     border-color: var(--border-color-strong);
 }
+
+/* Final owner: src/styles/shared-controls.css. */
 
 .chess-button.danger {
     background: var(--gradient-error);
@@ -467,6 +509,8 @@
     border-color: transparent;
     box-shadow: var(--shadow-md);
 }
+
+/* Final owner: src/styles/shared-controls.css. */
 
 .chess-button.danger:disabled {
     background: var(--bg-tertiary);
@@ -477,6 +521,7 @@
 
 /* Start Drill is gated until an opening AND a strictness tier are picked
    (g-09mu); the gate must read as disabled, not as a clickable primary. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-panel .chess-button.primary:disabled {
     background: var(--bg-tertiary);
     color: var(--text-tertiary);
@@ -484,16 +529,21 @@
     cursor: not-allowed;
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .chess-button:hover {
     border-color: var(--text-primary);
 }
 
 /* Again + settings-gear pairing — keep the gear visually tied to its button. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .drill-again-group {
     display: inline-flex;
     align-items: center;
     gap: 0.15rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .drill-settings-gear {
     width: 32px;
@@ -513,15 +563,21 @@
         color 200ms ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .drill-settings-gear:hover:not(:disabled) {
     color: var(--text-primary);
     background: var(--bg-tertiary);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .drill-settings-gear:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chessboard-wrapper {
     grid-area: board;
@@ -530,15 +586,20 @@
     max-width: var(--game-board-max-width);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-graph-area .analysis-graph > svg {
     height: var(--game-graph-height);
 }
 
 @media (max-width: 767px) {
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .chess-graph-area .analysis-graph > svg {
         height: var(--game-graph-height);
     }
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chessboard-board-with-eval {
     display: flex;
@@ -546,11 +607,15 @@
     gap: 0.4rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chessboard-board-area {
     position: relative;
     flex: 1;
     min-width: 0;
 }
+
+/* Final owner: src/components/EvalBar.css. */
 
 .eval-bar {
     flex: 0 0 2rem;
@@ -562,6 +627,8 @@
     gap: 0.35rem;
 }
 
+/* Final owner: src/components/EvalBar.css. */
+
 .eval-bar__value {
     min-height: 0.75rem;
     font-size: 0.75rem;
@@ -572,10 +639,14 @@
     color: var(--text-primary);
 }
 
+/* Final owner: src/components/EvalBar.css. */
+
 .eval-bar__value--negative,
 .eval-bar__value--neutral {
     color: var(--text-tertiary);
 }
+
+/* Final owner: src/components/EvalBar.css. */
 
 .eval-bar__track {
     width: 10px;
@@ -589,13 +660,19 @@
     background: var(--eval-bar-black);
 }
 
+/* Final owner: src/components/EvalBar.css. */
+
 .eval-bar__track--white-bottom {
     justify-content: flex-end;
 }
 
+/* Final owner: src/components/EvalBar.css. */
+
 .eval-bar__track--white-top {
     justify-content: flex-start;
 }
+
+/* Final owner: src/components/EvalBar.css. */
 
 .eval-bar__white-fill {
     width: 100%;
@@ -604,6 +681,7 @@
 }
 
 /* Blunder flash overlay */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .blunder-flash {
     position: absolute;
     inset: 0;
@@ -612,6 +690,8 @@
     background: var(--eval-blunder-flash);
     animation: blunder-flash-anim 400ms ease-out forwards;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes blunder-flash-anim {
     0% {
@@ -623,6 +703,7 @@
 }
 
 /* Shared toast entrance animation (used by .streak-toast, .board-notice, etc.) */
+/* Final owner: src/styles/shared-effects.css. */
 @keyframes blunder-toast-in {
     0% {
         opacity: 0;
@@ -633,6 +714,8 @@
         transform: translateY(0);
     }
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .streak-toast {
     position: absolute;
@@ -653,9 +736,13 @@
     pointer-events: none;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .streak-toast--record {
     border-color: var(--warning);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .streak-toast__label {
     font-weight: 800;
@@ -663,14 +750,20 @@
     color: var(--success);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .streak-toast--record .streak-toast__label {
     color: var(--warning);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .streak-toast__detail {
     color: var(--text-tertiary);
     font-size: 0.8rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .copy-position-toast {
     position: absolute;
@@ -692,23 +785,33 @@
     animation: blunder-toast-in 250ms ease-out;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .copy-position-toast__icon {
     font-size: 1rem;
     font-weight: 900;
     line-height: 1;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .copy-position-toast--success {
     border-color: var(--success);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .copy-position-toast--success .copy-position-toast__icon {
     color: var(--success);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .copy-position-toast--error {
     border-color: var(--error);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .copy-position-toast--error .copy-position-toast__icon {
     color: var(--error);
@@ -718,6 +821,7 @@
    it never competes with the single-slot board notice (top-left) or the streak
    toast (bottom-right). Interactive (dismissable), so unlike its siblings it
    keeps pointer events. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .last-drill-delta-toast {
     position: absolute;
     top: 0.75rem;
@@ -737,6 +841,8 @@
     gap: 0.3rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .last-drill-delta-toast__dismiss {
     position: absolute;
     top: 0.15rem;
@@ -750,6 +856,8 @@
     cursor: pointer;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .last-drill-delta-toast__label {
     font-weight: 800;
     font-size: 0.7rem;
@@ -757,6 +865,8 @@
     letter-spacing: 0.04em;
     color: var(--text-tertiary);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .last-drill-delta-toast__list {
     list-style: none;
@@ -767,6 +877,8 @@
     gap: 0.2rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .last-drill-delta-toast__item {
     display: flex;
     align-items: baseline;
@@ -774,11 +886,15 @@
     gap: 0.6rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .last-drill-delta-toast__opening {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .last-drill-delta-toast__delta {
     font-variant-numeric: tabular-nums;
@@ -786,15 +902,20 @@
     flex: 0 0 auto;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .last-drill-delta-toast__item--up .last-drill-delta-toast__delta {
     color: var(--success);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .last-drill-delta-toast__item--down .last-drill-delta-toast__delta {
     color: var(--error);
 }
 
 /* Shared warning-triangle icon (board notice + revert/resign dialogs) */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .warning-triangle-icon {
     flex: 0 0 auto;
     color: var(--warning-dark);
@@ -805,6 +926,7 @@
  * at a time (see useBoardNotice); each kind auto-dismisses on its own timer.
  * Top-left so it never collides with the bottom-right streak toast.
  */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .board-notice {
     position: absolute;
     top: 0.75rem;
@@ -824,16 +946,22 @@
     animation: blunder-toast-in 250ms ease-out;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice__header {
     display: flex;
     align-items: center;
     gap: 0.35rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice .warning-triangle-icon {
     width: 1.25rem;
     height: 1.25rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice__label {
     font-size: 0.78rem;
@@ -842,11 +970,15 @@
     text-transform: uppercase;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice__detail {
     margin: 0;
     font-size: 0.8rem;
     color: var(--text-secondary);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice--review-warning {
     border: 2px solid var(--warning);
@@ -857,11 +989,15 @@
     box-shadow: 0 4px 12px color-mix(in srgb, var(--warning) 25%, transparent);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice__result {
     display: flex;
     align-items: center;
     gap: 0.5rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice__result-icon {
     font-size: 1.75rem;
@@ -870,35 +1006,49 @@
     animation: review-overlay-in 300ms ease-out;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice__result-label {
     font-size: 0.85rem;
     font-weight: 700;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice--pass {
     border: 2px solid var(--success);
     background: color-mix(in srgb, var(--success) 12%, var(--overlay-bg));
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice--pass .board-notice__result-icon,
 .board-notice--pass .board-notice__result-label {
     color: var(--success);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice--fail {
     border: 2px solid var(--eval-blunder);
     background: color-mix(in srgb, var(--eval-blunder) 12%, var(--overlay-bg));
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice--fail .board-notice__result-icon,
 .board-notice--fail .board-notice__result-label {
     color: var(--eval-blunder);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-notice--rehook {
     border: 1px solid color-mix(in srgb, var(--status-ghost) 45%, transparent 55%);
     background: color-mix(in srgb, var(--status-ghost) 12%, var(--overlay-bg));
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-notice--rehook .board-notice__label {
     color: var(--status-ghost);
@@ -908,52 +1058,8 @@
 }
 
 /* Review fail panel (side panel) */
-.review-fail-panel {
-    margin: 0.35rem 0 0.5rem;
-    padding: 0.7rem 0.9rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--error-light);
-    background: var(--error-bg);
-    box-shadow: var(--shadow-sm);
-    color: var(--text-primary);
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    width: 100%;
-    max-width: 420px;
-    animation: blunder-toast-in 250ms ease-out;
-}
 
-.review-fail-panel__label {
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--error);
-}
-
-.review-fail-panel__detail {
-    margin: 0;
-    font-size: 0.8rem;
-    color: var(--error-dark);
-}
-
-.review-fail-panel__bad {
-    color: var(--error);
-    font-weight: 600;
-}
-
-.review-fail-panel__best {
-    color: var(--success);
-    font-weight: 600;
-}
-
-.review-fail-panel .chess-button {
-    margin-top: 0.35rem;
-    align-self: flex-start;
-    font-size: 0.8rem;
-    padding: 0.4rem 1rem;
-}
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes review-overlay-in {
     0% { opacity: 0; transform: scale(0.8); }
@@ -965,6 +1071,7 @@
    primary fix for "I don't know how to get back": pulses gently and returns to
    the latest move on click. pointer-events must be auto — the sibling toast
    layer above it may be click-through. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .board-return-live {
     position: absolute;
     bottom: 0.25rem;
@@ -997,6 +1104,8 @@
         board-return-live-pulse 2s ease-in-out 250ms infinite;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-return-live--tucked {
     width: var(--board-return-live-size);
     height: var(--board-return-live-height);
@@ -1005,6 +1114,8 @@
     padding: 0;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-return-live__label {
     max-width: 8rem;
     opacity: 1;
@@ -1012,24 +1123,34 @@
     transition: max-width 200ms ease, opacity 150ms ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-return-live--tucked .board-return-live__label {
     max-width: 0;
     opacity: 0;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-return-live:hover {
     filter: brightness(1.06);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .board-return-live:focus-visible {
     outline: 2px solid var(--text-on-gradient);
     outline-offset: 2px;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .board-return-live__glyph {
     font-size: 1rem;
     line-height: 1;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes board-return-live-pulse {
     0%,
@@ -1045,6 +1166,8 @@
     }
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chessboard-overlay {
     position: fixed;
     inset: 0;
@@ -1055,6 +1178,8 @@
     background: var(--overlay-scrim);
     backdrop-filter: blur(2px);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-start-panel {
     position: relative;
@@ -1075,6 +1200,8 @@
     box-sizing: border-box;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-start-close {
     position: absolute;
     top: 0.5rem;
@@ -1093,15 +1220,21 @@
         transform 0.2s;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-start-close:hover:not(:disabled) {
     color: var(--error-dark);
     transform: scale(1.1);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-start-close:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-start-title {
     margin: 0;
@@ -1109,6 +1242,8 @@
     font-weight: 600;
     color: var(--text-primary);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-elo-selector {
     display: flex;
@@ -1118,10 +1253,14 @@
     width: 100%;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-elo-slider-row {
     display: flex;
     width: 100%;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-elo-bot-row {
     display: flex;
@@ -1130,12 +1269,16 @@
     gap: 0.75rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .chess-elo-slider {
     width: 100%;
     accent-color: var(--accent);
     cursor: pointer;
     height: 6px;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-elo-label {
     font-size: 1.1rem;
@@ -1144,11 +1287,15 @@
     color: var(--text-primary);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opponent-avatar {
     border-radius: 4px;
     object-fit: contain;
     flex-shrink: 0;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .elo-stakes {
     margin: 0.25rem 0 0;
@@ -1158,13 +1305,19 @@
     opacity: 0.85;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .elo-stakes__win {
     color: #4caf50;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .elo-stakes__loss {
     color: #ef5350;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-start-options {
     display: flex;
@@ -1174,6 +1327,7 @@
 }
 
 /* Play-side buttons: a king piece above a small label (g-lgi5). */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .play-side-button {
     display: flex;
     flex-direction: column;
@@ -1189,43 +1343,61 @@
     transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-button:hover:not(:disabled) {
     border-color: var(--brand-primary);
     transform: translateY(-2px);
     box-shadow: var(--shadow-md);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .play-side-button__piece {
     width: 3rem;
     height: 3rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-button__label {
     font-size: 0.9rem;
     font-weight: 600;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-button__piece--split {
     position: relative;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .play-side-king {
     position: absolute;
     inset: 0;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-king--left {
     clip-path: inset(0 50% 0 0);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .play-side-king--right {
     clip-path: inset(0 0 0 50%);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-start-error {
     margin: 0;
@@ -1234,11 +1406,15 @@
     max-width: 260px;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .revert-warning-dialog__pending-label {
     display: inline-flex;
     align-items: center;
     gap: 0.5rem;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .revert-warning-dialog__spinner {
     display: inline-block;
@@ -1253,6 +1429,7 @@
 
 /* Segmented toggle: a single inset track holding equal-width segments with a
    raised, brand-accented active thumb (g-lgi5). */
+/* Final owner: src/styles/shared-controls.css. */
 .segmented-toggle {
     display: flex;
     gap: 0.25rem;
@@ -1263,10 +1440,13 @@
 }
 
 /* Standalone toggle (e.g. Blunder Library filter): pill with its own border. */
+/* Final owner: src/styles/shared-controls.css. */
 .chess-button.toggle {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);
 }
+
+/* Final owner: src/styles/shared-controls.css. */
 
 .chess-button.toggle.active {
     background: var(--gradient-brand);
@@ -1276,6 +1456,7 @@
 }
 
 /* Inside a segmented track the toggle becomes a borderless segment / thumb. */
+/* Final owner: src/styles/shared-controls.css. */
 .segmented-toggle .chess-button.toggle {
     flex: 1 1 0;
     border: none;
@@ -1287,9 +1468,13 @@
     text-align: center;
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .segmented-toggle .chess-button.toggle:hover:not(.active) {
     color: var(--text-primary);
 }
+
+/* Final owner: src/styles/shared-controls.css. */
 
 .segmented-toggle .chess-button.toggle.active {
     background: var(--gradient-brand);
@@ -1297,17 +1482,15 @@
     box-shadow: var(--shadow-md);
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .segmented-toggle .chess-button.toggle:disabled {
     opacity: 0.55;
     cursor: not-allowed;
 }
 
-.overlay-button {
-    font-size: 1.25rem;
-    padding: 1rem 2rem;
-}
-
 /* Subtle scrim over board when game has ended */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chessboard-ended-scrim {
     position: absolute;
     inset: 0;
@@ -1315,6 +1498,8 @@
     pointer-events: none;
     background: var(--scrim-ended);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .chess-post-game-actions {
     display: flex;
@@ -1324,6 +1509,7 @@
 }
 
 /* Game status badge */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .game-status-badge {
     display: inline-block;
     align-self: flex-start;
@@ -1334,11 +1520,15 @@
     letter-spacing: 0.02em;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .game-status-badge--live {
     background: var(--status-live-light);
     color: var(--status-live);
     border: 1px solid var(--status-live);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .game-status-badge--win {
     background: var(--success-bg);
@@ -1346,11 +1536,15 @@
     border: 1px solid var(--success-border);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .game-status-badge--loss {
     background: var(--error-bg-subtle);
     color: var(--error-dark);
     border: 1px solid var(--error);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .game-status-badge--other {
     background: var(--status-other-bg);
@@ -1359,6 +1553,7 @@
 }
 
 /* Unrated badge */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .unrated-badge {
     display: inline-block;
     align-self: flex-start;
@@ -1373,6 +1568,7 @@
 }
 
 /* Revert confirmation dialog */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .revert-warning-dialog {
     display: flex;
     flex-direction: column;
@@ -1387,6 +1583,8 @@
     max-width: 20rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .revert-warning-dialog__title {
     font-size: 1.1rem;
     font-weight: 700;
@@ -1394,12 +1592,16 @@
     margin: 0;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .revert-warning-dialog__body {
     font-size: 0.9rem;
     color: var(--text-secondary);
     margin: 0;
     line-height: 1.4;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .revert-warning-dialog__actions {
     display: flex;

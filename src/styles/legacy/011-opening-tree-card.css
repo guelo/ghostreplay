@@ -3,6 +3,7 @@
 /* Width-agnostic presentational cards for opening-tree nodes. The left accent
    border encodes the grade (--grade-accent); column widths/scroll belong to
    g-tree-layout, not here. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card {
     --grade-accent: var(--text-tertiary);
     width: 100%;
@@ -10,31 +11,41 @@
     box-sizing: border-box;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card--grade-a {
     --grade-accent: var(--color-green-600);
 }
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--grade-b {
     --grade-accent: var(--color-green-500);
 }
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--grade-c {
     --grade-accent: var(--color-yellow-600);
 }
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--grade-d {
     --grade-accent: var(--color-orange-500);
 }
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--grade-f {
     --grade-accent: var(--color-red-500);
 }
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--grade-none {
     --grade-accent: var(--text-tertiary);
 }
 
 /* A fresh score outcome belongs to the card, not beside it. Keep the outcome
    colour separate from the grade accent: an A can fall and an F can improve. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--score-change-up {
     --score-change-accent: var(--success);
     --score-change-tint: color-mix(in srgb, var(--success) 15%, transparent);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card--score-change-down {
     --score-change-accent: var(--error);
@@ -42,6 +53,7 @@
 }
 
 /* --- Compact variant: two-line selection button -------------------------- */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--compact {
     display: flex;
     flex-direction: column;
@@ -56,6 +68,8 @@
     text-align: left;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 button.tree-node-card--compact {
     cursor: pointer;
 }
@@ -63,9 +77,12 @@ button.tree-node-card--compact {
 /* The score's arrival is intentionally brief: it is feedback for this opening,
    not a reward-screen animation. The tint and glow call attention to the whole
    active card while preserving its ordinary grade border. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--compact.tree-node-card--score-change-animate {
     animation: opening-score-card-glow 600ms ease-out;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 @keyframes opening-score-card-glow {
     0% {
@@ -83,15 +100,20 @@ button.tree-node-card--compact {
 
 /* Selected highlight via background + inset ring so the grade accent border
    stays intact (one visual variable per concept). */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--compact.tree-node-card--selected {
     background: color-mix(in srgb, var(--grade-accent) 16%, var(--card-bg));
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--grade-accent) 45%, transparent);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card--compact:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
     outline-offset: 1px;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__line {
     display: flex;
@@ -99,16 +121,22 @@ button.tree-node-card--compact {
     min-width: 0;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__line--primary {
     justify-content: space-between;
     gap: 0.5rem;
     white-space: nowrap;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__move {
     font-weight: 600;
     font-size: 0.8rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__primary-right {
     flex: 0 0 auto;
@@ -116,6 +144,8 @@ button.tree-node-card--compact {
     align-items: center;
     gap: 0.35rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score {
     font-variant-numeric: tabular-nums;
@@ -126,23 +156,32 @@ button.tree-node-card--compact {
 /* The resolved score becomes the headline of a newly known outcome. It grows
    roughly 28% over the standard compact score, then the tinted capsule confirms
    the signed change without competing with the new value. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__score--hero {
     font-size: 1rem;
     font-weight: 800;
     letter-spacing: -0.02em;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score--previous {
     color: var(--text-primary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score--resolved {
     color: var(--score-change-accent);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score--changed {
     animation: opening-score-number-arrive 300ms cubic-bezier(0.18, 0.8, 0.28, 1.16) both;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 @keyframes opening-score-number-arrive {
     from {
@@ -154,6 +193,8 @@ button.tree-node-card--compact {
         transform: translateY(0) scale(1);
     }
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score-change-badge {
     display: inline-flex;
@@ -171,9 +212,13 @@ button.tree-node-card--compact {
     white-space: nowrap;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score-change-badge--animated {
     animation: opening-score-badge-pop 220ms ease-out both;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 @keyframes opening-score-badge-pop {
     from {
@@ -187,6 +232,7 @@ button.tree-node-card--compact {
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/OpeningTreeNodeCard.css. */
     .tree-node-card--compact.tree-node-card--score-change-animate,
     .tree-node-card__score--changed,
     .tree-node-card__score-change-badge--animated {
@@ -197,6 +243,7 @@ button.tree-node-card--compact {
 /* Score loading placeholder (g-a5v3): occupies the score + grade slot while a
    cold score cache is recomputing. Width is fixed to roughly the widest real
    content ("100" + grade tag) so hydrating a score does not reflow the card. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__score-loading {
     flex: 0 0 auto;
     display: inline-flex;
@@ -205,6 +252,8 @@ button.tree-node-card--compact {
     min-width: 3.1rem;
     height: 0.95rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score-spinner {
     flex: 0 0 0.8rem;
@@ -219,12 +268,14 @@ button.tree-node-card--compact {
 
 /* Respect reduced-motion: keep the ring visible, drop the rotation. */
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/OpeningTreeNodeCard.css. */
     .tree-node-card__score-spinner {
         animation: none;
     }
 }
 
 /* Screen-reader-only loading label — the spinner alone is invisible to AT. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__score-loading-label {
     position: absolute;
     width: 1px;
@@ -237,6 +288,8 @@ button.tree-node-card--compact {
     border: 0;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__grade {
     flex: 0 0 auto;
     padding: 0.05rem 0.3rem;
@@ -248,6 +301,8 @@ button.tree-node-card--compact {
     color: var(--grade-accent);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__line--secondary {
     gap: 0.4rem;
 }
@@ -257,10 +312,13 @@ button.tree-node-card--compact {
    than a grade or a book edge) flagging moves that branch off the eco.json
    book. Clickable: toggles the info popover below. Mirrors the grade tag's
    sizing for a consistent chip rhythm. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__off-book-wrap {
     flex: 0 0 auto;
     display: inline-flex;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__off-book {
     flex: 0 0 auto;
@@ -280,10 +338,14 @@ button.tree-node-card--compact {
     transition: background 0.15s, border-color 0.15s;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__off-book:hover {
     background: color-mix(in srgb, var(--color-violet-500) 28%, var(--card-bg));
     border-color: color-mix(in srgb, var(--color-violet-500) 75%, transparent);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__off-book:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-violet-500) 60%, transparent);
@@ -293,6 +355,7 @@ button.tree-node-card--compact {
 /* "Transposition" chip — a book position reached through a different move order
    (g-openings-transpose). Same plumbing as the off-book chip, in emerald so it
    reads as in-book rather than as the player's own off-book branch. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__transposition {
     flex: 0 0 auto;
     display: inline-flex;
@@ -311,10 +374,14 @@ button.tree-node-card--compact {
     transition: background 0.15s, border-color 0.15s;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__transposition:hover {
     background: color-mix(in srgb, var(--color-emerald-500) 28%, var(--card-bg));
     border-color: color-mix(in srgb, var(--color-emerald-500) 75%, transparent);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__transposition:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-emerald-500) 60%, transparent);
@@ -323,6 +390,7 @@ button.tree-node-card--compact {
 
 /* "Your move" chip — the third move type (a board exploration). Mirrors the
    off-book chip's plumbing but in sky to match its connector color (g-obh5). */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__selected-move {
     flex: 0 0 auto;
     display: inline-flex;
@@ -341,10 +409,14 @@ button.tree-node-card--compact {
     transition: background 0.15s, border-color 0.15s;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__selected-move:hover {
     background: color-mix(in srgb, var(--color-sky-500) 28%, var(--card-bg));
     border-color: color-mix(in srgb, var(--color-sky-500) 75%, transparent);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__selected-move:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-sky-500) 60%, transparent);
@@ -353,6 +425,7 @@ button.tree-node-card--compact {
 
 /* Fixed (viewport-anchored) so it escapes the tree columns' overflow scrollers.
    Positioned in JS from the trigger's rect. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__off-book-popup {
     position: fixed;
     z-index: 50;
@@ -375,10 +448,14 @@ button.tree-node-card--compact {
     cursor: default;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__off-book-popup strong {
     font-size: 0.74rem;
     color: var(--text-primary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__name {
     flex: 1;
@@ -389,6 +466,8 @@ button.tree-node-card--compact {
     font-size: 0.7rem;
     color: var(--text-secondary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__eval {
     flex: 0 0 auto;
@@ -403,6 +482,7 @@ button.tree-node-card--compact {
    than the compact selected state: a full grade-accent border, an accent-tinted
    background (matching the selected/collapsed cards) and a lifted shadow that
    eases in to read as elevation above the surrounding tree. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--expanded {
     /* Positioning context for the optional full-surface collapse overlay
        (lineage in-place expansion); harmless on /openings (no overlay there). */
@@ -422,6 +502,8 @@ button.tree-node-card--compact {
     animation: tree-node-card-elevate 0.22s ease-out;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 @keyframes tree-node-card-elevate {
     from {
         transform: translateY(5px) scale(0.985);
@@ -437,10 +519,13 @@ button.tree-node-card--compact {
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/OpeningTreeNodeCard.css. */
     .tree-node-card--expanded {
         animation: none;
     }
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__header {
     display: flex;
@@ -449,11 +534,15 @@ button.tree-node-card--compact {
     min-width: 0;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__move-label {
     font-size: 0.95rem;
     font-weight: 700;
     color: var(--text-primary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__name-line {
     display: flex;
@@ -462,9 +551,13 @@ button.tree-node-card--compact {
     min-width: 0;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card--expanded .tree-node-card__name {
     font-size: 0.78rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score-panel,
 .tree-node-card__metrics {
@@ -473,13 +566,19 @@ button.tree-node-card--compact {
     gap: 0.5rem;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score-panel {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score-metric,
 .tree-node-card__metric {
@@ -489,13 +588,19 @@ button.tree-node-card--compact {
     background: color-mix(in srgb, var(--color-white) 70%, var(--bg-primary));
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score-metric {
     padding: 0.5rem 0.6rem;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__metric {
     padding: 0.45rem 0.55rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__score-metric dt,
 .tree-node-card__metric dt {
@@ -507,6 +612,8 @@ button.tree-node-card--compact {
     color: var(--text-tertiary);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score-metric dd {
     margin: 0;
     font-size: 1.4rem;
@@ -516,11 +623,15 @@ button.tree-node-card--compact {
     color: var(--text-primary);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__score-value {
     display: flex;
     align-items: center;
     gap: 0.4rem;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__metric dd {
     margin: 0;
@@ -530,12 +641,16 @@ button.tree-node-card--compact {
     color: var(--text-primary);
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__terminal {
     margin: 0;
     font-size: 0.78rem;
     font-weight: 600;
     color: var(--text-secondary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__action-button {
     /* Raised above the collapse overlay (z-index:0) so it stays clickable when
@@ -555,11 +670,15 @@ button.tree-node-card--compact {
     transition: border-color 200ms ease, background 200ms ease;
 }
 
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
+
 .tree-node-card__action-button:hover {
     border-color: var(--text-primary);
     background: var(--gradient-brand);
     color: var(--text-on-gradient);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__action-button:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
@@ -569,6 +688,7 @@ button.tree-node-card--compact {
 /* Stretched click target that collapses the expanded card; sits behind the
    raised footer actions so those controls stay clickable (same pattern as the
    former .opening-family-card__collapse-nav). */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__collapse-nav {
     position: absolute;
     inset: 0;
@@ -586,6 +706,7 @@ button.tree-node-card--compact {
 /* The lineage entry identifies an opening family by position — no SAN/eval — so
    the score panel drops the Eval tile (the name-led header is shared with the
    /openings move card via .tree-node-card__move--name). */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--family .tree-node-card__score-panel {
     grid-template-columns: minmax(0, 1fr);
 }
@@ -594,6 +715,7 @@ button.tree-node-card--compact {
 /* The primary line leads with the opening NAME on every surface. Collapsed
    cards give it two lines before truncating, while the score/grade keeps its
    fixed slot at the right; expanded cards continue to wrap without a limit. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__move--name {
     flex: 1;
     min-width: 0;
@@ -601,6 +723,8 @@ button.tree-node-card--compact {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card--compact .tree-node-card__move--name {
     display: -webkit-box;
@@ -611,11 +735,14 @@ button.tree-node-card--compact {
 
 /* The played move list ("1.e4 c6 2.Bc4") is the secondary line; the last
    (crossing) move is bold to disambiguate siblings that share a name. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__move-list {
     font-size: 0.7rem;
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card__move-list-last {
     font-weight: 700;
@@ -624,6 +751,7 @@ button.tree-node-card--compact {
 
 /* Compact: one truncated line (full text in the title). The growing flex child
    of the secondary line, so chips/eval keep their intrinsic width. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__move-list--compact {
     flex: 1;
     min-width: 0;
@@ -633,6 +761,7 @@ button.tree-node-card--compact {
 }
 
 /* Expanded: wraps to as many lines as needed — no truncation. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__move-list--expanded {
     min-width: 0;
     white-space: normal;
@@ -640,9 +769,12 @@ button.tree-node-card--compact {
 
 /* Expanded header: the name wraps (no truncation) and the move list wraps below
    it, chips flowing after. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card--expanded .tree-node-card__move-label {
     white-space: normal;
 }
+
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 
 .tree-node-card--expanded .tree-node-card__name-line {
     flex-wrap: wrap;
@@ -650,6 +782,7 @@ button.tree-node-card--compact {
 
 /* "View in Openings" footer link lives inside the expanded card; raised above
    the collapse overlay (z-index:0) so it stays clickable. */
+/* Final owner: src/components/OpeningTreeNodeCard.css. */
 .tree-node-card__footer-action {
     position: relative;
     z-index: 1;

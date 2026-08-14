@@ -1,11 +1,14 @@
 
 /* Auth Form Page */
+/* Final owner: src/components/AuthForm.css. */
 .auth-page {
     flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form {
     display: flex;
@@ -20,12 +23,16 @@
     box-shadow: var(--shadow-xl);
 }
 
+/* Final owner: src/components/AuthForm.css. */
+
 .auth-form__title {
     margin: 0;
     font-size: 1.5rem;
     color: var(--text-primary);
     text-align: center;
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form__label {
     display: flex;
@@ -35,6 +42,8 @@
     font-weight: 500;
     color: var(--text-tertiary);
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form__input {
     padding: 0.65rem 0.85rem;
@@ -47,9 +56,13 @@
     transition: border-color 200ms ease;
 }
 
+/* Final owner: src/components/AuthForm.css. */
+
 .auth-form__input:focus {
     border-color: var(--brand-secondary);
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form__error {
     margin: 0;
@@ -57,16 +70,22 @@
     color: var(--error-light);
 }
 
+/* Final owner: src/components/AuthForm.css. */
+
 .auth-form__submit {
     width: 100%;
     font-size: 0.95rem;
     padding: 0.7rem;
 }
 
+/* Final owner: src/components/AuthForm.css. */
+
 .auth-form__submit:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form__footer {
     margin: 0;
@@ -75,11 +94,15 @@
     color: var(--text-tertiary);
 }
 
+/* Final owner: src/components/AuthForm.css. */
+
 .auth-form__footer a {
     color: var(--brand-secondary);
     text-decoration: none;
     font-weight: 500;
 }
+
+/* Final owner: src/components/AuthForm.css. */
 
 .auth-form__footer a:hover {
     text-decoration: underline;

@@ -1,3 +1,5 @@
+/* Final owner: src/styles/app-shell.css. */
+
 .app-shell {
     padding: clamp(0.8rem, 2vw, 1.5rem) clamp(1rem, 2vw, 25px)
         clamp(1rem, 2vw, 25px);
@@ -6,17 +8,25 @@
     gap: clamp(0.75rem, 2vw, 1.25rem);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-page {
     gap: clamp(0.75rem, 2vw, 1.25rem);
 }
+
+/* Final owner: src/pages/GamePage.css. */
 
 .game-page {
     gap: clamp(0.75rem, 2vw, 1.25rem);
 }
 
+/* Final owner: src/styles/app-shell.css. */
+
 .constrained-content {
     width: 100%;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-page .nav-bar,
 .home-page__content {
@@ -24,11 +34,7 @@
     margin-inline: auto;
 }
 
-.home-page__content {
-    display: flex;
-    flex-direction: column;
-    gap: clamp(4.5rem, 8vw, 7.5rem);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-kicker {
     display: flex;
@@ -42,87 +48,8 @@
     text-transform: uppercase;
 }
 
-.home-hero {
-    position: relative;
-    isolation: isolate;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: clamp(2rem, 4.5vw, 3.25rem);
-    padding: clamp(2.5rem, 5vw, 4.25rem) clamp(1.5rem, 4vw, 3.5rem)
-        clamp(1.75rem, 4vw, 3rem);
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--status-ghost) 24%, var(--border-color));
-    border-radius: clamp(1.6rem, 4vw, 2.75rem);
-    background:
-        radial-gradient(
-            circle at 82% 18%,
-            color-mix(in srgb, var(--status-ghost-light) 72%, transparent) 0 9%,
-            transparent 30%
-        ),
-        radial-gradient(
-            circle at 4% 98%,
-            color-mix(in srgb, var(--color-cream-200) 46%, transparent),
-            transparent 34%
-        ),
-        linear-gradient(
-            145deg,
-            color-mix(in srgb, var(--card-bg) 94%, var(--status-ghost-light)),
-            var(--card-bg)
-        );
-    box-shadow: var(--shadow-xl);
-}
-
-.home-hero::before,
-.home-hero::after {
-    position: absolute;
-    z-index: -1;
-    content: "";
-    border-radius: 50%;
-    opacity: 0.7;
-}
-
-.home-hero::before {
-    top: 12%;
-    right: 44%;
-    width: 9px;
-    height: 9px;
-    background: var(--warning);
-    box-shadow:
-        36px 54px 0 2px color-mix(in srgb, var(--status-ghost) 50%, transparent),
-        -22px 118px 0 -1px color-mix(in srgb, var(--brand-primary) 50%, transparent);
-}
-
-.home-hero::after {
-    right: -85px;
-    bottom: -130px;
-    width: 280px;
-    height: 280px;
-    border: 1px dashed color-mix(in srgb, var(--status-ghost) 30%, transparent);
-}
-
-.home-hero__intro {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 1.4rem;
-    max-width: 860px;
-    text-align: center;
-}
-
-.home-hero__intro .home-kicker {
-    justify-content: center;
-}
-
-.home-hero h1 {
-    max-width: 820px;
-    margin: 0;
-    color: var(--text-primary);
-    font-size: clamp(2.8rem, 5.6vw, 5.2rem);
-    font-weight: 850;
-    letter-spacing: -0.065em;
-    line-height: 0.96;
-}
+/* Keep this rule before the intervening reduced-motion override; do not move it back to its later duplicate position. */
+/* Final owner: src/pages/HomePage.css. */
 
 .home-hero__accent {
     display: inline;
@@ -139,7 +66,17 @@
     color: transparent;
     -webkit-background-clip: text;
     animation: home-accent-shimmer 6s ease-in-out infinite;
+    background: linear-gradient(
+        105deg,
+        var(--status-ghost-light),
+        #d7ffcf,
+        var(--color-cream-200)
+    );
+    background-clip: text;
+    -webkit-background-clip: text;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-accent-shimmer {
     0%,
@@ -152,11 +89,14 @@
 }
 
 /* Playful bobbing/wiggling kicker emoji */
+/* Final owner: src/pages/HomePage.css. */
 .home-kicker [aria-hidden="true"]:first-child {
     display: inline-block;
     animation: home-kicker-wiggle 3.2s ease-in-out infinite;
     transform-origin: 70% 80%;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-kicker-wiggle {
     0%,
@@ -175,12 +115,7 @@
     }
 }
 
-.home-hero__lede {
-    max-width: 55ch;
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: clamp(1.04rem, 1.6vw, 1.22rem);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-button {
     display: inline-flex;
@@ -195,264 +130,14 @@
         border-color 180ms ease;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-button:hover {
     transform: translateY(-2px);
     box-shadow: var(--shadow-lg);
 }
 
-.home-hero__proof {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 0.55rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.home-hero__proof li {
-    padding: 0.32rem 0.72rem;
-    border: 1px solid color-mix(in srgb, var(--status-ghost) 20%, var(--border-color));
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--card-bg) 76%, transparent);
-    color: var(--text-tertiary);
-    font-size: 0.76rem;
-    font-weight: 650;
-}
-
-.home-hero__proof li::before {
-    margin-right: 0.42rem;
-    color: var(--teal);
-    content: "✓";
-}
-
-.home-hero__proof li:nth-child(1)::before {
-    content: "👻";
-}
-
-.home-hero__proof li:nth-child(2)::before {
-    content: "⚙️";
-}
-
-.home-hero__proof li:nth-child(3)::before {
-    content: "🔮";
-}
-
-/* Dual feature portals inside the hero */
-.home-portals {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: clamp(1.25rem, 3vw, 2rem);
-    width: 100%;
-}
-
-.home-portal {
-    position: relative;
-    isolation: isolate;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1.1rem;
-    min-width: 0;
-    padding: clamp(1.35rem, 2.6vw, 2rem);
-    overflow: hidden;
-    border-radius: clamp(1.2rem, 2.5vw, 1.8rem);
-    text-decoration: none;
-    transition:
-        transform 220ms ease,
-        box-shadow 220ms ease;
-}
-
-.home-portal:hover {
-    transform: translateY(-5px) rotate(0deg);
-    box-shadow: var(--shadow-xl);
-}
-
-.home-portal--ghost {
-    transform: rotate(-0.5deg);
-    border: 1px solid
-        color-mix(in srgb, var(--status-ghost) 28%, var(--border-color));
-    background: color-mix(in srgb, var(--card-bg) 88%, var(--status-ghost-light));
-    box-shadow: var(--shadow-lg);
-}
-
-.home-portal--drill {
-    transform: rotate(0.5deg);
-    border: 1px solid color-mix(in srgb, var(--status-ghost) 45%, transparent);
-    background:
-        radial-gradient(
-            circle at 85% 8%,
-            color-mix(in srgb, var(--status-ghost) 55%, transparent),
-            transparent 42%
-        ),
-        linear-gradient(125deg, var(--color-brown-900), #45345d 78%);
-    color: white;
-    box-shadow: var(--shadow-xl);
-}
-
-.home-portal__ghosts {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    overflow: hidden;
-    pointer-events: none;
-}
-
-.home-portal__ghosts span {
-    position: absolute;
-    color: color-mix(in srgb, var(--status-ghost-light) 13%, transparent);
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: clamp(6rem, 12vw, 10rem);
-    line-height: 1;
-    filter: blur(1px);
-    animation: home-float 7s ease-in-out infinite;
-}
-
-.home-portal__ghosts span:nth-child(1) {
-    top: -14%;
-    right: 4%;
-}
-
-.home-portal__ghosts span:nth-child(2) {
-    bottom: -20%;
-    left: 8%;
-    animation-delay: -3s;
-    animation-duration: 8.5s;
-}
-
-.home-portal__head {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 0.7rem;
-}
-
-.home-portal__tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.45rem;
-    padding: 0.3rem 0.75rem;
-    border: 1px solid
-        color-mix(in srgb, var(--status-ghost) 30%, var(--border-color));
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--card-bg) 75%, transparent);
-    color: var(--brand-secondary);
-    font-size: 0.7rem;
-    font-weight: 850;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-}
-
-.home-portal__tag--electric {
-    border-color: color-mix(in srgb, var(--color-orange-500) 50%, transparent);
-    background: color-mix(in srgb, var(--color-orange-500) 18%, transparent);
-    color: var(--status-ghost-light);
-}
-
-.home-portal__head h2 {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: clamp(1.5rem, 2.6vw, 2.2rem);
-    letter-spacing: -0.04em;
-    line-height: 1.05;
-}
-
-.home-portal--drill .home-portal__head h2 {
-    color: white;
-}
-
-.home-portal--drill .home-portal__head h2 em {
-    font-style: italic;
-    background: linear-gradient(
-        110deg,
-        var(--status-ghost-light),
-        var(--color-orange-500)
-    );
-    background-clip: text;
-    color: transparent;
-    -webkit-background-clip: text;
-}
-
-.home-portal__head p {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.95rem;
-}
-
-.home-portal--drill .home-portal__head p {
-    color: color-mix(in srgb, white 80%, transparent);
-}
-
-.home-portal__panel {
-    width: 100%;
-    padding: 0.9rem 1rem 1rem;
-    border: 1px solid color-mix(in srgb, white 14%, transparent);
-    border-radius: 1.1rem;
-    background: color-mix(in srgb, var(--card-bg) 96%, transparent);
-    box-shadow: 0 22px 45px color-mix(in srgb, black 34%, transparent);
-}
-
-.home-portal__panel-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.75rem;
-    color: var(--text-secondary);
-    font-size: 0.76rem;
-    font-weight: 750;
-}
-
-.home-portal__streak {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    margin-top: 0.75rem;
-    padding-top: 0.75rem;
-    border-top: 1px dashed var(--border-color);
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    font-weight: 700;
-}
-
-.home-portal__streak strong {
-    color: var(--text-primary);
-}
-
-.home-portal__stats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-}
-
-.home-portal__cta {
-    margin-top: auto;
-}
-
-.home-portal--drill .home-portal__cta {
-    background: white;
-    border-color: white;
-    color: var(--color-brown-900);
-}
-
-.home-portal--ghost .home-demo {
-    width: 100%;
-    transform: none;
-    box-shadow:
-        0 18px 42px color-mix(in srgb, var(--text-primary) 13%, transparent),
-        inset 0 1px 0 color-mix(in srgb, white 80%, transparent);
-}
-
-@media (max-width: 900px) {
-    .home-portals {
-        grid-template-columns: 1fr;
-    }
-
-    .home-portal--ghost,
-    .home-portal--drill {
-        transform: none;
-    }
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo {
     position: relative;
@@ -467,6 +152,8 @@
         inset 0 1px 0 color-mix(in srgb, white 80%, transparent);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__topbar {
     display: flex;
     justify-content: space-between;
@@ -479,12 +166,16 @@
     text-transform: uppercase;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__live {
     display: inline-flex;
     align-items: center;
     gap: 0.35rem;
     color: var(--error-dark);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__live > span {
     width: 7px;
@@ -495,27 +186,7 @@
     animation: home-live-pulse 2s ease-in-out infinite;
 }
 
-.home-demo__stage {
-    position: relative;
-    min-height: 420px;
-    padding: clamp(1.25rem, 4vw, 2.3rem);
-    overflow: hidden;
-    border-radius: 1.1rem;
-    background:
-        linear-gradient(color-mix(in srgb, white 30%, transparent) 1px, transparent 1px),
-        linear-gradient(90deg, color-mix(in srgb, white 30%, transparent) 1px, transparent 1px),
-        linear-gradient(
-            145deg,
-            color-mix(in srgb, var(--status-ghost-light) 82%, var(--card-bg)),
-            color-mix(in srgb, var(--color-sky-500) 11%, var(--card-bg))
-        );
-    background-size:
-        26px 26px,
-        26px 26px,
-        auto;
-    box-shadow:
-        inset 0 0 80px color-mix(in srgb, var(--status-ghost) 15%, transparent);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__board-frame {
     position: relative;
@@ -527,6 +198,8 @@
     margin: 0 auto;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__ranks {
     display: grid;
     grid-template-rows: repeat(5, 1fr);
@@ -534,12 +207,16 @@
     justify-items: center;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__files {
     display: grid;
     grid-column: 2;
     grid-template-columns: repeat(5, 1fr);
     justify-items: center;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__ranks span,
 .home-demo__files span {
@@ -549,6 +226,8 @@
     font-weight: 800;
     font-style: italic;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__board {
     position: relative;
@@ -566,6 +245,8 @@
         inset 0 0 30px color-mix(in srgb, var(--status-ghost) 6%, transparent);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__square {
     display: grid;
     place-items: center;
@@ -581,6 +262,7 @@
 }
 
 /* Give the demo board life — pieces jump and glow when poked */
+/* Final owner: src/pages/HomePage.css. */
 .home-demo__square:hover {
     transform: translateY(-6px) scale(1.18) rotate(-5deg);
     text-shadow:
@@ -588,13 +270,19 @@
     cursor: pointer;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__square:nth-child(odd) {
     background: var(--color-cream-100);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__square:nth-child(even) {
     background: color-mix(in srgb, var(--status-ghost) 46%, var(--color-cream-300));
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__square--target {
     position: relative;
@@ -602,6 +290,7 @@
 }
 
 /* The move the ghost wants you to see — a knight from beyond the veil */
+/* Final owner: src/pages/HomePage.css. */
 .home-demo__spectre {
     position: absolute;
     inset: 0;
@@ -611,6 +300,8 @@
     text-shadow: 0 0 14px color-mix(in srgb, var(--status-ghost) 85%, transparent);
     animation: home-spectre-flicker 2.8s ease-in-out infinite;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-spectre-flicker {
     0%,
@@ -624,6 +315,8 @@
         opacity: 0.85;
     }
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__arrow {
     position: absolute;
@@ -639,6 +332,8 @@
     transform: rotate(-18deg);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__mascot {
     position: absolute;
     right: -6%;
@@ -651,10 +346,14 @@
     animation: ghost-spook 5s ease-in-out infinite;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__mascot:hover {
     animation: ghost-spook 1.5s ease-in-out infinite;
     cursor: pointer;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-demo__callout {
     position: absolute;
@@ -673,6 +372,8 @@
     box-shadow: var(--shadow-lg);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-demo__callout strong {
     display: block;
     margin-bottom: 0.12rem;
@@ -680,29 +381,7 @@
     font-size: 0.73rem;
 }
 
-.home-demo__callout-icon {
-    display: grid;
-    flex: 0 0 auto;
-    place-items: center;
-    width: 1.7rem;
-    height: 1.7rem;
-    border-radius: 50%;
-    font-size: 0.85rem;
-    font-weight: 850;
-    line-height: 1;
-}
-
-.home-demo__callout--blunder {
-    top: 9%;
-    left: -7%;
-    transform: rotate(-4deg);
-}
-
-.home-demo__callout--review {
-    right: -7%;
-    bottom: 16%;
-    transform: rotate(3deg);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-section-heading {
     display: grid;
@@ -712,13 +391,15 @@
     margin-bottom: clamp(1.75rem, 4vw, 3rem);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-section-heading .home-kicker {
     grid-column: 1 / -1;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-section-heading h2,
-.home-loop h2,
-.home-faq h2,
 .home-final-cta h2 {
     margin: 0;
     color: var(--text-primary);
@@ -727,20 +408,18 @@
     line-height: 1;
 }
 
-.home-section-heading > p:last-child,
-.home-loop__intro > p:last-child {
+/* Final owner: src/pages/HomePage.css. */
+
+.home-section-heading > p:last-child {
     max-width: 58ch;
     margin: 0;
     color: var(--text-secondary);
     font-size: 1rem;
 }
 
-.home-bento {
-    display: grid;
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    grid-auto-flow: dense;
-    gap: 1rem;
-}
+/* Keep this base before its responsive min-height overrides; the later
+   home-feature rule intentionally contains only the later source body. */
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature {
     position: relative;
@@ -760,18 +439,14 @@
         border-color 180ms ease;
 }
 
-.home-feature:hover {
-    transform: translateY(-5px) rotate(-0.25deg);
-    border-color: color-mix(in srgb, var(--status-ghost) 42%, var(--border-color));
-    box-shadow:
-        var(--shadow-xl),
-        0 0 40px 2px color-mix(in srgb, var(--status-ghost) 10%, transparent);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature:focus-visible {
     outline: 3px solid color-mix(in srgb, var(--brand-primary) 62%, transparent);
     outline-offset: 3px;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature h3 {
     max-width: 19ch;
@@ -782,6 +457,8 @@
     line-height: 1.05;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature p {
     max-width: 48ch;
     margin: 0;
@@ -789,16 +466,22 @@
     font-size: 0.92rem;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature > :not(.home-feature__orbit) {
     position: relative;
     z-index: 1;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__topline {
     display: flex;
     align-items: center;
     gap: 0.7rem;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__icon {
     display: grid;
@@ -815,10 +498,14 @@
     transition: transform 200ms ease, box-shadow 200ms ease;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature:hover .home-feature__icon {
     transform: scale(1.08) rotate(-5deg);
     box-shadow: 0 0 20px color-mix(in srgb, var(--status-ghost) 25%, transparent);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__tag {
     color: var(--text-tertiary);
@@ -828,6 +515,8 @@
     text-transform: uppercase;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__link {
     margin-top: auto;
     padding-top: 1.15rem;
@@ -836,12 +525,16 @@
     font-weight: 750;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__pills {
     display: flex;
     flex-wrap: wrap;
     gap: 0.45rem;
     margin-top: 1.15rem;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__pills span {
     padding: 0.28rem 0.62rem;
@@ -852,6 +545,8 @@
     font-size: 0.7rem;
     font-weight: 700;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature--openings {
     grid-column: span 7;
@@ -870,10 +565,14 @@
         );
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--openings h3 {
     max-width: 13ch;
     font-size: clamp(2rem, 4.2vw, 3.9rem);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__orbit {
     position: absolute;
@@ -887,6 +586,8 @@
     pointer-events: none;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__orbit::before,
 .home-feature__orbit::after {
     position: absolute;
@@ -895,13 +596,19 @@
     border-radius: 50%;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__orbit::before {
     inset: 28px;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__orbit::after {
     inset: 65px;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__orbit span {
     position: absolute;
@@ -917,25 +624,35 @@
     font-size: 2rem;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__orbit span:nth-child(1) {
     top: 5px;
     left: 38px;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature__orbit span:nth-child(2) {
     top: 76px;
     right: -8px;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature__orbit span:nth-child(3) {
     bottom: 20px;
     left: 36px;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--play,
 .home-feature--blunders {
     grid-column: span 5;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature--play {
     background:
@@ -947,10 +664,14 @@
         var(--card-bg);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--play .home-feature__icon {
     background: color-mix(in srgb, var(--color-sky-500) 13%, var(--card-bg));
     color: var(--info-dark);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature--blunders {
     background:
@@ -962,10 +683,14 @@
         var(--card-bg);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--blunders .home-feature__icon {
     background: color-mix(in srgb, var(--color-orange-500) 13%, var(--card-bg));
     color: var(--color-orange-500);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature--history,
 .home-feature--analysis,
@@ -974,178 +699,29 @@
     min-height: 300px;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--history .home-feature__icon {
     color: var(--color-amber-700);
     background: color-mix(in srgb, var(--warning) 14%, var(--card-bg));
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-feature--analysis .home-feature__icon {
     color: var(--teal-dark);
     background: color-mix(in srgb, var(--teal) 12%, var(--card-bg));
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-feature--stats .home-feature__icon {
     color: var(--info-dark);
     background: color-mix(in srgb, var(--info) 12%, var(--card-bg));
 }
 
-.home-loop {
-    display: grid;
-    grid-template-columns: minmax(230px, 0.7fr) minmax(0, 1.3fr);
-    gap: clamp(2rem, 7vw, 6rem);
-    align-items: start;
-    padding: clamp(1.5rem, 4vw, 3rem);
-    border: 1px solid var(--border-color);
-    border-radius: 2rem;
-    background:
-        linear-gradient(
-            135deg,
-            color-mix(in srgb, var(--color-cream-100) 86%, var(--status-ghost-light)),
-            var(--card-bg)
-        );
-}
-
-.home-loop__intro {
-    position: sticky;
-    top: 1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1.1rem;
-}
-
-.home-loop__steps {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-}
-
-.home-loop__steps li {
-    position: relative;
-    display: grid;
-    grid-template-columns: 3rem 3.4rem 1fr;
-    gap: 1rem;
-    align-items: start;
-    min-height: 142px;
-    padding: 0.5rem 0 2rem;
-}
-
-.home-loop__steps li:not(:last-child)::after {
-    position: absolute;
-    top: 3.65rem;
-    bottom: 0.25rem;
-    left: 4.75rem;
-    width: 2px;
-    content: "";
-    background: linear-gradient(
-        var(--status-ghost),
-        color-mix(in srgb, var(--status-ghost) 10%, transparent)
-    );
-}
-
-.home-loop__number {
-    padding-top: 1rem;
-    color: var(--text-tertiary);
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 0.78rem;
-    font-weight: 850;
-    font-style: italic;
-    letter-spacing: 0.04em;
-    white-space: nowrap;
-}
-
-.home-loop__number--blunder {
-    color: var(--error-dark);
-}
-
-.home-loop__number--brilliant {
-    color: var(--teal-dark);
-}
-
-.home-loop__legend {
-    margin: 0;
-    padding: 0.65rem 0.9rem;
-    border: 1px dashed color-mix(in srgb, var(--status-ghost) 38%, var(--border-color));
-    border-radius: 0.85rem;
-    background: color-mix(in srgb, var(--card-bg) 72%, transparent);
-    color: var(--text-tertiary);
-    font-size: 0.79rem;
-}
-
-.home-loop__legend strong {
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 0.9rem;
-}
-
-.home-loop__legend strong:first-of-type {
-    color: var(--error-dark);
-}
-
-.home-loop__legend strong:last-of-type {
-    color: var(--teal-dark);
-}
-
-.home-loop__glyph {
-    position: relative;
-    z-index: 1;
-    display: grid;
-    place-items: center;
-    width: 3.4rem;
-    height: 3.4rem;
-    border: 1px solid color-mix(in srgb, var(--status-ghost) 20%, var(--border-color));
-    border-radius: 1rem;
-    background: var(--card-bg);
-    color: var(--brand-secondary);
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 1.65rem;
-    font-weight: 850;
-    box-shadow:
-        var(--shadow-md),
-        0 0 15px color-mix(in srgb, var(--status-ghost) 12%, transparent);
-    transition: transform 200ms ease;
-}
-
-.home-loop__glyph:hover {
-    transform: scale(1.1) rotate(-8deg);
-}
-
-.home-loop__steps h3 {
-    margin: 0.35rem 0 0.3rem;
-    color: var(--text-primary);
-    font-size: 1.15rem;
-}
-
-.home-loop__steps p {
-    max-width: 48ch;
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-}
-
-.home-final-cta {
-    position: relative;
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: clamp(1rem, 3vw, 2rem);
-    align-items: center;
-    margin-bottom: clamp(1rem, 4vw, 3rem);
-    padding: clamp(1.4rem, 4vw, 2.6rem);
-    overflow: hidden;
-    border-radius: 1.8rem;
-    background:
-        radial-gradient(
-            circle at 78% -20%,
-            color-mix(in srgb, var(--status-ghost) 70%, transparent),
-            transparent 35%
-        ),
-        linear-gradient(120deg, var(--color-brown-900), #47365f);
-    color: white;
-    box-shadow: var(--shadow-xl);
-}
-
 /* Checkerboard ribbon along the top of the final CTA */
+/* Final owner: src/pages/HomePage.css. */
 .home-final-cta::before {
     position: absolute;
     top: 0;
@@ -1161,6 +737,8 @@
     opacity: 0.55;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-final-cta::after {
     position: absolute;
     right: 25%;
@@ -1174,12 +752,16 @@
     animation-delay: -3s;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-final-cta__mascot {
     position: relative;
     z-index: 1;
     display: grid;
     place-items: center;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-final-cta img {
     position: relative;
@@ -1190,6 +772,7 @@
 }
 
 /* Cheeky 'Boo!' that pops out of the ghost on a loop */
+/* Final owner: src/pages/HomePage.css. */
 .home-final-cta__boo {
     position: absolute;
     top: -0.6rem;
@@ -1207,6 +790,8 @@
     animation: home-boo-pop 5s ease-in-out infinite;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-final-cta__boo::before {
     position: absolute;
     bottom: -4px;
@@ -1218,6 +803,8 @@
     content: "";
     transform: rotate(45deg);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-boo-pop {
     0%,
@@ -1237,25 +824,28 @@
     }
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-final-cta > div {
     position: relative;
     z-index: 1;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-final-cta .home-kicker {
     margin-bottom: 0.45rem;
     color: var(--status-ghost-light);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-final-cta h2 {
     color: white;
     font-size: clamp(1.8rem, 4vw, 3.25rem);
 }
 
-.home-final-cta p:last-child {
-    margin: 0.55rem 0 0;
-    color: color-mix(in srgb, white 72%, transparent);
-}
+/* Final owner: src/pages/HomePage.css. */
 
 .home-final-cta .home-button {
     position: relative;
@@ -1266,111 +856,11 @@
 }
 
 /* Floating ghost chess pieces drifting behind the hero */
-.home-hero__drift {
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    overflow: hidden;
-    pointer-events: none;
-}
-
-.home-hero__drift span {
-    position: absolute;
-    color: color-mix(in srgb, var(--status-ghost) 26%, transparent);
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: clamp(2.4rem, 6vw, 4.6rem);
-    line-height: 1;
-    filter: blur(0.3px);
-    animation: home-drift 12s ease-in-out infinite;
-}
-
-.home-hero__drift span:nth-child(1) {
-    top: 14%;
-    left: 8%;
-    animation-delay: -1s;
-    animation-duration: 13s;
-}
-.home-hero__drift span:nth-child(2) {
-    top: 62%;
-    left: 18%;
-    animation-delay: -5s;
-    animation-duration: 15s;
-}
-.home-hero__drift span:nth-child(3) {
-    top: 30%;
-    left: 52%;
-    animation-delay: -3s;
-    animation-duration: 11s;
-}
-.home-hero__drift span:nth-child(4) {
-    top: 74%;
-    left: 64%;
-    animation-delay: -8s;
-    animation-duration: 14s;
-}
-.home-hero__drift span:nth-child(5) {
-    top: 8%;
-    left: 80%;
-    animation-delay: -6s;
-    animation-duration: 16s;
-}
-.home-hero__drift span:nth-child(6) {
-    top: 50%;
-    left: 90%;
-    animation-delay: -2s;
-    animation-duration: 12s;
-}
 
 /* Ghostly ectoplasm particles floating around the hero */
-.home-hero__drift span.ecto-particle {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--status-ghost-light) 55%, transparent);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--status-ghost) 35%, transparent);
-    filter: none;
-    font-size: 0;
-    animation: ecto-float 8s ease-in-out infinite;
-}
-
-.home-hero__drift span.ecto-particle:nth-child(7) {
-    top: 22%;
-    left: 36%;
-    animation-delay: -0.5s;
-    animation-duration: 9s;
-}
-.home-hero__drift span.ecto-particle:nth-child(8) {
-    top: 45%;
-    left: 72%;
-    animation-delay: -3s;
-    animation-duration: 7s;
-}
-.home-hero__drift span.ecto-particle:nth-child(9) {
-    top: 78%;
-    left: 28%;
-    animation-delay: -5.5s;
-    animation-duration: 10s;
-}
-.home-hero__drift span.ecto-particle:nth-child(10) {
-    top: 52%;
-    left: 42%;
-    animation-delay: -7s;
-    animation-duration: 8.5s;
-}
-.home-hero__drift span.ecto-particle:nth-child(11) {
-    top: 88%;
-    left: 55%;
-    animation-delay: -2s;
-    animation-duration: 11s;
-}
-.home-hero__drift span.ecto-particle:nth-child(12) {
-    top: 16%;
-    left: 65%;
-    animation-delay: -4s;
-    animation-duration: 9.5s;
-}
 
 /* Drill stat pills + panel pieces (used inside the drill portal) */
+/* Final owner: src/pages/HomePage.css. */
 .home-drill-stat {
     padding: 0.4rem 0.85rem;
     border: 1px solid color-mix(in srgb, white 18%, transparent);
@@ -1381,15 +871,21 @@
     font-weight: 650;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-drill-stat strong {
     color: white;
     font-weight: 850;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-drill-stat--ghost {
     border-color: color-mix(in srgb, var(--status-ghost) 55%, transparent);
     background: color-mix(in srgb, var(--status-ghost) 26%, transparent);
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-drill-spotlight__perfect {
     padding: 0.18rem 0.55rem;
@@ -1401,6 +897,8 @@
     letter-spacing: 0.12em;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-drill-moves {
     display: flex;
     flex-direction: column;
@@ -1409,6 +907,8 @@
     padding: 0;
     list-style: none;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-drill-move {
     display: flex;
@@ -1423,10 +923,14 @@
     font-weight: 650;
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-drill-move--good > span:last-child {
     color: var(--teal-dark);
     font-weight: 850;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-drill-move--live {
     background: color-mix(in srgb, var(--status-ghost) 16%, var(--card-bg));
@@ -1434,9 +938,13 @@
         color-mix(in srgb, var(--status-ghost) 50%, transparent);
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 .home-drill-move__cursor {
     animation: home-drill-bob 1.3s ease-in-out infinite;
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 .home-drill-spotlight__flame {
     font-size: 1rem;
@@ -1444,238 +952,12 @@
 }
 
 /* Scrolling fact ticker with checkerboard trim */
-.home-ticker {
-    position: relative;
-    overflow: hidden;
-    margin-block: calc(-1 * clamp(2.25rem, 4vw, 3.75rem));
-    padding: 1.3rem 0;
-    border-radius: 1rem;
-    background: color-mix(in srgb, var(--card-bg) 62%, transparent);
-}
-
-.home-ticker::before,
-.home-ticker::after {
-    position: absolute;
-    right: 0;
-    left: 0;
-    height: 8px;
-    content: "";
-    background: repeating-conic-gradient(
-        color-mix(in srgb, var(--status-ghost) 42%, transparent) 0% 25%,
-        transparent 0% 50%
-    );
-    background-size: 16px 16px;
-    opacity: 0.8;
-}
-
-.home-ticker::before {
-    top: 0;
-}
-
-.home-ticker::after {
-    bottom: 0;
-}
-
-.home-ticker__track {
-    display: flex;
-    width: max-content;
-    animation: home-ticker-scroll 38s linear infinite;
-}
-
-.home-ticker:hover .home-ticker__track {
-    animation-play-state: paused;
-}
-
-.home-ticker__group {
-    display: flex;
-    flex: 0 0 auto;
-    gap: 2.6rem;
-    margin: 0;
-    padding: 0 1.3rem;
-    list-style: none;
-}
-
-.home-ticker__group li {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: var(--text-secondary);
-    font-size: 0.84rem;
-    font-weight: 700;
-    white-space: nowrap;
-}
-
-.home-ticker__group li::after {
-    margin-left: 2.6rem;
-    color: color-mix(in srgb, var(--status-ghost) 55%, transparent);
-    font-family: Georgia, "Times New Roman", serif;
-    content: "♟";
-}
-
-@keyframes home-ticker-scroll {
-    from {
-        transform: translateX(0);
-    }
-    to {
-        transform: translateX(-50%);
-    }
-}
 
 /* Frequently asked hauntings */
-.home-faq {
-    display: grid;
-    grid-template-columns: minmax(240px, 0.8fr) minmax(0, 1.2fr);
-    gap: clamp(2rem, 6vw, 5rem);
-    align-items: start;
-}
-
-.home-faq__intro {
-    position: sticky;
-    top: 1rem;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1.1rem;
-}
-
-.home-faq__intro > p:last-of-type {
-    max-width: 40ch;
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 1rem;
-}
-
-.home-faq__mascot {
-    align-self: center;
-    width: clamp(96px, 11vw, 138px);
-    margin-top: 0.75rem;
-    filter:
-        drop-shadow(0 12px 14px color-mix(in srgb, var(--text-primary) 16%, transparent))
-        drop-shadow(0 0 22px color-mix(in srgb, var(--status-ghost) 28%, transparent));
-    animation: home-float 6s ease-in-out infinite;
-}
-
-.home-faq__list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
-}
-
-.home-faq__item {
-    overflow: hidden;
-    border: 1px solid var(--border-color);
-    border-radius: 1.1rem;
-    background: var(--card-bg);
-    box-shadow: var(--shadow-sm);
-    transition:
-        border-color 180ms ease,
-        box-shadow 180ms ease;
-}
-
-.home-faq__item[open] {
-    border-color: color-mix(in srgb, var(--status-ghost) 45%, var(--border-color));
-    box-shadow:
-        var(--shadow-md),
-        0 0 28px color-mix(in srgb, var(--status-ghost) 12%, transparent);
-}
-
-.home-faq__item summary {
-    display: flex;
-    align-items: center;
-    gap: 0.85rem;
-    padding: 1rem 1.2rem;
-    color: var(--text-primary);
-    font-size: 1rem;
-    font-weight: 750;
-    list-style: none;
-    cursor: pointer;
-    user-select: none;
-}
-
-.home-faq__item summary::-webkit-details-marker {
-    display: none;
-}
-
-.home-faq__move {
-    display: grid;
-    flex: 0 0 auto;
-    place-items: center;
-    min-width: 2.1rem;
-    height: 2.1rem;
-    border-radius: 0.6rem;
-    background: color-mix(in srgb, var(--status-ghost) 14%, var(--card-bg));
-    color: var(--brand-secondary);
-    font-family: Georgia, "Times New Roman", serif;
-    font-size: 0.88rem;
-    font-style: italic;
-    font-weight: 850;
-}
-
-.home-faq__ghost {
-    margin-left: auto;
-    opacity: 0.3;
-    transition:
-        transform 220ms ease,
-        opacity 220ms ease;
-}
-
-.home-faq__item summary:hover .home-faq__ghost {
-    transform: translateY(-2px);
-    opacity: 0.75;
-}
-
-.home-faq__item[open] .home-faq__ghost {
-    transform: rotate(10deg) scale(1.25) translateY(-2px);
-    opacity: 1;
-}
-
-.home-faq__item p {
-    max-width: 60ch;
-    margin: 0;
-    padding: 0 1.2rem 1.15rem 4.15rem;
-    color: var(--text-secondary);
-    font-size: 0.92rem;
-}
 
 /* A ghost occasionally drifts across the whole page */
-.home-wanderer {
-    position: fixed;
-    top: 16%;
-    left: -64px;
-    z-index: 40;
-    font-size: 1.7rem;
-    opacity: 0;
-    filter: drop-shadow(0 0 12px color-mix(in srgb, var(--status-ghost) 55%, transparent));
-    pointer-events: none;
-    animation: home-wander 34s linear infinite 5s;
-}
 
-@keyframes home-wander {
-    0%,
-    58% {
-        transform: translate(0, 0) rotate(0);
-        opacity: 0;
-    }
-    61% {
-        opacity: 0.55;
-    }
-    68% {
-        transform: translate(28vw, 4vh) rotate(8deg);
-    }
-    76% {
-        transform: translate(58vw, -3vh) rotate(-7deg);
-        opacity: 0.5;
-    }
-    84% {
-        transform: translate(88vw, 5vh) rotate(6deg);
-        opacity: 0.35;
-    }
-    90%,
-    100% {
-        transform: translate(110vw, 1vh) rotate(0);
-        opacity: 0;
-    }
-}
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-drift {
     0%,
@@ -1695,25 +977,7 @@
     }
 }
 
-@keyframes ecto-float {
-    0%,
-    100% {
-        transform: translateY(0) translateX(0);
-        opacity: 0.25;
-    }
-    25% {
-        transform: translateY(-18px) translateX(8px);
-        opacity: 0.7;
-    }
-    50% {
-        transform: translateY(-8px) translateX(-6px);
-        opacity: 0.35;
-    }
-    75% {
-        transform: translateY(-26px) translateX(4px);
-        opacity: 0.55;
-    }
-}
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-drill-bob {
     0%,
@@ -1724,6 +988,8 @@
         transform: translateY(-3px);
     }
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes home-live-pulse {
     0%,
@@ -1737,6 +1003,8 @@
     }
 }
 
+/* Final owner: src/pages/HomePage.css. */
+
 @keyframes home-float {
     0%,
     100% {
@@ -1746,6 +1014,8 @@
         transform: translateY(-12px) rotate(3deg);
     }
 }
+
+/* Final owner: src/pages/HomePage.css. */
 
 @keyframes ghost-spook {
     0%,
@@ -1772,14 +1042,13 @@
 }
 
 @media (max-width: 900px) {
+    /* Final owner: src/pages/HomePage.css. */
     .home-demo {
         width: min(100%, 560px);
         margin-inline: auto;
     }
 
-    .home-bento {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-feature,
     .home-feature--openings,
@@ -1793,99 +1062,40 @@
         min-height: 310px;
     }
 
+    /* Final owner: src/pages/HomePage.css. */
+
     .home-feature--openings {
         min-height: 420px;
-    }
-
-    .home-loop {
-        grid-template-columns: 1fr;
-    }
-
-    .home-loop__intro {
-        position: static;
-    }
-
-    .home-faq {
-        grid-template-columns: 1fr;
-    }
-
-    .home-faq__intro {
-        position: static;
-    }
-
-    .home-faq__mascot {
-        align-self: flex-end;
-        margin-top: -2.5rem;
-    }
-
-    .home-wanderer {
-        display: none;
     }
 }
 
 @media (max-width: 620px) {
+    /* Final owner: src/pages/HomePage.css. */
     .home-page {
         padding-inline: 0.65rem;
     }
 
-    .home-page__content {
-        gap: 4rem;
-    }
-
-    .home-hero {
-        gap: 2.25rem;
-        padding: 2.1rem 1rem 1rem;
-        border-radius: 1.5rem;
-    }
-
-    .home-hero h1 {
-        font-size: clamp(2.8rem, 15vw, 4.2rem);
-    }
-
-    .home-portal__cta {
-        width: 100%;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-demo {
         padding: 0.55rem;
         border-radius: 1.1rem;
     }
 
-    .home-demo__stage {
-        min-height: 340px;
-        padding: 2.4rem 0.6rem;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-demo__board-frame {
         width: min(90%, 285px);
     }
 
-    .home-ticker {
-        margin-block: -2rem;
-    }
-
-    .home-faq__item summary {
-        font-size: 0.92rem;
-    }
-
-    .home-faq__item p {
-        padding-left: 1.2rem;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-demo__callout {
         max-width: 170px;
         padding: 0.55rem;
     }
 
-    .home-demo__callout--blunder {
-        top: 3%;
-        left: 1%;
-    }
-
-    .home-demo__callout--review {
-        right: 1%;
-        bottom: 4%;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-demo__mascot {
         right: 1%;
@@ -1893,17 +1103,19 @@
         width: 82px;
     }
 
+    /* Final owner: src/pages/HomePage.css. */
+
     .home-section-heading {
         grid-template-columns: 1fr;
     }
+
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-section-heading .home-kicker {
         grid-column: auto;
     }
 
-    .home-bento {
-        grid-template-columns: 1fr;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-feature,
     .home-feature--play,
@@ -1915,48 +1127,27 @@
         border-radius: 1.3rem;
     }
 
+    /* Final owner: src/pages/HomePage.css. */
+
     .home-feature--openings {
         min-height: 360px;
         border-radius: 1.3rem;
     }
+
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-feature__orbit {
         right: -6rem;
         opacity: 0.35;
     }
 
-    .home-loop {
-        padding: 1.35rem 1rem;
-        border-radius: 1.5rem;
-    }
-
-    .home-loop__steps li {
-        grid-template-columns: 3.2rem 1fr;
-        gap: 0.8rem;
-    }
-
-    .home-loop__number {
-        display: none;
-    }
-
-    .home-loop__steps li:not(:last-child)::after {
-        left: 1.6rem;
-    }
-
-    .home-loop__glyph {
-        width: 3.2rem;
-        height: 3.2rem;
-    }
-
-    .home-final-cta {
-        grid-template-columns: 1fr;
-        justify-items: start;
-        border-radius: 1.5rem;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-final-cta img {
         width: 78px;
     }
+
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-final-cta .home-button {
         width: 100%;
@@ -1964,34 +1155,33 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/pages/HomePage.css. */
     .home-demo__live > span,
     .home-demo__mascot,
-    .home-hero__drift span,
-    .home-portal__ghosts span,
     .home-drill-move__cursor,
     .home-drill-spotlight__flame,
     .home-hero__accent,
     .home-kicker [aria-hidden="true"]:first-child,
     .home-final-cta img,
     .home-final-cta__boo,
-    .home-ticker__track,
-    .home-demo__spectre,
-    .home-faq__mascot {
+    .home-demo__spectre {
         animation: none;
     }
+
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-demo__spectre {
         opacity: 0.6;
     }
 
-    .home-wanderer {
-        display: none;
-    }
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-final-cta__boo {
         transform: scale(1) rotate(-3deg);
         opacity: 1;
     }
+
+    /* Final owner: src/pages/HomePage.css. */
 
     .home-button,
     .home-feature {

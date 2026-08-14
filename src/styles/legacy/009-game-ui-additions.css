@@ -1,5 +1,6 @@
 
 /* ---- Drill setup panel additions ---- */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-scroll {
     display: flex;
     flex-direction: column;
@@ -10,6 +11,7 @@
 
 /* Play keeps the mode toggle and side actions reachable while its difficulty
    controls take the remaining height and scroll on short landscape screens. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-scroll:not(.chess-start-scroll--drill) {
     flex: 1 1 auto;
     min-height: 0;
@@ -20,6 +22,7 @@
 
 /* Drill mode splits into a scrolling fields region and a pinned action row, so
    this wrapper only has to hand its leftover height down (g-drill-cta-clip). */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-scroll--drill {
     flex: 1 1 auto;
     min-height: 0;
@@ -27,6 +30,7 @@
 
 /* The only thing that scrolls. min-height:0 lets it shrink below its content
    inside the height-capped panel; the Start button sits outside it. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .drill-setup__fields {
     display: flex;
     flex-direction: column;
@@ -44,6 +48,8 @@
     box-sizing: border-box;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .drill-setup__actions {
     display: flex;
     flex-direction: column;
@@ -53,10 +59,14 @@
     flex: 0 0 auto;
 }
 
+/* Final owner: src/styles/shared-controls.css. */
+
 .mode-toggle-row {
     /* Layout comes from .segmented-toggle; keep only the centering intent. */
     justify-content: center;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .strictness-slider-row {
     display: flex;
@@ -65,6 +75,7 @@
 
 /* Forced strictness tier choice (g-09mu): three cards, none active until the
    user picks one — the natural "unset" state a slider can't express. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .strictness-tier-grid {
     /* auto-fit keeps the tiers equal-width and reflows them to 2-up (or 1-up)
        when the control column can't seat three. As a nowrap flex row they
@@ -76,6 +87,8 @@
     gap: 0.5rem;
     width: 100%;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .strictness-tier-button {
     padding: 0.5rem;
@@ -89,16 +102,22 @@
     transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .strictness-tier-button:hover:not(:disabled) {
     border-color: var(--brand-primary);
     transform: translateY(-2px);
     box-shadow: var(--shadow-md);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .strictness-tier-button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .strictness-tier-button--active {
     border-color: transparent;
@@ -107,9 +126,13 @@
     box-shadow: var(--shadow-md);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .strictness-tier-button--active:disabled {
     opacity: 0.7;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .strictness-label {
     font-size: 0.9rem;
@@ -124,17 +147,21 @@
 }
 
 /* ---- Drill setup: short/wide left-labeled rows (g-pr8z) ---- */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-panel--drill {
     width: min(calc(100vw - 2rem), 30rem);
     max-width: 100%;
 }
 
 /* Fixed chrome: the mode toggle and Play side actions do not give up height. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-start-panel > .mode-toggle-row,
 .chess-start-panel > .chess-start-options,
 .chess-start-panel > .chess-start-error {
     flex: 0 0 auto;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .drill-field {
     display: flex;
@@ -144,6 +171,8 @@
     text-align: left;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .drill-field__label {
     flex: 0 0 96px;
     font-size: 0.85rem;
@@ -151,15 +180,20 @@
     color: var(--text-secondary);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .drill-field__control {
     flex: 1 1 auto;
     min-width: 0;
 }
 
 /* ---- Opening picker (anchored List popover + near-fullscreen Tree dialog) ---- */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .opening-picker {
     width: 100%;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__trigger {
     display: flex;
@@ -176,16 +210,22 @@
     cursor: pointer;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__trigger:disabled {
     opacity: 0.6;
     cursor: default;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__trigger-label {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__popover {
     z-index: 1000;
@@ -201,14 +241,20 @@
     overflow: hidden;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__popover--list {
     position: fixed;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__toggle {
     /* Layout comes from .segmented-toggle; keep only the centering intent. */
     justify-content: center;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__search {
     width: 100%;
@@ -221,11 +267,15 @@
     box-sizing: border-box;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__list {
     overflow-y: auto;
     scrollbar-width: thin;
     flex: 1 1 auto;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__group-label {
     font-size: 0.75rem;
@@ -237,6 +287,8 @@
     background: var(--modal-bg);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__row {
     padding: 0.35rem 0.5rem;
     border-radius: 0.4rem;
@@ -245,15 +297,21 @@
     cursor: pointer;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__row--active {
     background: var(--bg-secondary);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__row--selected {
     font-weight: 700;
     color: var(--text-on-gradient);
     background: var(--gradient-brand);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__empty {
     padding: 0.75rem;
@@ -262,12 +320,16 @@
     text-align: center;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__tree-backdrop {
     position: fixed;
     inset: 0;
     z-index: 1000;
     background: rgba(15, 23, 42, 0.62);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__tree-modal {
     position: fixed;
@@ -289,6 +351,8 @@
     box-shadow: var(--shadow-xl);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__tree-chrome {
     flex: 0 0 auto;
     display: grid;
@@ -297,9 +361,13 @@
     gap: 0.75rem;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__tree-chrome .opening-picker__toggle {
     min-width: 0;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__tree-body {
     flex: 1;
@@ -309,6 +377,8 @@
     overflow: hidden;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__tree-body .openings-tree-explorer,
 .opening-picker__tree-body .openings-tree-workspace {
     flex: 1;
@@ -316,9 +386,13 @@
     min-height: 0;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .opening-picker__tree-body .openings-tree-workspace {
     width: 100%;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__tree-body .openings-tree-scroll {
     align-self: stretch;
@@ -327,6 +401,8 @@
        the clipped flex body even though the canvas itself still scrolls. */
     box-sizing: border-box;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .opening-picker__tree-body .openings-tree-canvas {
     height: 100%;
@@ -339,9 +415,12 @@
        the pinned action row size the fields region to the real viewport. */
 
     /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .game-page .chess-start-panel--drill {
         width: min(calc(100vw - 1.5rem), 30rem);
     }
+
+    /* Final owner: src/components/chess-game/ChessGame.css. */
 
     .opening-picker__tree-modal {
         padding: 0.55rem;
@@ -349,13 +428,18 @@
 }
 
 @media (max-width: 720px) {
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .opening-picker__tree-chrome {
         grid-template-columns: minmax(0, 1fr) auto;
     }
 
+    /* Final owner: src/components/chess-game/ChessGame.css. */
+
     .opening-picker__tree-chrome .opening-picker__toggle {
         grid-column: 1 / -1;
     }
+
+    /* Final owner: src/components/chess-game/ChessGame.css. */
 
     .opening-picker__tree-body {
         display: block;
@@ -363,15 +447,21 @@
         overflow-x: hidden;
     }
 
+    /* Final owner: src/components/chess-game/ChessGame.css. */
+
     .opening-picker__tree-body .openings-tree-explorer {
         width: 100%;
         min-height: min-content;
     }
 
+    /* Final owner: src/components/chess-game/ChessGame.css. */
+
     .opening-picker__tree-body .openings-tree-explorer,
     .opening-picker__tree-body .openings-tree-workspace {
         flex: 0 0 auto;
     }
+
+    /* Final owner: src/components/chess-game/ChessGame.css. */
 
     .opening-picker__tree-body .openings-tree-workspace {
         width: 100%;
@@ -379,12 +469,15 @@
 }
 
 /* Game opening lineage (compact chips on /history analysis footer) */
+/* Final owner: src/components/GameOpeningLineage.css. */
 .game-opening-lineage {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
     margin-top: 0.75rem;
 }
+
+/* Final owner: src/components/GameOpeningLineage.css. */
 
 .game-opening-lineage__label {
     margin: 0;
@@ -395,6 +488,8 @@
     color: var(--text-tertiary);
 }
 
+/* Final owner: src/components/GameOpeningLineage.css. */
+
 .game-opening-lineage__list {
     list-style: none;
     margin: 0;
@@ -404,6 +499,8 @@
     gap: 0.35rem;
 }
 
+/* Final owner: src/components/GameOpeningLineage.css. */
+
 .game-opening-lineage__item {
     /* The card now owns its score-change treatment, so it gets the full row
        width rather than making space for a sibling diff annotation. */
@@ -411,6 +508,8 @@
     align-items: center;
     padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
 }
+
+/* Final owner: src/components/GameOpeningLineage.css. */
 
 .game-opening-lineage__item > .tree-node-card,
 .game-opening-lineage__item > .opening-lineage-card {
@@ -422,12 +521,15 @@
    footer link (the /openings card has no such link). The link sits below the
    card as a sibling, so it is outside the card's collapse overlay and stays
    clickable. */
+/* Final owner: src/components/GameOpeningLineage.css. */
 .opening-lineage-card {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
     min-width: 0;
 }
+
+/* Final owner: src/components/GameOpeningLineage.css. */
 
 .opening-lineage-card__openings-link {
     align-self: flex-start;
@@ -436,6 +538,8 @@
     color: var(--accent, var(--text-primary));
     text-decoration: none;
 }
+
+/* Final owner: src/components/GameOpeningLineage.css. */
 
 .opening-lineage-card__openings-link:hover,
 .opening-lineage-card__openings-link:focus-visible {
@@ -448,6 +552,7 @@
    deep cards fit the narrower inner panel. Scoped to .chess-panel__openings so
    /history (wider) is untouched. (The metrics grid is two-up globally, so no
    panel-scoped override is needed for it.) */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-panel__openings {
     min-width: 0;
 }
@@ -455,6 +560,7 @@
 /* Smaller depth step so deep cards don't run off the right edge of the panel.
    The badge pins to the card's top-right (flex-start) in the narrow panel so an
    expanded card keeps the diff visible without widening the 240px column. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chess-panel__openings .game-opening-lineage__item {
     align-items: flex-start;
     padding-left: calc(var(--lineage-depth, 0) * 0.4rem);
@@ -463,11 +569,13 @@
 /* ---- SRS repeat-mistake spotlight (full-screen, board stays lit) ---- */
 /* Wrapper that lets us measure the live board square for the clip-path hole.
    Sizes to the square board (a block box the same size as the board). */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .chessboard-square-measure {
     line-height: 0;
 }
 
 /* Scrim dims the whole viewport except the board (clip-path hole set inline). */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .srs-fail-scrim {
     position: fixed;
     inset: 0;
@@ -478,10 +586,14 @@
     animation: srs-fail-scrim-in 200ms ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .srs-fail-scrim--shrink {
     opacity: 0;
     transition: opacity 500ms ease;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes srs-fail-scrim-in {
     from {
@@ -493,11 +605,14 @@
 }
 
 /* Glyph + headline pinned to the top of the board, centered, no background. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .srs-fail-content {
     position: fixed;
     z-index: 51;
     cursor: pointer;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .srs-fail-content__inner {
     display: flex;
@@ -513,11 +628,15 @@
     animation: srs-fail-content-in 220ms ease-out;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .srs-fail-content__inner--shrink {
     transform: translateX(-50%) scale(0.12);
     opacity: 0;
     transition: transform 500ms cubic-bezier(0.5, 0, 0.75, 0), opacity 500ms ease;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .srs-fail-content__glyph {
     flex: 0 0 auto;
@@ -533,6 +652,8 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .srs-fail-content__headline {
     margin: 0;
     font-size: clamp(18px, 3.2vw, 26px);
@@ -540,6 +661,8 @@
     color: #fff;
     text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 2px rgba(0, 0, 0, 0.9);
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes srs-fail-content-in {
     from {
@@ -553,14 +676,17 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .srs-fail-scrim,
     .srs-fail-scrim--shrink {
         animation: none;
         transition: opacity 300ms ease;
     }
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .srs-fail-content__inner {
         animation: none;
     }
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .srs-fail-content__inner--shrink {
         transform: translateX(-50%);
         transition: opacity 300ms ease;
@@ -571,6 +697,7 @@
 /* Centered card over the already-dimmed board (clips to .chessboard-board-area,
    sits above .chessboard-ended-scrim). Borrows the SrsFail visual language —
    scale-in → hold → shrink-out, click-to-skip — without the portal machinery. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare {
     position: absolute;
     inset: 0;
@@ -582,10 +709,14 @@
     animation: end-game-fanfare-fade-in 200ms ease;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .end-game-fanfare--shrink {
     opacity: 0;
     transition: opacity 450ms ease;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 @keyframes end-game-fanfare-fade-in {
     from { opacity: 0; }
@@ -594,6 +725,7 @@
 
 /* A real <button> for the focus + keyboard dismiss path — reset the UA chrome
    and inherit the app font so the headline/reason spans render unchanged. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare__inner {
     appearance: none;
     font: inherit;
@@ -615,11 +747,15 @@
     animation: review-overlay-in 300ms ease-out;
 }
 
+/* Final owner: src/components/chess-game/ChessGame.css. */
+
 .end-game-fanfare__inner--shrink {
     transform: scale(0.12);
     opacity: 0;
     transition: transform 450ms cubic-bezier(0.5, 0, 0.75, 0), opacity 450ms ease;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .end-game-fanfare__headline {
     font-size: clamp(2.1rem, 6vw, 3.4rem);
@@ -627,6 +763,8 @@
     line-height: 1;
     letter-spacing: 0.01em;
 }
+
+/* Final owner: src/components/chess-game/ChessGame.css. */
 
 .end-game-fanfare__reason {
     font-size: clamp(0.95rem, 2.4vw, 1.2rem);
@@ -637,34 +775,43 @@
 }
 
 /* Outcome accents: border-top + headline color. */
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--win .end-game-fanfare__inner {
     border-top-color: var(--success);
 }
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--win .end-game-fanfare__headline {
     color: var(--success);
 }
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--loss .end-game-fanfare__inner {
     border-top-color: var(--eval-blunder);
 }
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--loss .end-game-fanfare__headline {
     color: var(--eval-blunder);
 }
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--draw .end-game-fanfare__inner {
     border-top-color: var(--warning);
 }
+/* Final owner: src/components/chess-game/ChessGame.css. */
 .end-game-fanfare--draw .end-game-fanfare__headline {
     color: var(--text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .end-game-fanfare,
     .end-game-fanfare--shrink {
         animation: none;
         transition: opacity 300ms ease;
     }
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .end-game-fanfare__inner {
         animation: none;
     }
+    /* Final owner: src/components/chess-game/ChessGame.css. */
     .end-game-fanfare__inner--shrink {
         transform: none;
         transition: opacity 300ms ease;
