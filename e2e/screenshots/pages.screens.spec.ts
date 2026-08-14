@@ -7,10 +7,25 @@ import {
   captureState,
   failRoute,
   FIXED_TIME,
+  installDeterministicStockfish,
   prepareDeterministicPage,
   stallRoute,
   viewportsFor,
 } from "./helpers";
+
+// The gallery needs one raster backend across runs. Software compositing keeps
+// production shadows and rounded corners visible without process-specific GPU
+// antialiasing pixels.
+test.use({
+  launchOptions: {
+    args: [
+      "--use-gl=angle",
+      "--use-angle=swiftshader",
+      "--deterministic-mode",
+      "--disable-skia-runtime-opts",
+    ],
+  },
+});
 
 /**
  * Screenshot gallery suite (g-tsyy). Captures a FIXED first-pass inventory of UI
@@ -36,12 +51,75 @@ test.describe.configure({ mode: "serial", timeout: 180_000 });
  */
 const showCapturedMaterial = async (page: Page): Promise<void> => {
   await page.locator(".move-list-grid .move-button, .h-move").last().click();
+  await expect(page.locator('[data-piece][style*="transform"]')).toHaveCount(0);
   await expect(
     page.locator(".analysis-board__material--player .material-icons"),
   ).toBeVisible();
   await expect(
     page.locator(".analysis-board__material--opponent .material-icons"),
   ).toBeVisible();
+};
+
+/** Assert the fixed engine-on state that visually covers its cascade rules. */
+const waitForDeterministicEngineLines = async (page: Page): Promise<void> => {
+  const board = page.locator(".analysis-board:visible");
+  const toggle = board.getByRole("checkbox", { name: "Engine lines" });
+
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toBeChecked();
+  const progress = board.getByRole("progressbar", {
+    name: "Engine analysis depth",
+  });
+  await expect(progress).toHaveAttribute("aria-valuenow", "21");
+  await expect(board.locator(".analysis-board__engine-depth")).toHaveText(
+    "d21",
+  );
+  await expect(
+    progress.locator(".analysis-board__engine-progress-fill"),
+  ).toHaveClass(/analysis-board__engine-progress-fill--thinking/);
+  await expect(
+    board.getByRole("button", { name: "Show engine line 1" }),
+  ).toContainText("Nc6");
+  await expect(
+    board.locator(".analysis-board__engine-line--placeholder"),
+  ).toHaveCount(2);
+};
+
+/** Wait until every move in an active live game has its final analysis. */
+const waitForLiveMoveAnalysis = async (page: Page): Promise<void> => {
+  await expect(page.locator(".move-analyzing-spinner")).toHaveCount(0, {
+    timeout: 60_000,
+  });
+};
+
+/**
+ * Settle live analysis while keeping a timed notice frozen on screen.
+ *
+ * Worker results can schedule cache debounce timers after the clock is paused,
+ * so advance it throughout the wait instead of relying on one pre-wait pump.
+ * The 3s total budget remains below the review warning's 4s dismissal timer.
+ */
+const waitForLiveMoveAnalysisWithPausedClock = async (
+  page: Page,
+): Promise<void> => {
+  const spinner = page.locator(".move-analyzing-spinner");
+  const clockStepMs = 25;
+  const clockBudgetMs = 3_000;
+  let clockAdvancedMs = 0;
+
+  await expect
+    .poll(
+      async () => {
+        const count = await spinner.count();
+        if (count > 0 && clockAdvancedMs < clockBudgetMs) {
+          await page.clock.runFor(clockStepMs);
+          clockAdvancedMs += clockStepMs;
+        }
+        return count;
+      },
+      { timeout: 60_000, intervals: [150] },
+    )
+    .toBe(0);
 };
 
 /** Capture one state across every viewport that page cares about. */
@@ -146,6 +224,7 @@ test.describe("history", () => {
   test("loading / empty / populated / error", async ({ page, loginAs }) => {
     // Loading: stall the history fetch so the placeholder persists.
     await prepareDeterministicPage(page);
+    await installDeterministicStockfish(page);
     await loginAs(page, "stable");
     await stallRoute(page, "**/api/history**");
     await page.goto("/history");
@@ -169,9 +248,14 @@ test.describe("history", () => {
     // auto-selects the first one, so wait for the analysis board to render, then
     // scrub to the final ply so the captured-material rows are populated.
     await loginAs(page, "stable");
+    await page.setViewportSize({
+      width: viewportsFor("history").at(-1)!.width,
+      height: viewportsFor("history").at(-1)!.height,
+    });
     await page.goto("/history");
     await expect(page.locator(".analysis-board")).toBeVisible();
     await showCapturedMaterial(page);
+    await waitForDeterministicEngineLines(page);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "history",
       state: "populated",
@@ -340,6 +424,7 @@ test.describe("game", () => {
     loginAs,
   }) => {
     await prepareDeterministicPage(page);
+    await installDeterministicStockfish(page);
     await loginAs(page, "stable");
 
     // Resolve a real session id from history to drive the populated state.
@@ -373,9 +458,14 @@ test.describe("game", () => {
 
     // Populated: real analysis renders the board. Scrub to the final ply so the
     // captured-material rows are populated for both sides.
+    await page.setViewportSize({
+      width: viewportsFor("game").at(-1)!.width,
+      height: viewportsFor("game").at(-1)!.height,
+    });
     await page.goto(`/game?id=${id}`);
     await expect(page.locator(".analysis-board")).toBeVisible();
     await showCapturedMaterial(page);
+    await waitForDeterministicEngineLines(page);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "game",
       state: "populated",
@@ -385,6 +475,8 @@ test.describe("game", () => {
     // Processing: analysis still computing (is_complete false).
     await mockAnalysis(page, { is_complete: false, analyzed_moves: 2 });
     await page.goto(`/game?id=${id}`);
+    await expect(page.locator(".analysis-board")).toBeVisible();
+    await waitForDeterministicEngineLines(page);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "game",
       state: "processing",
@@ -500,6 +592,13 @@ const startGameAsWhite = async (page: Page): Promise<void> => {
   // unstarted. `.click()` auto-waits, but assert visibility first for a clear
   // failure if the overlay never appears.
   await expect(playWhite).toBeVisible({ timeout: 15_000 });
+  // The panel initially drafts the store's 800 default, then the current-rating
+  // request reseeds it. Starting during that request makes the opponent depend
+  // on backend timing even with Math.random pinned. The seeded due user and the
+  // fixed sample resolve to the 1200 bot; wait for that state before clicking.
+  await expect(
+    page.locator(".chess-start-panel .chess-elo-label"),
+  ).toHaveText("Gigglegeist 1200", { timeout: 15_000 });
   await playWhite.click();
   await expect(page.locator(".game-status-badge--live")).toBeVisible({
     timeout: 15_000,
@@ -630,18 +729,35 @@ test.describe("play", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await playMove(page, "e2", "e4");
     await waitForMoveCountAtLeast(page, 2);
+    await waitForLiveMoveAnalysis(page);
     await playMove(page, "g1", "f3");
     await waitForMoveCountAtLeast(page, 4);
+    await waitForLiveMoveAnalysis(page);
     await playMove(page, "f1", "c4");
     await waitForMoveCountAtLeast(page, 6);
     await expect(
       page.locator(".board-notice--review-warning:visible"),
     ).toBeVisible({ timeout: 30_000 });
 
+    // Preserve the four-second warning while the final move pair settles. Keep
+    // pumping the paused clock so a cache timer scheduled by a late worker
+    // result cannot be stranded after one fixed advance.
+    await page.clock.pauseAt(FIXED_TIME);
+    // Regression probe for the exact race: schedule spinner removal beyond the
+    // old one-shot 500ms advance. The wait must continue pumping timers that
+    // are enqueued only after the clock is frozen.
+    await page.evaluate(() => {
+      const probe = document.createElement("span");
+      probe.className = "move-analyzing-spinner gallery-clock-pump-probe";
+      probe.hidden = true;
+      document.body.appendChild(probe);
+      window.setTimeout(() => probe.remove(), 700);
+    });
+    await waitForLiveMoveAnalysisWithPausedClock(page);
+
     // The review warning auto-dismisses after four seconds. Freeze it only
     // after it has appeared so six sequential viewport captures cannot race
     // its timer under full-suite load.
-    await page.clock.pauseAt(FIXED_TIME);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "review-warning-toast",
@@ -721,6 +837,7 @@ test.describe("play", () => {
     await expect(
       page.locator(".material-display .material-icons:visible"),
     ).toHaveCount(2);
+    await waitForLiveMoveAnalysis(page);
 
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
@@ -738,6 +855,24 @@ test.describe("play", () => {
   test("game-end banner", async ({ page, loginAs }) => {
     await prepareDeterministicPage(page);
     await loginAs(page, "due");
+
+    // The position behind the banner is part of the golden image too. Pin the
+    // sole opponent reply instead of letting backend engine sampling vary it.
+    await page.route("**/api/game/next-opponent-move", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "engine",
+          move: { uci: "e7e5", san: "e5" },
+          target_blunder_id: null,
+          target_blunder_srs: null,
+          target_fen: null,
+          decision_source: "backend_engine",
+          drill_route: null,
+        }),
+      }),
+    );
 
     const endGamePayload = {
       session_id: "e2e-resign",
@@ -770,6 +905,7 @@ test.describe("play", () => {
     // Play one move so resign is enabled, then open the resign warning dialog.
     await playMove(page, "e2", "e4");
     await waitForMoveCountAtLeast(page, 2);
+    await waitForLiveMoveAnalysis(page);
     await page.getByRole("button", { name: "Resign" }).click();
     // Both the board control and the dialog button are named "Resign"; scope
     // the confirm click through the alertdialog to avoid a strict-mode match.
@@ -777,6 +913,11 @@ test.describe("play", () => {
       .getByRole("alertdialog")
       .getByRole("button", { name: "Resign" })
       .click();
+
+    // Starting the game can raise the ghost-rehook notice. It is unrelated to
+    // the end-banner state, and the frozen clock would otherwise preserve it.
+    await page.clock.runFor(3500);
+    await expect(page.locator(".board-notice:visible")).toHaveCount(0);
 
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
@@ -861,13 +1002,19 @@ test.describe("play", () => {
     await expect(page.locator(".game-opening-lineage")).toBeVisible({
       timeout: 15_000,
     });
+    await expect(
+      page.locator(
+        ".game-opening-lineage .tree-node-card__score-loading",
+      ),
+    ).toHaveCount(0, { timeout: 30_000 });
 
     // The first ghost reply (engine->ghost) raised the "The haunting resumes"
     // rehook notice; reaching the review position then preempted it with the
-    // review warning (single board-notice slot). Advance the frozen clock to
-    // clear any lingering rehook timer and confirm no rehook is in the capture.
-    await page.clock.runFor(3500);
-    await expect(page.locator(".board-notice--rehook:visible")).toHaveCount(0);
+    // four-second review warning (single board-notice slot). Clear that warning
+    // before the fail move so worker timing cannot decide whether it remains
+    // visible beneath the spotlight.
+    await page.clock.runFor(4500);
+    await expect(page.locator(".board-notice:visible")).toHaveCount(0);
 
     // Play the recorded fail move (king move) to trigger the spotlight. The
     // clock MUST stay running across this move: the coordinator dispatches the
@@ -880,6 +1027,7 @@ test.describe("play", () => {
     await expect(page.locator(".srs-fail-scrim")).toBeVisible({
       timeout: 15_000,
     });
+    await waitForLiveMoveAnalysis(page);
 
     // Pause the clock so the spotlight's hold/shrink timers don't advance and
     // dismiss the scrim mid-capture.
@@ -960,6 +1108,7 @@ test.describe("play", () => {
     await waitForMoveCountAtLeast(page, 6);
     await playMove(page, "a6", "b7");
     await waitForMoveCountAtLeast(page, 8);
+    await waitForLiveMoveAnalysis(page);
     await playMove(page, "b7", "c8");
 
     await captureAcrossViewports(page, test.info(), {

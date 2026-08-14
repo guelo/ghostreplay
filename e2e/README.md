@@ -96,11 +96,26 @@ pixel-diff suite** — there are no `toHaveScreenshot()` assertions this pass.
   `e2e/screenshots/output/` (gitignored). Open `index.html` to review.
 - Screenshots are also attached to the Playwright HTML report.
 - The suite runs serial (shared output dir). Determinism comes from a frozen
-  clock, disabled animations, seeded accounts, and route mocks for
-  loading/error states (see `helpers.ts`).
-- Harder live-game overlays (promotion picker, review-fail modal, game-end
-  banner) and pixel-diff baselines are tracked as follow-up beads
-  (`g-yr3a`, `g-r03h`, `g-zwpe`).
+  clock, the app's reduced-motion branch plus disabled animations, fixed
+  client-side random sampling, software Chromium compositing, seeded accounts,
+  and route mocks for loading/error/gameplay states (see `helpers.ts`). Each PNG
+  is written only after three consecutive screenshot samples are byte-identical.
+  The software raster lane keeps rounded-corner and shadow antialiasing stable
+  between browser processes while screenshots still use the application's
+  production CSS without capture-only shadow, radius, or SVG rendering
+  overrides, so decorative cascade rules remain part of the golden.
+- History and game-analysis captures keep Engine lines on. A worker scoped to
+  the gallery supplies fixed depth-21 output, so the PNGs deterministically
+  cover the depth badge, progress/shimmer, populated PV row, and placeholder
+  rows without depending on local Stockfish search timing. The live-game
+  analysis worker is not mocked.
+- Live-game scenarios wait for their visible move-analysis spinners to clear
+  before capture so graph values and classifications are final rather than an
+  arbitrary intermediate engine state. Timed review-warning captures advance
+  their paused clock in small steps during that wait, bounded below the notice's
+  dismissal timer, so late cache debounce work cannot be stranded.
+- Analysis-board captures wait for piece transforms to reconcile and place the
+  selected move at a deterministic scroll offset after responsive layout swaps.
 
 ## Seeded Accounts
 
