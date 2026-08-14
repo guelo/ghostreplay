@@ -51,7 +51,7 @@ from app.opening_cache import (
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
-from app.opening_rootcalc import root_calc_config_fingerprint
+from app.opening_rootcalc import SYNTHETIC_INITIAL_FEN, root_calc_config_fingerprint
 from app.opening_score_delta import (
     BASELINE_RETRYABLE_SOURCES,
     BASELINE_TERMINAL_SOURCES,
@@ -59,6 +59,7 @@ from app.opening_score_delta import (
     capture_baseline_watermark,
     fill_opening_baselines_for_batch,
     run_baseline_snapshot_job,
+    snapshot_opening_baseline,
 )
 
 # Fixed timestamps prove the new contract is independent of wall-clock ordering.
@@ -400,6 +401,55 @@ def test_durable_batch_push_fill_recovers_a_cold_start(db_session):
     assert json.loads(_baseline(db_session, sid)) == _baseline_envelope({"k": 42.0})
 
 
+@pytest.mark.parametrize(
+    "scores",
+    [{}, {SYNTHETIC_INITIAL_FEN: 42.0}],
+    ids=["zero-rows", "synthetic-only"],
+)
+def test_evidence_backed_empty_batch_suppresses_all_baseline_capture_paths(
+    db_session, scores
+):
+    # This persisted shape covers both an all-quarantined generation and the
+    # intentionally indistinguishable clean rootless-evidence case.
+    _seed_candidate_history(db_session)
+    sid = _make_session(db_session)
+    batch_id = _seed_batch(
+        db_session,
+        computed_at=T_AFTER,
+        fresh=True,
+        scores=scores,
+    )
+
+    assert snapshot_opening_baseline(db_session, 123, "white") is None
+    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+    filled = fill_opening_baselines_for_batch(
+        batch_id,
+        session_factory=TestingSessionLocal,
+    )
+
+    assert source == "skipped_quarantined_empty"
+    assert filled == 0
+    assert _baseline(db_session, sid) is None
+
+
+def test_partial_surviving_root_still_captures_baseline(db_session):
+    _seed_candidate_history(db_session)
+    sid = _make_session(db_session)
+    _seed_batch(
+        db_session,
+        computed_at=T_AFTER,
+        fresh=True,
+        scores={"survivor": 42.0},
+    )
+
+    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+
+    assert source == "cached_fresh"
+    assert json.loads(_baseline(db_session, sid)) == _baseline_envelope(
+        {"survivor": 42.0}
+    )
+
+
 def test_unrelated_shared_write_after_start_still_accepts(db_session):
     _seed_candidate_history(db_session)
     sid = _make_session(db_session)
@@ -735,6 +785,26 @@ def test_cold_retry_requests_one_ordinary_recompute_when_none_scheduled():
         "black",
         source=OpeningScoreTrigger.BASELINE_RECOVERY,
     )
+
+
+def test_quarantined_empty_source_is_terminal_without_recompute_or_retry():
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        run_job=lambda db, **kwargs: "skipped_quarantined_empty",
+        clock=clock,
+    )
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "black")
+
+    with (
+        patch("app.opening_score_scheduler.is_recompute_scheduled") as scheduled,
+        patch("app.opening_score_scheduler.request_recompute") as request,
+    ):
+        sched.run_due()
+
+    assert sid not in sched._pending
+    scheduled.assert_not_called()
+    request.assert_not_called()
 
 
 def test_retry_budget_stops_at_eight_attempts():

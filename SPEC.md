@@ -110,9 +110,12 @@ and directed moves as a graph. A target marks a player decision at one of those
 positions, while each later review is recorded separately from the target.
 
 Alongside this game and training data, PostgreSQL holds reusable analysis
-evidence, rating history, and side-scoped opening-score snapshots. The exact
-relational schema, constraints, and migration history remain authoritative in
-the backend model and migration layer, not in this overview.
+evidence, rating history, and side-scoped opening-score snapshots. Opening-score
+generations are published atomically; a materially invalid derived coverage row
+is isolated as honest no-data while valid score rows and observed navigation
+edges still converge in the same current generation. The exact relational
+schema, constraints, and migration history remain authoritative in the backend
+model and migration layer, not in this overview.
 
 ## Major end-to-end flows
 

@@ -65,6 +65,8 @@ _REPORT_FOLD_COVERAGE_EPSILON = 1e-9
 #                      the ordinary node ratio. Numerically identical to "keep", but
 #                      reported distinctly so the fallback is visible.
 ReportSelfTermEffective = Literal["keep", "drop_user", "keep_fallback"]
+CoverageValidationCause = Literal["opportunity_invariant", "report_fold_bounds"]
+CoverageFailurePolicy = Literal["raise", "isolate_rows"]
 
 # Report-scorer contract id. A report-scorer semantic change that is NOT already
 # captured by a RootCalcConfig field (config changes move
@@ -72,6 +74,113 @@ ReportSelfTermEffective = Literal["keep", "drop_user", "keep_fallback"]
 # SCORE_MODEL_VERSION (app.opening_cache) to force a full recompute. Adding the
 # report-stage behavior above is config-captured, so this stays at v1.
 REPORT_SCORER_CONTRACT_ID = "report-fold-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class _CoverageFailure:
+    """Immutable in-process detail for one coverage validation failure.
+
+    The calculator's negative memo stores this value rather than an exception, so
+    repeated ancestor/root/position reports do not retain traceback frames. Raw
+    operands remain available to a debugger, but never enter the rendered error or
+    the aggregate telemetry exported by the durable batch path.
+    """
+
+    cause: CoverageValidationCause
+    normalized_fen: str
+    earned: float | None = None
+    available: float | None = None
+    coverage: float | None = None
+
+
+class OpeningCoverageValidationError(ValueError):
+    """Narrow, privacy-safe failure for materially invalid derived coverage."""
+
+    def __init__(self, failure: _CoverageFailure) -> None:
+        self.cause = failure.cause
+        self.normalized_fen = failure.normalized_fen
+        self.earned = failure.earned
+        self.available = failure.available
+        self.coverage = failure.coverage
+        self.failure = failure
+        super().__init__(f"opening coverage validation failed cause={failure.cause}")
+
+
+@dataclass(frozen=True, slots=True)
+class RowIsolationSummary:
+    """Privacy-safe aggregate outcome for one full-batch score calculation."""
+
+    outcome: Literal["clean", "quarantined"]
+    omitted_root_row_count: int
+    omitted_position_row_count: int
+    opportunity_invariant_count: int
+    report_fold_bounds_count: int
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.omitted_root_row_count,
+            self.omitted_position_row_count,
+            self.opportunity_invariant_count,
+            self.report_fold_bounds_count,
+        )
+        if any(count < 0 for count in counts):
+            raise ValueError("row-isolation counts must be non-negative")
+        omitted = self.omitted_root_row_count + self.omitted_position_row_count
+        causes = self.opportunity_invariant_count + self.report_fold_bounds_count
+        expected_outcome = "quarantined" if omitted else "clean"
+        if causes != omitted:
+            raise ValueError("row-isolation cause counts must equal omitted row count")
+        if self.outcome != expected_outcome:
+            raise ValueError(
+                f"row-isolation outcome must be {expected_outcome!r} for {omitted} omissions"
+            )
+
+
+@dataclass
+class RowIsolationTelemetry:
+    """Mutable calculator out-param; only :meth:`snapshot` crosses the boundary."""
+
+    omitted_root_row_count: int = 0
+    omitted_position_row_count: int = 0
+    opportunity_invariant_count: int = 0
+    report_fold_bounds_count: int = 0
+
+    def _record(self, error: OpeningCoverageValidationError) -> None:
+        if error.cause == "opportunity_invariant":
+            self.opportunity_invariant_count += 1
+        else:
+            self.report_fold_bounds_count += 1
+
+    def record_root(self, error: OpeningCoverageValidationError) -> None:
+        self.omitted_root_row_count += 1
+        self._record(error)
+
+    def record_position(self, error: OpeningCoverageValidationError) -> None:
+        self.omitted_position_row_count += 1
+        self._record(error)
+
+    def snapshot(self) -> RowIsolationSummary:
+        omitted = self.omitted_root_row_count + self.omitted_position_row_count
+        return RowIsolationSummary(
+            outcome="quarantined" if omitted else "clean",
+            omitted_root_row_count=self.omitted_root_row_count,
+            omitted_position_row_count=self.omitted_position_row_count,
+            opportunity_invariant_count=self.opportunity_invariant_count,
+            report_fold_bounds_count=self.report_fold_bounds_count,
+        )
+
+
+def _row_isolation_collector(
+    failure_policy: CoverageFailurePolicy,
+    row_isolation: RowIsolationTelemetry | None,
+) -> RowIsolationTelemetry | None:
+    """Resolve explicit isolation policy without relying on runtime assertions."""
+
+    if failure_policy == "raise":
+        return None
+    if failure_policy == "isolate_rows":
+        return row_isolation or RowIsolationTelemetry()
+    raise ValueError(f"unknown coverage failure policy {failure_policy!r}")
 
 
 @dataclass
@@ -92,9 +201,10 @@ class CalcTelemetry:
       ``is_middlegame_position``. This does **not** imply the root is unscored: a
       raw-middlegame board can still have a scored subtree via observed off-book
       moves (see ``_structural_children``).
-    - ``unscored_root_count``: named roots absent from the scored result set
-      (no reachable quality observation). Reported separately from the raw
-      middlegame count and never conflated with it.
+    - ``unscored_root_count``: named roots absent from the scored result set,
+      either because no quality observation is reachable or because validation
+      quarantined the row. ``quarantined_root_row_count`` identifies the latter
+      subset. Both remain separate from the raw middlegame count.
     """
 
     named_root_count: int = 0
@@ -103,6 +213,7 @@ class CalcTelemetry:
     calculation_misses: int = 0
     raw_middlegame_root_count: int = 0
     unscored_root_count: int = 0
+    quarantined_root_row_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -348,9 +459,11 @@ class PositionCalcTelemetry:
 
     Mutated in place, never read by scoring. Lets the batch builder log row-volume
     drift if user evidence grows beyond the spike's measured range (~15.5k book
-    nodes + observed edges). ``persisted_row_count == scoreable_position_count +
-    observed_off_book_row_count`` minus any overlap (an off-book FEN that is itself
-    scoreable is counted under both classes but persisted once).
+    nodes + observed edges). Before validation quarantine,
+    ``scoreable_position_count + observed_off_book_row_count`` minus overlap (an
+    off-book FEN that is itself scoreable is counted under both classes but
+    persisted once) is the candidate row count. ``persisted_row_count`` excludes
+    ``quarantined_position_row_count`` from those unique candidates.
     """
 
     domain_count: int = 0
@@ -358,6 +471,7 @@ class PositionCalcTelemetry:
     observed_off_book_row_count: int = 0
     persisted_row_count: int = 0
     metric_key_count: int = 0
+    quarantined_position_row_count: int = 0
 
 
 def _normalized(fen: str) -> str:
@@ -444,6 +558,7 @@ class _SharedCalculator:
         self._weights_cache: dict[str, dict[str, float]] = {}
         self._coverage_weights_cache: dict[str, dict[str, float]] = {}
         self._coverage_masses: dict[str, tuple[float, float]] = {}
+        self._coverage_failures: dict[str, _CoverageFailure] = {}
         self._score_reachable_cache: dict[str, set[str]] = {}
         self._metrics: dict[tuple[str, bool], tuple[float, float, float, float]] = {}
         self.debug_nodes: dict[str, NodeDebug] = {}
@@ -786,27 +901,37 @@ class _SharedCalculator:
         cached = self._coverage_masses.get(fen)
         if cached is not None:
             return cached
+        failed = self._coverage_failures.get(fen)
+        if failed is not None:
+            raise OpeningCoverageValidationError(failed)
 
-        earned = 0.0
-        available = 0.0
-        weights = self._get_coverage_weights(fen)
-        if self._is_user_turn(fen):
-            for child, weight in weights.items():
-                child_earned, child_available = self._coverage_opportunity_mass(
-                    child
-                )
-                earned += weight * child_earned
-                available += weight * child_available
-        else:
-            for child, weight in weights.items():
-                if self._edge_was_traversed(fen, child):
-                    child_earned, child_available = (
-                        self._coverage_opportunity_mass(child)
+        try:
+            earned = 0.0
+            available = 0.0
+            weights = self._get_coverage_weights(fen)
+            if self._is_user_turn(fen):
+                for child, weight in weights.items():
+                    child_earned, child_available = self._coverage_opportunity_mass(
+                        child
                     )
-                    earned += weight * (1.0 + child_earned)
-                    available += weight * (1.0 + child_available)
-                else:
-                    available += weight
+                    earned += weight * child_earned
+                    available += weight * child_available
+            else:
+                for child, weight in weights.items():
+                    if self._edge_was_traversed(fen, child):
+                        child_earned, child_available = (
+                            self._coverage_opportunity_mass(child)
+                        )
+                        earned += weight * (1.0 + child_earned)
+                        available += weight * (1.0 + child_available)
+                    else:
+                        available += weight
+        except OpeningCoverageValidationError as error:
+            # Negative-memo every ancestor in the affected dependency closure. The
+            # immutable descriptor keeps the originating cause without retaining a
+            # traceback; no positive mass is stored for this FEN.
+            self._coverage_failures[fen] = error.failure
+            raise OpeningCoverageValidationError(error.failure) from None
 
         if not (
             -_REPORT_FOLD_COVERAGE_EPSILON
@@ -815,10 +940,14 @@ class _SharedCalculator:
             and available
             <= 1.0 + earned + _REPORT_FOLD_COVERAGE_EPSILON
         ):
-            raise ValueError(
-                "coverage opportunity invariants failed for "
-                f"{fen!r}: earned={earned!r}, available={available!r}"
+            failure = _CoverageFailure(
+                cause="opportunity_invariant",
+                normalized_fen=fen,
+                earned=earned,
+                available=available,
             )
+            self._coverage_failures[fen] = failure
+            raise OpeningCoverageValidationError(failure)
         result = earned, available
         self._coverage_masses[fen] = result
         return result
@@ -1211,9 +1340,12 @@ class _SharedCalculator:
                 <= coverage
                 <= 1.0 + _REPORT_FOLD_COVERAGE_EPSILON
             ):
-                raise ValueError(
-                    "report-fold coverage fraction out of range for "
-                    f"{key!r}: {coverage!r}"
+                raise OpeningCoverageValidationError(
+                    _CoverageFailure(
+                        cause="report_fold_bounds",
+                        normalized_fen=key,
+                        coverage=coverage,
+                    )
                 )
             bounded_coverage = min(1.0, max(0.0, coverage))
             multiplier = bounded_coverage**p
@@ -1245,7 +1377,11 @@ class _SharedCalculator:
         )
 
     def compute_position_scores(
-        self, *, telemetry: PositionCalcTelemetry | None = None
+        self,
+        *,
+        telemetry: PositionCalcTelemetry | None = None,
+        failure_policy: CoverageFailurePolicy = "raise",
+        row_isolation: RowIsolationTelemetry | None = None,
     ) -> list[PositionScore]:
         """Direct position-score rows for the tree read model (g-tree-score-model).
 
@@ -1265,6 +1401,7 @@ class _SharedCalculator:
         row never surfaces the alpha/beta prior and a no-evidence opponent-turn leaf
         never surfaces ``_calc``'s perfect-looking ``(1.0, 1.0, 1.0, 0.0)`` result.
         """
+        isolation = _row_isolation_collector(failure_policy, row_isolation)
         results: list[PositionScore] = []
         scoreable_count = 0
         off_book_count = 0
@@ -1279,7 +1416,15 @@ class _SharedCalculator:
                 off_book_count += 1
             if has_evidence:
                 scoreable_count += 1
-                opening_score, confidence, coverage, depth = self._direct_metrics(fen)
+                try:
+                    opening_score, confidence, coverage, depth = self._direct_metrics(
+                        fen
+                    )
+                except OpeningCoverageValidationError as error:
+                    if isolation is None:
+                        raise
+                    isolation.record_position(error)
+                    continue
                 sample_size, game_count, last_practiced_at = self._aggregate_metadata(
                     fen
                 )
@@ -1324,6 +1469,9 @@ class _SharedCalculator:
             telemetry.observed_off_book_row_count = off_book_count
             telemetry.persisted_row_count = len(results)
             telemetry.metric_key_count = len(self._metrics)
+            telemetry.quarantined_position_row_count = (
+                isolation.omitted_position_row_count if isolation is not None else 0
+            )
         return results
 
     def _base_root_score(self, root: OpeningRoot) -> RootScore:
@@ -1354,15 +1502,25 @@ class _SharedCalculator:
         roots_to_compute: list[OpeningRoot],
         *,
         include_branch_summaries: bool,
+        failure_policy: CoverageFailurePolicy = "raise",
+        row_isolation: RowIsolationTelemetry | None = None,
     ) -> dict[str, RootScore]:
-        scores = {
-            root.opening_key: self._base_root_score(root) for root in roots_to_compute
-        }
+        isolation = _row_isolation_collector(failure_policy, row_isolation)
+        scores: dict[str, RootScore] = {}
+        for root in roots_to_compute:
+            try:
+                scores[root.opening_key] = self._base_root_score(root)
+            except OpeningCoverageValidationError as error:
+                if isolation is None:
+                    raise
+                isolation.record_root(error)
         if not include_branch_summaries:
             return scores
 
         enriched: dict[str, RootScore] = {}
         for root in roots_to_compute:
+            if root.opening_key not in scores:
+                continue
             score = scores[root.opening_key]
             score_reachable = self._score_reachable(_normalized(root.opening_key))
             immediate = [
@@ -1454,6 +1612,7 @@ def _populate_root_telemetry(
     calculator: _SharedCalculator,
     named_roots: list[OpeningRoot],
     result: dict[str, RootScore],
+    row_isolation: RowIsolationTelemetry | None,
 ) -> None:
     telemetry.named_root_count = len(named_roots)
     telemetry.actual_key_count = sum(1 for key in calculator._metrics if not key[1])
@@ -1462,6 +1621,9 @@ def _populate_root_telemetry(
     telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
     telemetry.unscored_root_count = sum(
         1 for root in named_roots if root.opening_key not in result
+    )
+    telemetry.quarantined_root_row_count = (
+        row_isolation.omitted_root_row_count if row_isolation is not None else 0
     )
 
 
@@ -1479,6 +1641,8 @@ def _compute_scores(
     telemetry: CalcTelemetry | None,
     include_position_scores: bool,
     position_telemetry: PositionCalcTelemetry | None,
+    failure_policy: CoverageFailurePolicy,
+    row_isolation: RowIsolationTelemetry | None,
 ) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
     """Build one shared calculator and derive named-root and direct position rows.
 
@@ -1488,6 +1652,7 @@ def _compute_scores(
     reuse the same ``_metrics``, SCC cut, weights, and reachable caches.
     """
     config = config or RootCalcConfig()
+    row_isolation = _row_isolation_collector(failure_policy, row_isolation)
     now = now or datetime.now(timezone.utc)
     named_roots = _iter_named_roots(roots)
     has_quality = any(node.quality_count > 0 for node in overlay.nodes.values())
@@ -1518,19 +1683,28 @@ def _compute_scores(
             calculator, named_roots, include_synthetic_root=include_synthetic_root
         )
         result = calculator.compute_roots(
-            selected, include_branch_summaries=include_branch_summaries
+            selected,
+            include_branch_summaries=include_branch_summaries,
+            failure_policy=failure_policy,
+            row_isolation=row_isolation,
         )
     else:
         # No quality: emit no named-root rows and no synthetic repertoire row — only
         # the connected observed off-book no-data position rows computed below.
         eligible, result = set(), {}
     position_scores = (
-        calculator.compute_position_scores(telemetry=position_telemetry)
+        calculator.compute_position_scores(
+            telemetry=position_telemetry,
+            failure_policy=failure_policy,
+            row_isolation=row_isolation,
+        )
         if include_position_scores
         else []
     )
     if telemetry is not None:
-        _populate_root_telemetry(telemetry, calculator, named_roots, result)
+        _populate_root_telemetry(
+            telemetry, calculator, named_roots, result, row_isolation
+        )
     return result, eligible, position_scores
 
 
@@ -1560,6 +1734,8 @@ def compute_all_root_scores(
         telemetry=telemetry,
         include_position_scores=False,
         position_telemetry=None,
+        failure_policy="raise",
+        row_isolation=None,
     )
     return result, eligible
 
@@ -1637,6 +1813,8 @@ def compute_all_scores(
     include_synthetic_root: bool = False,
     telemetry: CalcTelemetry | None = None,
     position_telemetry: PositionCalcTelemetry | None = None,
+    failure_policy: CoverageFailurePolicy = "raise",
+    row_isolation: RowIsolationTelemetry | None = None,
 ) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
     """Named-root scores plus direct position-score rows from one shared traversal.
 
@@ -1644,7 +1822,9 @@ def compute_all_scores(
     the same ``(scores, eligible)`` pair as :func:`compute_all_root_scores` together
     with the list of :class:`PositionScore` rows to persist for ``(batch_id,
     normalized_fen)`` lookup. Both share a single ``_SharedCalculator`` so named and
-    direct metrics can never disagree.
+    direct metrics can never disagree. Coverage failures raise by default; the
+    durable batch writer is the only production caller that explicitly selects
+    ``failure_policy="isolate_rows"`` and supplies aggregate telemetry.
     """
     return _compute_scores(
         player_color,
@@ -1659,6 +1839,8 @@ def compute_all_scores(
         telemetry=telemetry,
         include_position_scores=True,
         position_telemetry=position_telemetry,
+        failure_policy=failure_policy,
+        row_isolation=row_isolation,
     )
 
 

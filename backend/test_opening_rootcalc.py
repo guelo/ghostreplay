@@ -17,7 +17,9 @@ from app.opening_rootcalc import (
     SYNTHETIC_ROOT_FAMILY,
     SYNTHETIC_ROOT_NAME,
     CalcTelemetry,
+    OpeningCoverageValidationError,
     PositionCalcTelemetry,
+    RowIsolationTelemetry,
     RootCalcConfig,
     _normalized,
     _SharedCalculator,
@@ -2119,11 +2121,11 @@ def test_report_fold_clamps_both_tolerated_coverage_boundaries(
 def test_report_fold_invalid_active_coverage_fails_closed():
     # An active, in-scope row materially outside the tolerated [0, 1] float boundary
     # still raises rather than returning a complex/NaN score. The FEN and offending
-    # value are named.
+    # value stay available in-process but are absent from the rendered message.
     graph, overlay, roots, root, opp, covered = _fold_fixture()
     key = _normalized(root)
 
-    for bad in (1.0 + 1e-8, 1.5, -1e-8, -0.1):
+    for bad in (1.0 + 1e-8, 1.5, -1e-8, -0.1, math.nan, math.inf):
         active = _fold_calc(
             graph,
             overlay,
@@ -2133,15 +2135,27 @@ def test_report_fold_invalid_active_coverage_fails_closed():
         # Poison the shared memo so _calc surfaces an out-of-range coverage fraction.
         active._metrics[(key, False)] = (0.6, 0.0, bad, 0.5)
         active._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
-        with pytest.raises(ValueError, match=repr(key)):
+        with pytest.raises(OpeningCoverageValidationError) as raised:
             active._direct_metrics(root)
+        assert isinstance(raised.value, ValueError)
+        assert raised.value.cause == "report_fold_bounds"
+        assert raised.value.normalized_fen == key
+        if math.isnan(bad):
+            assert math.isnan(raised.value.coverage)
+        else:
+            assert raised.value.coverage == bad
+        assert key not in str(raised.value)
+        assert repr(bad) not in str(raised.value)
 
         # p == 0 never evaluates the power or validates coverage: same poison passes.
         dormant = _fold_calc(graph, overlay, roots, _sm_v2_3_config())
         dormant._metrics[(key, False)] = (0.6, 0.0, bad, 0.5)
         dormant._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
         _, _, cov, _ = dormant._direct_metrics(root)
-        assert cov == pytest.approx(100.0 * bad)
+        if math.isnan(bad):
+            assert math.isnan(cov)
+        else:
+            assert cov == pytest.approx(100.0 * bad)
 
     # An out-of-scope active row also skips validation entirely (never powers).
     opp_key = _normalized(opp)
@@ -2155,6 +2169,124 @@ def test_report_fold_invalid_active_coverage_fails_closed():
     out_of_scope._metrics[(opp_key, True)] = (1.0, 0.0, 1.0, 0.3)
     _, _, cov, _ = out_of_scope._direct_metrics(opp)
     assert cov == pytest.approx(150.0)
+
+
+def test_isolate_rows_omits_only_invalid_reported_rows(monkeypatch):
+    root, e4 = _positions(["e2e4"])
+    d4 = _positions(["d2d4"])[1]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    roots = _roots(_root(e4, "Healthy"), _root(d4, "Corrupt"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    _prepared(overlay, root, d4, "d2d4")
+    overlay.nodes[e4] = _quality(e4, 1.0)
+    overlay.nodes[d4] = _quality(d4, 1.0)
+
+    original = _SharedCalculator._coverage_fraction
+
+    def poisoned_coverage(self, fen):
+        if _normalized(fen) == d4:
+            return 1.5
+        return original(self, fen)
+
+    monkeypatch.setattr(_SharedCalculator, "_coverage_fraction", poisoned_coverage)
+    isolation = RowIsolationTelemetry()
+    scores, eligible, positions = compute_all_scores(
+        "white",
+        graph,
+        overlay,
+        roots,
+        config=RootCalcConfig(report_fold_scope="all"),
+        include_synthetic_root=True,
+        failure_policy="isolate_rows",
+        row_isolation=isolation,
+    )
+    positions_by_fen = {row.normalized_fen: row for row in positions}
+
+    assert eligible == {e4, d4}
+    assert e4 in scores and e4 in positions_by_fen
+    assert d4 not in scores and d4 not in positions_by_fen
+    assert all(
+        summary.opening_key != d4
+        for score in scores.values()
+        for summary in (
+            score.strongest_branch,
+            score.weakest_branch,
+            score.underexposed_branch,
+        )
+        if summary is not None
+    )
+    assert isolation.snapshot().omitted_root_row_count == 1
+    assert isolation.snapshot().omitted_position_row_count == 1
+    assert isolation.snapshot().report_fold_bounds_count == 2
+
+    # Direct calculator callers get the same isolation semantics even when they do
+    # not need aggregate telemetry and omit the optional collector.
+    direct = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(report_fold_scope="all"),
+        FOLD_NOW,
+    )
+    direct_scores = direct.compute_roots(
+        [roots.get_root(e4), roots.get_root(d4)],
+        include_branch_summaries=False,
+        failure_policy="isolate_rows",
+    )
+    direct_positions = {
+        row.normalized_fen: row
+        for row in direct.compute_position_scores(failure_policy="isolate_rows")
+    }
+    assert e4 in direct_scores and d4 not in direct_scores
+    assert e4 in direct_positions and d4 not in direct_positions
+
+
+def test_opportunity_failure_negative_memo_is_private_and_fold_independent(monkeypatch):
+    root, opponent, leaf = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root, "Root"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, opponent, "e2e4")
+    overlay.nodes[root] = _quality(root, 1.0)
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(report_fold_p=0.0, report_fold_scope="user"),
+        FOLD_NOW,
+    )
+    original = _SharedCalculator._get_coverage_weights
+    corrupt_calls = 0
+
+    def corrupt_opportunity_weights(self, fen):
+        nonlocal corrupt_calls
+        if _normalized(fen) == opponent:
+            corrupt_calls += 1
+            return {leaf: 2.0}
+        return original(self, fen)
+
+    monkeypatch.setattr(
+        _SharedCalculator, "_get_coverage_weights", corrupt_opportunity_weights
+    )
+
+    with pytest.raises(OpeningCoverageValidationError) as first:
+        calculator._direct_metrics(root)
+    with pytest.raises(OpeningCoverageValidationError) as second:
+        calculator._direct_metrics(root)
+
+    assert first.value.cause == second.value.cause == "opportunity_invariant"
+    assert first.value.normalized_fen == opponent
+    assert opponent not in str(first.value)
+    assert "2.0" not in str(first.value)
+    assert corrupt_calls == 1
+    assert root in calculator._coverage_failures
+    assert opponent in calculator._coverage_failures
+    assert root not in calculator._coverage_masses
+    assert opponent not in calculator._coverage_masses
+    assert (root, False) not in calculator._metrics
 
 
 def test_report_fold_named_root_and_position_row_agree():

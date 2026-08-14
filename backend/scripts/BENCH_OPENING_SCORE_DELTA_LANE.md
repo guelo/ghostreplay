@@ -20,6 +20,9 @@ migrated template named `gr_snap_base`.
 
 cd backend
 source .venv/bin/activate
+export DATABASE_URL=\
+'postgresql+psycopg://localhost:5433/gr_delta_lane_bench'
+alembic upgrade head
 export GHOSTREPLAY_DELTA_BENCH_DATABASE_URL=\
 'postgresql+psycopg://localhost:5433/gr_delta_lane_bench'
 TMPDIR=/private/tmp pytest -c pytest.ini -s -q \
@@ -27,6 +30,11 @@ TMPDIR=/private/tmp pytest -c pytest.ini -s -q \
 
 /opt/homebrew/opt/postgresql@18/bin/dropdb -p 5433 gr_delta_lane_bench
 ```
+
+Always migrate the disposable clone even when `gr_snap_base` was previously
+described as migrated: the restored template is retained across development and
+can legitimately trail current Alembic head. Never migrate the template merely to
+make this gate pass.
 
 `GHOSTREPLAY_DELTA_BENCH_REPS` defaults to 10 and may be overridden for a
 verification run; values below 5 are rejected. Ten repetitions make the

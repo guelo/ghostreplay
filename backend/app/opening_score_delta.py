@@ -74,6 +74,8 @@ from app.opening_evidence import (
 from app.opening_graph import get_opening_graph
 from app.opening_rootcalc import (
     RootCalcConfig,
+    SYNTHETIC_INITIAL_FEN,
+    SYNTHETIC_ROOT_FAMILY,
     compute_scoped_root_scores,
     root_calc_config_fingerprint,
 )
@@ -92,6 +94,7 @@ class BaselineSnapshotSource(str, Enum):
     SKIPPED_STALE = "skipped_stale"
     SKIPPED_COLD = "skipped_cold"
     SKIPPED_RECOMPUTE_INFLIGHT = "skipped_recompute_inflight"
+    SKIPPED_QUARANTINED_EMPTY = "skipped_quarantined_empty"
     RACED_EVIDENCE_OR_ALREADY_SET = "raced_evidence_or_already_set"
     ALREADY_SET = "already_set"
     MISSING_SESSION = "missing_session"
@@ -130,6 +133,35 @@ def _serialize_baseline(scores: dict[str, float]) -> str:
             "root_calc_config_fingerprint": root_calc_config_fingerprint(),
             "scores": scores,
         }
+    )
+
+
+def _has_baseline_relevant_root(rows: list[UserOpeningScore]) -> bool:
+    """Whether a persisted batch has a root that a played-opening chain can use."""
+
+    return any(
+        row.opening_family != SYNTHETIC_ROOT_FAMILY
+        and row.opening_key != SYNTHETIC_INITIAL_FEN
+        for row in rows
+    )
+
+
+def _is_evidence_backed_empty_baseline(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    rows: list[UserOpeningScore],
+) -> bool:
+    """Infer the persisted shape that is unsafe to snapshot as an empty baseline.
+
+    This intentionally folds clean rootless evidence into the same terminal branch
+    as an all-quarantined batch: without a persisted discriminator those shapes are
+    indistinguishable, and suppressing a rare ``is_new`` is safer than relabelling an
+    established repertoire wholesale.
+    """
+
+    return not _has_baseline_relevant_root(rows) and has_opening_evidence(
+        db, user_id, player_color
     )
 
 
@@ -395,8 +427,14 @@ def _capture_baseline_json(
       only runs in the no-batch case (to keep a brand-new user's empty baseline).
       The async worker passes ``skip_when_inflight=False``: it is off the request
       thread, so correctness comes from the strict date/freshness proof instead.
-    - Freshness: a provably-stale batch returns ``(None, "skipped_stale")``; a fresh
-      batch returns ``(json.dumps({key: score}), "cached_fresh")``.
+    - Freshness: a provably-stale batch returns ``(None, "skipped_stale")``.
+    - Baseline relevance: after freshness is proven, evidence plus zero surviving
+      non-synthetic named-root rows returns
+      ``(None, "skipped_quarantined_empty")``. The persisted shape intentionally
+      covers both an all-quarantined batch and indistinguishable clean rootless
+      evidence.
+    - Otherwise, a fresh batch returns
+      ``(json.dumps({key: score}), "cached_fresh")``.
 
     The async worker does not call this helper: it uses the durable session
     watermark and the two-proof acceptance path below.
@@ -437,6 +475,8 @@ def _capture_baseline_json(
         # Cache exists but is provably stale (evidence/registry drift or legacy
         # branch keys). Persisting it would reintroduce the misattribution.
         return None, "skipped_stale"
+    if _is_evidence_backed_empty_baseline(db, user_id, player_color, rows):
+        return None, BaselineSnapshotSource.SKIPPED_QUARANTINED_EMPTY.value
     return _serialize_baseline(
         {row.opening_key: row.opening_score for row in rows}
     ), "cached_fresh"
@@ -663,6 +703,11 @@ def run_baseline_snapshot_job(
             if mismatch_reason is not None:
                 source = BaselineSnapshotSource.WATERMARK_MISMATCH.value
                 return source
+            if _is_evidence_backed_empty_baseline(
+                db, session.user_id, session.player_color, rows
+            ):
+                source = BaselineSnapshotSource.SKIPPED_QUARANTINED_EMPTY.value
+                return source
             baseline_json = _serialize_baseline(
                 {row.opening_key: row.opening_score for row in rows}
             )
@@ -729,6 +774,15 @@ def fill_opening_baselines_for_batch(
         # perform writes only cache_epoch through an independent session and does
         # not change either historical proof.
         if not _is_batch_fresh(db, batch, rows):
+            return 0
+
+        if _is_evidence_backed_empty_baseline(
+            db, batch.user_id, batch.player_color, rows
+        ):
+            logger.info(
+                "opening baseline push-fill source=%s",
+                BaselineSnapshotSource.SKIPPED_QUARANTINED_EMPTY.value,
+            )
             return 0
 
         baseline_json = _serialize_baseline(

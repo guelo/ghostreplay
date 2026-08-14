@@ -61,7 +61,11 @@ from app.opening_evidence import (
 from app.opening_evidence import overlay_evidence as _real_overlay_evidence
 from app.opening_graph import get_opening_graph
 from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
-from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
+from app.opening_rootcalc import (
+    RootCalcConfig,
+    _SharedCalculator,
+    root_calc_config_fingerprint,
+)
 from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -2189,6 +2193,116 @@ def test_recompute_writes_direct_position_rows(db_session):
     assert kings_pawn.coverage is not None
 
 
+def test_recompute_isolates_one_corrupt_row_and_suppresses_unchanged_work(
+    db_session, monkeypatch
+):
+    _seed_black_opening_session(db_session)
+    original = _SharedCalculator._coverage_fraction
+
+    def poison_knight(self, fen):
+        if normalize_fen(fen) == KNIGHT_OPENING_FEN:
+            return 1.5
+        return original(self, fen)
+
+    monkeypatch.setattr(_SharedCalculator, "_coverage_fraction", poison_knight)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert first.disposition is RecomputeDisposition.REBUILT
+    assert first.row_isolation is not None
+    assert first.row_isolation.outcome == "quarantined"
+    assert first.row_isolation.omitted_root_row_count == 1
+    assert first.row_isolation.omitted_position_row_count == 1
+    assert first.row_isolation.report_fold_bounds_count == 2
+    batch = first.batch
+    assert batch is not None
+    named_keys = {
+        row.opening_key
+        for row in db_session.query(UserOpeningScore)
+        .filter(UserOpeningScore.batch_id == batch.id)
+        .all()
+    }
+    position_keys = {
+        row.normalized_fen
+        for row in db_session.query(OpeningPositionScore)
+        .filter(OpeningPositionScore.batch_id == batch.id)
+        .all()
+    }
+    assert KINGS_PAWN_FEN in named_keys
+    assert KNIGHT_OPENING_FEN not in named_keys
+    assert KINGS_PAWN_FEN in position_keys
+    assert KNIGHT_OPENING_FEN not in position_keys
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .count()
+        > 0
+    )
+
+    with patch(
+        "app.opening_cache._build_cached_scores",
+        side_effect=AssertionError("unchanged isolated batch must not rebuild"),
+    ):
+        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert second.disposition is RecomputeDisposition.CACHED
+    assert second.batch.id == batch.id
+    assert second.row_isolation is None
+
+
+def test_recompute_publishes_current_generation_when_every_score_row_isolated(
+    db_session, monkeypatch
+):
+    _seed_black_opening_session(db_session)
+    original = _SharedCalculator._get_coverage_weights
+
+    def poison_terminal_opportunity(self, fen):
+        if normalize_fen(fen) == TWO_KNIGHTS_FEN:
+            # TWO_KNIGHTS is an opponent-turn leaf for a black player. A synthetic
+            # untraversed weight above one violates the local opportunity invariant
+            # and propagates through every evidence-bearing ancestor.
+            return {START_FEN: 2.0}
+        return original(self, fen)
+
+    monkeypatch.setattr(
+        _SharedCalculator, "_get_coverage_weights", poison_terminal_opportunity
+    )
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert first.disposition is RecomputeDisposition.REBUILT
+    assert first.row_isolation is not None
+    assert first.row_isolation.outcome == "quarantined"
+    batch = first.batch
+    assert batch is not None
+    assert first.row_isolation.omitted_root_row_count == 3
+    assert first.row_isolation.omitted_position_row_count == 4
+    assert first.row_isolation.opportunity_invariant_count == 7
+    assert (
+        db_session.query(UserOpeningScore)
+        .filter(UserOpeningScore.batch_id == batch.id)
+        .count()
+        == 0
+    )
+    assert (
+        db_session.query(OpeningPositionScore)
+        .filter(OpeningPositionScore.batch_id == batch.id)
+        .count()
+        == 0
+    )
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .count()
+        > 0
+    )
+
+    with patch(
+        "app.opening_cache._build_cached_scores",
+        side_effect=AssertionError("zero-row current batch must not rebuild"),
+    ):
+        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert second.disposition is RecomputeDisposition.CACHED
+    assert second.batch.id == batch.id
+
+
 def test_position_rows_match_named_root_metrics(db_session):
     _seed_black_opening_session(db_session)
     recompute_opening_scores(db_session, 123, "black")
@@ -2665,6 +2779,11 @@ def test_equivalent_disposition_string_normalizes_to_the_enum():
             {"disposition": RecomputeDisposition.REBUILT, "batch": object(),
              "reason": "because_i_said_so"},
             "requires a rebuild reason",
+        ),
+        (
+            {"disposition": RecomputeDisposition.REBUILT, "batch": object(),
+             "reason": "cache_miss"},
+            "requires row isolation",
         ),
         (
             {"disposition": RecomputeDisposition.CACHED, "batch": None},

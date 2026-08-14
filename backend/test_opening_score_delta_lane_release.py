@@ -37,6 +37,7 @@ from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.opening_score_delta import (
     _session_played_fens,
+    capture_baseline_watermark,
     publish_scoped_opening_score_deltas,
     read_opening_score_delta,
     reset_scoped_delta_cache,
@@ -386,6 +387,9 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
         # the real epoch-drift scoped digest branch, overlap the real async job,
         # and measure rather than assuming it needs a new defer/retry mechanism.
         with session_factory() as db:
+            watermark_seq, watermark_epoch, watermark_fingerprint = (
+                capture_baseline_watermark(db, user_id, color)
+            )
             baseline_session = GameSession(
                 id=uuid.uuid4(),
                 user_id=user_id,
@@ -396,6 +400,9 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
                 is_rated=False,
                 player_color=color,
                 session_mode="normal",
+                baseline_watermark_seq=watermark_seq,
+                baseline_watermark_epoch=watermark_epoch,
+                baseline_watermark_fingerprint=watermark_fingerprint,
             )
             db.add(baseline_session)
             db.commit()

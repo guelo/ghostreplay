@@ -25,7 +25,13 @@ from app.opening_cache import (
     recompute_opening_scores_if_needed,
 )
 from app.opening_score_scheduler import OpeningScoreScheduler, OpeningScoreTrigger
-from test_opening_cache import _make_graph, _make_roots, _seed_black_opening_session
+from app.opening_rootcalc import _SharedCalculator
+from test_opening_cache import (
+    KNIGHT_OPENING_FEN,
+    _make_graph,
+    _make_roots,
+    _seed_black_opening_session,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -81,6 +87,44 @@ def test_cache_miss_emits_with_full_props(db_session, captured):
     assert props["replay_cache_persisted_upserts"] == 1
     assert props["replay_cache_l2_read_failed"] is False
     assert props["replay_cache_l2_write_failed"] is False
+    assert props["row_isolation_version"] == 1
+    assert props["row_isolation_outcome"] == "clean"
+    assert props["omitted_root_row_count"] == 0
+    assert props["omitted_position_row_count"] == 0
+    assert props["opportunity_invariant_count"] == 0
+    assert props["report_fold_bounds_count"] == 0
+
+
+def test_quarantined_rebuild_emits_only_aggregate_isolation_data(
+    db_session, captured, caplog, monkeypatch
+):
+    _seed_black_opening_session(db_session)
+    original = _SharedCalculator._coverage_fraction
+
+    def poison_knight(self, fen):
+        if fen == KNIGHT_OPENING_FEN:
+            return 1.5
+        return original(self, fen)
+
+    monkeypatch.setattr(_SharedCalculator, "_coverage_fraction", poison_knight)
+    with caplog.at_level("INFO"):
+        result = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert result.disposition is RecomputeDisposition.REBUILT
+    props = _only_props(captured)
+    assert props["row_isolation_outcome"] == "quarantined"
+    assert props["omitted_root_row_count"] == 1
+    assert props["omitted_position_row_count"] == 1
+    assert props["opportunity_invariant_count"] == 0
+    assert props["report_fold_bounds_count"] == 2
+    isolation_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "row isolation outcome=" in record.getMessage()
+    ]
+    assert isolation_messages
+    assert all(KNIGHT_OPENING_FEN not in message for message in isolation_messages)
+    assert all("1.5" not in message for message in isolation_messages)
 
 
 def test_persisted_bootstrap_emits_l2_restart_signature(db_session, captured):

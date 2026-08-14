@@ -23,6 +23,7 @@ import pytest
 from app import main
 from app.logging_config import SimpleFormatter
 from app.opening_cache import OpeningScoreRecomputeResult, RecomputeDisposition
+from app.opening_rootcalc import RowIsolationSummary
 from app.opening_score_scheduler import (
     OpeningScoreScheduler,
     OpeningScoreTrigger,
@@ -40,6 +41,13 @@ from app.opening_score_scheduler import request_recompute as _real_request_recom
 
 # Default provenance for tests that are not about provenance itself.
 _TRIGGER = OpeningScoreTrigger.CACHED_SCORE_READER_WARM
+_CLEAN_ROW_ISOLATION = RowIsolationSummary(
+    outcome="clean",
+    omitted_root_row_count=0,
+    omitted_position_row_count=0,
+    opportunity_invariant_count=0,
+    report_fold_bounds_count=0,
+)
 
 
 class _FakeClock:
@@ -65,11 +73,13 @@ def _rebuilt(
     reason: str = "cache_miss",
     generation: int = 7,
     batch_id: int | None = None,
+    row_isolation: RowIsolationSummary = _CLEAN_ROW_ISOLATION,
 ):
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,
         batch=_FakeBatch(generation, batch_id),
         reason=reason,
+        row_isolation=row_isolation,
     )
 
 
@@ -796,6 +806,33 @@ def test_completion_log_reports_the_exact_run_outcome(
     assert f"run_outcome={expected_outcome}" in rendered
     assert f"rebuild_reason={expected_reason}" in rendered
     assert f"generation={expected_generation}" in rendered
+    expected_isolation = "clean" if expected_outcome == "rebuilt" else "not_applicable"
+    assert f"row_isolation_outcome={expected_isolation}" in rendered
+
+
+def test_completion_log_reports_quarantine_counts_without_row_identity(caplog):
+    isolation = RowIsolationSummary(
+        outcome="quarantined",
+        omitted_root_row_count=2,
+        omitted_position_row_count=3,
+        opportunity_invariant_count=4,
+        report_fold_bounds_count=1,
+    )
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        clock, lambda *args: _rebuilt(row_isolation=isolation)
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    clock.advance(2.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    rendered = _rendered_completion(caplog)
+    assert "row_isolation_outcome=quarantined" in rendered
+    assert "omitted_root_row_count=2" in rendered
+    assert "omitted_position_row_count=3" in rendered
+    assert "opportunity_invariant_count=4" in rendered
+    assert "report_fold_bounds_count=1" in rendered
 
 
 def test_failed_run_does_not_prevent_the_next_due_key():

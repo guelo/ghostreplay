@@ -16,6 +16,7 @@ from app.opening_score_delta import (
     reserve_scoped_delta_generation,
 )
 from app.opening_score_delta_lane import (
+    DELTA_LANE_RETRY_BACKOFF_SECONDS,
     DeltaLaneEnqueueOutcome,
     OpeningScoreDeltaLane,
 )
@@ -317,6 +318,38 @@ def test_failure_rolls_back_closes_and_exhausts_bounded_retries(caplog):
     assert all(session.closed for session in sessions)
     assert lane._pending == {}
     assert "outcome=retry_exhausted" in caplog.text
+
+
+def test_production_backoff_makes_exactly_four_fail_closed_attempts(caplog):
+    clock = _FakeClock()
+    calls = 0
+
+    def publish(db, user_id, player_color, requests, *, on_complete):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("corrupt played-root closure")
+
+    lane, _ = _make_lane(
+        clock,
+        publish,
+        retry_backoff=DELTA_LANE_RETRY_BACKOFF_SECONDS,
+    )
+    lane.enqueue(1, "white", uuid.uuid4())
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta_lane"):
+        lane.run_due()
+        for delay in DELTA_LANE_RETRY_BACKOFF_SECONDS:
+            clock.advance(delay)
+            lane.run_due()
+
+    completions = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("opening_score_delta_lane_run ")
+    ]
+    assert calls == 4
+    assert sum("outcome=retry_scheduled" in message for message in completions) == 3
+    assert sum("outcome=retry_exhausted" in message for message in completions) == 1
+    assert lane._pending == {}
 
 
 def test_cancelled_inflight_failure_is_not_reported_as_overflow(caplog):

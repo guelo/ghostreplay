@@ -655,6 +655,64 @@ def test_tree_observed_off_book_edge_appears_navigable(client, auth_headers):
     assert deeper["canonical_line"] == ["e2e4", "e7e5", "d2d4"]
 
 
+def test_warm_isolated_batch_keeps_off_book_navigation_with_null_metrics(
+    client, auth_headers
+):
+    # A current generation may preserve its observed edge while quarantining both
+    # the off-book destination row and the independent start-position hero row.
+    edge_key, edge = _obs_edge(
+        ["e2e4", "e7e5", "d2d4"],
+        traversal_count=5,
+        live_attempts=3,
+        live_passes=2,
+    )
+    overlay = _overlay("white", edges={edge_key: edge})
+    data = _call(
+        client,
+        auth_headers,
+        overlay=overlay,
+        position_rows={},
+        params={"player_color": "white", "move": ["e2e4", "e7e5"]},
+    ).json()
+
+    assert data["cache_state"] == "warm_fresh"
+    assert data["root_opening_score"] is None
+    assert data["root_coverage"] is None
+    assert data["root_confidence"] is None
+    assert data["root_game_count"] is None
+    off_book = _by_uci(data["columns"][2], "d2d4")
+    assert off_book["is_observed"] is True
+    assert off_book["in_book"] is False
+    assert off_book["is_navigable"] is True
+    assert off_book["opening_score"] is None
+    assert off_book["user_choice_count"] == 3
+    assert off_book["encounter_count"] == 5
+
+    followed = _call(
+        client,
+        auth_headers,
+        overlay=overlay,
+        params={
+            "player_color": "white",
+            "move": ["e2e4", "e7e5", "d2d4"],
+        },
+    ).json()
+    unknown = _call(
+        client,
+        auth_headers,
+        overlay=overlay,
+        params={
+            "player_color": "white",
+            "move": ["e2e4", "e7e5", "c2c3"],
+        },
+    ).json()
+    assert followed["canonical_line"] == ["e2e4", "e7e5", "d2d4"]
+    assert unknown["canonical_line"] == ["e2e4", "e7e5", "c2c3"]
+    unknown_node = _by_uci(unknown["columns"][2], "c2c3")
+    assert unknown_node["is_user_selected"] is True
+    assert unknown_node["is_observed"] is False
+
+
 def test_tree_observed_in_book_edge_sets_both_flags(client, auth_headers):
     edge_key, edge = _obs_edge(
         ["e2e4", "e7e5"], traversal_count=4, live_attempts=1, live_passes=1

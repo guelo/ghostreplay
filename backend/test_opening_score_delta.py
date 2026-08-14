@@ -1040,6 +1040,22 @@ def test_delta_null_baseline_shows_after_only(db_session):
     assert by_key[RUY_KEY].delta is None
 
 
+def test_all_quarantined_null_baseline_does_not_mark_repertoire_new(db_session):
+    session = _make_session(db_session, baseline=None)
+    _insert_moves(db_session, session.id, RUY_SANS)
+    _make_batch(db_session)  # current generation, but every score row is absent
+    db_session.commit()
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        items = compute_opening_score_delta(db_session, session)
+
+    assert items
+    assert all(item.before is None for item in items)
+    assert all(item.after is None for item in items)
+    assert all(item.delta is None for item in items)
+    assert all(item.is_new is False for item in items)
+
+
 def test_delta_empty_when_no_opening_crossed(db_session):
     session = _make_session(db_session, baseline=_baseline_json({}))
     _insert_moves(db_session, session.id, RUY_SANS)

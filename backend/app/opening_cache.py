@@ -50,6 +50,8 @@ from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
 from app.opening_rootcalc import (
     PositionCalcTelemetry,
     PositionScore,
+    RowIsolationSummary,
+    RowIsolationTelemetry,
     RootCalcConfig,
     RootScore,
     compute_all_scores,
@@ -294,12 +296,18 @@ def _build_cached_scores(
     overlay: EvidenceOverlay,
     roots: OpeningRoots,
     computed_at: datetime,
+    *,
+    row_isolation: RowIsolationTelemetry | None = None,
 ) -> tuple[list[RootScore], list[PositionScore]]:
     """Build named-root rows and direct position rows from one shared traversal.
 
     Both row sets come from a single ``compute_all_scores`` call (one
-    ``_SharedCalculator``), so named and direct metrics can never disagree.
+    ``_SharedCalculator``), so named and direct metrics can never disagree. This is
+    the durable recovery boundary: typed coverage failures omit only affected
+    outputs, while every unrelated exception still aborts the batch.
     """
+    if row_isolation is None:
+        row_isolation = RowIsolationTelemetry()
     position_telemetry = PositionCalcTelemetry()
     scores, _, position_scores = compute_all_scores(
         player_color,
@@ -311,6 +319,8 @@ def _build_cached_scores(
         include_branch_summaries=True,
         include_synthetic_root=True,
         position_telemetry=position_telemetry,
+        failure_policy="isolate_rows",
+        row_isolation=row_isolation,
     )
     logger.info(
         "opening position-score rows computed",
@@ -322,6 +332,17 @@ def _build_cached_scores(
             "persisted_row_count": position_telemetry.persisted_row_count,
             "metric_key_count": position_telemetry.metric_key_count,
         },
+    )
+    summary = row_isolation.snapshot()
+    logger.info(
+        "opening score row isolation outcome=%s omitted_root_row_count=%s "
+        "omitted_position_row_count=%s opportunity_invariant_count=%s "
+        "report_fold_bounds_count=%s",
+        summary.outcome,
+        summary.omitted_root_row_count,
+        summary.omitted_position_row_count,
+        summary.opportunity_invariant_count,
+        summary.report_fold_bounds_count,
     )
     return list(scores.values()), position_scores
 
@@ -1399,7 +1420,15 @@ def recompute_opening_scores(
     overlay: EvidenceOverlay | None = None,
     freshness: FreshnessSnapshot | None = None,
     computed_at: datetime | None = None,
+    row_isolation: RowIsolationTelemetry | None = None,
 ) -> OpeningScoreBatch:
+    """Atomically publish one full score/position/edge generation.
+
+    CPU scoring finishes before staging starts. Typed coverage failures are already
+    represented as omitted rows by ``_build_cached_scores``; any other calculation
+    or persistence failure keeps the previous generation visible and rolls back the
+    new one. A generation with zero score rows is valid and current.
+    """
     _validate_player_color(player_color)
     if overlay is not None and freshness is None:
         # A prebuilt overlay reflects a specific raw-input snapshot. Deriving the
@@ -1435,8 +1464,15 @@ def recompute_opening_scores(
     # keeps its value.
     if computed_at is None:
         computed_at = _utcnow()
+    if row_isolation is None:
+        row_isolation = RowIsolationTelemetry()
     scores, position_scores = _build_cached_scores(
-        player_color, graph, overlay, roots, computed_at
+        player_color,
+        graph,
+        overlay,
+        roots,
+        computed_at,
+        row_isolation=row_isolation,
     )
 
     batch = OpeningScoreBatch(
@@ -1658,9 +1694,10 @@ class OpeningScoreRecomputeResult:
     Invariants (enforced in ``__post_init__``, so an impossible combination cannot
     be constructed and downstream readers never have to re-derive the outcome):
 
-      - ``rebuilt``     → a batch AND one of ``_REBUILD_REASONS``;
-      - ``cached``      → a batch and NO reason (nothing triggered a rebuild);
-      - ``no_evidence`` → no batch and no reason.
+      - ``rebuilt``     → a batch, one of ``_REBUILD_REASONS``, and an isolation
+        summary for the completed calculation;
+      - ``cached``      → a batch, no reason, and no isolation summary;
+      - ``no_evidence`` → no batch, no reason, and no isolation summary.
 
     A ``failed`` run is NOT representable here: an exception stays exceptional and
     the scheduler maps it to its fourth operational outcome (see
@@ -1670,6 +1707,7 @@ class OpeningScoreRecomputeResult:
     disposition: RecomputeDisposition
     batch: OpeningScoreBatch | None
     reason: RecomputeReason | None = None
+    row_isolation: RowIsolationSummary | None = None
 
     def __post_init__(self) -> None:
         # Close the vocabulary before the per-disposition checks: without this an
@@ -1691,10 +1729,16 @@ class OpeningScoreRecomputeResult:
                 raise ValueError(
                     f"rebuilt recompute result requires a rebuild reason, got {self.reason!r}"
                 )
+            if self.row_isolation is None:
+                raise ValueError("rebuilt recompute result requires row isolation")
             return
         if self.reason is not None:
             raise ValueError(
                 f"{self.disposition.value} recompute result must carry no rebuild reason"
+            )
+        if self.row_isolation is not None:
+            raise ValueError(
+                f"{self.disposition.value} recompute result must carry no row isolation"
             )
         if self.disposition is RecomputeDisposition.CACHED:
             if self.batch is None:
@@ -1719,6 +1763,7 @@ def _emit_opening_scores_recomputed(
     decay_staleness: bool,
     freshness_capture: FreshnessCapturePath,
     replay_cache_stats: ReplayCacheStats,
+    row_isolation: RowIsolationSummary,
 ) -> None:
     """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
 
@@ -1777,6 +1822,12 @@ def _emit_opening_scores_recomputed(
         "player_color": player_color,
         "scheduler_timed": timing is not None,
         "freshness_capture": freshness_capture,
+        "row_isolation_version": 1,
+        "row_isolation_outcome": row_isolation.outcome,
+        "omitted_root_row_count": row_isolation.omitted_root_row_count,
+        "omitted_position_row_count": row_isolation.omitted_position_row_count,
+        "opportunity_invariant_count": row_isolation.opportunity_invariant_count,
+        "report_fold_bounds_count": row_isolation.report_fold_bounds_count,
     }
     properties.update(replay_cache_telemetry(replay_cache_stats))
     if timing is not None:
@@ -1837,13 +1888,16 @@ def recompute_opening_scores_if_needed(
         # Do NOT pass computed_at=now: the writer samples it AFTER the freshness
         # + overlay reads above so it stays an upper bound on the batch's evidence
         # (g-mxeo). ``now`` is kept only for the decay-staleness gate below.
+        row_isolation = RowIsolationTelemetry()
         result = recompute_opening_scores(
             db,
             user_id,
             player_color,
             overlay=overlay,
             freshness=freshness,
+            row_isolation=row_isolation,
         )
+        isolation_summary = row_isolation.snapshot()
         _emit_opening_scores_recomputed(
             db,
             user_id,
@@ -1858,11 +1912,13 @@ def recompute_opening_scores_if_needed(
             decay_staleness=False,
             freshness_capture=freshness_capture,
             replay_cache_stats=overlay.replay_cache_stats,
+            row_isolation=isolation_summary,
         )
         return OpeningScoreRecomputeResult(
             disposition=RecomputeDisposition.REBUILT,
             batch=result,
             reason="cache_miss",
+            row_isolation=isolation_summary,
         )
 
     registry_drift = batch.registry_fingerprint != registry_fingerprint
@@ -1914,13 +1970,16 @@ def recompute_opening_scores_if_needed(
     # As in the cache-miss branch: let the writer sample computed_at after these
     # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
     # for the decay-staleness gate only.
+    row_isolation = RowIsolationTelemetry()
     result = recompute_opening_scores(
         db,
         user_id,
         player_color,
         overlay=overlay,
         freshness=freshness,
+        row_isolation=row_isolation,
     )
+    isolation_summary = row_isolation.snapshot()
     _emit_opening_scores_recomputed(
         db,
         user_id,
@@ -1935,9 +1994,11 @@ def recompute_opening_scores_if_needed(
         decay_staleness=decay_staleness,
         freshness_capture=freshness_capture,
         replay_cache_stats=overlay.replay_cache_stats,
+        row_isolation=isolation_summary,
     )
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,
         batch=result,
         reason=reason,
+        row_isolation=isolation_summary,
     )

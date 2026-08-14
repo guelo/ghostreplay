@@ -576,6 +576,65 @@ present) calls `request_recompute()` to schedule a coalesced background
 convergence and serves the cached batch immediately, never blocking; only a cold
 reader (no batch yet) blocks on `refresh_now()` for the one-time initial compute.
 
+### Row-isolated full-batch publication
+
+The durable full-batch writer treats the two derived-coverage validations as a
+row boundary. A material opportunity-mass invariant failure or active report-fold
+bounds failure omits each named-root or direct-position output whose calculation
+depends on it. Valid rows, the batch/shared-scope metadata, and all observed edges
+still publish in one transaction. Any other calculation error, database write
+error, or commit error still fails and rolls back the whole new generation.
+Direct/debug/calibration scoring and the scoped terminal-delta scorer remain
+fail-closed; only the durable full-batch builder opts into isolation.
+
+An isolated position is never rewritten as `has_evidence=false`: its score row is
+absent. Existing readers therefore expose the current generation as warm/ready and
+render nullable metrics as no-data. Family totals and branch summaries use only
+surviving rows. The tree remains navigable through independently persisted
+observed edges, including an observed off-book destination with no position row.
+If the starting-position row is affected, the whole-repertoire hero metrics are
+null. A generation with zero named-root and zero position rows is still valid and
+current, suppressing unchanged recompute work even though its edge table may be
+nonempty.
+
+Rebuild telemetry is aggregate and low-cardinality:
+`row_isolation_version=1`, `clean|quarantined`, omitted root/position counts, and
+counts for `opportunity_invariant` and `report_fold_bounds`. It never exports a
+FEN, coverage operand, score, session, or user-derived row identity. Coverage
+errors retain those operands only on the in-process exception for debugging; the
+rendered exception is generic.
+
+Warm readers still enqueue ordinary convergence work according to their existing
+contracts. Suppression happens when the serialized worker sees that the isolated
+batch's evidence/config/registry/decay inputs are unchanged and returns `cached`
+before rebuilding the overlay or scorer.
+
+### Baselines and terminal deltas after isolation
+
+A fresh batch with evidence but no baseline-relevant non-synthetic named root is
+not a trustworthy session-before map. Synchronous capture, asynchronous capture,
+and durable push-fill all leave the baseline null and classify the result as the
+terminal `skipped_quarantined_empty`; they do not spend retry budget or request a
+redundant recovery recompute. This rule is inferred from persisted shape so it
+survives process restarts. Consequently it also includes the indistinguishable
+clean rootless-evidence case by design: that rare case gives up a later
+`is_new=true` claim to prevent an all-quarantined established repertoire from
+being relabelled wholesale as new.
+
+If some ordinary named roots survive, the baseline records them. A root omitted at
+capture and recovered later has no before value and is honestly reported as
+`is_new=true`. A genuinely no-evidence start retains the valid empty baseline, so
+its first later opening is also new. With an entirely suppressed baseline, crossed
+roots instead report `before=null`, `delta=null`, and `is_new=false`.
+
+The terminal delta lane deliberately remains fail-closed. One corrupt played-root
+closure can make four scoped-publication attempts for a request generation: the
+immediate attempt and retries after 0.25, 1.0, and 2.0 seconds. The first three
+completion records are `retry_scheduled`; the fourth is `retry_exhausted` unless an
+existing supersession/cancellation/overflow rule wins. Polling never starts these
+attempts and continues to fall back to the full batch; an isolated missing key is
+represented as `after=null`.
+
 ## Output Per Opening
 
 Each computed opening record should include:

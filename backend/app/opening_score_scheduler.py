@@ -91,6 +91,7 @@ from app.opening_cache import (
     OpeningScoreRecomputeResult,
     recompute_opening_scores_if_needed,
 )
+from app.opening_rootcalc import RowIsolationSummary
 
 logger = logging.getLogger(__name__)
 
@@ -641,6 +642,7 @@ class OpeningScoreScheduler:
         rebuild_reason: str | None,
         worker_run_ms: float | None,
         generation: int | None,
+        row_isolation: RowIsolationSummary | None,
     ) -> None:
         """One completion record per executed run, for ALL four outcomes.
 
@@ -654,12 +656,20 @@ class OpeningScoreScheduler:
         stop later due keys from running.
         """
         try:
+            isolation_outcome = (
+                row_isolation.outcome
+                if row_isolation is not None
+                else "not_applicable"
+            )
             logger.info(
                 "opening_score_recompute_run run_id=%s run_outcome=%s rebuild_reason=%s "
                 "queue_first_ms=%s queue_last_ms=%s coalesce_span_ms=%s "
                 "deadline_delay_ms=%s dispatch_lag_ms=%s worker_run_ms=%s "
                 "trigger_first=%s trigger_last=%s trigger_sources=%s "
-                "enqueue_count=%s immediate=%s forced_dispatch=%s generation=%s",
+                "enqueue_count=%s immediate=%s forced_dispatch=%s generation=%s "
+                "row_isolation_outcome=%s omitted_root_row_count=%s "
+                "omitted_position_row_count=%s opportunity_invariant_count=%s "
+                "report_fold_bounds_count=%s",
                 context.run_id,
                 run_outcome,
                 rebuild_reason,
@@ -676,6 +686,17 @@ class OpeningScoreScheduler:
                 context.immediate,
                 context.forced_dispatch,
                 generation,
+                isolation_outcome,
+                0 if row_isolation is None else row_isolation.omitted_root_row_count,
+                0
+                if row_isolation is None
+                else row_isolation.omitted_position_row_count,
+                0
+                if row_isolation is None
+                else row_isolation.opportunity_invariant_count,
+                0
+                if row_isolation is None
+                else row_isolation.report_fold_bounds_count,
             )
         except Exception:
             logger.exception("opening score recompute completion log failed")
@@ -696,6 +717,7 @@ class OpeningScoreScheduler:
         generation: int | None = None
         worker_run_ms: float | None = None
         push_fill_batch_id: int | None = None
+        row_isolation: RowIsolationSummary | None = None
         token = None
         try:
             token = _run_context.set(context)
@@ -708,6 +730,7 @@ class OpeningScoreScheduler:
                 run_outcome = result.disposition.value
                 rebuild_reason = result.reason
                 generation = getattr(result.batch, "generation", None)
+                row_isolation = result.row_isolation
                 batch_id = getattr(result.batch, "id", None)
                 if batch_id is not None:
                     push_fill_batch_id = int(batch_id)
@@ -775,6 +798,7 @@ class OpeningScoreScheduler:
             rebuild_reason=rebuild_reason,
             worker_run_ms=worker_run_ms,
             generation=generation,
+            row_isolation=row_isolation,
         )
 
 
