@@ -878,26 +878,11 @@ def test_statement_count_idempotent_constant_pg(pg_db, n):
 
 
 @pg_required
-def test_pg_statement_count_overwrite_no_per_row_roundtrip(pg_db):
-    """Overwrite path: UPDATEs are bounded by changed rows with no per-row
-    SELECT/INSERT round-trips (one INSERT + one SELECT for the whole batch)."""
+@pytest.mark.parametrize("n", [10, 40])
+def test_pg_statement_count_overwrite_no_per_row_roundtrip(pg_db, n):
+    """PostgreSQL overwrite maintenance stays set-based across batch sizes."""
     engine, Factory = pg_db
-    keys = [f"leg-{i}" for i in range(10)]
-    for k in keys:  # seed legacy rows the canonical batch will reclaim
-        _seed(Factory, {"fen_before": k, "move_uci": "e2e4", "move_san": "e4",
-                        "played_eval": 5, "source": "jeffml-scores"})
-
-    batch = [_canonical_full(k) for k in keys]  # all LEGACY_REPLACED_BY_AUTH
-    with _statement_counter(engine) as counts:
-        s = Factory()
-        results = write_analysis_cache_rows(s, batch)
-        s.close()
-
-    from app.analysis_cache_policy import Reason
-    assert all(r is Reason.LEGACY_REPLACED_BY_AUTH for _, r in results)
-    assert counts["INSERT"] == 1, counts            # one multi-row conflict INSERT
-    assert counts["SELECT"] == 1, counts            # one FOR UPDATE over conflicts
-    assert counts["UPDATE"] <= len(keys), counts    # bounded by changed rows
+    _assert_overwrite_set_based(engine, Factory, n)  # engine is fixture-owned
 
 
 def _run_concurrent_batches(Factory, batches, monkeypatch, *, timeout=30.0):
@@ -1945,6 +1930,44 @@ def _assert_idempotent_constant(engine, Factory, n):
     assert counts["UPDATE"] == 0, counts   # every row idempotent-KEEP
 
 
+def _assert_overwrite_set_based(engine, Factory, n):
+    """Seed N legacy rows, then reclaim them in one canonical batch.
+
+    At these batch sizes every operation fits one bind-parameter chunk, so the
+    overwrite is one conflict INSERT, one lock SELECT, one association SELECT,
+    and one unconditional-on-REPLACE association DELETE. Larger batches scale by
+    bind-parameter chunks, not by row. Shared by the PG and SQLite contracts so
+    the default suite catches statement-shape drift.
+    """
+    keys = [f"leg-{i}" for i in range(n)]
+    for key in keys:
+        _seed(
+            Factory,
+            {
+                "fen_before": key,
+                "move_uci": "e2e4",
+                "move_san": "e4",
+                "played_eval": 5,
+                "source": "jeffml-scores",
+            },
+        )
+
+    with _statement_counter(engine) as counts:
+        s = Factory()
+        results = write_analysis_cache_rows(
+            s, [_canonical_full(key) for key in keys]
+        )
+        s.close()
+
+    from app.analysis_cache_policy import Reason
+
+    assert all(reason is Reason.LEGACY_REPLACED_BY_AUTH for _, reason in results)
+    assert counts["INSERT"] == 1, counts          # one multi-row conflict INSERT
+    assert counts["SELECT"] == 2, counts          # lock + association load
+    assert counts["DELETE"] == 1, counts          # unconditional on REPLACE
+    assert counts["UPDATE"] <= len(keys), counts  # bounded by changed rows
+
+
 def test_canonical_conflicts_issue_no_association_query():
     """A batch whose conflicts are all CANONICAL keeps its historical statement
     count: canonical merges skip the ownership precondition and canonical rows
@@ -1979,4 +2002,14 @@ def test_statement_count_idempotent_constant_sqlite(n):
     Base.metadata.create_all(engine)
     F = sessionmaker(bind=engine)
     _assert_idempotent_constant(engine, F, n)
+    engine.dispose()  # test-owned engine (not a fixture)
+
+
+@pytest.mark.parametrize("n", [10, 40])
+def test_statement_count_overwrite_set_based_sqlite(n):
+    """SQLite mirrors the PostgreSQL overwrite statement-shape contract."""
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    Factory = sessionmaker(bind=engine)
+    _assert_overwrite_set_based(engine, Factory, n)
     engine.dispose()  # test-owned engine (not a fixture)
