@@ -2667,7 +2667,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 </div>
               </div>
             )}
-            {isGameActive && !isPlayersTurn && (
+            {isGameActive && !isStoppedDrill && !isPlayersTurn && (
               <span className="turn-label">
                 Waiting for opponent
                 <span className="turn-label-spinner" aria-hidden="true" />
@@ -2689,7 +2689,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               isInteractionDisabled={isRevertPending}
               materialFen={controlsMaterialFen}
             />
-            {isGameActive && isPlayersTurn && (
+            {isGameActive && !isStoppedDrill && isPlayersTurn && (
               <span className="turn-label">Your turn</span>
             )}
             <MaterialDisplay fen={displayedFen} perspective={playerColor} />

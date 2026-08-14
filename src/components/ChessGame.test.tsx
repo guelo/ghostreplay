@@ -1438,6 +1438,8 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
       expect(useGameStore.getState().viewIndex).toBe(-1);
     });
+    expect(screen.queryByText("Waiting for opponent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Your turn")).not.toBeInTheDocument();
     // The reconcile-poll fires for the failed drill session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
       "session-characterization",
