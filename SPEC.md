@@ -231,6 +231,7 @@ implementation authorities named in the engineering map.
 - **Product and feature contracts:** [drill mode](docs/features/drill-mode.md)
   and [stats and metrics](docs/features/stats-metrics.md).
 - **Architecture, data, and policy:**
+  [frontend state management](docs/state-management.md),
   [analysis evidence](docs/architecture/analysis-evidence.md), the
   [opening-book loader](docs/opening-book.md), the
   [opening-score model and calibration](docs/openingscore_final.md), and

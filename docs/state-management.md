@@ -1,47 +1,68 @@
-# Frontend State Management Decision
+# Frontend state management
 
-## Context
+This guide describes the implemented frontend state boundaries. It is an
+architecture guide, not a requirement to put all client or server data into a
+global store.
 
-The client orchestrates two Stockfish workers, the chessboard UI, and future calls to the coordinator API (`SPEC.md`). We therefore have two distinct state domains:
+## Current model
 
-- **Local & volatile state** – current FEN, move list, timers, UI toggles (auto-rotate, flips), worker readiness, and transient error banners. These must update synchronously with chessboard events and web worker messages.
-- **Server-synchronized state** – Ghost suggestions, queued blunders, authentication/session info, and SRS metadata that lives in PostgreSQL and is accessed via the FastAPI coordinator.
+Ghost Replay uses React state, contexts, and narrow Zustand stores together:
 
-The state solution must stay lightweight for now but scale to multi-view routing and background syncing during Milestone 1.
+| State or owner | Current authority | Lifetime and boundary |
+| --- | --- | --- |
+| Gameplay and session state shared across the board workflow | [`useGameStore`](../src/stores/useGameStore.ts) | One non-persisted singleton store shared by the game surface, lifecycle hooks, and analysis connectors. Actions own multi-field transitions that must commit atomically. |
+| Live and historical engine-analysis results | [`createAnalysisStore`](../src/stores/createAnalysisStore.ts) | A store factory supports an analysis surface with an explicit provider; the main game uses one singleton instance. Worker lifecycle and per-move analysis state stay separate from general game state. |
+| Drill-analysis route handoff | [`drillAnalysisStore`](../src/stores/drillAnalysisStore.ts) | A deliberately ephemeral singleton. Refreshing drops the snapshot because there is no durable drill-analysis endpoint. |
+| Authentication and account lifecycle | [`AuthContext`](../src/contexts/AuthContext.tsx) | Context owns account initialization, credentials, bearer-token lifecycle, and the auth operations consumed throughout the app. |
+| Analysis orchestration service | [`GameAnalysisCoordinatorContext`](../src/contexts/GameAnalysisCoordinatorContext.tsx) | Context exposes the long-lived coordinator instance; the coordinator and its effects are not store state. |
+| Component- or page-local state | Components and focused hooks | Loading and error states, form drafts, UI toggles, and request results remain local when no cross-boundary consumer needs them. [`useOpeningsTree`](../src/hooks/useOpeningsTree.ts) is an example with a workflow-specific response cache and stale-request guard. |
 
-## Decision
+Mutable `Chess` instances stay outside Zustand and are passed to controller
+hooks such as [`useChessGameController`](../src/hooks/useChessGameController.ts).
+Effects and request sequencing belong in hooks or services rather than raw
+store subscribers. Store state records the inputs and outcomes that rendering
+or another workflow boundary needs.
 
-Adopt **Zustand** for local client state and **TanStack Query** for server data. This pairing keeps the baseline bundle size very small (~1 KB + adapters) while still enabling normalized selectors, optimistic updates, and background refetch when API endpoints ship.
+## Server data
 
-## Rationale
+The frontend does not use TanStack Query or another general server-state cache.
+Typed functions in [`src/utils/api.ts`](../src/utils/api.ts) call `fetch` through
+the shared `requestJson` transport, which owns error decoding, bounded retries,
+request correlation, deadlines, and telemetry. Authentication uses a focused
+fetch wrapper because its initialization flow has different retry and error
+semantics.
 
-### Zustand (local/stateful UI)
+The calling page, hook, or lifecycle owns when a request runs and how its result
+is refreshed, cancelled, cached, or discarded as stale. A response belongs in
+Zustand only when a concrete cross-component workflow needs the same client-side
+state or an atomic transition. PostgreSQL and the FastAPI contract remain the
+durable source of truth; copying a response into a store does not make it more
+authoritative.
 
-- Minimal boilerplate: stores are plain functions, so we can colocate slices next to features (e.g., `gameStore`, `uiStore`) without ceremony.
-- Excellent TypeScript inference and middleware support (devtools, immer) when we start debugging Ghost mode edge cases.
-- Works nicely with Web Workers: state updates are simple function calls, so dispatching from worker message handlers does not require thunk middleware.
-- Keeps bundle lean; avoids shipping Redux Toolkit when Milestone 1 only needs a few stores.
+## Store design rules
 
-### TanStack Query (server state)
+When adding or changing frontend state:
 
-- Separates caching/fetch lifecycles from the UI, allowing the Ghost suggestion queue or user profile to stay fresh in the background.
-- Built-in retry, exponential backoff, and mutation helpers simplify the error handling strategy task (`ghostreplay-sq8`).
-- Plays well with Zustand—use Zustand for local chessboard data, and derive selectors from TanStack Query for API responses to keep each concern isolated.
+1. Keep state local unless it crosses a real component, route, or lifecycle
+   boundary.
+2. Put only canonical values in a store. Derive cheap display values in
+   selectors or subscriber components so reset, rewind, navigation, and move
+   application cannot make stored copies drift.
+3. Keep mutable engines, timers, network work, browser effects, and coordinator
+   services outside stores. Hooks and services perform effects and commit their
+   outcomes through store actions.
+4. Give every stored value an explicit lifetime and reset path. Non-persisted
+   singletons survive component remounts but not a page reload; route handoffs
+   that must survive reload need a backend contract rather than accidental
+   client persistence.
+5. Prefer narrow selectors and purpose-specific stores over a single application
+   store. Add a new slice only when its values share ownership and reset
+   semantics with that slice.
+6. Test behavior contracts and transitions. The focused store tests and the
+   lifecycle/component tests that consume them are the authority for exact
+   reset and sequencing behavior.
 
-## Alternatives Considered
-
-### Redux Toolkit
-
-- **Pros:** Batteries-included devtools, Immer baked in, standard pattern for large teams.
-- **Cons:** Adds ~10 KB before middleware, requires boilerplate slices, and async thunks are heavier than our current needs. Web worker bridging would still need custom middleware.
-
-### React Context + `useReducer`
-
-- **Pros:** Zero dependencies, straightforward for very small trees.
-- **Cons:** Context updates cause unnecessary re-renders across the chessboard, which hurts performance during fast move sequences. Scaling to multiple contexts (game, UI, session) becomes unwieldy, and there is no built-in devtool story.
-
-## Next Steps
-
-1. Install dependencies: `npm install zustand @tanstack/react-query`.
-2. Create an initial `useGameStore` for board state + worker readiness, and a `QueryClientProvider` in `src/main.tsx`.
-3. Document store boundaries in `SPEC.md` once the API surfaces are finalized so future tasks can extend the pattern consistently.
+Adding a generalized server-data library would be an architecture change. It
+should start from a demonstrated cache or synchronization need, define which
+existing request lifecycles it replaces, and update this guide together with
+the provider and dependency changes.
