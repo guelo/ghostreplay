@@ -23,7 +23,7 @@ import {
   useOpeningsTree,
   type OpeningsTreeRoute,
 } from "../hooks/useOpeningsTree";
-import "../App.css";
+import "./OpeningsTreeExplorer.css";
 
 const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
   background: "rgba(56, 189, 248, 0.35)",

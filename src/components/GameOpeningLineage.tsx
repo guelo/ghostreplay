@@ -16,6 +16,7 @@ import {
   badgeFor,
   describeOpeningDeltaBadge,
 } from "../utils/openingDeltaBadge";
+import "./GameOpeningLineage.css";
 
 interface GameOpeningLineageProps {
   playerColor: OpeningPlayerColor;

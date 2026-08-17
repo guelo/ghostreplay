@@ -7,6 +7,7 @@ import { formatWhiteEval } from "./MoveRow.helpers";
 import type { MoveMessage, SrsFailDetail } from "./MoveRow";
 import VariationLine from "./VariationLine";
 import ControlsRow from "./ControlsRow";
+import "./MoveList.css";
 
 // Re-export types that other modules import from MoveList
 export type { SrsFailDetail, SrsStats, MoveMessage } from "./MoveRow";

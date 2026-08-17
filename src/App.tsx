@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import AppNav from "./components/AppNav";
-import "./App.css";
+import "./pages/HomePage.css";
 
 const boardPieces: Record<number, string> = {
   1: "♜",

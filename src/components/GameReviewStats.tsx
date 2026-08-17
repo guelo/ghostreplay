@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CLASS_KEYS, type SideStats, type StatSelection, type ClassKey } from '../utils/gameStats';
 import { accuracyColor, acplColor } from '../utils/statColor';
 import { CLASSIFICATION_ICON } from './MoveRow.helpers';
+import './GameReviewStats.css';
 
 const ACCURACY_INFO =
   'How closely your moves matched the engine\'s best moves across the game.\n\n 100% means perfect play. Lower scores reflect how much each move gave up.'

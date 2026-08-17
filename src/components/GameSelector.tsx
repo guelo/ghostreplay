@@ -5,6 +5,7 @@ import {
   resultClass,
   resultLabel,
 } from "./GameSelector.helpers";
+import "./GameSelector.css";
 
 interface GameSelectorProps {
   games: HistoryGame[];

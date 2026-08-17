@@ -37,6 +37,7 @@ import {
   isAnalysisBoardDiagnosticsEnabled,
   logAnalysisBoardDiagnostic,
 } from "../utils/analysisBoardDiagnostics";
+import "./AnalysisBoard.css";
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ENGINE_SEARCH_DEPTH = 21;

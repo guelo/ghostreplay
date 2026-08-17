@@ -6,6 +6,7 @@ import {
   classificationClass,
   formatWhiteEval,
 } from "./MoveRow.helpers";
+import "./MoveList.css";
 
 // ---------------------------------------------------------------------------
 // Shared types (re-exported from MoveList.tsx too)

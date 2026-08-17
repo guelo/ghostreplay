@@ -9,7 +9,7 @@ import RatingGraph from "../components/RatingGraph";
 import { accuracyColor } from "../utils/statColor";
 import { formatScore } from "../openings/format";
 import { captureEvent } from "../analytics/posthog";
-import "../App.css";
+import "./StatsPage.css";
 
 const WINDOW_OPTIONS: Array<{ label: string; value: StatsWindowDays }> = [
   { label: "7d", value: 7 },

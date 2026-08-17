@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react'
 import type { VariationNodeId, VarNode, VariationTree } from '../types/variationTree'
+import './MoveList.css'
 
 export type VariationLineProps = {
   rootNodeId: VariationNodeId

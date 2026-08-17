@@ -418,9 +418,10 @@ describe('AnalysisBoard — what-if graph', () => {
     expect(screen.getByTestId('footer-stats')).toBeTruthy()
   })
 
-  // The board wash-out (App.css: .analysis-board__board-frame--variation
-  // [data-square]) hangs off this class, so guard that it toggles with the
-  // variation state. The filter itself can't be asserted in jsdom.
+  // The board wash-out (AnalysisBoard.css:
+  // .analysis-board__board-frame--variation [data-square]) hangs off this
+  // class, so guard that it toggles with the variation state. The filter itself
+  // can't be asserted in jsdom.
   it('marks the board frame as a variation only while in what-if mode', () => {
     const node = makeNode({})
     mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }

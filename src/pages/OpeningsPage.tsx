@@ -13,7 +13,7 @@ import {
   parseOpeningsSearchParams,
 } from "../openings/route";
 import type { OpeningPlayerColor } from "../utils/api";
-import "../App.css";
+import "./OpeningsPage.css";
 
 function SelectedOpeningsExplorer({
   playerColor,

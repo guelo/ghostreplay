@@ -10,12 +10,15 @@ import postcss from "postcss";
 import ts from "typescript";
 import {
   TARGET_STATE_MARKERS,
+  assembleCssFromModuleGraph,
   assertIndexedEntries,
   buildFixtureDescriptors,
   enrichCssScenariosFromTsx,
+  expandCssImports,
   extractCssSelectorScenarios,
   forcePseudoStates,
   mergeComputedPropertyNames,
+  selectReachableOwnerStylesheets,
 } from "./cascade-parity-lib.mjs";
 
 const WIDTHS = [320, 620, 659, 720, 721, 768, 900, 1099];
@@ -41,14 +44,14 @@ const DEFAULT_SELECTOR_FIXTURE_MANIFEST = path.join(
 const usage = () => {
   console.error(
     "Usage: node scripts/css/check-computed-cascade-parity.mjs " +
-      "[--baseline <css>] [--candidate src/App.css] [--output <json>] [--quick]",
+      "[--baseline <css>] [--candidate src/main.tsx] [--output <json>] [--quick]",
   );
 };
 
 const parseArgs = (argv) => {
   const result = {
     baseline: DEFAULT_BASELINE,
-    candidate: "src/App.css",
+    candidate: "src/main.tsx",
     output: undefined,
     quick: false,
   };
@@ -328,22 +331,6 @@ const deduplicateScenarios = (scenarios) => {
   return result;
 };
 
-const expandImports = (entryPath, stack = []) => {
-  const absolutePath = path.resolve(entryPath);
-  if (stack.includes(absolutePath)) {
-    throw new Error(`CSS import cycle: ${[...stack, absolutePath].join(" -> ")}`);
-  }
-  const source = fs.readFileSync(absolutePath, "utf8");
-  return source.replace(
-    /@import\s+["']([^"']+)["']\s*;/g,
-    (_match, importPath) =>
-      expandImports(path.resolve(path.dirname(absolutePath), importPath), [
-        ...stack,
-        absolutePath,
-      ]),
-  );
-};
-
 const configurations = (quick = false) => {
   if (quick) {
     return [
@@ -587,10 +574,34 @@ const main = async () => {
     baselineAppCss,
   );
   const selectorCorpus = readRepositorySelectorCorpus();
-  const candidateAppCss = expandImports(args.candidate);
   const indexCss = fs.readFileSync("src/index.css", "utf8");
+  const candidateIsCss = path.extname(args.candidate) === ".css";
+  let candidateGraph;
+  let candidateSourceCss;
+  let candidateParityStylesheets;
+  if (candidateIsCss) {
+    candidateGraph = {
+      modules: [path.resolve(args.candidate)],
+      stylesheets: [path.resolve("src/index.css"), path.resolve(args.candidate)],
+    };
+    candidateSourceCss = `${indexCss}\n${expandCssImports(args.candidate)}`;
+    candidateParityStylesheets = candidateGraph.stylesheets;
+  } else {
+    candidateGraph = assembleCssFromModuleGraph(args.candidate);
+    // Lazy chunks do not share one runtime insertion order. Use the frozen,
+    // reviewed owner order for cascade comparison after separately proving
+    // that every owner is reachable from the real entry module graph.
+    candidateParityStylesheets = selectReachableOwnerStylesheets({
+      reachableStylesheets: candidateGraph.stylesheets,
+      ownerFiles: selectorCorpus.manifest.owner_files,
+      indexFile: "src/index.css",
+    });
+    candidateSourceCss = candidateParityStylesheets
+      .map((file) => expandCssImports(file))
+      .join("\n");
+  }
   const baselineCss = forcePseudoStates(`${indexCss}\n${baselineAppCss}`);
-  const candidateCss = forcePseudoStates(`${indexCss}\n${candidateAppCss}`);
+  const candidateCss = forcePseudoStates(candidateSourceCss);
   const knownCssClasses = uniqueStrings(
     [...selectorCorpus.css.matchAll(/\.(-?[_a-zA-Z]+[_a-zA-Z0-9-]*)/g)].map(
       (match) => match[1],
@@ -805,6 +816,13 @@ const main = async () => {
     repository_baseline_manifest: baselineManifest,
     selector_fixture_manifest: selectorCorpus.manifest,
     candidate: path.resolve(args.candidate),
+    candidate_module_count: candidateGraph.modules.length,
+    candidate_stylesheets: candidateGraph.stylesheets.map((file) =>
+      path.relative(process.cwd(), file),
+    ),
+    candidate_parity_stylesheets: candidateParityStylesheets.map((file) =>
+      path.relative(process.cwd(), file),
+    ),
     widths: WIDTHS,
     heights: HEIGHTS,
     reduced_motion_modes: ["no-preference", "reduce"],

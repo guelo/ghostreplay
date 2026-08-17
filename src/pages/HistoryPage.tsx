@@ -19,7 +19,7 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { projectExactBest } from "../utils/projectExactBest";
 import { captureEvent } from "../analytics/posthog";
-import "../App.css";
+import "./HistoryPage.css";
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;

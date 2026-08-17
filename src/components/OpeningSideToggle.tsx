@@ -1,6 +1,7 @@
 import { memo } from "react";
 import { defaultPieces } from "react-chessboard";
 import type { OpeningPlayerColor } from "../utils/api";
+import "./OpeningSideToggle.css";
 
 const WhiteKing = defaultPieces.wK;
 const BlackKing = defaultPieces.bK;

@@ -6,7 +6,7 @@ import AnalysisBoard, { type AnalysisBoardRef } from "../components/AnalysisBoar
 import GameReviewStats from "../components/GameReviewStats";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
-import "../App.css";
+import "./HistoryPage.css";
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;

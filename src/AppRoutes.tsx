@@ -1,7 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
-import App from "./App";
-import AuthForm from "./components/AuthForm";
+const App = lazy(() => import("./App"));
+const AuthForm = lazy(() => import("./components/AuthForm"));
 const BlundersPage = lazy(() => import("./pages/BlundersPage"));
 const GameAnalysisPage = lazy(() => import("./pages/GameAnalysisPage"));
 const DrillAnalysisPage = lazy(() => import("./pages/DrillAnalysisPage"));

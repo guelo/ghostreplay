@@ -13,7 +13,7 @@ import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
 import { lookupOpeningByFen, type OpeningLookupResult } from "../openings/openingBook";
 import { captureEvent } from "../analytics/posthog";
-import "../App.css";
+import "./BlundersPage.css";
 
 function formatDate(iso: string): string {
   const d = new Date(iso);

@@ -4,6 +4,7 @@ import {
   PIECE_VALUES,
   parseMaterial,
 } from "./MaterialDisplay.helpers";
+import "./MaterialDisplay.css";
 
 type MaterialDisplayProps = {
   fen: string;

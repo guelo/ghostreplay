@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback } from "react";
+import "./TimeRangeSlider.css";
 
 export interface TimeRangeSliderProps {
   value: [number, number];

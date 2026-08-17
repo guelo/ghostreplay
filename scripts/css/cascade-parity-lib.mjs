@@ -1,6 +1,165 @@
 import crypto from "node:crypto";
 import * as csstree from "css-tree";
+import fs from "node:fs";
+import path from "node:path";
 import postcss from "postcss";
+import ts from "typescript";
+
+const SCRIPT_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+const MODULE_EXTENSIONS = [...SCRIPT_EXTENSIONS, ".css"];
+
+// This deliberately models relative and Vite root-relative imports only. Bare
+// specifiers (including Vite aliases), non-literal import() expressions, and
+// import.meta.glob are outside the traversal. They do not currently carry
+// application CSS; g-css-route-audit tracks a stricter per-route audit and
+// explicit handling for these exclusions.
+const runtimeImportSpecifiers = (source, filePath) => {
+  const sourceFile = ts.createSourceFile(
+    filePath,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    filePath.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+  const specifiers = [];
+  const addLiteral = (node) => {
+    if (node && ts.isStringLiteralLike(node)) specifiers.push(node.text);
+  };
+  const hasRuntimeImport = (clause) => {
+    if (!clause) return true;
+    if (clause.isTypeOnly) return false;
+    if (clause.name) return true;
+    if (!clause.namedBindings) return false;
+    if (ts.isNamespaceImport(clause.namedBindings)) return true;
+    return (
+      ts.isNamedImports(clause.namedBindings) &&
+      clause.namedBindings.elements.some((element) => !element.isTypeOnly)
+    );
+  };
+  const hasRuntimeExport = (node) => {
+    if (node.isTypeOnly) return false;
+    if (!node.exportClause || ts.isNamespaceExport(node.exportClause)) return true;
+    return node.exportClause.elements.some((element) => !element.isTypeOnly);
+  };
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node)) {
+      if (hasRuntimeImport(node.importClause)) addLiteral(node.moduleSpecifier);
+      return;
+    }
+    if (ts.isExportDeclaration(node)) {
+      if (hasRuntimeExport(node)) addLiteral(node.moduleSpecifier);
+      return;
+    }
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword
+    ) {
+      addLiteral(node.arguments[0]);
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return specifiers;
+};
+
+const resolveLocalModule = (fromPath, rawSpecifier, rootDir) => {
+  if (!rawSpecifier.startsWith(".") && !path.isAbsolute(rawSpecifier)) {
+    return null;
+  }
+  const specifier = rawSpecifier.replace(/[?#].*$/, "");
+  const unresolved = specifier.startsWith("/")
+    ? path.resolve(rootDir, specifier.slice(1))
+    : path.resolve(path.dirname(fromPath), specifier);
+  const candidates = [
+    unresolved,
+    ...MODULE_EXTENSIONS.map((extension) => `${unresolved}${extension}`),
+    ...MODULE_EXTENSIONS.map((extension) =>
+      path.join(unresolved, `index${extension}`),
+    ),
+  ];
+  const resolved = candidates.find((candidate) => {
+    try {
+      return fs.statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  });
+  if (!resolved) {
+    throw new Error(
+      `Cannot resolve runtime import ${JSON.stringify(rawSpecifier)} from ${fromPath}`,
+    );
+  }
+  return resolved;
+};
+
+export const expandCssImports = (entryPath, stack = []) => {
+  const absolutePath = path.resolve(entryPath);
+  if (stack.includes(absolutePath)) {
+    throw new Error(`CSS import cycle: ${[...stack, absolutePath].join(" -> ")}`);
+  }
+  const source = fs.readFileSync(absolutePath, "utf8");
+  return source.replace(
+    /@import\s+["']([^"']+)["']\s*;/g,
+    (_match, importPath) =>
+      expandCssImports(path.resolve(path.dirname(absolutePath), importPath), [
+        ...stack,
+        absolutePath,
+      ]),
+  );
+};
+
+export const assembleCssFromModuleGraph = (
+  entryPath,
+  { rootDir = process.cwd() } = {},
+) => {
+  const absoluteEntry = path.resolve(entryPath);
+  const visited = new Set();
+  const modules = [];
+  const stylesheets = [];
+  const visit = (modulePath) => {
+    const absolutePath = path.resolve(modulePath);
+    if (visited.has(absolutePath)) return;
+    visited.add(absolutePath);
+    modules.push(absolutePath);
+    const extension = path.extname(absolutePath);
+    if (extension === ".css") {
+      stylesheets.push(absolutePath);
+      return;
+    }
+    if (!SCRIPT_EXTENSIONS.includes(extension)) return;
+    const source = fs.readFileSync(absolutePath, "utf8");
+    for (const specifier of runtimeImportSpecifiers(source, absolutePath)) {
+      const dependency = resolveLocalModule(absolutePath, specifier, rootDir);
+      if (dependency) visit(dependency);
+    }
+  };
+  visit(absoluteEntry);
+  return {
+    modules,
+    stylesheets,
+  };
+};
+
+export const selectReachableOwnerStylesheets = ({
+  reachableStylesheets,
+  ownerFiles,
+  indexFile,
+}) => {
+  const reachable = new Set(reachableStylesheets.map((file) => path.resolve(file)));
+  const indexPath = path.resolve(indexFile);
+  if (!reachable.has(indexPath)) {
+    throw new Error(`Runtime CSS graph does not reach ${indexPath}`);
+  }
+  const ownerPaths = ownerFiles.map((file) => path.resolve(file));
+  const missingOwners = ownerPaths.filter((ownerPath) => !reachable.has(ownerPath));
+  if (missingOwners.length > 0) {
+    throw new Error(
+      `Runtime CSS graph omits owner stylesheets:\n${missingOwners.join("\n")}`,
+    );
+  }
+  return [indexPath, ...ownerPaths];
+};
 
 export const TARGET_STATE_MARKERS = [
   "hover",

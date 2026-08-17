@@ -9,7 +9,7 @@ import { test } from "./fixtures/auth";
  * Stacked single-column used to size the board off the viewport WIDTH, so a
  * square board pushed the eval graph and the game-review stats below the fold.
  * Two modes now share the vertical budget (see the "Narrow fold budget" block
- * in App.css):
+ * in AnalysisBoard.css):
  *
  *   mode 1 (>=811px tall) — still stacked, board capped off viewport height so
  *     the graph plus >=75% of the stats pane stay above the fold.

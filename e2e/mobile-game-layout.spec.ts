@@ -78,6 +78,19 @@ const playToSeededReviewPosition = async (page: Page): Promise<void> => {
   ).toBeVisible();
 };
 
+test("mobile navigation exposes its named menu button", async ({
+  page,
+  loginAs,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await loginAs(page, "stable");
+  await page.goto("/play");
+
+  await expect(
+    page.getByRole("button", { name: "Open navigation menu" }),
+  ).toBeVisible();
+});
+
 test("play setup stays usable in a short landscape viewport", async ({
   page,
   loginAs,

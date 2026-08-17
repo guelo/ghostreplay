@@ -1,5 +1,6 @@
 import React from "react";
 import MaterialDisplay from "./MaterialDisplay";
+import "./ControlsRow.css";
 
 export type ControlsRowProps = {
   className?: string;

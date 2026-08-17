@@ -1,9 +1,13 @@
 # CSS cascade parity gate
 
-`npm run css:check-cascade` compares the current imported CSS with the frozen
-pre-owner-file stylesheet in `baselines/App.pre-owner.css`. Its manifest records
-the artifact's SHA-256, byte count, line count, source checkpoint, and final
-newline. The gate verifies that manifest before using the repository baseline.
+`npm run css:check-cascade` follows static and literal lazy imports from
+`src/main.tsx`, requires that graph to reach every stylesheet in the frozen
+owner corpus, and compares those reachable owners with the pre-owner-file
+stylesheet in `baselines/App.pre-owner.css`. The candidate is assembled in the
+reviewed corpus order because independently loaded lazy chunks do not have one
+global runtime insertion order. The baseline manifest records the artifact's
+SHA-256, byte count, line count, source checkpoint, and final newline; the gate
+verifies it before use.
 
 Selector discovery comes from the separately checksummed owner list in
 `baselines/owner-selector-corpus.json`, not from the candidate assembly. This is
@@ -35,4 +39,12 @@ target index set before hashes are compared.
 
 The full viewport/reduced-motion matrix runs in `.githooks/pre-push`. `--quick`
 is a four-configuration diagnostic mode; `--baseline` and `--candidate` are
-available for explicit mutation checks.
+available for explicit mutation checks. A CSS `--candidate` keeps the old
+single-stylesheet diagnostic behavior; a TypeScript/JavaScript candidate is
+treated as a runtime entry module and includes static plus literal lazy imports.
+
+The module traversal intentionally follows only relative or Vite root-relative
+literal imports. Bare specifiers (including Vite aliases), non-literal
+`import()` expressions, and `import.meta.glob` calls are excluded; none
+currently carries application CSS. `g-css-route-audit` tracks the stricter
+per-route reachability check and explicit coverage of those exclusions.

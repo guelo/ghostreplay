@@ -1,5 +1,5 @@
-/* Debug overlay (g-0oow). Component-local styles so the overlay is styled on
-   every route, including auth routes that don't load App.css. */
+/* Debug overlay (g-0oow). Component-local styles keep the eager overlay styled
+   independently from every lazy route stylesheet, including auth routes. */
 
 .debug-hotspot {
   position: fixed;

@@ -33,6 +33,13 @@ const renderNav = () =>
     </MemoryRouter>,
   );
 
+// jsdom loads the component stylesheet but does not evaluate its mobile media
+// query, so the menu button keeps its desktop display:none base. Query by the
+// explicit label to exercise drawer behavior without treating jsdom's missing
+// responsive layout as an accessibility result.
+const getMenuButton = () =>
+  screen.getByLabelText(/open navigation menu/i) as HTMLButtonElement;
+
 describe("AppNav", () => {
   beforeEach(() => {
     vi.mocked(openFeedbackWidget).mockClear();
@@ -50,9 +57,7 @@ describe("AppNav", () => {
   it("opens the mobile drawer with the shared route actions", () => {
     renderNav();
 
-    const menuButton = screen.getByRole("button", {
-      name: /open navigation menu/i,
-    });
+    const menuButton = getMenuButton();
     expect(menuButton).toHaveAttribute("aria-expanded", "false");
 
     fireEvent.click(menuButton);
@@ -77,9 +82,7 @@ describe("AppNav", () => {
 
   it("closes the drawer on route, backdrop, and Escape interactions", () => {
     const { container } = renderNav();
-    const menuButton = screen.getByRole("button", {
-      name: /open navigation menu/i,
-    });
+    const menuButton = getMenuButton();
 
     fireEvent.click(menuButton);
     fireEvent.click(
@@ -109,9 +112,7 @@ describe("AppNav", () => {
     };
     renderNav();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /open navigation menu/i }),
-    );
+    fireEvent.click(getMenuButton());
     const logoutButtons = screen.getAllByRole("button", { name: /log out/i });
     fireEvent.click(logoutButtons[logoutButtons.length - 1]);
 
@@ -121,9 +122,7 @@ describe("AppNav", () => {
 
   it("keeps the backdrop out of the tab order and traps focus in the drawer", () => {
     const { container } = renderNav();
-    fireEvent.click(
-      screen.getByRole("button", { name: /open navigation menu/i }),
-    );
+    fireEvent.click(getMenuButton());
 
     const drawer = screen.getByRole("dialog", { name: /navigation menu/i });
     const closeButton = within(drawer).getByRole("button", {
@@ -155,9 +154,7 @@ describe("AppNav", () => {
   it("opens the feedback widget from the mobile drawer and closes it", () => {
     renderNav();
 
-    fireEvent.click(
-      screen.getByRole("button", { name: /open navigation menu/i }),
-    );
+    fireEvent.click(getMenuButton());
     const drawer = screen.getByRole("dialog", { name: /navigation menu/i });
     fireEvent.click(within(drawer).getByRole("button", { name: /feedback/i }));
 

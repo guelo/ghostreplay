@@ -15,6 +15,7 @@ import {
   type RatingScoreKey,
 } from "../utils/api";
 import TimeRangeSlider from "./TimeRangeSlider";
+import "./RatingGraph.css";
 
 const PROVISIONAL_THRESHOLD = 20;
 const SERIES: Array<{ key: RatingScoreKey; label: string; color: string }> = [

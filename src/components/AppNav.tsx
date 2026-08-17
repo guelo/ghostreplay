@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../contexts/useAuth";
 import { openFeedbackWidget } from "../analytics/featurebase";
+import "./AppNav.css";
 
 type AppNavProps = {
   showLogo?: boolean;

@@ -651,11 +651,6 @@
     width: 100%;
     min-width: 0;
 }
-.drill-stop-error {
-    margin: 0 0 0.5rem;
-    font-size: 0.85rem;
-    color: var(--danger, #c0392b);
-}
 .drill-analysis-footer {
     margin: 0;
     font-size: 0.85rem;

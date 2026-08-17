@@ -1,15 +1,111 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assembleCssFromModuleGraph,
   assertIndexedEntries,
   buildFixtureDescriptors,
   enrichCssScenariosFromTsx,
   extractCssSelectorScenarios,
   mergeComputedPropertyNames,
+  selectReachableOwnerStylesheets,
 } from "./cascade-parity-lib.mjs";
+
+describe("runtime CSS graph assembly", () => {
+  it("follows static and lazy runtime imports while deduplicating owner CSS", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "css-graph-"));
+    fs.writeFileSync(
+      path.join(directory, "main.tsx"),
+      [
+        'import "./index.css";',
+        'import type { Ignored } from "./types";',
+        'import "./shared";',
+        'const Page = import("./Page");',
+      ].join("\n"),
+    );
+    fs.writeFileSync(path.join(directory, "types.ts"), 'import "./ignored.css";');
+    fs.writeFileSync(path.join(directory, "shared.ts"), 'import "./shared.css";');
+    fs.writeFileSync(
+      path.join(directory, "Page.tsx"),
+      ['import "./shared.css";', 'import "./page.css";'].join("\n"),
+    );
+    fs.writeFileSync(path.join(directory, "index.css"), ":root { --x: 1; }");
+    fs.writeFileSync(path.join(directory, "ignored.css"), ".ignored { color: red; }");
+    fs.writeFileSync(path.join(directory, "shared.css"), ".shared { color: blue; }");
+    fs.writeFileSync(path.join(directory, "page.css"), ".page { color: green; }");
+
+    const result = assembleCssFromModuleGraph(path.join(directory, "main.tsx"));
+
+    expect(result.stylesheets.map((file) => path.basename(file))).toEqual([
+      "index.css",
+      "shared.css",
+      "page.css",
+    ]);
+    expect(result.modules.map((file) => path.basename(file))).not.toContain(
+      "types.ts",
+    );
+    expect(result.modules.map((file) => path.basename(file))).not.toContain(
+      "ignored.css",
+    );
+  });
+
+  it("fails closed when a local runtime import cannot be resolved", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "css-graph-"));
+    fs.writeFileSync(path.join(directory, "main.ts"), 'import "./missing";');
+
+    expect(() =>
+      assembleCssFromModuleGraph(path.join(directory, "main.ts")),
+    ).toThrow("Cannot resolve runtime import");
+  });
+
+  it("resolves Vite root-relative imports from the project root", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "css-graph-"));
+    const sourceDirectory = path.join(directory, "src");
+    fs.mkdirSync(sourceDirectory);
+    fs.writeFileSync(path.join(sourceDirectory, "main.ts"), 'import "/root.css";');
+    fs.writeFileSync(path.join(directory, "root.css"), ".root { color: blue; }");
+
+    const result = assembleCssFromModuleGraph(
+      path.join(sourceDirectory, "main.ts"),
+      { rootDir: directory },
+    );
+
+    expect(result.stylesheets).toEqual([path.join(directory, "root.css")]);
+  });
+
+  it("uses reviewed owner order after proving entry-graph reachability", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "css-owners-"));
+    const indexFile = path.join(directory, "index.css");
+    const firstOwner = path.join(directory, "first.css");
+    const secondOwner = path.join(directory, "second.css");
+    const debugCss = path.join(directory, "debug.css");
+
+    expect(
+      selectReachableOwnerStylesheets({
+        reachableStylesheets: [secondOwner, debugCss, indexFile, firstOwner],
+        ownerFiles: [firstOwner, secondOwner],
+        indexFile,
+      }),
+    ).toEqual([indexFile, firstOwner, secondOwner]);
+  });
+
+  it("fails closed when the runtime graph omits an owner stylesheet", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "css-owners-"));
+    const indexFile = path.join(directory, "index.css");
+    const missingOwner = path.join(directory, "missing.css");
+
+    expect(() =>
+      selectReachableOwnerStylesheets({
+        reachableStylesheets: [indexFile],
+        ownerFiles: [missingOwner],
+        indexFile,
+      }),
+    ).toThrow(`Runtime CSS graph omits owner stylesheets:\n${missingOwner}`);
+  });
+});
 
 const singleScenario = (selector) => {
   const result = extractCssSelectorScenarios(`${selector} { color: red; }`);

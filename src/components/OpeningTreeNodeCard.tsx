@@ -16,6 +16,7 @@ import {
   formatOpeningDeltaValue,
   type OpeningDeltaBadge,
 } from "../utils/openingDeltaBadge";
+import "./OpeningTreeNodeCard.css";
 
 /**
  * Presentational view-model for a single opening-tree node. Built by

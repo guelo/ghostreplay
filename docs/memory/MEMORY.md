@@ -10,7 +10,8 @@
 ## Frontend Architecture
 - React 19 + Vite + TypeScript
 - Main game component: `src/components/ChessGame.tsx` (~1200 lines)
-- Styles: `src/App.css` (no CSS modules)
+- Styles: component/page owner stylesheets plus eager shared files under
+  `src/styles/` (no CSS modules)
 - Toast pattern: absolute-positioned in `.chessboard-board-area`, z-index 8, slide-up animation via `blunder-toast-in` keyframes
 - Blunder review flow: `blunderReviewId` set in `applyGhostMove` when `target_blunder_id` received from API
 
@@ -22,5 +23,4 @@
 - [Thorough plans](feedback_thorough_plans.md) — plans must trace data flows, layout math, sizing constraints, and test coverage precisely
 - [Plans in beads](feedback_plans_in_beads.md) — always update bead design field with plan content before exiting plan mode
 - [Full plans in beads](feedback_plans_in_beads_full.md) — bead design field must contain the full plan, not a condensed summary
-
 

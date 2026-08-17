@@ -4,6 +4,7 @@ import type { MoveListProps } from "./MoveList";
 import { CLASSIFICATION_ICON, classificationClass } from "./MoveRow.helpers";
 import ControlsRow from "./ControlsRow";
 import MoveMessages from "./MoveMessages";
+import "./MoveList.css";
 
 const EMPTY_MESSAGES: ReadonlyMap<number, import("./MoveRow").MoveMessage[]> = new Map();
 

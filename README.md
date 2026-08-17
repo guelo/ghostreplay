@@ -77,7 +77,8 @@ The client now bundles [`react-chessboard`](https://www.npmjs.com/package/react-
 - `src/components/ChessGame.tsx` powers the local chess sandbox with react-chessboard + chess.js
 - `src/openings/openingBook.ts` loads the vendored ECO opening dataset + precomputed position index with caching
 - `scripts/build-opening-position-index.mjs` regenerates the precomputed opening position index
-- `src/App.css` + `src/index.css` define the temporary theme and layout
+- `src/index.css`, eager `src/styles/` primitives, and component/page owner
+  stylesheets define the theme and layout
 - `public/` holds assets that should be copied verbatim into the build output
 - `public/data/openings/eco.json` is the full local ECO opening book (no runtime network dependency)
 - `public/data/openings/eco.byPosition.json` is the precomputed normalized-position lookup index

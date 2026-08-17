@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import ChessGame from "../components/ChessGame";
 import AppNav from "../components/AppNav";
-import "../App.css";
+import "./GamePage.css";
 
 function GamePage() {
   const navigate = useNavigate();

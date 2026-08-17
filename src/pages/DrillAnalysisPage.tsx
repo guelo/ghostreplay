@@ -2,7 +2,7 @@ import { Navigate, useNavigate } from "react-router-dom";
 import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
 import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
-import "../App.css";
+import "./HistoryPage.css";
 
 /**
  * Ephemeral, in-memory review of a just-played drill (g-a406). Reads the

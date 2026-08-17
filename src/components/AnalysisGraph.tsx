@@ -4,6 +4,7 @@ import { formatWhiteEval } from "./MoveRow.helpers";
 import { cpToWinningChances } from "./AnalysisGraph.helpers";
 import InfoHelpButton from "./InfoHelpButton";
 import type { HighlightedMoves } from "../utils/gameStats";
+import "./AnalysisGraph.css";
 
 type AnalysisGraphProps = {
   evals: (number | null)[];

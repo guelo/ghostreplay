@@ -87,6 +87,7 @@ import {
   ConnectedMoveList,
 } from "./chess-game/AnalysisConnectors";
 import AnalysisEffects from "./chess-game/AnalysisEffects";
+import "./chess-game/ChessGame.css";
 
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import "./InfoHelpButton.css";
+import "./OpeningsMetricsLegend.css";
 
 function OpeningsMetricsLegend() {
   const [open, setOpen] = useState(false);

@@ -12,7 +12,8 @@ If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backe
 ## Frontend Architecture
 - React 19 + Vite + TypeScript
 - Main game component: `src/components/ChessGame.tsx` (~1000 lines)
-- Styles: `src/App.css` (no CSS modules)
+- Styles: component/page owner stylesheets plus eager shared files under
+  `src/styles/` (no CSS modules)
 - Toast pattern: absolute-positioned in `.chessboard-board-area`, z-index 8, slide-up animation via `blunder-toast-in` keyframes
 - Blunder review flow: `blunderReviewId` set in `applyGhostMove` when `target_blunder_id` received from API
 
@@ -97,4 +98,3 @@ bd close <id>         # Complete work
 **CRITICAL**: Use the `bd` CLI tool exclusively. Never read or modify files in the `.beads/` directory directly.
 
  **REQUIRED**: Always pass `--id=g-<slug>` when creating issues. `<slug>` must be 5–20 char lowercase kebab-case mini-summary (e.g. `g-fix-login-redirect`). Never let beads auto-generate IDs.
-
