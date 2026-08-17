@@ -26,18 +26,23 @@ canonical coordinate set is incomplete all derive nothing.
 
 from __future__ import annotations
 
-import io
 import logging
 from dataclasses import dataclass
 
 import chess
-import chess.pgn
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.fen import normalize_fen
 from app.models import GameSession, SessionMove
 from app.session_contracts import segment_for_move
+from app.terminal_pgn import (
+    MAX_DERIVABLE_PLIES,
+    MAX_TERMINAL_PGN_BYTES,
+    PlyRecord,
+    pgn_size_over_ceiling,
+    replay_pgn_mainline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +71,6 @@ OUTCOME_DERIVED = "derived"
 # before the parse; ``end_game`` then reuses ``ReconcileResult.expected_plies``
 # for the accuracy recompute and analytics, so the terminal path parses a PGN
 # exactly once and a size-refused PGN exactly zero times.
-MAX_TERMINAL_PGN_BYTES = 32_768
-MAX_DERIVABLE_PLIES = 600
-
-
 def _pgn_size_over_ceiling(pgn: str) -> bool:
     """True when the PGN exceeds ``MAX_TERMINAL_PGN_BYTES`` of strict UTF-8.
 
@@ -83,22 +84,7 @@ def _pgn_size_over_ceiling(pgn: str) -> bool:
     ``errors="ignore"`` would silently drop them from the count, and they can
     never be stored anyway).
     """
-    if len(pgn) > MAX_TERMINAL_PGN_BYTES:
-        return True
-    try:
-        return len(pgn.encode("utf-8")) > MAX_TERMINAL_PGN_BYTES
-    except UnicodeEncodeError:
-        return True
-
-
-@dataclass(frozen=True)
-class PlyRecord:
-    move_number: int
-    color: str
-    san: str
-    uci: str
-    fen_before: str
-    fen_after: str
+    return pgn_size_over_ceiling(pgn, max_bytes=MAX_TERMINAL_PGN_BYTES)
 
 
 @dataclass(frozen=True)
@@ -107,49 +93,6 @@ class ReconcileResult:
     expected_plies: int | None
     stored_rows: int
     derived_rows: int
-
-
-def replay_pgn_mainline(pgn: str | None) -> list[PlyRecord] | None:
-    """Replay a stored PGN's mainline into per-ply records, or None.
-
-    The terminal path's single parse: the reconcile takes both the expected
-    ply count (its ``len``) and the verification/derivation records from one
-    call. Its reject conditions — parse errors, empty mainlines, non-PGN
-    text — mirror the frozen :func:`accuracy_v1.expected_total_moves_from_pgn`
-    that post-end recomputes still parse with: both refuse the same PGNs and
-    count the same ``mainline_moves()``, and the per-ply replay here can only
-    refuse MORE (any replay failure returns None), never disagree on a count.
-    Starts from ``pgn_game.board()`` so a FEN/SetUp header is honored, and
-    takes each ply's coordinates from the board state rather than assuming a
-    move-1 start.
-    """
-    if not pgn:
-        return None
-    try:
-        pgn_game = chess.pgn.read_game(io.StringIO(pgn))
-        if pgn_game is None or pgn_game.errors:
-            return None
-        board = pgn_game.board()
-        records: list[PlyRecord] = []
-        for move in pgn_game.mainline_moves():
-            fen_before = board.fen()
-            move_number = board.fullmove_number
-            color = "white" if board.turn == chess.WHITE else "black"
-            san = board.san(move)
-            board.push(move)
-            records.append(
-                PlyRecord(
-                    move_number=move_number,
-                    color=color,
-                    san=san,
-                    uci=move.uci(),
-                    fen_before=fen_before,
-                    fen_after=board.fen(),
-                )
-            )
-        return records or None
-    except Exception:
-        return None
 
 
 def _row_matches_ply(row, ply: PlyRecord) -> bool:

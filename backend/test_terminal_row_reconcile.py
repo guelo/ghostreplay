@@ -155,6 +155,7 @@ def test_end_with_short_prefix_derives_the_pgn_tail(
     # The durable marker records the derivation; the analytics props below
     # carry the same verdict but are best-effort only.
     assert session.derived_tail_rows == 2
+    assert session.terminal_line_reconciled is True
 
     props = game_ended_props()
     assert props["row_reconcile_outcome"] == OUTCOME_DERIVED

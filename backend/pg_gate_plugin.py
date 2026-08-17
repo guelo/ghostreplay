@@ -216,6 +216,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix",
     # Release-A schema migration on a disposable PostgreSQL DB (g-accuracy-schema)
     "test_release_a_migrations.py::test_pg_disposable_release_a_migration",
+    # Revision-fenced move-line migration: constant default, statement-clock
+    # receipt, FK/uniques/checks, invalid writes, and downgrade/re-upgrade.
+    "test_session_move_line_migration.py::"
+    "test_pg_move_line_migration_catalog_defaults_and_constraints",
     # Release-B backfill/repair correctness core (g-b-backfill-core). The
     # NOT VALID -> validated CHECK transition, the frozen visibility predicate's
     # parity with app/session_contracts.py, and the ply-coordinate detectors'
@@ -418,6 +422,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opening_evidence_digest_pg.py::test_null_evals_use_the_sentinel_not_an_empty_field",
     "test_opening_evidence_digest_pg.py::test_probe_ordering_is_collation_independent",
     "test_opening_evidence_digest_pg.py::test_probe_payload_is_fixed_size_per_session",
+    "test_opening_evidence_digest_pg.py::test_raw_digest_folds_pgn_once_via_postgres_uuid_keys",
     "test_opening_evidence_digest_pg.py::"
     "test_real_recompute_persists_l2_across_caller_rollback",
     "test_opening_evidence_digest_pg.py::test_sql_and_python_digest_bodies_are_byte_equal",

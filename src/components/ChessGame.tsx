@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type { MouseEvent as ReactMouseEvent, SetStateAction } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Chess } from "chess.js";
@@ -184,6 +191,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Singleton analysis store — persists across remounts like the game store.
   const analysisStore = gameAnalysisStore;
   const coordinator = useGameAnalysisCoordinator();
+  const subscribeToLineSyncDiagnostic = useCallback(
+    (listener: () => void) => coordinator.addLineSyncDiagnosticListener(listener),
+    [coordinator],
+  );
+  const readLineSyncDiagnostic = useCallback(
+    () => coordinator.getLineSyncDiagnostic(),
+    [coordinator],
+  );
+  const lineSyncDiagnostic = useSyncExternalStore(
+    subscribeToLineSyncDiagnostic,
+    readLineSyncDiagnostic,
+    readLineSyncDiagnostic,
+  );
+  const retryLineSynchronization = useCallback(
+    () => coordinator.retryLineSynchronization(),
+    [coordinator],
+  );
 
   // --- Cross-boundary state from zustand store ---
   const fen = useGameStore((s) => s.liveFen);
@@ -1356,9 +1380,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Sync coordinator with existing active session on mount (e.g., after refresh)
   useEffect(() => {
-    const { sessionId: sid, isGameActive: active } = useGameStore.getState();
+    const {
+      sessionId: sid,
+      isGameActive: active,
+      moveLineRevision,
+    } = useGameStore.getState();
     if (sid && active && coordinator.sessionId !== sid) {
-      coordinator.startSession(sid);
+      coordinator.startSession(sid, moveLineRevision);
     }
   }, [coordinator]);
 
@@ -2654,6 +2682,30 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
+            {isGameActive && lineSyncDiagnostic && (
+              <div className="line-sync-alert" role="alert">
+                <p>
+                  {lineSyncDiagnostic === "foreign_branch_revision"
+                    ? "This game changed in another tab. Move uploads are paused for this session."
+                    : lineSyncDiagnostic === "move_line_identity_conflict"
+                      ? "The saved move line conflicts with the server. Move uploads are paused for this session."
+                      : "The truncation acknowledgement was inconsistent. Move uploads are paused."}
+                </p>
+                <button
+                  className="chess-button"
+                  type="button"
+                  onClick={
+                    lineSyncDiagnostic === "line_sync_conflict"
+                      ? retryLineSynchronization
+                      : () => void handleNewGame()
+                  }
+                >
+                  {lineSyncDiagnostic === "line_sync_conflict"
+                    ? "Retry sync"
+                    : "Start new game"}
+                </button>
+              </div>
+            )}
             {((isGameActive && isStoppedDrill && !gameResult) ||
               isReviewedDrillReturn) && (
               <DrillStopActions

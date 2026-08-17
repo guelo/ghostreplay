@@ -10,6 +10,7 @@ import chess
 
 from conftest import TestingSessionLocal
 
+import app.opening_evidence as opening_evidence
 import app.opening_cache as oc
 from app.models import (
     AnalysisCache,
@@ -29,6 +30,7 @@ from app.opening_cache import (
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
+from app.terminal_row_reconcile import OUTCOME_PREFIX_MISMATCH
 from sql_capture import capture_statements, cursor_last_before_commit, no_cursor_bump
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
@@ -115,6 +117,14 @@ def test_start_drill_persists_contract(client, auth_headers, db_session):
     assert data["strictness"] == "standard"
     assert data["is_rated"] is False
     assert data["rated_start_ply"] is None
+    assert data["move_line_revision"] == 0
+
+    fetched = client.get(
+        f"/api/drills/{data['session_id']}",
+        headers=auth_headers(),
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["move_line_revision"] == 0
 
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(data["session_id"])).one()
     assert session.session_mode == "drill"
@@ -503,6 +513,7 @@ def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers
     db_session.refresh(session)
     assert session.drill_state == "failed"
     assert session.drill_terminal_reason == "accuracy"
+    assert session.terminal_line_reconciled is False
     assert observed == [("active", "failed", "accuracy")]
 
 
@@ -661,6 +672,133 @@ def test_natural_end_marks_session_failed(client, auth_headers, db_session):
     assert session.is_rated is False
     assert db_session.query(RatingHistory).filter(RatingHistory.game_session_id == session.id).count() == 0
     assert observed == [("ended", "failed", "natural_end")]
+
+
+def test_natural_end_reconciles_a_lost_final_upload_before_evidence(
+    client, auth_headers, db_session
+):
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    board = chess.Board()
+    fen_before = board.fen()
+    board.push_san("e4")
+    db_session.add(
+        SessionMove(
+            session_id=session_uuid,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=fen_before,
+            fen_after=board.fen(),
+            segment="drill",
+        )
+    )
+    db_session.commit()
+
+    with (
+        patch("app.api.drills.compute_opening_score_delta", return_value=[]),
+        patch("app.opening_score_scheduler.request_recompute"),
+    ):
+        response = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={"result": "draw", "pgn": "1. e4 e5 2. Nf3 *"},
+            headers=auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    rows = (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .order_by(SessionMove.move_number, SessionMove.color.desc())
+        .all()
+    )
+    assert [(row.move_number, row.color, row.move_san) for row in rows] == [
+        (1, "white", "e4"),
+        (1, "black", "e5"),
+        (2, "white", "Nf3"),
+    ]
+    assert rows[1].eval_cp is None
+    assert rows[2].eval_cp is None
+    ended = db_session.get(GameSession, session_uuid)
+    assert ended.derived_tail_rows == 2
+    assert ended.terminal_line_reconciled is True
+
+
+def test_natural_end_contradictory_rows_are_excluded_from_fresh_evidence(
+    client, auth_headers, db_session
+):
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    board = chess.Board()
+    fen_before = board.fen()
+    board.push_san("e4")
+    db_session.add(
+        SessionMove(
+            session_id=session_uuid,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=fen_before,
+            fen_after=board.fen(),
+            segment="drill",
+        )
+    )
+    db_session.commit()
+
+    observed = []
+
+    def observe_delta(db, terminal):
+        overlay = opening_evidence.EvidenceOverlay(
+            user_id=terminal.user_id,
+            player_color=terminal.player_color,
+        )
+        moves = opening_evidence._build_move_rows(
+            db,
+            terminal.user_id,
+            terminal.player_color,
+            overlay,
+        )
+        observed.append(
+            (
+                terminal.terminal_line_reconciled,
+                overlay.excluded_sessions,
+                len(moves),
+            )
+        )
+        return []
+
+    captured = []
+    with (
+        patch(
+            "app.api.drills.compute_opening_score_delta",
+            side_effect=observe_delta,
+        ),
+        patch(
+            "app.api.drills.capture",
+            side_effect=lambda *args: captured.append(args),
+        ),
+    ):
+        response = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={"result": "draw", "pgn": "1. d4 d5 *"},
+            headers=auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    ended = db_session.get(GameSession, session_uuid)
+    assert ended.terminal_line_reconciled is True
+    rows = (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .all()
+    )
+    assert [row.move_san for row in rows] == ["e4"]
+    assert observed == [(True, 1, 0)]
+    natural_end_events = [event for event in captured if event[1] == "drill_natural_end"]
+    assert len(natural_end_events) == 1
+    assert natural_end_events[0][2]["row_reconcile_outcome"] == OUTCOME_PREFIX_MISMATCH
 
 
 def test_unconverted_drill_rejects_game_end_and_stays_unrated(client, auth_headers, db_session):

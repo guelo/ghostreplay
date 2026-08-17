@@ -359,7 +359,11 @@ def test_natural_end_emits_drill_natural_end(client, auth_headers, captured):
     assert r.status_code == 200
     did, _event, props = _one(captured, "drill_natural_end")
     assert did == "55"
-    assert props == {"result": "checkmate_win"}
+    assert props == {
+        "result": "checkmate_win",
+        "row_reconcile_outcome": "pgn_unknown",
+        "derived_tail_rows": 0,
+    }
 
 
 def test_continue_emits_drill_continued_once(client, auth_headers, captured, db_session):

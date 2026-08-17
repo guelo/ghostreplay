@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-from sqlalchemy import or_
+from sqlalchemy import case, or_
 from sqlalchemy.orm import Session
 
 from app.models import GameSession, SessionMove
+from app.ply_coordinates import ply_after
 
 SessionMode = Literal["normal", "drill"]
 DrillState = Literal["active", "root_reached", "failed", "abandoned", "converted"]
@@ -60,8 +61,13 @@ def normal_play_started_at_expr():
     return GameSession.started_at
 
 
-def ply_after(move_number: int, color: str) -> int:
-    return (move_number - 1) * 2 + (1 if color == "white" else 2)
+def ply_after_expr(move_number, color):
+    """SQLAlchemy rendering of :func:`ply_after` for persisted move rows.
+
+    Keep deletion/ordering predicates on the same canonical coordinate as the
+    Python proof instead of duplicating the white/black arithmetic in SQL.
+    """
+    return (move_number - 1) * 2 + case((color == "white", 1), else_=2)
 
 
 def segment_for_move(session: GameSession, move_number: int, color: str) -> MoveSegment:

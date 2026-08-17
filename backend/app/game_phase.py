@@ -33,17 +33,20 @@ scalachess is MIT licensed. The required notice accompanies this derived work:
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE.
 
-Everything here is pure: functions take ``chess.Board`` objects (or FEN strings)
-and return plain values, with no database or IO dependencies.
+Everything here is pure: functions take in-memory chess data and return plain
+values, with no database or external-I/O dependencies.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol, Sequence
 
 import chess
 
 from app.fen import normalize_fen
+from app.ply_coordinates import ply_after
 
 # Version tag for the phase-divider implementation. Bump when the divider logic
 # (thresholds, mixedness, control flow) changes so opening-score fingerprints
@@ -59,6 +62,9 @@ __all__ = [
     "divide",
     "reconstruct_board_sequence",
     "ContinuityError",
+    "CompleteLineProof",
+    "CompleteLineProofVerdict",
+    "prove_complete_standard_line",
     "is_opening_premove",
     "is_middlegame_position",
 ]
@@ -253,6 +259,66 @@ def divide(boards: list[chess.Board]) -> Division:
 
 class ContinuityError(ValueError):
     """Raised when a session's move list does not form a continuous board line."""
+
+
+class CompleteLineProofVerdict(str, Enum):
+    PASSED = "passed"
+    WRONG_ROW_COUNT = "wrong_row_count"
+    COORDINATE_MISMATCH = "coordinate_mismatch"
+    NONSTANDARD_START = "nonstandard_start"
+    ILLEGAL_OR_DISCONTINUOUS_LINE = "illegal_or_discontinuous_line"
+
+
+class _CompleteLineRow(Protocol):
+    move_number: int
+    color: str
+    fen_before: str
+    fen_after: str
+    move_san: str
+
+
+@dataclass(frozen=True, slots=True)
+class CompleteLineProof:
+    verdict: CompleteLineProofVerdict
+    premove_boards: tuple[chess.Board, ...] = ()
+    final_board: chess.Board | None = None
+
+
+def prove_complete_standard_line(
+    rows: Sequence[_CompleteLineRow], expected_terminal_ply: int
+) -> CompleteLineProof:
+    """Fail-closed proof that ``rows`` are exactly the standard line ``1..N``.
+
+    A failed proof is a typed value, never an exception. This lets final_full use
+    it as an advisory evidence gate while still committing valid raw rows.
+    """
+    if len(rows) != expected_terminal_ply:
+        return CompleteLineProof(CompleteLineProofVerdict.WRONG_ROW_COUNT)
+    for index, row in enumerate(rows):
+        if ply_after(row.move_number, row.color) != index + 1:
+            return CompleteLineProof(CompleteLineProofVerdict.COORDINATE_MISMATCH)
+
+    if not rows:
+        board = chess.Board()
+        return CompleteLineProof(CompleteLineProofVerdict.PASSED, (), board)
+    try:
+        if normalize_fen(rows[0].fen_before) != normalize_fen(chess.STARTING_FEN):
+            return CompleteLineProof(CompleteLineProofVerdict.NONSTANDARD_START)
+    except (TypeError, ValueError):
+        return CompleteLineProof(CompleteLineProofVerdict.NONSTANDARD_START)
+
+    try:
+        premove_boards = reconstruct_board_sequence(
+            [(row.fen_before, row.fen_after, row.move_san) for row in rows]
+        )
+        final_board = chess.Board(rows[-1].fen_after)
+    except (ContinuityError, TypeError, ValueError):
+        return CompleteLineProof(CompleteLineProofVerdict.ILLEGAL_OR_DISCONTINUOUS_LINE)
+    return CompleteLineProof(
+        CompleteLineProofVerdict.PASSED,
+        tuple(premove_boards),
+        final_board,
+    )
 
 
 def _canonical_key(fen: str, move_index: int, field: str) -> str:

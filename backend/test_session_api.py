@@ -80,7 +80,7 @@ def test_session_moves_bulk_insert_success(client, auth_headers, create_game_ses
     )
 
     assert response.status_code == 200
-    assert response.json() == {"moves_inserted": 2}
+    assert response.json() == {"moves_inserted": 2, "line_revision": 0}
 
     rows = (
         db_session.query(SessionMove)
@@ -453,7 +453,7 @@ def test_session_moves_succeeds_when_opening_cache_refresh_fails(
         )
 
     assert response.status_code == 200
-    assert response.json() == {"moves_inserted": 1}
+    assert response.json() == {"moves_inserted": 1, "line_revision": 0}
     assert (
         db_session.query(SessionMove)
         .filter(SessionMove.session_id == session_uuid, SessionMove.move_number == 1, SessionMove.color == "white")

@@ -54,11 +54,13 @@ from app.game_phase import (
     divide,
     is_opening_premove,
     reconstruct_board_sequence,
+    prove_complete_standard_line,
 )
 from app.models import AnalysisCache, decode_uci_line
 from app.opening_graph import OpeningGraph
 from app.opening_quality import cache_row_to_mover_evals, move_quality
 from app.position_analysis_repo import resolve_trusted_positions
+from app.terminal_pgn import bounded_replay_pgn_mainline
 
 logger = logging.getLogger(__name__)
 
@@ -102,10 +104,17 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 #   3. the coherent-tuple requirement changes which PAIRS upgrade — equal-strength
 #      sibling rows whose facts disagree no longer do.
 # Old batches must therefore fail the registry/input fingerprint and self-heal.
+# raw-v8 (g-drill-line-truncate): sessions whose terminal writer recorded that
+# reconciliation ran, and whose bounded PGN is known, must pass the complete-line
+# proof before contributing opening evidence. Historical sessions default to an
+# unmarked compatibility path so a cache-version miss cannot silently reclassify
+# rows no reconcile boundary ever covered. Replay-cache/raw identities fold both
+# game_sessions proof inputs (PGN + marker), and natural drill endings now
+# reconcile missing rows before becoming eligible.
 # This one-time bump is explicitly NOT a substitute for hashing the association set
 # in ``_shared_evidence_lines`` below: a version bump cannot invalidate anything
 # that changes AFTER it lands, and associations keep mutating.
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v7"
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v8"
 
 # Cheap-freshness-signal contract version (g-jact). Bump whenever the CHEAP
 # signal's semantics change — the shared-scope definition captured on a batch,
@@ -686,11 +695,16 @@ def _sm_line(r) -> str:
     two are separate formatters over one column list. The by-construction link is
     replaced by a behavioral guard: ``test_every_consumed_column_busts_the_replay_cache``
     mutates each column in turn and asserts the cache re-derives, and the
-    freshness-digest tests cover this side. Adding a column the overlay consumes
-    means adding it in BOTH places.
+    freshness-digest tests cover this side. Adding a ``session_moves`` column the
+    overlay consumes means adding it in BOTH places. ``started_at`` remains on
+    each row because it affects each row's evidence timestamp. PGN and the
+    terminal-reconcile marker are constant per session and are intentionally
+    represented once by ``_sp_line`` below; repeating a multi-KiB PGN in every
+    sorted ``SM|`` line makes this already expensive slow-path digest grow as
+    ``pgn_bytes * move_count``.
 
-    The stored format is deliberately unchanged: it feeds the optional
-    ``inputs_fingerprint`` audit/release identity and raw-mutation tests.
+    The stored format feeds the optional ``inputs_fingerprint`` audit/release
+    identity and raw-mutation tests; any semantic edit must be versioned.
     Ordinary scheduler batches use the partitioned freshness signal instead, so
     a semantic edit here must also follow the version/counter discipline
     documented at ``OPENING_EVIDENCE_INPUTS_VERSION`` above.
@@ -709,6 +723,25 @@ def _sm_line(r) -> str:
             _digest_ts(r.session_ts),
         )
     )
+
+
+def _sp_line(
+    session_id,
+    pgn: str | None,
+    terminal_line_reconciled: bool,
+) -> str:
+    """One fixed-width terminal-proof identity line per evidence session.
+
+    The ``V|`` prefix / NULL sentinel mirrors the replay-cache identity and
+    prevents a literal PGN from colliding with SQL NULL. SHA-256 keeps sorting
+    and joining the raw freshness lines independent of PGN byte length while a
+    PGN-only mutation still changes the digest.
+    """
+    proof_body = (
+        f"R|{int(bool(terminal_line_reconciled))}|{_session_pgn_body(pgn)}"
+    )
+    pgn_hash = hashlib.sha256(proof_body.encode("utf-8")).hexdigest()
+    return f"SP|{session_id}|{pgn_hash}"
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +809,8 @@ _DIGEST_ROW_SEP = "\n"
 # The ``session_moves`` columns the per-session replay product depends on —
 # everything ``_derive_session`` reads plus everything ``_CachedMove`` carries.
 # Must stay in sync with ``_sm_line`` (see its MAINTENANCE note). ``session_id``
-# is absent because the digest is already per-session, and ``gs.started_at`` is
-# folded in separately (it is a game_sessions column, constant per session).
+# is absent because the digest is already per-session. The three game_sessions
+# inputs (started_at, PGN, and terminal reconcile marker) are folded separately.
 _SESSION_DIGEST_COLUMNS = (
     "move_number",
     "color",
@@ -810,6 +843,14 @@ _SESSION_DIGEST_AGG_SQL = (
     f" '{_DIGEST_ROW_SEP}' ORDER BY {_SESSION_DIGEST_ORDER_SQL})"
 )
 
+# PGN is a game_sessions value, not part of the session_moves row projection.
+# Prefixing distinguishes SQL NULL from a literal value equal to the digest's
+# NULL sentinel. PostgreSQL folds it to a fixed 32-byte value; portable dialects
+# return the prefixed text and remain correct at the cost of a larger probe row.
+_SESSION_PGN_BODY_SQL = (
+    "CASE WHEN max(gs.pgn) IS NULL THEN '~' ELSE 'V|' || max(gs.pgn) END"
+)
+
 # (SQL template, python equivalent) per SQLAlchemy dialect name — see THE
 # DB-SIDE FOLD above. md5 here is a non-cryptographic content fold, hence
 # ``usedforsecurity=False`` (which also keeps it working under a FIPS build,
@@ -839,11 +880,15 @@ def _probe_sql(dialect: str) -> str:
     Cached because it is pure in ``dialect`` and runs on every overlay build.
     """
     body = _body_fold(dialect)[0].format(body=_SESSION_DIGEST_AGG_SQL)
+    pgn_body = _body_fold(dialect)[0].format(body=_SESSION_PGN_BODY_SQL)
     return f"""
     SELECT sm.session_id AS sid,
            count(*) AS row_count,
            {body} AS body,
-           max(gs.started_at) AS session_ts
+           max(gs.started_at) AS session_ts,
+           {pgn_body} AS session_pgn_body,
+           max(CAST(gs.terminal_line_reconciled AS INTEGER))
+               AS terminal_line_reconciled
     FROM session_moves sm
     JOIN game_sessions gs ON gs.id = sm.session_id
     WHERE gs.user_id = :user_id
@@ -863,6 +908,9 @@ _SESSION_ROWS_SQL = f"""
            sm.fen_before, sm.fen_after, sm.move_san,
            sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
            gs.started_at AS session_ts
+           , gs.pgn AS session_pgn
+           , CAST(gs.terminal_line_reconciled AS INTEGER)
+               AS terminal_line_reconciled
     FROM session_moves sm
     JOIN game_sessions gs ON gs.id = sm.session_id
     WHERE gs.user_id = :user_id
@@ -901,15 +949,29 @@ def _session_digest_body(srows) -> str:
     )
 
 
-def _session_digest(row_count: int, body: str | None, session_ts) -> str:
-    """Content hash over one session's rows + the two REPLAY version tags.
+def _session_pgn_body(pgn: str | None) -> str:
+    """Python mirror of ``_SESSION_PGN_BODY_SQL`` before dialect folding."""
+    return _DIGEST_NULL if pgn is None else f"V|{pgn}"
+
+
+def _session_digest(
+    row_count: int,
+    body: str | None,
+    session_ts,
+    session_pgn_body: str | None = None,
+    terminal_line_reconciled: bool = False,
+) -> str:
+    """Content hash over rows, terminal-proof inputs, and REPLAY version tags.
 
     Folds ``game_phase.DIVIDER_VERSION`` (read as a LIVE module attribute so a
     monkeypatch is observed) and ``OPENING_EVIDENCE_INPUTS_VERSION`` in, so any
     version bump misses every entry and forces full re-derivation. QUALITY /
     TAU constants are deliberately absent — quality is recomputed on copy-out.
     """
-    payload = f"{row_count}\x00{body or ''}\x00{_digest_ts(session_ts)}"
+    payload = (
+        f"{row_count}\x00{body or ''}\x00{_digest_ts(session_ts)}"
+        f"\x00{session_pgn_body or ''}\x00{int(bool(terminal_line_reconciled))}"
+    )
     payload += f"\n\x00DIVIDER={game_phase.DIVIDER_VERSION}"
     payload += f"\n\x00INPUTS={OPENING_EVIDENCE_INPUTS_VERSION}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -1319,6 +1381,30 @@ def _derive_session(srows) -> _CachedSession:
     overlay mutation — the caller owns those so they happen once per rebuild
     regardless of cache hit/miss, and the warning fires only on a miss.
     """
+    terminal_replay = bounded_replay_pgn_mainline(
+        getattr(srows[0], "session_pgn", None) if srows else None
+    )
+    # Preserve the measured g-i6st policy: a shorter/truncated PGN does not make
+    # a fuller stored line invalid. Exact/short row sets are proof-checked against
+    # the bounded terminal replay; absent, unparseable, or over-ceiling PGNs skip
+    # this independent proof and retain the pre-g-drill-line replay boundary.
+    terminal_line_reconciled = bool(
+        getattr(srows[0], "terminal_line_reconciled", False)
+    ) if srows else False
+    if (
+        terminal_line_reconciled
+        and terminal_replay is not None
+        and len(srows) <= len(terminal_replay)
+    ):
+        proof = prove_complete_standard_line(srows, len(terminal_replay))
+        if proof.verdict.value != "passed":
+            return _CachedSession(
+                moves=(),
+                phase_sample=None,
+                excluded=True,
+                exclusion_msg=f"complete-line proof failed: {proof.verdict.value}",
+            )
+
     triples = [(r.fen_before, r.fen_after, r.move_san) for r in srows]
     try:
         boards = reconstruct_board_sequence(triples)
@@ -1411,7 +1497,13 @@ def _build_move_rows(
     l1_missed: list[str] = []
     for pr in probe_rows:
         sid = str(pr.sid)
-        content_hash = _session_digest(pr.row_count, pr.body, pr.session_ts)
+        content_hash = _session_digest(
+            pr.row_count,
+            pr.body,
+            pr.session_ts,
+            pr.session_pgn_body,
+            pr.terminal_line_reconciled,
+        )
         expected_hashes[sid] = content_hash
         cached = _session_cache_get(sid, content_hash)
         if cached is None:
@@ -1476,7 +1568,11 @@ def _build_move_rows(
             # is exactly the probe's max(gs.started_at). ``fold`` is the same
             # dialect's fold the probe applied server-side.
             content_hash = _session_digest(
-                len(srows), fold(_session_digest_body(srows)), srows[0].session_ts
+                len(srows),
+                fold(_session_digest_body(srows)),
+                srows[0].session_ts,
+                fold(_session_pgn_body(srows[0].session_pgn)),
+                srows[0].terminal_line_reconciled,
             )
             cached = _derive_session(srows)  # REPLAY happens here only (miss)
             if cached.excluded and _mark_exclusion_warned_if_new(sid, content_hash):
@@ -1929,7 +2025,7 @@ def _per_user_evidence_lines(
     user_id: int,
     player_color: str,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Per-user digest lines (``SM|``/``GT|``/``BR|``) plus the shared-FEN scope.
+    """Per-user digest lines (``SM|``/``SP|``/``GT|``/``BR|``) plus shared scope.
 
     Returns ``(lines, candidate_fens, norm_list)`` where the candidate sets are
     the SHARED-lookup scope derived from the per-user rows: this user's
@@ -1942,7 +2038,9 @@ def _per_user_evidence_lines(
     lines: list[str] = []
 
     # 1. Session moves (mirrors _build_move_rows). Same SELECT, but we hash the
-    #    scalar columns and stop instead of replaying boards.
+    #    scalar columns and stop instead of replaying boards. PGN is deliberately
+    #    absent here: selecting it through this join would repeat the whole value
+    #    over the wire for every move before ``_sp_line`` could deduplicate it.
     session_rows = db.execute(
         text(f"""
             SELECT sm.session_id, sm.move_number, sm.color,
@@ -1965,6 +2063,32 @@ def _per_user_evidence_lines(
         # see the MAINTENANCE note on ``_sm_line`` for what keeps them aligned
         # now that they no longer share this function.
         lines.append(_sm_line(r))
+
+    # 1b. The proof's game_sessions input, exactly once per session returned by
+    #     section 1. Reuse that frozen id set for indexed PK lookups rather than
+    #     scanning session_moves a second time; this also prevents a concurrent
+    #     eligibility transition from adding an SP line with no matching SM line
+    #     between the two statements.
+    session_ids = sorted({r.session_id for r in session_rows}, key=str)
+    if session_ids:
+        session_pgn_rows = db.execute(
+            text("""
+                SELECT gs.id AS session_id, gs.pgn AS session_pgn,
+                       CAST(gs.terminal_line_reconciled AS INTEGER)
+                           AS terminal_line_reconciled
+                FROM game_sessions gs
+                WHERE gs.id IN :sids
+            """).bindparams(bindparam("sids", expanding=True)),
+            {"sids": session_ids},
+        ).fetchall()
+        for r in session_pgn_rows:
+            lines.append(
+                _sp_line(
+                    r.session_id,
+                    r.session_pgn,
+                    r.terminal_line_reconciled,
+                )
+            )
 
     # 2. Candidate fen_before set for the shared trusted-source lookups: this
     #    user's player-color session moves lacking a primary eval (the only
@@ -2301,8 +2425,8 @@ def raw_evidence_inputs_snapshot(
     ``OPENING_EVIDENCE_INPUTS_VERSION`` / ``FRESHNESS_CONTRACT_VERSION``, folded
     into the registry fingerprint (``opening_score_inputs_fingerprint``).
 
-    MAINTENANCE (g-f3m4): every digest-visible mutation of the per-user SM|, GT|,
-    or BR| sources must advance the affected ``OpeningScoreCursor.evidence_seq``
+    MAINTENANCE (g-f3m4): every digest-visible mutation of the per-user SM|, SP|,
+    GT|, or BR| sources must advance the affected ``OpeningScoreCursor.evidence_seq``
     in the same transaction. The session-start baseline proof relies on equality
     with that monotonic counter; it intentionally does not enumerate source tables
     in a parallel NOT EXISTS guard. A new per-user source therefore needs the same

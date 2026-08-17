@@ -186,8 +186,14 @@ def test_md5_fold_pair_agrees_and_keys_match_end_to_end(pg_session_factory):
                 len(rows),
                 fold(opening_evidence._session_digest_body(rows)),
                 rows[0].session_ts,
+                fold(opening_evidence._session_pgn_body(rows[0].session_pgn)),
+                rows[0].terminal_line_reconciled,
             ) == opening_evidence._session_digest(
-                probe[sid].row_count, probe[sid].body, probe[sid].session_ts
+                probe[sid].row_count,
+                probe[sid].body,
+                probe[sid].session_ts,
+                probe[sid].session_pgn_body,
+                probe[sid].terminal_line_reconciled,
             )
     finally:
         db.close()
@@ -208,9 +214,33 @@ def test_probe_payload_is_fixed_size_per_session(pg_session_factory):
 
         assert len(probe[short].body) == 32
         assert len(probe[long_].body) == 32
+        assert len(probe[short].session_pgn_body) == 32
+        assert len(probe[long_].session_pgn_body) == 32
         # The unfolded bodies really do differ in size, or the claim is vacuous.
         assert probe[long_].row_count >= 3 * probe[short].row_count
         assert len(raw[long_].body) >= 3 * len(raw[short].body)
+    finally:
+        db.close()
+
+
+@pg_required
+def test_raw_digest_folds_pgn_once_via_postgres_uuid_keys(pg_session_factory):
+    """The separate one-row-per-session PGN query must preserve UUID typing."""
+    db = pg_session_factory()
+    try:
+        sid = _seed(db, sessions=1, plies=12)[0]
+        before = opening_evidence.raw_evidence_inputs_digest(db, USER_ID, COLOR)
+        db.execute(
+            text(
+                "UPDATE game_sessions SET pgn='1. e4 *', "
+                "terminal_line_reconciled=true WHERE id=:sid"
+            ),
+            {"sid": sid},
+        )
+        db.commit()
+
+        after = opening_evidence.raw_evidence_inputs_digest(db, USER_ID, COLOR)
+        assert after != before
     finally:
         db.close()
 

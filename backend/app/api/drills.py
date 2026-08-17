@@ -45,6 +45,7 @@ from app.session_contracts import (
     resegment_session_moves,
     utcnow,
 )
+from app.terminal_row_reconcile import reconcile_terminal_move_rows
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ class DrillSessionContract(BaseModel):
     rated_start_ply: int | None
     normal_started_at: datetime | None
     converted_at: datetime | None
+    move_line_revision: int
     terminal_reason: str | None = None
     # Played-opening score deltas (before -> after) vs the drill baseline, set
     # only by the terminal drill endpoints (natural-end, accuracy fail). None for
@@ -505,6 +507,7 @@ def _contract(
         rated_start_ply=session.rated_start_ply,
         normal_started_at=session.normal_started_at,
         converted_at=session.converted_at,
+        move_line_revision=session.move_line_revision,
         terminal_reason=session.drill_terminal_reason,
         opening_score_changes=opening_score_changes,
     )
@@ -880,12 +883,34 @@ def natural_end_drill(
     session.ended_at = utcnow()
     if request.pgn:
         session.pgn = request.pgn
+    # Natural drill termination is the second live terminal writer. It must
+    # restore a lost/sparse final upload before the status transition exposes
+    # the session to opening evidence, just like /api/game/end does.
+    reconcile_result = reconcile_terminal_move_rows(
+        db,
+        session,
+        allow_sparse=True,
+    )
+    session.terminal_line_reconciled = True
+    if reconcile_result.derived_rows:
+        # Match /api/game/end's durable audit marker. Once the missing rows are
+        # present, the row grid alone cannot show that terminal reconciliation
+        # repaired a lost final upload.
+        session.derived_tail_rows = reconcile_result.derived_rows
     db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible:
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
-    capture(str(user.user_id), "drill_natural_end", {"result": request.result})
+    capture(
+        str(user.user_id),
+        "drill_natural_end",
+        {
+            "result": request.result,
+            "row_reconcile_outcome": reconcile_result.outcome,
+            "derived_tail_rows": reconcile_result.derived_rows,
+        },
+    )
     return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
 
 

@@ -55,6 +55,7 @@ from app.accuracy import (
     recompute_session_accuracy,
 )
 from app.fen import active_color, fen_hash, normalize_fen
+from app.game_phase import CompleteLineProofVerdict, prove_complete_standard_line
 from app.graph_write_lock import acquire_graph_write_lock
 from app.opening_cache import bump_evidence_seq, load_cached_rows_nonblocking
 from app.opening_evidence import session_is_evidence_eligible
@@ -72,6 +73,7 @@ from app.models import (
     Move,
     Position,
     SessionMove,
+    SessionMoveTruncationReceipt,
     SessionUploadReceipt,
     decode_uci_line,
     encode_uci_line,
@@ -83,6 +85,7 @@ from app.session_contracts import (
     VISIBLE_DRILL_STATE,
     is_visible_game_session,
     normal_play_started_at,
+    ply_after_expr,
     segment_for_move,
 )
 from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
@@ -197,12 +200,37 @@ class SessionMovesRequest(BaseModel):
     # committing a stale null snapshot.
     eval_repair: bool = False
     final_client_request_id: uuid.UUID | None = None
+    # Server-owned branch token. Omission is accepted only while the session is
+    # still at revision zero for mixed-version rollout.
+    line_revision: int | None = Field(None, ge=0)
+    # Validated client telemetry only; never authorizes a branch or evidence.
+    line_sync_verdict: (
+        Literal["synchronized", "deadline_expired", "permanent_conflict"] | None
+    ) = None
 
 
 class SessionMovesResponse(BaseModel):
     moves_inserted: int
     drill_state: str | None = None
     drill_terminal_reason: str | None = None
+    line_revision: int
+    line_proof_verdict: str | None = None
+
+
+class SessionMovesTruncateRequest(BaseModel):
+    client_request_id: uuid.UUID
+    line_revision: int = Field(..., ge=0)
+    after_ply: int = Field(..., ge=0)
+
+
+class SessionMovesTruncateResponse(BaseModel):
+    client_request_id: uuid.UUID
+    from_revision: int
+    to_revision: int
+    line_revision: int
+    after_ply: int
+    deleted_move_count: int
+    evidence_changed: bool
 
 
 class SessionAnalysisMove(BaseModel):
@@ -1356,6 +1384,184 @@ def _emit_session_moves_uploaded(
     )
 
 
+def _raise_line_revision_conflict(current_revision: int) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error_code": "FOREIGN_BRANCH_REVISION",
+            "current_revision": current_revision,
+        },
+    )
+
+
+def _identity_fen(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return normalize_fen(value)
+    except ValueError:
+        # Preserve the endpoint's existing advisory validation boundary: an
+        # invalid FEN is not newly rejected here, but it also cannot compare
+        # equal to a differently-spelled persisted identity.
+        return value
+
+
+def _validate_versioned_line_identity(
+    db: Session,
+    session_id: uuid.UUID,
+    moves: list[SessionMoveInput],
+) -> None:
+    if not moves:
+        return
+    keys = [(move.move_number, move.color.value) for move in moves]
+    existing = (
+        db.query(SessionMove)
+        .filter(
+            SessionMove.session_id == session_id,
+            tuple_(SessionMove.move_number, SessionMove.color).in_(keys),
+        )
+        .all()
+    )
+    incoming = {(move.move_number, move.color.value): move for move in moves}
+    for row in existing:
+        move = incoming[(row.move_number, row.color)]
+        if (
+            row.move_san != move.move_san
+            or _identity_fen(row.fen_before) != _identity_fen(move.fen_before)
+            or _identity_fen(row.fen_after) != _identity_fen(move.fen_after)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "MOVE_LINE_IDENTITY_CONFLICT",
+                    "move_number": row.move_number,
+                    "color": row.color,
+                },
+            )
+
+
+def _ordered_session_moves(db: Session, session_id: uuid.UUID) -> list[SessionMove]:
+    color_order = case((SessionMove.color == MoveColor.WHITE.value, 0), else_=1)
+    return (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session_id)
+        # Identity validation may already have loaded these rows before the
+        # Core upsert. Force authoritative post-upsert attributes instead of
+        # accepting stale values from the ORM identity map.
+        .populate_existing()
+        .order_by(
+            SessionMove.move_number.asc(), color_order.asc(), SessionMove.id.asc()
+        )
+        .all()
+    )
+
+
+@router.post(
+    "/{session_id}/moves/truncate",
+    response_model=SessionMovesTruncateResponse,
+)
+def truncate_session_moves(
+    session_id: uuid.UUID,
+    request: SessionMovesTruncateRequest,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> SessionMovesTruncateResponse:
+    """Atomically advance the branch token and delete its abandoned move tail."""
+    game_session = for_no_key_update(
+        db.query(GameSession).filter(GameSession.id == session_id)
+    ).first()
+    if game_session is None:
+        raise HTTPException(status_code=404, detail="Game session not found")
+    _ensure_session_owned_by_user(game_session, user)
+    if game_session.status != "active" or game_session.is_rated:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "MOVE_LINE_TRUNCATION_NOT_ALLOWED"},
+        )
+
+    receipt = (
+        db.query(SessionMoveTruncationReceipt)
+        .filter(
+            SessionMoveTruncationReceipt.session_id == session_id,
+            SessionMoveTruncationReceipt.client_request_id == request.client_request_id,
+        )
+        .first()
+    )
+    if receipt is not None:
+        if (
+            receipt.from_revision != request.line_revision
+            or receipt.after_ply != request.after_ply
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error_code": "TRUNCATION_IDEMPOTENCY_CONFLICT",
+                    "current_revision": game_session.move_line_revision,
+                },
+            )
+        return SessionMovesTruncateResponse(
+            client_request_id=receipt.client_request_id,
+            from_revision=receipt.from_revision,
+            to_revision=receipt.to_revision,
+            line_revision=game_session.move_line_revision,
+            after_ply=receipt.after_ply,
+            deleted_move_count=receipt.deleted_move_count,
+            evidence_changed=receipt.evidence_changed,
+        )
+
+    if request.line_revision != game_session.move_line_revision:
+        _raise_line_revision_conflict(game_session.move_line_revision)
+
+    deleted_move_count = (
+        db.query(SessionMove)
+        .filter(
+            SessionMove.session_id == session_id,
+            ply_after_expr(SessionMove.move_number, SessionMove.color)
+            > request.after_ply,
+        )
+        .delete(synchronize_session=False)
+    )
+    from_revision = game_session.move_line_revision
+    to_revision = from_revision + 1
+    game_session.move_line_revision = to_revision
+    evidence_changed = bool(
+        deleted_move_count and session_is_evidence_eligible(game_session)
+    )
+    db.add(
+        SessionMoveTruncationReceipt(
+            session_id=session_id,
+            client_request_id=request.client_request_id,
+            from_revision=from_revision,
+            to_revision=to_revision,
+            after_ply=request.after_ply,
+            deleted_move_count=deleted_move_count,
+            evidence_changed=evidence_changed,
+        )
+    )
+    # Drain the delete/session/receipt writes before the cursor bump, which stays
+    # the transaction's final potentially-blocking statement.
+    db.flush()
+    if evidence_changed:
+        bump_evidence_seq(db, user.user_id, game_session.player_color)
+    db.commit()
+
+    if evidence_changed:
+        request_recompute(
+            user.user_id,
+            game_session.player_color,
+            source=OpeningScoreTrigger.SESSION_EVIDENCE,
+        )
+    return SessionMovesTruncateResponse(
+        client_request_id=request.client_request_id,
+        from_revision=from_revision,
+        to_revision=to_revision,
+        line_revision=to_revision,
+        after_ply=request.after_ply,
+        deleted_move_count=deleted_move_count,
+        evidence_changed=evidence_changed,
+    )
+
+
 @router.post(
     "/{session_id}/moves/eval-repair",
     response_model=SessionMovesResponse,
@@ -1398,6 +1604,18 @@ def upsert_session_moves(
     is_final_full = request.terminal_action is not None
     client_request_id = getattr(http_request.state, "client_request_id", None)
     server_request_id = getattr(http_request.state, "request_id", None)
+    if request.line_sync_verdict is not None and not is_final_full:
+        raise HTTPException(
+            status_code=400,
+            detail="line_sync_verdict is valid only for final_full",
+        )
+    if (request.line_revision is None and game_session.move_line_revision > 0) or (
+        request.line_revision is not None
+        and request.line_revision != game_session.move_line_revision
+    ):
+        _raise_line_revision_conflict(game_session.move_line_revision)
+    if request.line_revision is not None:
+        _validate_versioned_line_identity(db, session_id, request.moves)
 
     # Reject a final_full upload lacking a valid client id BEFORE any writes. A
     # header stripped by a proxy or malformed by a client would otherwise commit a
@@ -1449,6 +1667,9 @@ def upsert_session_moves(
                 detail="final_full receipt not yet available",
             )
 
+    upload_receipt: SessionUploadReceipt | None = None
+    line_proof_verdict: str | None = None
+
     def _add_upload_receipt() -> None:
         """Stage the durable final_full receipt into the CURRENT transaction.
 
@@ -1463,20 +1684,35 @@ def upsert_session_moves(
         """
         if not is_final_full:
             return
-        db.add(
-            SessionUploadReceipt(
-                session_id=session_id,
-                user_id=user.user_id,
-                # Re-wrap the middleware-normalized canonical string; guaranteed
-                # non-null here by the reject-before-write guard above.
-                client_request_id=uuid.UUID(client_request_id),
-                server_request_id=server_request_id,
-                recompute_opportunity=request.recompute_opportunity,
-                session_mode=game_session.session_mode,
-                terminal_action=request.terminal_action,
-                content_length_bytes=_validated_content_length(http_request),
-            )
+        nonlocal upload_receipt
+        upload_receipt = SessionUploadReceipt(
+            session_id=session_id,
+            user_id=user.user_id,
+            # Re-wrap the middleware-normalized canonical string; guaranteed
+            # non-null here by the reject-before-write guard above.
+            client_request_id=uuid.UUID(client_request_id),
+            server_request_id=server_request_id,
+            recompute_opportunity=request.recompute_opportunity,
+            session_mode=game_session.session_mode,
+            terminal_action=request.terminal_action,
+            content_length_bytes=_validated_content_length(http_request),
+            move_line_revision=request.line_revision,
+            line_sync_verdict=request.line_sync_verdict,
         )
+        db.add(upload_receipt)
+
+    def _assess_final_line(expected_terminal_ply: int) -> bool:
+        """Record an advisory proof and return whether evidence may run."""
+        nonlocal line_proof_verdict
+        if not is_final_full or request.line_revision is None:
+            return True
+        proof = prove_complete_standard_line(
+            _ordered_session_moves(db, session_id), expected_terminal_ply
+        )
+        line_proof_verdict = proof.verdict.value
+        if upload_receipt is not None:
+            upload_receipt.line_proof_verdict = line_proof_verdict
+        return proof.verdict is CompleteLineProofVerdict.PASSED
 
     if not request.moves:
         # An empty upload writes no moves, but a final_full one still MUST leave a
@@ -1487,8 +1723,19 @@ def upsert_session_moves(
         # the receipt INSERT is the only statement in this transaction.
         if is_final_full:
             _add_upload_receipt()
+            db.flush()
+            persisted_count = (
+                db.query(SessionMove)
+                .filter(SessionMove.session_id == session_id)
+                .count()
+            )
+            _assess_final_line(persisted_count)
             db.commit()
-        return SessionMovesResponse(moves_inserted=0)
+        return SessionMovesResponse(
+            moves_inserted=0,
+            line_revision=game_session.move_line_revision,
+            line_proof_verdict=line_proof_verdict,
+        )
 
     values = [
         {
@@ -1530,6 +1777,7 @@ def upsert_session_moves(
     # ON-CONFLICT path can't distinguish insert from update, and over-bumping one
     # eligible upload is a harmless rebuild, never a false accept.
     bump_for_evidence = session_is_evidence_eligible(game_session)
+    proof_allows_evidence = True
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
         statement = sqlite_insert(SessionMove).values(values)
@@ -1549,15 +1797,16 @@ def upsert_session_moves(
                     SessionMove.color == value["color"],
                 ).first()
                 if existing_row:
-                    existing_row.move_san = value["move_san"]
-                    existing_row.fen_after = value["fen_after"]
+                    if request.line_revision is None:
+                        existing_row.move_san = value["move_san"]
+                        existing_row.fen_after = value["fen_after"]
+                        existing_row.fen_before = value["fen_before"]
                     existing_row.eval_cp = value["eval_cp"]
                     existing_row.eval_mate = value["eval_mate"]
                     existing_row.best_move_san = value["best_move_san"]
                     existing_row.best_move_eval_cp = value["best_move_eval_cp"]
                     existing_row.eval_delta = value["eval_delta"]
                     existing_row.classification = value["classification"]
-                    existing_row.fen_before = value["fen_before"]
                     existing_row.best_move_uci = value["best_move_uci"]
                     existing_row.best_line_uci = value["best_line_uci"]
                     existing_row.decision_source = value["decision_source"]
@@ -1577,9 +1826,15 @@ def upsert_session_moves(
             # Drain the dirty accuracy assignment before the cursor bump so the
             # cache write lands ahead of the transaction's final statement.
             db.flush()
-            if bump_for_evidence:
+            proof_allows_evidence = _assess_final_line(len(request.moves))
+            # Persist the advisory receipt verdict ahead of the final blocking
+            # cursor statement. A failed proof never rolls back valid rows.
+            db.flush()
+            if bump_for_evidence and proof_allows_evidence:
                 bump_evidence_seq(db, user.user_id, game_session.player_color)
             db.commit()
+        if not proof_allows_evidence:
+            evidence_moves = []
         if evidence_moves:
             # Deferred off the request path: the expensive graph/opportunity/
             # analysis-cache/recompute pipeline runs on the evidence scheduler's
@@ -1615,31 +1870,39 @@ def upsert_session_moves(
             moves_inserted=len(values),
             drill_state=game_session.drill_state,
             drill_terminal_reason=game_session.drill_terminal_reason,
+            line_revision=game_session.move_line_revision,
+            line_proof_verdict=line_proof_verdict,
         )
 
+    conflict_updates = {
+        "eval_cp": statement.excluded.eval_cp,
+        "eval_mate": statement.excluded.eval_mate,
+        "best_move_san": statement.excluded.best_move_san,
+        "best_move_eval_cp": statement.excluded.best_move_eval_cp,
+        "eval_delta": statement.excluded.eval_delta,
+        "classification": statement.excluded.classification,
+        "best_move_uci": statement.excluded.best_move_uci,
+        "best_line_uci": statement.excluded.best_line_uci,
+        "decision_source": statement.excluded.decision_source,
+        "target_blunder_id": statement.excluded.target_blunder_id,
+        "segment": statement.excluded.segment,
+        "browser_provenance": statement.excluded.browser_provenance,
+    }
+    if request.line_revision is None:
+        conflict_updates.update(
+            {
+                "move_san": statement.excluded.move_san,
+                "fen_after": statement.excluded.fen_after,
+                "fen_before": statement.excluded.fen_before,
+            }
+        )
     statement = statement.on_conflict_do_update(
         index_elements=[
             SessionMove.session_id,
             SessionMove.move_number,
             SessionMove.color,
         ],
-        set_={
-            "move_san": statement.excluded.move_san,
-            "fen_after": statement.excluded.fen_after,
-            "eval_cp": statement.excluded.eval_cp,
-            "eval_mate": statement.excluded.eval_mate,
-            "best_move_san": statement.excluded.best_move_san,
-            "best_move_eval_cp": statement.excluded.best_move_eval_cp,
-            "eval_delta": statement.excluded.eval_delta,
-            "classification": statement.excluded.classification,
-            "fen_before": statement.excluded.fen_before,
-            "best_move_uci": statement.excluded.best_move_uci,
-            "best_line_uci": statement.excluded.best_line_uci,
-            "decision_source": statement.excluded.decision_source,
-            "target_blunder_id": statement.excluded.target_blunder_id,
-            "segment": statement.excluded.segment,
-            "browser_provenance": statement.excluded.browser_provenance,
-        },
+        set_=conflict_updates,
     )
     with _timed_side_effect(
         "session_moves_upsert",
@@ -1657,10 +1920,14 @@ def upsert_session_moves(
         # INSERT is emitted ahead of the cursor bump (g-upload-observe).
         _add_upload_receipt()
         db.flush()
-        if bump_for_evidence:
+        proof_allows_evidence = _assess_final_line(len(request.moves))
+        db.flush()
+        if bump_for_evidence and proof_allows_evidence:
             bump_evidence_seq(db, user.user_id, game_session.player_color)
         db.commit()
 
+    if not proof_allows_evidence:
+        evidence_moves = []
     if evidence_moves:
         # Deferred off the request path: the expensive graph/opportunity/
         # analysis-cache/recompute pipeline runs on the evidence scheduler's
@@ -1697,6 +1964,8 @@ def upsert_session_moves(
         moves_inserted=len(values),
         drill_state=game_session.drill_state,
         drill_terminal_reason=game_session.drill_terminal_reason,
+        line_revision=game_session.move_line_revision,
+        line_proof_verdict=line_proof_verdict,
     )
 
 

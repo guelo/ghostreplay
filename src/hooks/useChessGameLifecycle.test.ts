@@ -70,7 +70,11 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
       generation: 0,
       sessionId: useGameStore.getState().sessionId,
     })),
+    ensurePendingAnalysis: vi.fn().mockReturnValue(true),
     settleWithin: vi.fn().mockResolvedValue(undefined),
+    settleLineSynchronizationWithin: vi.fn().mockResolvedValue("synchronized"),
+    getLineRevision: vi.fn().mockReturnValue(0),
+    transitionMoveLine: vi.fn().mockReturnValue(false),
     armLateEvaluationRepair: vi.fn().mockReturnValue(false),
     releaseLateEvaluationRepair: vi.fn(),
     cancelLateEvaluationRepair: vi.fn(),
@@ -408,6 +412,44 @@ describe("useChessGameLifecycle", () => {
     expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
     // M1: revert synchronously prunes coordinator-owned state from the new length.
     expect(coordinator.pruneFromMoveIndex).toHaveBeenCalledWith(2);
+  });
+
+  it("starts active-unrated line synchronization before the optimistic board rewind", async () => {
+    const chess = new Chess();
+    const moveHistory = ["e4", "e5", "Nf3"].map((san) => {
+      const move = chess.move(san);
+      return {
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to + (move.promotion ?? ""),
+      };
+    });
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: false,
+      isPracticeContinuation: false,
+    });
+    vi.mocked(coordinator.transitionMoveLine).mockImplementationOnce(
+      (afterPly) => {
+        expect(afterPly).toBe(2);
+        // The transition owns epoch replacement + pruning while the old branch
+        // is still visible; the board/store rewind follows synchronously.
+        expect(useGameStore.getState().moveHistory).toHaveLength(3);
+        expect(chess.history()).toHaveLength(3);
+        return true;
+      },
+    );
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(coordinator.transitionMoveLine).toHaveBeenCalledWith(2);
+    expect(coordinator.pruneFromMoveIndex).not.toHaveBeenCalled();
+    expect(useGameStore.getState().moveHistory).toHaveLength(2);
+    expect(chess.history()).toHaveLength(2);
   });
 
   it("prunes pending SRS reviews before rated revert network calls resolve", async () => {
@@ -1980,9 +2022,10 @@ describe("useChessGameLifecycle", () => {
   });
 
   // ---------------------------------------------------------------
-  // g-2nrn: bounded tail wait ahead of the final upload
+  // g-2nrn / g-history-accuracy: bounded unresolved-evaluation recovery ahead
+  // of the final upload
   // ---------------------------------------------------------------
-  describe("g-2nrn: penultimate-ply tail wait", () => {
+  describe("terminal unresolved-evaluation recovery", () => {
     const buildTerminalGame = () => {
       const chess = new Chess();
       const moveHistory = ["f3", "e5", "g4", "Qh4#"].map((san) => {
@@ -2005,7 +2048,7 @@ describe("useChessGameLifecycle", () => {
         opening_score_changes: OPENING_CHANGES,
       });
 
-    it("waits on the PENULTIMATE ply only, not the terminal ply", async () => {
+    it("waits on every unresolved nonterminal ply, excluding the synthetic terminal ply", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
         chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
@@ -2017,13 +2060,58 @@ describe("useChessGameLifecycle", () => {
         await result.current.handleGameEnd();
       });
 
-      // 4 plies -> penultimate index is 2. The terminal ply (3) is filled
-      // deterministically by fillUnresolvedTerminal, so waiting on it would add
-      // latency for a value we synthesize anyway.
+      // All real analyses are unresolved in this production-shaped mock. The
+      // terminal ply (3) is filled deterministically by fillUnresolvedTerminal,
+      // but every earlier gap must be retried and included in the shared wait.
       expect(coordinator.settleWithin).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).toEqual([2]);
-      // Earlier plies (n-5 etc.) are long settled and are never waited on.
-      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).not.toContain(0);
+      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).toEqual([
+        0, 1, 2,
+      ]);
+      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).not.toContain(3);
+    });
+
+    it("resignation waits on and arms the final non-terminal ply", async () => {
+      const chess = new Chess();
+      const move = chess.move("e4");
+      if (!move) throw new Error("Unable to construct resignation test move");
+      const moveHistory = [{
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to,
+      }];
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValueOnce(true);
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "resign",
+        );
+      });
+
+      expect(coordinator.settleWithin).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).toEqual([0]);
+      const waitBudget = vi.mocked(coordinator.settleWithin).mock.calls[0][1];
+      expect(waitBudget).toBeGreaterThan(0);
+      expect(waitBudget).toBeLessThanOrEqual(300);
+      expect(Number.isInteger(waitBudget)).toBe(true);
+      expect(coordinator.armLateEvaluationRepair).toHaveBeenCalledWith(
+        "session-123",
+        0,
+        0,
+        moveHistory,
+        "final-request-123",
+      );
+      const payload = uploadSessionMovesMock.mock.calls[0][1];
+      expect(payload[0]).toEqual(expect.objectContaining({
+        move_san: "e4",
+        eval_cp: null,
+        eval_mate: null,
+      }));
+      expect(payload[0]).not.toHaveProperty("synthetic_terminal_eval");
     });
 
     it("waits AFTER stopping ordinary uploads, before the final full upload", async () => {
@@ -2050,26 +2138,29 @@ describe("useChessGameLifecycle", () => {
       );
     });
 
-    it("arms a late penultimate repair and releases it only after final_full settles", async () => {
+    it("arms each unresolved repair and releases them only after final_full settles", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
         chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
       });
       await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
       endGameOnce();
-      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValueOnce(true);
+      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValue(true);
 
       await act(async () => {
         await result.current.handleGameEnd();
       });
 
-      expect(coordinator.armLateEvaluationRepair).toHaveBeenCalledWith(
-        "session-123",
-        0,
-        2,
-        moveHistory,
-        "final-request-123",
-      );
+      expect(coordinator.armLateEvaluationRepair).toHaveBeenCalledTimes(3);
+      for (const moveIndex of [0, 1, 2]) {
+        expect(coordinator.armLateEvaluationRepair).toHaveBeenCalledWith(
+          "session-123",
+          0,
+          moveIndex,
+          moveHistory,
+          "final-request-123",
+        );
+      }
       expect(
         vi.mocked(coordinator.armLateEvaluationRepair).mock.invocationCallOrder[0],
       ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
@@ -2082,14 +2173,17 @@ describe("useChessGameLifecycle", () => {
       );
     });
 
-    it("disarms when the penultimate resolves into the final snapshot", async () => {
+    it("disarms only the row that resolves into the final snapshot", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
         chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
       });
       await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
-      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValueOnce(true);
+      vi.mocked(coordinator.armLateEvaluationRepair).mockReturnValue(true);
       vi.mocked(coordinator.store.getState).mockReturnValueOnce({
+        analysisMap: new Map(),
+      } as ReturnType<GameAnalysisCoordinator["store"]["getState"]>);
+      vi.mocked(coordinator.store.getState).mockReturnValue({
         analysisMap: new Map([[2, { playedEval: 12 }]]),
       } as ReturnType<GameAnalysisCoordinator["store"]["getState"]>);
 
@@ -2103,8 +2197,12 @@ describe("useChessGameLifecycle", () => {
       expect(coordinator.cancelLateEvaluationRepair).toHaveBeenCalledWith(
         "session-123",
         0,
+        2,
       );
-      expect(coordinator.releaseLateEvaluationRepair).not.toHaveBeenCalled();
+      expect(coordinator.releaseLateEvaluationRepair).toHaveBeenCalledWith(
+        "session-123",
+        0,
+      );
     });
 
     it("hands the upload only the REMAINDER of the absolute deadline", async () => {
@@ -2138,6 +2236,87 @@ describe("useChessGameLifecycle", () => {
       expect(granted).toBeLessThanOrEqual(3750);
       // Floored to an integer — AbortSignal.timeout rejects a fractional delay.
       expect(Number.isInteger(granted)).toBe(true);
+    });
+
+    it("gives the tail first claim and line sync only the unused 300ms subdeadline", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      let now = 1000;
+      vi.spyOn(performance, "now").mockImplementation(() => now);
+      vi.mocked(coordinator.settleWithin).mockImplementationOnce(async () => {
+        now += 5;
+      });
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "game_end",
+        );
+      });
+
+      expect(coordinator.settleWithin).toHaveBeenCalledWith([0, 1, 2], 300);
+      expect(
+        coordinator.settleLineSynchronizationWithin,
+      ).toHaveBeenCalledWith(295);
+      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ deadlineMs: 3995 }),
+      );
+    });
+
+    it("a full 300ms tail leaves no extra sync wait and preserves the 3700ms final_full floor", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      let now = 2000;
+      vi.spyOn(performance, "now").mockImplementation(() => now);
+      vi.mocked(coordinator.settleWithin).mockImplementationOnce(async () => {
+        now += 300;
+      });
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "game_end",
+        );
+      });
+
+      expect(
+        coordinator.settleLineSynchronizationWithin,
+      ).toHaveBeenCalledWith(0);
+      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ deadlineMs: 3700 }),
+      );
+    });
+
+    it("records an unsynchronized verdict and still attempts final_full", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      vi.mocked(coordinator.settleLineSynchronizationWithin).mockResolvedValueOnce(
+        "permanent_conflict",
+      );
+      vi.mocked(coordinator.getLineRevision).mockReturnValueOnce(7);
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "game_end",
+        );
+      });
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledOnce();
+      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+        expect.objectContaining({
+          lineRevision: 7,
+          lineSyncVerdict: "permanent_conflict",
+          recomputeOpportunity: true,
+          clientRequestId: "final-request-123",
+        }),
+      );
     });
 
     it("uploads nothing when the session was already replaced (step-1 guard)", async () => {

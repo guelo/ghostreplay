@@ -4,6 +4,7 @@ import { Chess } from "chess.js";
 import type {
   DrillSessionContract,
   DrillStrictness,
+  LineSyncVerdict,
   TargetBlunderSrs,
   TerminalAction,
 } from "../utils/api";
@@ -39,29 +40,93 @@ import {
 } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
+import { captureEvent } from "../analytics/posthog";
 
 // Upper bound on the final pre-terminal move upload (g-xanz). Keeps a hung or
 // lock-bound /moves from blocking game/drill end; the opening-score delta is
 // supplementary, so on timeout we proceed and let it degrade.
 const FINAL_UPLOAD_TIMEOUT_MS = 4000;
 
-// Slice of FINAL_UPLOAD_TIMEOUT_MS (not additive to it) spent waiting for an
-// still-pending PENULTIMATE-ply analysis before the final upload (g-2nrn). A
-// null penultimate eval nulls whole-game accuracy in both color configurations,
-// and unlike the terminal ply it cannot be filled deterministically — it needs
-// a real engine result.
+// Slice of FINAL_UPLOAD_TIMEOUT_MS (not additive to it) spent waiting for every
+// unresolved move analysis before the final upload (g-2nrn,
+// g-history-accuracy). Checkmate/draw endings exclude only the final ply because
+// fillUnresolvedTerminal can supply that exact terminal value; non-terminal
+// resignation and accuracy-fail paths cannot synthesize any row. One missing
+// evaluation anywhere in the played grid can null whole-game accuracy.
 //
 // Sized from measurement, not intuition. Depth-17 settle time is bimodal: a
-// penultimate ply inside a forced mating sequence settles in ~3ms (tiny tree),
+// tail ply inside a forced mating sequence settles in ~3ms (tiny tree),
 // while a quiet one (resign/draw endings) takes ~1.7s median and ~3.0s p90 on
 // mid-tier desktop hardware. Covering the quiet arm would need most of the 4s
 // budget, and the final upload ALREADY times out at ~18.5% of terminal actions
 // — taking that time would convert "null accuracy" into "tail never persisted",
 // which is strictly worse. So this buys the forced-mate arm plus analyses that
 // are nearly done (the wait only needs the RESIDUAL settle time, since the
-// analysis has been running since the penultimate move was played), and leaves
+// analysis has been running since its move was played), and leaves
 // the upload budget essentially intact.
 const TAIL_SETTLE_BUDGET_MS = 300;
+// Shares TAIL_SETTLE_BUDGET_MS's absolute subdeadline. The tail gets first
+// claim; branch synchronization may consume only the unused remainder.
+const LINE_SYNC_WAIT_BUDGET_MS = 300;
+
+const hasUsableMoveEvaluation = (
+  analysis:
+    | { playedEval: number | null; playedEvalMate: number | null }
+    | undefined,
+): boolean =>
+  analysis !== undefined &&
+  (analysis.playedEval !== null || analysis.playedEvalMate !== null);
+
+type ReanalysisInput = {
+  fenBefore: string;
+  moveUci: string;
+  moverColor: "white" | "black";
+  legalMoveCount: number;
+};
+
+/**
+ * Recover the immutable inputs needed to retry one recorded move. Fail closed
+ * unless chess.js can replay the UCI move from the recorded pre-move FEN and
+ * reproduce both its SAN and post-move FEN.
+ */
+const reanalysisInputForMove = (
+  history: MoveRecord[],
+  moveIndex: number,
+): ReanalysisInput | null => {
+  const move = history[moveIndex];
+  if (!move || move.uci.length < 4) return null;
+
+  const fenBefore =
+    moveIndex === 0
+      ? STARTING_FEN
+      : history[moveIndex - 1]?.fen;
+  if (!fenBefore) return null;
+
+  try {
+    const replay = new Chess(fenBefore);
+    const legalMoveCount = replay.moves().length;
+    const applied = replay.move({
+      from: move.uci.slice(0, 2),
+      to: move.uci.slice(2, 4),
+      promotion: move.uci.slice(4) || undefined,
+    });
+    if (
+      !applied ||
+      applied.san !== move.san ||
+      replay.fen() !== move.fen
+    ) {
+      return null;
+    }
+    return {
+      fenBefore,
+      moveUci: move.uci,
+      moverColor: moveIndex % 2 === 0 ? "white" : "black",
+      legalMoveCount,
+    };
+  } catch {
+    return null;
+  }
+};
 
 const applyRatingScores = (scores: RatingScores | null | undefined) => {
   if (!scores) return;
@@ -272,8 +337,8 @@ export const useChessGameLifecycle = ({
       // FULL/finality upload this client emits for the session (g-y90g). Folding
       // the stop in here — rather than at each terminal call site — makes that
       // ownership structural: no terminal path (game end, drill natural-end,
-      // resign, accuracy-fail) can forget it. A later g-residual-eval-gaps
-      // request is a one-row real-evaluation repair, never another full snapshot.
+      // resign, accuracy-fail) can forget it. Later g-residual-eval-gaps
+      // requests are sparse real-evaluation repairs, never another full snapshot.
       // stopSessionUploads only touches
       // the coordinator's upload bookkeeping (disables the timer, clears dirty,
       // aborts the in-flight fetch); the full-history upload below reads
@@ -292,6 +357,8 @@ export const useChessGameLifecycle = ({
         return;
       }
       const deadlineStartedAt = performance.now();
+      const preUploadDeadlineAt =
+        deadlineStartedAt + LINE_SYNC_WAIT_BUDGET_MS;
 
       coordinator.stopSessionUploads();
 
@@ -303,16 +370,77 @@ export const useChessGameLifecycle = ({
       // /moves" invariant is preserved.
       const frozenHistory = useGameStore.getState().moveHistory;
 
-      // Wait only on the PENULTIMATE ply. The terminal ply is filled
-      // deterministically by fillUnresolvedTerminal, so waiting on it would add
-      // latency for a result we synthesize anyway; earlier plies are long
-      // settled and are not the race this fixes.
-      if (frozenHistory.length >= 2) {
-        await coordinator.settleWithin(
-          [frozenHistory.length - 2],
+      // Recover every row that lacks a real score, not just the penultimate
+      // one. Production showed that a serial worker can preserve later results
+      // after an earlier request fails, leaving a complete row grid with a
+      // multi-row hole just before the terminal move. Reuse a live request when
+      // one exists; otherwise reconstruct immutable analysis inputs from the
+      // recorded FEN chain and reschedule it.
+      const canSynthesizeFinalEvaluation =
+        terminalAction === "game_end" ||
+        terminalAction === "drill_natural_end";
+      const initialAnalysisMap =
+        coordinator.store.getState().analysisMap;
+      const reanalysisInputs = new Map<number, ReanalysisInput>();
+      const unresolvedEvalIndices: number[] = [];
+      const lastIndex = frozenHistory.length - 1;
+      for (let moveIndex = 0; moveIndex < frozenHistory.length; moveIndex += 1) {
+        if (canSynthesizeFinalEvaluation && moveIndex === lastIndex) continue;
+        if (hasUsableMoveEvaluation(initialAnalysisMap.get(moveIndex))) continue;
+
+        const input = reanalysisInputForMove(frozenHistory, moveIndex);
+        if (!input) continue;
+        reanalysisInputs.set(moveIndex, input);
+        if (
+          coordinator.ensurePendingAnalysis(
+            sessionId,
+            epochBefore.generation,
+            moveIndex,
+            input.fenBefore,
+            input.moveUci,
+            input.moverColor,
+            input.legalMoveCount,
+          )
+        ) {
+          unresolvedEvalIndices.push(moveIndex);
+        }
+      }
+
+      if (unresolvedEvalIndices.length > 0) {
+        const tailBudgetMs = Math.min(
           TAIL_SETTLE_BUDGET_MS,
+          Math.max(0, Math.floor(preUploadDeadlineAt - performance.now())),
+        );
+        await coordinator.settleWithin(
+          unresolvedEvalIndices,
+          tailBudgetMs,
         );
       }
+
+      const lineSyncBudgetMs = Math.max(
+        0,
+        Math.floor(preUploadDeadlineAt - performance.now()),
+      );
+      let lineSyncVerdict: LineSyncVerdict = "synchronized";
+      try {
+        if (
+          typeof coordinator.settleLineSynchronizationWithin === "function"
+        ) {
+          lineSyncVerdict = await coordinator.settleLineSynchronizationWithin(
+            lineSyncBudgetMs,
+          );
+        }
+      } catch (err) {
+        // The coordinator's contract is non-throwing; retain a fail-closed
+        // terminal classification if an unexpected implementation error leaks.
+        lineSyncVerdict = "permanent_conflict";
+        console.error("[SessionMoves] Line synchronization wait failed:", err);
+      }
+      captureEvent("terminal_line_sync", {
+        session_id: sessionId,
+        terminal_action: terminalAction,
+        verdict: lineSyncVerdict,
+      });
 
       // REVALIDATE after the await. If startSession() ran during the wait it
       // bumped the generation, replaced uploadState and cleared analysisMap —
@@ -327,23 +455,37 @@ export const useChessGameLifecycle = ({
       }
 
       const finalClientRequestId = newClientRequestId();
-      let lateRepairArmed = false;
+      const armedRepairIndices = new Set<number>();
       try {
-        const penultimateIndex =
-          frozenHistory.length >= 2 ? frozenHistory.length - 2 : null;
-
-        // If the real penultimate analysis missed the bounded wait, retain one
-        // guarded sparse repair. Arm BEFORE snapshotting analysisMap so there is
-        // no gap where a resolution can miss both final_full and the repair.
-        if (penultimateIndex !== null) {
+        // If any real analysis missed the shared bounded wait, retain an
+        // independently guarded sparse repair for that row. Arm BEFORE
+        // snapshotting analysisMap so there is no gap where a resolution can
+        // miss both final_full and its repair. A request that failed during the
+        // wait is rescheduled once here before arming.
+        for (const moveIndex of unresolvedEvalIndices) {
+          const input = reanalysisInputs.get(moveIndex);
+          if (!input) continue;
           try {
-            lateRepairArmed = coordinator.armLateEvaluationRepair(
-              sessionId,
-              epochBefore.generation,
-              penultimateIndex,
-              frozenHistory,
-              finalClientRequestId,
-            );
+            if (
+              coordinator.ensurePendingAnalysis(
+                sessionId,
+                epochBefore.generation,
+                moveIndex,
+                input.fenBefore,
+                input.moveUci,
+                input.moverColor,
+                input.legalMoveCount,
+              ) &&
+              coordinator.armLateEvaluationRepair(
+                sessionId,
+                epochBefore.generation,
+                moveIndex,
+                frozenHistory,
+                finalClientRequestId,
+              )
+            ) {
+              armedRepairIndices.add(moveIndex);
+            }
           } catch (err) {
             console.error(
               "[SessionMoves] Could not arm late evaluation repair:",
@@ -355,18 +497,16 @@ export const useChessGameLifecycle = ({
         const analysisMap = new Map(
           coordinator.store.getState().analysisMap,
         );
-        // Resolution won the race into the final snapshot, so final_full already
-        // carries it and no later sparse upload is needed.
-        if (
-          lateRepairArmed &&
-          penultimateIndex !== null &&
-          analysisMap.has(penultimateIndex)
-        ) {
+        // A resolution that won the race into the final snapshot is already
+        // carried by final_full, so disarm only that row's sparse repair.
+        for (const moveIndex of [...armedRepairIndices]) {
+          if (!hasUsableMoveEvaluation(analysisMap.get(moveIndex))) continue;
           coordinator.cancelLateEvaluationRepair(
             sessionId,
             epochBefore.generation,
+            moveIndex,
           );
-          lateRepairArmed = false;
+          armedRepairIndices.delete(moveIndex);
         }
 
         const uploads = fillUnresolvedTerminal(
@@ -408,6 +548,11 @@ export const useChessGameLifecycle = ({
             deadlineMs: remainingBudgetMs,
             clientRequestId: finalClientRequestId,
             recomputeOpportunity: true,
+            lineRevision:
+              typeof coordinator.getLineRevision === "function"
+                ? (coordinator.getLineRevision(sessionId) ?? 0)
+                : 0,
+            lineSyncVerdict,
           });
         }
       } catch (err) {
@@ -416,9 +561,9 @@ export const useChessGameLifecycle = ({
           err,
         );
       } finally {
-        if (lateRepairArmed) {
+        if (armedRepairIndices.size > 0) {
           // Synchronous release only: the terminal action never awaits the late
-          // repair or inherits its retries.
+          // repairs or inherits their retries.
           try {
             coordinator.releaseLateEvaluationRepair(
               sessionId,
@@ -573,7 +718,10 @@ export const useChessGameLifecycle = ({
     setEngineMessage,
   ]);
 
-  const rewindBoardLocally = useCallback((storeMoveHistory: MoveRecord[]) => {
+  const rewindBoardLocally = useCallback((
+    storeMoveHistory: MoveRecord[],
+    coordinatorAlreadyPruned = false,
+  ) => {
     const store = useGameStore.getState();
     const newHistoryLength = getRewindHistoryLength(storeMoveHistory);
     const undoCount = storeMoveHistory.length - newHistoryLength;
@@ -595,7 +743,9 @@ export const useChessGameLifecycle = ({
     // Synchronously prune coordinator-owned resolution/lineage state for the
     // reverted indices (M1), in the same turn as the UI reset. This drives the
     // DecisionOwner's partial reset (frontier/context/SRS prune) via emitReset.
-    coordinator.pruneFromMoveIndex(newHistory.length);
+    if (!coordinatorAlreadyPruned) {
+      coordinator.pruneFromMoveIndex(newHistory.length);
+    }
   }, [
     chess,
     coordinator,
@@ -620,11 +770,12 @@ export const useChessGameLifecycle = ({
     clearBlunderBoardOverride?.();
 
     const snapshotMoveHistory = [...store.moveHistory];
+    const afterPly = getRewindHistoryLength(snapshotMoveHistory);
     // Cancel pending SRS reviews for the reverted indices BEFORE the awaited
     // upload/endGame, so an analysis resolving during that async window cannot
     // POST a review the revert is cancelling (durable resolved slots survive).
     coordinator.decisionOwner.cancelPendingSrsReviews(
-      getRewindHistoryLength(snapshotMoveHistory),
+      afterPly,
     );
     setResolvedReview(null);
 
@@ -646,6 +797,10 @@ export const useChessGameLifecycle = ({
         await uploadSessionMoves(store.sessionId!, snapshotUploads, {
           uploadKind: "revert",
           recomputeOpportunity: true,
+          lineRevision:
+            typeof coordinator.getLineRevision === "function"
+              ? (coordinator.getLineRevision(store.sessionId!) ?? 0)
+              : 0,
         });
         if (!isCurrentRevertExecution(executionId)) {
           return;
@@ -684,7 +839,14 @@ export const useChessGameLifecycle = ({
         return;
       }
 
-      rewindBoardLocally(snapshotMoveHistory);
+      const synchronizeActiveUnratedLine =
+        !store.isRated && !store.isPracticeContinuation;
+      const coordinatorPruned =
+        synchronizeActiveUnratedLine &&
+        typeof coordinator.transitionMoveLine === "function"
+        ? coordinator.transitionMoveLine(afterPly)
+        : false;
+      rewindBoardLocally(snapshotMoveHistory, coordinatorPruned);
       setShowRevertWarning(false);
     } catch (error) {
       if (!isCurrentRevertExecution(executionId)) {
@@ -781,7 +943,7 @@ export const useChessGameLifecycle = ({
         // a separate flip-then-clear would destroy a delta that resolved during
         // the await. Late arrivals were already routed to the queue by the
         // setDepartingSession mark above.
-        s2.beginSession(response.session_id);
+        s2.beginSession(response.session_id, response.move_line_revision);
         s2.setIsGameActive(true);
         setIsStartingGame(false);
         setShowStartOverlay(false);
@@ -796,7 +958,10 @@ export const useChessGameLifecycle = ({
         s2.setMoveHistory([]);
         s2.setViewIndex(null);
         resetEngine();
-        coordinator.startSession(response.session_id);
+        coordinator.startSession(
+          response.session_id,
+          response.move_line_revision,
+        );
         clearBlunderBoardOverride?.();
         setBlunderAlert(null);
         setShowFlash(false);
@@ -937,7 +1102,7 @@ export const useChessGameLifecycle = ({
 
         const s = useGameStore.getState();
         // Atomic flip + clear; see the startGame path (g-f3m4).
-        s.beginSession(response.session_id);
+        s.beginSession(response.session_id, response.move_line_revision);
         s.setIsGameActive(true);
         s.setPlayerColor(options.playerColor);
         s.setBoardOrientation(options.playerColor);
@@ -967,7 +1132,10 @@ export const useChessGameLifecycle = ({
         if (!clearedDepartingDrillCoordinator) {
           coordinator.clearSession();
         }
-        coordinator.startSession(response.session_id);
+        coordinator.startSession(
+          response.session_id,
+          response.move_line_revision,
+        );
         clearBlunderBoardOverride?.();
         setBlunderAlert(null);
         setShowFlash(false);
@@ -1212,6 +1380,7 @@ export const useChessGameLifecycle = ({
     store.setBoardOrientation(store.playerColor);
     setEngineMessage(null);
     store.setSessionId(null);
+    store.setMoveLineRevision(0);
     // Deliberate abandonment, not a supersede: drop the current delta, drop any
     // queued late notifications, and invalidate in-flight polls so a response
     // already on the wire cannot resurface as a phantom toast (g-f3m4). The

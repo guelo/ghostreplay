@@ -76,9 +76,24 @@ def test_broken_reuse_fails_before_timing(capsys, monkeypatch):
     counter = {"n": 0}
     real = bench.opening_evidence._session_digest
 
-    def never_matching(row_count, body, session_ts):
+    def never_matching(
+        row_count,
+        body,
+        session_ts,
+        session_pgn_body,
+        terminal_line_reconciled=False,
+    ):
         counter["n"] += 1
-        return f"{real(row_count, body, session_ts)}-{counter['n']}"
+        digest = real(
+            row_count,
+            body,
+            session_ts,
+            session_pgn_body,
+            terminal_line_reconciled,
+        )
+        return (
+            f"{digest}-{counter['n']}"
+        )
 
     monkeypatch.setattr(bench.opening_evidence, "_session_digest", never_matching)
     assert bench.run(SMALL) == 1

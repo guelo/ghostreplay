@@ -572,6 +572,7 @@ class GameStartResponse(BaseModel):
     session_id: uuid.UUID
     engine_elo: int
     player_color: PlayerColor
+    move_line_revision: int
 
 
 class GameEndRequest(BaseModel):
@@ -779,6 +780,7 @@ def start_game(
         session_id=session.id,
         engine_elo=session.engine_elo,
         player_color=request.player_color,
+        move_line_revision=session.move_line_revision,
     )
 
 
@@ -842,6 +844,10 @@ def end_game(
     row_reconcile = reconcile_terminal_move_rows(
         db, session, allow_sparse=True
     )
+    # Admission marker for the independent fresh-replay proof. Historical
+    # sessions default false because no terminal reconcile ever covered them;
+    # this flips only in the same transaction that ran the boundary above.
+    session.terminal_line_reconciled = True
     if row_reconcile.derived_rows:
         # Durable marker: after derivation the row grid alone can't distinguish
         # a reconciled session from ordinary unresolved uploads, and the

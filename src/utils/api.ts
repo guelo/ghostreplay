@@ -80,6 +80,7 @@ const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`^/api/drills/${UUID_SOURCE}/abandon$`, 'i'), '/api/drills/{session_id}/abandon'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}$`, 'i'), '/api/drills/{session_id}'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/moves/eval-repair$`, 'i'), '/api/session/{session_id}/moves/eval-repair'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/moves/truncate$`, 'i'), '/api/session/{session_id}/moves/truncate'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/moves$`, 'i'), '/api/session/{session_id}/moves'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis-evidence$`, 'i'), '/api/session/{session_id}/analysis-evidence'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis$`, 'i'), '/api/session/{session_id}/analysis'],
@@ -189,6 +190,18 @@ export type UploadKind =
   | 'revert'
   | 'late_eval_repair'
 
+export type LineSyncVerdict =
+  | 'synchronized'
+  | 'deadline_expired'
+  | 'permanent_conflict'
+
+export type LineProofVerdict =
+  | 'passed'
+  | 'wrong_row_count'
+  | 'coordinate_mismatch'
+  | 'nonstandard_start'
+  | 'illegal_or_discontinuous_line'
+
 /**
  * Mint a client-generated correlation id for a request. Unlike the server id
  * (read off the response, absent on a timeout), this is attached to EVERY
@@ -219,6 +232,7 @@ export interface ApiRequestTelemetry {
   deadlineMs?: number
   /** `document.visibilityState` captured at call time (before the fetch). */
   visibilityStateStart?: string
+  lineSyncVerdict?: LineSyncVerdict
 }
 
 /**
@@ -259,6 +273,7 @@ export const reportApiRequest = (params: {
     move_count: t?.moveCount ?? null,
     payload_bytes: t?.payloadBytes ?? null,
     deadline_ms: t?.deadlineMs ?? null,
+    line_sync_verdict: t?.lineSyncVerdict ?? null,
     visibility_state_start: t?.visibilityStateStart ?? null,
     visibility_state_end: visibilityEnd ?? null,
     // A tab hidden mid-request: start !== end. Null unless both are known.
@@ -596,6 +611,7 @@ export interface DrillSessionContract {
   rated_start_ply: number | null
   normal_started_at: string | null
   converted_at: string | null
+  move_line_revision: number
   terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
   opening_score_changes?: OpeningScoreDeltaItem[] | null
 }
@@ -662,6 +678,7 @@ interface StartGameResponse {
   session_id: string
   engine_elo: number
   player_color?: 'white' | 'black'
+  move_line_revision: number
 }
 
 interface EndGameRequest {
@@ -818,12 +835,26 @@ interface SessionMovesRequest {
   eval_repair?: boolean
   /** Exact final_full receipt this sparse repair must follow. */
   final_client_request_id?: string
+  line_revision?: number
+  line_sync_verdict?: LineSyncVerdict
 }
 
-interface SessionMovesResponse {
+export interface SessionMovesResponse {
   moves_inserted: number
   drill_state?: DrillSessionState | null
   drill_terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
+  line_revision: number
+  line_proof_verdict?: LineProofVerdict | null
+}
+
+export interface TruncateSessionMovesResponse {
+  client_request_id: string
+  from_revision: number
+  to_revision: number
+  line_revision: number
+  after_ply: number
+  deleted_move_count: number
+  evidence_changed: boolean
 }
 
 /**
@@ -1117,14 +1148,26 @@ export type UploadSessionMovesOptions =
       deadlineMs: number
       clientRequestId?: string
       recomputeOpportunity?: boolean
+      lineRevision?: number
+      lineSyncVerdict?: LineSyncVerdict
     }
-  | { uploadKind: 'incremental'; signal?: AbortSignal; recomputeOpportunity?: boolean }
-  | { uploadKind: 'revert'; recomputeOpportunity?: boolean }
+  | {
+      uploadKind: 'incremental'
+      signal?: AbortSignal
+      recomputeOpportunity?: boolean
+      lineRevision?: number
+    }
+  | {
+      uploadKind: 'revert'
+      recomputeOpportunity?: boolean
+      lineRevision?: number
+    }
   | {
       uploadKind: 'late_eval_repair'
       finalClientRequestId: string
       signal?: AbortSignal
       recomputeOpportunity?: false
+      lineRevision?: number
     }
 
 /**
@@ -1153,6 +1196,12 @@ export const uploadSessionMoves = async (
           eval_repair: true,
           final_client_request_id: options.finalClientRequestId,
         }
+      : {}),
+    ...(options.lineRevision === undefined
+      ? {}
+      : { line_revision: options.lineRevision }),
+    ...(options.uploadKind === 'final_full' && options.lineSyncVerdict
+      ? { line_sync_verdict: options.lineSyncVerdict }
       : {}),
   }
   // Serialize ONCE: reuse the exact bytes for the fetch body AND the measured
@@ -1186,6 +1235,8 @@ export const uploadSessionMoves = async (
     deadlineMs:
       options.uploadKind === 'final_full' ? options.deadlineMs : undefined,
     visibilityStateStart: readVisibilityState(),
+    lineSyncVerdict:
+      options.uploadKind === 'final_full' ? options.lineSyncVerdict : undefined,
   }
   // A dedicated route makes mixed-version rollout fail closed: an old backend
   // returns 404 instead of ignoring eval_repair and accepting the sparse row as
@@ -1206,6 +1257,27 @@ export const uploadSessionMoves = async (
     { fallbackMessage: 'Failed to upload session moves', telemetry },
   )
 }
+
+/** Idempotently delete the persisted tail and advance the server branch token. */
+export const truncateSessionMoves = async (
+  sessionId: string,
+  request: {
+    client_request_id: string
+    line_revision: number
+    after_ply: number
+  },
+  options?: { signal?: AbortSignal },
+): Promise<TruncateSessionMovesResponse> =>
+  requestJson<TruncateSessionMovesResponse>(
+    `${API_BASE_URL}/api/session/${sessionId}/moves/truncate`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(request),
+      signal: options?.signal,
+    },
+    { fallbackMessage: 'Failed to synchronize session move line' },
+  )
 
 /**
  * Cached analysis result from the backend analysis cache (see backend

@@ -162,6 +162,20 @@ comments. The service keeps both forms of the game record under the session and
 account boundary, and game completion makes the saved game available for later
 review.
 
+An active unrated takeback rewinds the board immediately and also replaces the
+durable move branch. The browser pauses uploads behind a server-owned line
+revision while FastAPI idempotently truncates the abandoned tail; stale uploads
+cannot restore it, and analysis for surviving plies is carried into the new
+upload epoch. Terminal uploads are checked as a complete standard-start line,
+but a failed proof remains advisory for raw persistence while failing closed for
+opening evidence. Fresh replay applies that fail-closed gate only after a
+terminal writer durably marks that row reconciliation ran; historical sessions
+the boundary never covered retain their prior evidence behavior. The exact
+revision, race, proof, and terminal-deadline
+contract is in [Session move-line revisions](docs/session-move-lines.md).
+Both normal game completion and a drill's natural terminal result reconcile a
+verified missing PGN tail before exposing that session to opening evidence.
+
 The post-game view reads that account-owned saved session and its persisted
 move analysis. History lists ended sessions visible to that account, and
 selecting an item opens the same review journey. A rated terminal outcome also
@@ -184,6 +198,11 @@ A player who rewinds a rated game first confirms a resignation of that game.
 The board can then continue locally as unrated practice: it does not upload
 moves or create Ghost targets, drill progress, reviews, or rating effects.
 Starting another session clears that local practice state.
+
+By contrast, rewinding an active unrated game or drill updates its durable line
+through the revision protocol above. A stale second tab fails closed rather than
+adopting another tab's branch revision; that limitation is intentional because
+there is no cross-tab branch merge protocol.
 
 ## Cross-cutting contracts
 
@@ -246,7 +265,8 @@ implementation authorities named in the engineering map.
   [analysis evidence](docs/architecture/analysis-evidence.md), the
   [opening-book loader](docs/opening-book.md), the
   [opening-score model and calibration](docs/openingscore_final.md), and
-  [session-accuracy versioning](docs/session-accuracy-versioning.md).
+  [session-accuracy versioning](docs/session-accuracy-versioning.md), and
+  [session move-line revisions](docs/session-move-lines.md).
 - **Code-authoritative contracts:** [FastAPI routes](backend/app/api/),
   [models](backend/app/models.py), [migrations](backend/alembic/),
   [frontend API types and callers](src/utils/api.ts), tests, and generated

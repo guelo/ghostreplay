@@ -106,6 +106,8 @@ export type GameState = {
 
   // --- Session (set once per game, rarely changes) ---
   sessionId: string | null;
+  /** Last server-acknowledged branch token for the active session move line. */
+  moveLineRevision: number;
   isGameActive: boolean;
   gameResult: GameResult | null;
   playerColor: BoardOrientation;
@@ -181,6 +183,7 @@ export type GameActions = {
   setMoveHistory: (update: SetStateAction<MoveRecord[]>) => void;
   setViewIndex: (update: SetStateAction<number | null>) => void;
   setSessionId: (update: SetStateAction<string | null>) => void;
+  setMoveLineRevision: (update: SetStateAction<number>) => void;
   setIsGameActive: (update: SetStateAction<boolean>) => void;
   setGameResult: (update: SetStateAction<GameResult | null>) => void;
   setPlayerColor: (update: SetStateAction<BoardOrientation>) => void;
@@ -237,7 +240,7 @@ export type GameActions = {
    *  an invisible inline slot. */
   setDepartingSession: (sessionId: string | null) => void;
   /** Flip to a new session and clear the current delta slot as ONE transaction. */
-  beginSession: (sessionId: string) => void;
+  beginSession: (sessionId: string, moveLineRevision?: number) => void;
   /** Clear the current slot only; the late queue is untouched. */
   clearOpeningDelta: () => void;
   /** Deliberate abandonment: drop both slots and invalidate in-flight polls. */
@@ -258,6 +261,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   moveHistory: [],
   viewIndex: null,
   sessionId: null,
+  moveLineRevision: 0,
   isGameActive: false,
   gameResult: null,
   playerColor: "white",
@@ -297,6 +301,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ moveHistory: resolve(u, s.moveHistory) })),
   setViewIndex: (u) => set((s) => ({ viewIndex: resolve(u, s.viewIndex) })),
   setSessionId: (u) => set((s) => ({ sessionId: resolve(u, s.sessionId) })),
+  setMoveLineRevision: (u) =>
+    set((s) => ({ moveLineRevision: resolve(u, s.moveLineRevision) })),
   setIsGameActive: (u) =>
     set((s) => ({ isGameActive: resolve(u, s.isGameActive) })),
   setGameResult: (u) =>
@@ -391,9 +397,10 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   // destroy it. Nothing is promoted here — a delta sitting in the slot either
   // rendered inline (replaying it as a toast would double-show it) or arrived
   // while `departingSessionId` was set, in which case it was already queued.
-  beginSession: (sessionId) =>
+  beginSession: (sessionId, moveLineRevision = 0) =>
     set(() => ({
       sessionId,
+      moveLineRevision,
       departingSessionId: null,
       openingScoreDelta: null,
     })),

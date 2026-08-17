@@ -855,9 +855,10 @@ class TestSessionEligibilityParity:
         # g-v21l changed WHICH rows the cache fallback selects (the
         # OPENING_EVIDENCE grant), which of those a given user may read (submitter
         # scoping), and which PAIRS upgrade (the coherent-tuple requirement) —
-        # raw-v7. Pre-change batches must self-heal via a version mismatch, not
-        # serve as fresh.
-        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v7"
+        # raw-v7, then g-drill-line-truncate added the terminal complete-line
+        # evidence proof and its PGN cache input — raw-v8. Pre-change batches
+        # must self-heal via a version mismatch, not serve as fresh.
+        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v8"
 
     def test_in_progress_session_affects_neither_digest_nor_overlay(
         self, db_session, branching_graph
@@ -2267,9 +2268,9 @@ _COLUMN_MUTATIONS = [
 
 class TestReplayDigestColumnCoverage:
     """The replay-cache digest is computed by the DATABASE while the freshness
-    digest keeps ``_sm_line``, so "same rows → same line" no longer holds by
-    construction across the two. These tests are the replacement guard: every
-    consumed column must invalidate BOTH."""
+    digest keeps ``_sm_line`` plus one ``_sp_line`` per session, so "same rows →
+    same line" no longer holds by construction across the two. These tests are
+    the replacement guard: every consumed column must invalidate BOTH."""
 
     def test_mutation_list_covers_every_digested_column(self):
         assert {c for c, _ in _COLUMN_MUTATIONS} == set(
@@ -2335,6 +2336,89 @@ class TestReplayDigestColumnCoverage:
         reset_session_evidence_cache()
         _assert_overlay_equal(ov2, overlay_evidence(db_session, 1, "white", branching_graph))
 
+    def test_terminal_pgn_change_busts_the_replay_cache(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """The fresh proof consumes gs.pgn, so its bounded value is key input."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10
+        )
+        db_session.execute(
+            text(
+                "UPDATE game_sessions SET terminal_line_reconciled = 1 "
+                "WHERE id = :sid"
+            ),
+            {"sid": sid},
+        )
+        db_session.commit()
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        before_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+
+        db_session.execute(
+            text("UPDATE game_sessions SET pgn = '1. e4 *' WHERE id = :sid"),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != before_digest
+
+    def test_terminal_reconcile_marker_busts_both_cache_identities(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10
+        )
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        before_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+
+        db_session.execute(
+            text(
+                "UPDATE game_sessions SET terminal_line_reconciled = 1 "
+                "WHERE id = :sid"
+            ),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != before_digest
+
+    def test_terminal_pgn_is_folded_once_per_session_not_once_per_move(
+        self, db_session
+    ):
+        """The slow raw digest must not multiply PGN bytes by move-row count."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        long_pgn = "1. e4 {" + ("x" * 5_000) + "} *"
+        db_session.execute(
+            text("UPDATE game_sessions SET pgn = :pgn WHERE id = :sid"),
+            {"pgn": long_pgn, "sid": sid},
+        )
+        db_session.commit()
+
+        lines, _candidate_fens, _norm_list = (
+            opening_evidence._per_user_evidence_lines(db_session, 1, "white")
+        )
+        sm_lines = [line for line in lines if line.startswith("SM|")]
+        sp_lines = [line for line in lines if line.startswith("SP|")]
+
+        assert len(sm_lines) == 4
+        assert len(sp_lines) == 1
+        assert all(long_pgn not in line for line in lines)
+        assert len(sp_lines[0]) < 128
+
     def test_sql_and_python_digest_bodies_agree(self, db_session, branching_graph):
         """The probe's SQL body and ``_session_digest_body`` must be byte-equal:
         if they drift, nothing is WRONG but every build re-replays from scratch.
@@ -2367,9 +2451,17 @@ class TestReplayDigestColumnCoverage:
         assert opening_evidence._session_digest_body(rows) == probe[0].body
         assert len(rows) == probe[0].row_count
         assert opening_evidence._session_digest(
-            len(rows), opening_evidence._session_digest_body(rows), rows[0].session_ts
+            len(rows),
+            opening_evidence._session_digest_body(rows),
+            rows[0].session_ts,
+            opening_evidence._session_pgn_body(rows[0].session_pgn),
+            rows[0].terminal_line_reconciled,
         ) == opening_evidence._session_digest(
-            probe[0].row_count, probe[0].body, probe[0].session_ts
+            probe[0].row_count,
+            probe[0].body,
+            probe[0].session_ts,
+            probe[0].session_pgn_body,
+            probe[0].terminal_line_reconciled,
         )
 
 
@@ -2385,14 +2477,16 @@ class TestProbePayloadFold:
 
     def test_postgres_probe_wraps_the_aggregate_and_changes_nothing_else(self):
         agg = opening_evidence._SESSION_DIGEST_AGG_SQL
+        pgn = opening_evidence._SESSION_PGN_BODY_SQL
         pg = opening_evidence._probe_sql("postgresql")
         portable = opening_evidence._probe_sql("sqlite")
 
         assert f"md5({agg})" in pg, "PostgreSQL probe stopped folding server-side"
-        assert agg in portable and "md5(" not in portable
+        assert f"md5({pgn})" in pg
+        assert agg in portable and pgn in portable and "md5(" not in portable
         # The two statements may differ ONLY by the fold: same filters, same
         # GROUP BY, same explicit color rank. Anything else is a real divergence.
-        assert pg.replace(f"md5({agg})", agg) == portable
+        assert pg.replace(f"md5({agg})", agg).replace(f"md5({pgn})", pgn) == portable
 
     def test_every_registered_fold_is_a_usable_pair(self):
         for dialect, (template, fn) in opening_evidence._BODY_FOLDS.items():
@@ -2477,6 +2571,8 @@ class TestProbeFetchRace:
             probe.row_count,
             probe.body,
             probe.session_ts,
+            probe.session_pgn_body,
+            probe.terminal_line_reconciled,
         )
         persisted_hash = db_session.execute(
             text(

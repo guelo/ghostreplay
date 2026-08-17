@@ -104,9 +104,11 @@ SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/opening_score_delta_lane.py",
     "backend/app/opening_score_scheduler.py",
     "backend/app/opening_transposition_artifact.py",
+    "backend/app/ply_coordinates.py",
     "backend/app/position_analysis_policy.py",
     "backend/app/position_analysis_repo.py",
     "backend/app/posthog_client.py",
+    "backend/app/terminal_pgn.py",
     "backend/requirements.txt",
     "backend/scripts/calibrate_opening_scores_v2.py",
 )

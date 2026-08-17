@@ -440,6 +440,7 @@ def test_session_moves_abandoned_drill_skips_expensive_evidence_side_effects(
     assert response.json() == {
         "moves_inserted": 1,
         "drill_state": "abandoned",
+        "line_revision": 0,
     }
     assert (
         db_session.query(SessionMove)
@@ -494,6 +495,7 @@ def test_session_moves_natural_ended_drill_skips_expensive_evidence_side_effects
         "moves_inserted": 1,
         "drill_state": "failed",
         "drill_terminal_reason": "natural_end",
+        "line_revision": 0,
     }
     assert db_session.query(AnalysisCache).filter(
         AnalysisCache.fen_before == STARTING_FEN,

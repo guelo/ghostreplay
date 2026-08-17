@@ -7,6 +7,7 @@ import {
   startGame,
   endGame,
   uploadSessionMoves,
+  truncateSessionMoves,
   recordBlunder,
   recordManualBlunder,
   fetchBlunders,
@@ -458,6 +459,26 @@ describe('uploadSessionMoves', () => {
     expect(body.recompute_opportunity).toBe(true)
   })
 
+  it('serializes the revision and terminal line-sync verdict', async () => {
+    mockResponse({
+      moves_inserted: 1,
+      line_revision: 4,
+      line_proof_verdict: 'passed',
+    })
+
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'final_full',
+      terminalAction: 'game_end',
+      deadlineMs: 3700,
+      lineRevision: 4,
+      lineSyncVerdict: 'deadline_expired',
+    })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.line_revision).toBe(4)
+    expect(body.line_sync_verdict).toBe('deadline_expired')
+  })
+
   // Type-level contract (enforced by `tsc -b` in the build): the discriminated
   // union rejects mixing the wrong fields across upload kinds. Never executed.
   it('enforces the discriminated-union option shape at compile time', () => {
@@ -484,6 +505,38 @@ describe('uploadSessionMoves', () => {
       await uploadSessionMoves('s', [], {})
     }
     expect(typeof _typeContracts).toBe('function')
+  })
+})
+
+describe('truncateSessionMoves', () => {
+  it('forwards the stable idempotency body and abort signal', async () => {
+    const controller = new AbortController()
+    const body = {
+      client_request_id: '11111111-1111-4111-8111-111111111111',
+      line_revision: 3,
+      after_ply: 8,
+    }
+    mockResponse({
+      ...body,
+      from_revision: 3,
+      to_revision: 4,
+      line_revision: 4,
+      deleted_move_count: 2,
+      evidence_changed: false,
+    })
+
+    await truncateSessionMoves('sess-1', body, {
+      signal: controller.signal,
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/sess-1/moves/truncate'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }),
+    )
   })
 })
 

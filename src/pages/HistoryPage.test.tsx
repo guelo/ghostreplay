@@ -939,6 +939,51 @@ describe('HistoryPage', () => {
       expect(screen.queryByText(/showing the last loaded result/)).not.toBeInTheDocument();
     });
 
+    it('keeps polling a complete move grid until its missing evaluation is repaired', async () => {
+      const unresolved = {
+        ...ANALYSIS_RESPONSE,
+        expected_total_moves: 3,
+        analyzed_moves: 3,
+        is_complete: true,
+        moves: ANALYSIS_RESPONSE.moves.map((move, index) => ({
+          ...move,
+          eval_cp: index === 2 ? null : 10,
+          eval_mate: null,
+        })),
+        summary: { ...ANALYSIS_RESPONSE.summary, accuracy: null },
+      };
+      const repaired = {
+        ...unresolved,
+        moves: unresolved.moves.map((move, index) =>
+          index === 2 ? { ...move, eval_cp: 15 } : move,
+        ),
+        summary: { ...unresolved.summary, accuracy: 87 },
+      };
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis
+        .mockResolvedValueOnce(unresolved)
+        .mockResolvedValueOnce(repaired);
+
+      renderPage();
+      await settle();
+
+      expect(screen.getByText(/Analysis still processing/)).toBeInTheDocument();
+      expect(accuracyCell()).toHaveTextContent('computing');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+
+      expect(accuracyCell()).toHaveTextContent('87%');
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 2);
+      });
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(2);
+    });
+
     it('stays in the loading state through the retry window, claiming nothing about a payload it never got', async () => {
       mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
       mockFetchAnalysis.mockRejectedValue(new Error('Network error'));

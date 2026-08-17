@@ -24,6 +24,22 @@ import "./HistoryPage.css";
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
 
+/**
+ * `is_complete` is the persisted move-row count contract. A final_full upload can
+ * contain every expected row while one tail engine evaluation is still settling;
+ * the guarded accuracy calculation correctly returns null until the sparse repair
+ * replaces that row. Keep the existing bounded poll alive for that second phase.
+ */
+const hasUnresolvedExpectedEvaluation = (data: SessionAnalysis): boolean => {
+  const expected = data.expected_total_moves;
+  if (expected == null || expected <= 0 || data.moves.length < expected) {
+    return false;
+  }
+  return data.moves
+    .slice(0, expected)
+    .some((move) => move.eval_cp == null && move.eval_mate == null);
+};
+
 function HistoryPage() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -112,13 +128,18 @@ function HistoryPage() {
           // the pane on "Loading analysis..." forever with a payload in hand.
           setAnalysisLoading(false);
 
-          if (!data.is_complete && pollCountRef.current < POLL_MAX_ATTEMPTS) {
+          const stillProcessing =
+            !data.is_complete ||
+            (data.summary.accuracy == null &&
+              hasUnresolvedExpectedEvaluation(data));
+
+          if (stillProcessing && pollCountRef.current < POLL_MAX_ATTEMPTS) {
             setAnalysisProcessing(true);
             pollCountRef.current++;
             pollTimerRef.current = setTimeout(() => {
               if (!cancelled) doFetch();
             }, POLL_INTERVAL_MS);
-          } else if (data.is_complete) {
+          } else if (!stillProcessing) {
             setAnalysisProcessing(false);
             fetchHistory()
               .then((fresh) => { if (!cancelled) setGames(fresh); })

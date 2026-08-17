@@ -131,7 +131,10 @@ import {
   DecisionOwner,
   type DecisionOwnerGameState,
 } from "../services/DecisionOwner";
-import type { AnalysisOutcome } from "../services/GameAnalysisCoordinator";
+import type {
+  AnalysisOutcome,
+  LineSyncDiagnostic,
+} from "../services/GameAnalysisCoordinator";
 import { gradeDrillMove } from "../workers/analysisUtils";
 import { __resetOpeningRootIndexCache } from "../hooks/useLiveOpeningLineage";
 
@@ -201,6 +204,8 @@ let capturedOutcomeListener: ((o: unknown) => void) | null = null;
 let mockUploadCommitSessionId: string | null = null;
 let mockUploadCommitRevision = 0;
 const mockUploadCommitListeners = new Set<() => void>();
+let mockLineSyncDiagnostic: LineSyncDiagnostic | null = null;
+const mockLineSyncDiagnosticListeners = new Set<() => void>();
 
 const emitUploadCommit = (sessionId: string) => {
   if (sessionId === mockUploadCommitSessionId) {
@@ -240,6 +245,9 @@ const mockCoordinator = {
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
   stopSessionUploads: vi.fn(),
   settleWithin: vi.fn().mockResolvedValue(undefined),
+  settleLineSynchronizationWithin: vi.fn().mockResolvedValue("synchronized"),
+  ensurePendingAnalysis: vi.fn().mockReturnValue(false),
+  getLineRevision: vi.fn(() => useGameStore.getState().moveLineRevision),
   armLateEvaluationRepair: vi.fn().mockReturnValue(false),
   releaseLateEvaluationRepair: vi.fn(),
   cancelLateEvaluationRepair: vi.fn(),
@@ -255,6 +263,12 @@ const mockCoordinator = {
     mockUploadCommitListeners.add(listener);
     return () => mockUploadCommitListeners.delete(listener);
   }),
+  getLineSyncDiagnostic: vi.fn(() => mockLineSyncDiagnostic),
+  addLineSyncDiagnosticListener: vi.fn((listener: () => void) => {
+    mockLineSyncDiagnosticListeners.add(listener);
+    return () => mockLineSyncDiagnosticListeners.delete(listener);
+  }),
+  retryLineSynchronization: vi.fn(),
   store: gameAnalysisStore,
   markSkipped: vi.fn(),
   pruneFromMoveIndex: vi.fn((k: number) =>
@@ -381,8 +395,13 @@ beforeEach(() => {
   mockUploadCommitSessionId = null;
   mockUploadCommitRevision = 0;
   mockUploadCommitListeners.clear();
+  mockLineSyncDiagnostic = null;
+  mockLineSyncDiagnosticListeners.clear();
   mockCoordinator.getUploadCommitRevision.mockClear();
   mockCoordinator.addUploadCommitListener.mockClear();
+  mockCoordinator.getLineSyncDiagnostic.mockClear();
+  mockCoordinator.addLineSyncDiagnosticListener.mockClear();
+  mockCoordinator.retryLineSynchronization.mockClear();
   // Isolate persisted drill prefs between tests — a successful drill start
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
   // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
@@ -398,6 +417,11 @@ beforeEach(() => {
   mockCoordinator.flushPendingUploads.mockClear();
   mockCoordinator.flushPendingUploads.mockResolvedValue(undefined);
   mockCoordinator.stopSessionUploads.mockClear();
+  mockCoordinator.settleLineSynchronizationWithin.mockClear();
+  mockCoordinator.settleLineSynchronizationWithin.mockResolvedValue("synchronized");
+  mockCoordinator.ensurePendingAnalysis.mockClear();
+  mockCoordinator.ensurePendingAnalysis.mockReturnValue(false);
+  mockCoordinator.getLineRevision.mockClear();
   // Restore the delegating drill-grade default so a per-test override never leaks.
   mockCoordinator.waitForDrillGrade.mockReset();
   mockCoordinator.waitForDrillGrade.mockImplementation(defaultWaitForDrillGrade);
@@ -635,6 +659,54 @@ describe("ChessGame characterization safeguards", () => {
       "data-allow-dragging",
       "true",
     );
+  });
+
+  it("starts a new game for a permanent move-line identity conflict", async () => {
+    useGameStore.setState({
+      sessionId: "session-line-sync",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: STARTING_FEN,
+    });
+
+    await act(async () => {
+      render(<ChessGame />);
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => {
+      mockLineSyncDiagnostic = "move_line_identity_conflict";
+      for (const listener of mockLineSyncDiagnosticListeners) listener();
+    });
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The saved move line conflicts with the server.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Start new game" }));
+    await waitFor(() => expect(startGameMock).toHaveBeenCalledOnce());
+    expect(mockCoordinator.retryLineSynchronization).not.toHaveBeenCalled();
+  });
+
+  it("offers idempotent retry only for a local truncation acknowledgement conflict", async () => {
+    useGameStore.setState({
+      sessionId: "session-line-sync",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: STARTING_FEN,
+    });
+
+    await act(async () => {
+      render(<ChessGame />);
+    });
+    act(() => {
+      mockLineSyncDiagnostic = "line_sync_conflict";
+      for (const listener of mockLineSyncDiagnosticListeners) listener();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+    expect(mockCoordinator.retryLineSynchronization).toHaveBeenCalledOnce();
   });
 
   it("shows the drilling label while a drill is active or at root, but not once converted", async () => {
