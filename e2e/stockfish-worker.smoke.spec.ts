@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test('stockfish wrapper worker boots to ready in the browser', async ({ page }) => {
   await page.goto('/')
+  await expect(page.locator('.home-hero')).toBeVisible()
 
   const result = await page.evaluate(async () => {
     return await new Promise<{

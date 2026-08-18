@@ -13,13 +13,9 @@ import {
   readRequestId,
 } from '../utils/api'
 import { identifyUser, resetAnalytics } from '../analytics/posthog'
+import { AUTH_STORAGE_KEYS } from './authStorage'
 
 const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
-
-const STORAGE_KEYS = {
-  credentials: 'ghost_replay_credentials',
-  token: 'ghost_replay_token',
-} as const
 
 interface Credentials {
   username: string
@@ -54,7 +50,7 @@ const generateCredentials = (): Credentials => ({
  * Get stored credentials from localStorage
  */
 const getStoredCredentials = (): Credentials | null => {
-  const stored = localStorage.getItem(STORAGE_KEYS.credentials)
+  const stored = localStorage.getItem(AUTH_STORAGE_KEYS.credentials)
   if (!stored) return null
   try {
     return JSON.parse(stored) as Credentials
@@ -90,7 +86,10 @@ const decodeToken = (token: string): TokenPayload | null => {
  * Store credentials in localStorage
  */
 const storeCredentials = (credentials: Credentials): void => {
-  localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(credentials))
+  localStorage.setItem(
+    AUTH_STORAGE_KEYS.credentials,
+    JSON.stringify(credentials),
+  )
 }
 
 class AuthError extends Error {
@@ -267,7 +266,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const initAuth = async () => {
       // Fast path: restore session from a valid stored JWT — no API call needed
-      const storedToken = localStorage.getItem(STORAGE_KEYS.token)
+      const storedToken = localStorage.getItem(AUTH_STORAGE_KEYS.token)
       if (storedToken) {
         const payload = decodeToken(storedToken)
         if (payload) {
@@ -288,7 +287,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return
         }
         // Token expired or malformed — clear it and fall through
-        localStorage.removeItem(STORAGE_KEYS.token)
+        localStorage.removeItem(AUTH_STORAGE_KEYS.token)
       }
 
       const storedCredentials = getStoredCredentials()
@@ -300,7 +299,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             storedCredentials.username,
             storedCredentials.password
           )
-          localStorage.setItem(STORAGE_KEYS.token, response.token)
+          localStorage.setItem(AUTH_STORAGE_KEYS.token, response.token)
           const refreshedPayload = decodeToken(response.token)
           const isAnonymous = refreshedPayload?.is_anonymous ?? true
           setState({
@@ -321,7 +320,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch (err) {
           if (err instanceof AuthError && err.status === 401) {
             // Credentials are genuinely invalid — clear them
-            localStorage.removeItem(STORAGE_KEYS.credentials)
+            localStorage.removeItem(AUTH_STORAGE_KEYS.credentials)
           } else {
             // Transient error (network, server down, etc.) — keep credentials
             setState({
@@ -343,7 +342,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           newCredentials.password
         )
         storeCredentials(newCredentials)
-        localStorage.setItem(STORAGE_KEYS.token, response.token)
+        localStorage.setItem(AUTH_STORAGE_KEYS.token, response.token)
         setState({
           user: {
             id: response.user_id,
@@ -376,7 +375,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const response = await apiLogin(username, password)
       storeCredentials({ username, password })
-      localStorage.setItem(STORAGE_KEYS.token, response.token)
+      localStorage.setItem(AUTH_STORAGE_KEYS.token, response.token)
       setState({
         user: {
           id: response.user_id,
@@ -402,14 +401,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEYS.credentials)
-    localStorage.removeItem(STORAGE_KEYS.token)
+    localStorage.removeItem(AUTH_STORAGE_KEYS.credentials)
+    localStorage.removeItem(AUTH_STORAGE_KEYS.token)
     // Generate new anonymous credentials
     const newCredentials = generateCredentials()
     apiRegister(newCredentials.username, newCredentials.password)
       .then((response) => {
         storeCredentials(newCredentials)
-        localStorage.setItem(STORAGE_KEYS.token, response.token)
+        localStorage.setItem(AUTH_STORAGE_KEYS.token, response.token)
         setState({
           user: {
             id: response.user_id,
@@ -448,7 +447,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const response = await apiClaim(state.token, newUsername, newPassword)
         storeCredentials({ username: newUsername, password: newPassword })
-        localStorage.setItem(STORAGE_KEYS.token, response.token)
+        localStorage.setItem(AUTH_STORAGE_KEYS.token, response.token)
         setState({
           user: {
             id: response.user_id,

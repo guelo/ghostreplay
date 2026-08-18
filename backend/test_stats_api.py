@@ -141,6 +141,70 @@ def _seed_opening(
     )
 
 
+def test_stats_activity_requires_authentication(client):
+    response = client.get("/api/stats/activity")
+
+    assert response.status_code == 401
+
+
+def test_stats_activity_is_false_for_empty_account(client, auth_headers):
+    response = client.get(
+        "/api/stats/activity", headers=auth_headers(user_id=123)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"has_game_or_drill": False}
+
+
+def test_stats_activity_ignores_other_accounts(
+    client, auth_headers, create_game_session
+):
+    create_game_session(user_id=999)
+
+    response = client.get(
+        "/api/stats/activity", headers=auth_headers(user_id=123)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"has_game_or_drill": False}
+
+
+def test_stats_activity_includes_active_normal_game(
+    client, auth_headers, create_game_session
+):
+    create_game_session(user_id=123)
+
+    response = client.get(
+        "/api/stats/activity", headers=auth_headers(user_id=123)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"has_game_or_drill": True}
+
+
+def test_stats_activity_includes_unconverted_drill(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123)
+    session = (
+        db_session.query(GameSession)
+        .filter(GameSession.id == uuid.UUID(session_id))
+        .one()
+    )
+    session.session_mode = "drill"
+    session.drill_state = "abandoned"
+    session.is_rated = False
+    session.rated_start_ply = None
+    db_session.commit()
+
+    response = client.get(
+        "/api/stats/activity", headers=auth_headers(user_id=123)
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"has_game_or_drill": True}
+
+
 def test_stats_summary_empty_dataset(client, auth_headers):
     response = client.get("/api/stats/summary", headers=auth_headers(user_id=123))
     assert response.status_code == 200

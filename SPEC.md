@@ -61,11 +61,13 @@ Players begin with an anonymous account, so their games, targets, reviews, and
 progress are already account-scoped. They can later claim that same account
 with credentials for cross-device use without losing their training record.
 After a game, players can review the game, revisit saved history, and follow
-their Elo rating and summary statistics. The root route remains the marketing
-surface for an authenticated account with no game-session rows; once the same
-anonymous or claimed account owns any game or drill session, the root shows its
-Stats dashboard instead. `/stats` remains directly available regardless of
-account activity.
+their Elo rating and summary statistics. On a browser's first visit, when
+neither an auth token nor credentials exist in local storage, the root starts
+the marketing surface immediately while anonymous registration completes. For
+a stored authenticated identity, the root remains the marketing surface when
+the account has no game-session rows; once that anonymous or claimed account
+owns any game or drill session, the root shows its Stats dashboard instead.
+`/stats` remains directly available regardless of account activity.
 
 ### Openings and drills
 

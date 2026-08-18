@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   getStatsSummary,
   type StatsSummaryResponse,
@@ -102,10 +103,15 @@ function StatsPage() {
       <div className="constrained-content">
         <section className="stats-shell">
           <header className="stats-shell__header">
-            <h1 className="stats-shell__title">Your Stats</h1>
-            <p className="stats-shell__hint">
-              Performance summary for recent games and your blunder library.
-            </p>
+            <div className="stats-shell__heading">
+              <h1 className="stats-shell__title">Your Stats</h1>
+              <p className="stats-shell__hint">
+                Performance summary for recent games and your blunder library.
+              </p>
+            </div>
+            <Link to="/play" className="chess-button primary stats-shell__play">
+              Play
+            </Link>
           </header>
 
           <div

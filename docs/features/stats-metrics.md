@@ -15,6 +15,21 @@ retention with review-date window measures, Library combines all-time and creati
 measures, and Openings reads the latest cached score batch. The summary therefore does not
 apply one session/window predicate to every statistic.
 
+## Home eligibility
+
+The root route uses a separate all-time account-activity fact to choose its
+surface. An authenticated account that owns any durable game session sees the
+Stats page at `/`; an account with no session rows sees the marketing page.
+There is one synchronous acquisition fast path: when a browser load begins
+with neither a stored auth token nor stored credentials, `/` starts the
+marketing page immediately while the new anonymous account is registered and
+does not request the activity fact for that first-visit route lifetime.
+This ownership check includes active normal games and every drill lifecycle,
+including unconverted failed or abandoned drills. It intentionally applies no
+Stats-summary visibility or time-window filter, so it must not be derived from
+the summary population described below. The `/stats` route remains an
+unconditional Stats surface.
+
 ## Move and game populations
 
 | Metric | Grain | Population |

@@ -18,6 +18,7 @@ test('analysisWorker returns identical results for a repeated FEN across an inte
   test.setTimeout(90_000)
 
   await page.goto('/')
+  await expect(page.locator('.home-hero')).toBeVisible()
 
   const FEN_A = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
   const MOVE_A = 'e2e4'

@@ -1,0 +1,8 @@
+.home-route-pending {
+    min-height: 12rem;
+    display: grid;
+    place-items: center;
+    padding: 2rem;
+    color: var(--text-tertiary);
+    font-size: 0.95rem;
+}

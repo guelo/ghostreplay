@@ -151,21 +151,32 @@ test.afterAll(() => {
 // --- Landing -------------------------------------------------------------
 
 test.describe("landing", () => {
-  test("anonymous + authed", async ({ page, loginAs }) => {
+  test("anonymous + empty authed", async ({ page, loginAs }) => {
     await prepareDeterministicPage(page);
     await page.goto("/");
     await captureAcrossViewports(page, test.info(), {
       pageKey: "landing",
       state: "anonymous",
-      waitFor: (p) => p.locator(".nav-bar"),
+      waitFor: (p) => p.locator(".home-hero"),
     });
 
-    await loginAs(page, "stable");
+    await loginAs(page, "empty");
     await page.goto("/");
     await captureAcrossViewports(page, test.info(), {
       pageKey: "landing",
       state: "authed",
-      waitFor: (p) => p.locator(".nav-bar"),
+      waitFor: (p) => p.locator(".home-hero"),
+    });
+  });
+
+  test("returning", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "stable");
+    await page.goto("/");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "landing",
+      state: "returning",
+      waitFor: (p) => p.locator(".stats-shell"),
     });
   });
 });

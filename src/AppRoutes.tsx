@@ -1,5 +1,6 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router-dom";
+import HomeRoute from "./pages/HomeRoute";
 const App = lazy(() => import("./App"));
 const AuthForm = lazy(() => import("./components/AuthForm"));
 const BlundersPage = lazy(() => import("./pages/BlundersPage"));
@@ -14,7 +15,15 @@ function AppRoutes() {
   return (
     <Suspense fallback={null}>
       <Routes>
-        <Route path="/" element={<App />} />
+        <Route
+          path="/"
+          element={
+            <HomeRoute
+              marketingElement={<App />}
+              dashboardElement={<StatsPage />}
+            />
+          }
+        />
         <Route path="/play" element={<GamePage />} />
         <Route path="/game" element={<GameAnalysisPage />} />
         <Route path="/drill-analysis" element={<DrillAnalysisPage />} />

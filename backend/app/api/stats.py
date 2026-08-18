@@ -122,6 +122,10 @@ class StatsSummaryResponse(BaseModel):
     openings: OpeningsSummary
 
 
+class StatsActivityResponse(BaseModel):
+    has_game_or_drill: bool
+
+
 def _round1(value: float) -> float:
     return round(value, 1)
 
@@ -150,6 +154,20 @@ def _opening_stat(row: UserOpeningScore) -> OpeningStat:
         sample_size=row.sample_size,
         game_count=row.game_count,
     )
+
+
+@router.get("/activity", response_model=StatsActivityResponse)
+def get_stats_activity(
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> StatsActivityResponse:
+    has_game_or_drill = (
+        db.query(GameSession.id)
+        .filter(GameSession.user_id == user.user_id)
+        .first()
+        is not None
+    )
+    return StatsActivityResponse(has_game_or_drill=has_game_or_drill)
 
 
 class CurrentRatingResponse(BaseModel):

@@ -23,6 +23,10 @@ vi.mock("../contexts/useAuth", () => ({
   }),
 }));
 
+vi.mock("../components/AppNav", () => ({
+  default: () => null,
+}));
+
 vi.mock("../utils/api", () => ({
   getStatsSummary: (...args: unknown[]) => getStatsSummaryMock(...args),
   fetchRatingHistory: vi.fn().mockResolvedValue({ ratings: [], current_rating: 1200, games_played: 0 }),
@@ -144,6 +148,18 @@ describe("StatsPage", () => {
     expect(screen.queryByText("Perfect streak")).not.toBeInTheDocument();
     expect(screen.queryByText("Data Completeness")).not.toBeInTheDocument();
     expect(screen.queryByText("Positions Total")).not.toBeInTheDocument();
+  });
+
+  it("links the Play control to the game setup", async () => {
+    getStatsSummaryMock.mockResolvedValueOnce(baseSummary);
+
+    renderPage();
+
+    await screen.findByText("Results");
+    expect(screen.getByRole("link", { name: "Play" })).toHaveAttribute(
+      "href",
+      "/play",
+    );
   });
 
   it("renders em dashes for null rates and hides the distribution when there are no moves", async () => {
