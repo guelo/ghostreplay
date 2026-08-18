@@ -1,8 +1,7 @@
 import { memo, type ReactNode, type RefObject } from "react";
 import StaticMiniBoard from "./StaticMiniBoard";
-import SoundToggleIcon from "./SoundToggleIcon";
+import SoundToggleButton from "./SoundToggleButton";
 import type { RatingScores, TargetBlunderSrs } from "../../../utils/api";
-import { useGameStore } from "../../../stores/useGameStore";
 import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
 import OpponentAvatar from "./OpponentAvatar";
 import MaterialDisplay from "../../MaterialDisplay";
@@ -48,6 +47,8 @@ type GameInfoPanelProps = {
    *  Hidden by default CSS; shown inside the 659px block. */
   materialFen?: string;
   materialPerspective?: BoardOrientation;
+  /** The narrow game layout relocates this control into the move actions row. */
+  showSoundToggle?: boolean;
 };
 
 const formatLastSeen = (isoDate: string): string => {
@@ -150,10 +151,8 @@ const GameInfoPanel = ({
   perfectStreak,
   materialFen,
   materialPerspective,
+  showSoundToggle = true,
 }: GameInfoPanelProps) => {
-  const soundMuted = useGameStore((s) => s.soundMuted);
-  const setSoundMuted = useGameStore((s) => s.setSoundMuted);
-
   const resolvedScores = ratingScores ?? {
     elo: { rating: playerRating, is_provisional: isProvisional },
     chesscom: null,
@@ -172,18 +171,11 @@ const GameInfoPanel = ({
         ) : (
           <p className="chess-status">{statusText}</p>
         )}
-        <span className="panel-settings">
-          <button
-            className="panel-sound-toggle"
-            type="button"
-            aria-label={soundMuted ? "Unmute sound" : "Mute sound"}
-            title={soundMuted ? "Unmute" : "Mute"}
-            aria-pressed={soundMuted}
-            onClick={() => setSoundMuted(!soundMuted)}
-          >
-            <SoundToggleIcon muted={soundMuted} />
-          </button>
-        </span>
+        {showSoundToggle && (
+          <span className="panel-settings">
+            <SoundToggleButton className="panel-sound-toggle" />
+          </span>
+        )}
       </div>
       {gameStatusBadge && (
         <span className={`game-status-badge ${gameStatusBadge.className}`}>

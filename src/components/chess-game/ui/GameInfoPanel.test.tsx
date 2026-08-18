@@ -300,6 +300,12 @@ describe("GameInfoPanel", () => {
       fireEvent.click(button);
       expect(setSoundMuted).toHaveBeenCalledWith(false);
     });
+
+    it("omits the panel toggle when the narrow layout relocates it", () => {
+      render(<GameInfoPanel {...makeProps()} showSoundToggle={false} />);
+
+      expect(screen.queryByRole("button", { name: "Mute sound" })).toBeNull();
+    });
   });
 
   it("shows a practice badge during post-revert continuation", () => {

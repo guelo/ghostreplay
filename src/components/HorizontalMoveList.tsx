@@ -42,6 +42,7 @@ const HorizontalMoveList = ({
   navigateDown,
   materialFen,
   materialPerspective,
+  showSoundToggle = false,
 }: MoveListProps) => {
   const stripRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -264,6 +265,7 @@ const HorizontalMoveList = ({
         effectiveIndex={effectiveIndex}
         materialFen={materialFen}
         materialPerspective={materialPerspective}
+        showSoundToggle={showSoundToggle}
       />
       <div className="h-move-list__row">
         <button

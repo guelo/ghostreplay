@@ -2601,6 +2601,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             perfectStreak={perfectStreak}
             materialFen={panelMaterialFen}
             materialPerspective={opponentColor}
+            showSoundToggle={!isNarrow}
           />
 
           <div className="chessboard-wrapper">

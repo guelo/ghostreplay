@@ -1,5 +1,6 @@
 import React from "react";
 import MaterialDisplay from "./MaterialDisplay";
+import SoundToggleButton from "./chess-game/ui/SoundToggleButton";
 import "./ControlsRow.css";
 
 export type ControlsRowProps = {
@@ -23,6 +24,7 @@ export type ControlsRowProps = {
    *  custom-class callers must provide equivalent styling. */
   materialFen?: string;
   materialPerspective?: "white" | "black";
+  showSoundToggle?: boolean;
 };
 
 /** Shared row of game-control icon buttons.
@@ -45,6 +47,7 @@ const ControlsRow = ({
   effectiveIndex = -1,
   materialFen,
   materialPerspective,
+  showSoundToggle = false,
 }: ControlsRowProps) => {
   const hasAddButton = Boolean(onAddSelectedMove);
   // Both list callers derive -1 for empty history, so this is also the shared
@@ -59,7 +62,8 @@ const ControlsRow = ({
       onCopyPosition ||
       onReset ||
       onRevert ||
-      hasAddButton
+      hasAddButton ||
+      showSoundToggle
     ) &&
     !hasMaterial
   ) {
@@ -68,6 +72,9 @@ const ControlsRow = ({
 
   return (
     <div className={className}>
+      {showSoundToggle && (
+        <SoundToggleButton className="move-action-button" />
+      )}
       {onResign && (
         <button
           className="move-action-button danger"

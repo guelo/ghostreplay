@@ -4,6 +4,7 @@ import HorizontalMoveList from "./HorizontalMoveList";
 import type { Move, MoveListProps } from "./MoveList";
 import type { MoveMessage } from "./MoveRow";
 import type { VariationTree, VarNode } from "../types/variationTree";
+import { useGameStore } from "../stores/useGameStore";
 
 const MOVES: Move[] = [
   { san: "e4" },
@@ -133,6 +134,13 @@ describe("HorizontalMoveList", () => {
     const material = container.querySelector(".controls-row__material");
     expect(material).not.toBeNull();
     expect(material!.querySelector(".material-display")).not.toBeNull();
+  });
+
+  it("renders the relocated sound toggle in the controls row when supplied", () => {
+    useGameStore.setState({ soundMuted: false });
+    const { getByRole } = renderList({ showSoundToggle: true });
+
+    expect(getByRole("button", { name: "Mute sound" })).toBeInTheDocument();
   });
 
   it("opens a popup on the message badge and dismisses on navigation", () => {

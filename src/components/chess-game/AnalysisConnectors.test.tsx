@@ -540,6 +540,7 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
     const { queryByTestId } = renderConnected();
     expect(queryByTestId("h-move-list")).not.toBeNull();
     expect(queryByTestId("move-list")).toBeNull();
+    expect(capturedMoveListProps.showSoundToggle).toBe(true);
   });
 
   it("forwards materialFen + playerColor-derived perspective to the list", () => {
@@ -568,5 +569,6 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
     const { queryByTestId } = renderConnected();
     expect(queryByTestId("move-list")).not.toBeNull();
     expect(queryByTestId("h-move-list")).toBeNull();
+    expect(capturedMoveListProps.showSoundToggle).toBe(false);
   });
 });

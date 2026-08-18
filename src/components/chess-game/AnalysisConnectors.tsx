@@ -392,6 +392,7 @@ export const ConnectedMoveList = memo(
         isInteractionDisabled={isInteractionDisabled}
         materialFen={materialFen}
         materialPerspective={playerColor}
+        showSoundToggle={isNarrow}
       />
     );
   },

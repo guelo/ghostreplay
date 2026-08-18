@@ -1724,11 +1724,6 @@
         display: contents;
     }
 
-    .game-page .panel-settings {
-        order: 5;
-        margin-left: auto;
-    }
-
     .game-page .chess-panel__active-matchup {
         display: flex;
         align-items: center;

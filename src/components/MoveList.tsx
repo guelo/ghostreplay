@@ -58,6 +58,8 @@ export type MoveListProps = {
    *  horizontal list's controls row. Ignored by the vertical `MoveList`. */
   materialFen?: string;
   materialPerspective?: "white" | "black";
+  /** Render the global sound toggle in the horizontal controls row. */
+  showSoundToggle?: boolean;
 };
 
 type DisplayItem =

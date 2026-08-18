@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import ControlsRow from "./ControlsRow";
+import { useGameStore } from "../stores/useGameStore";
 
 describe("ControlsRow", () => {
   it("renders nothing when no actions are provided", () => {
@@ -61,6 +62,16 @@ describe("ControlsRow", () => {
   it("returns null when neither actions nor material are present", () => {
     const { container } = render(<ControlsRow materialPerspective="white" />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it("renders and operates the relocated sound toggle when requested", () => {
+    useGameStore.setState({ soundMuted: false });
+    const { getByRole } = render(<ControlsRow showSoundToggle />);
+
+    const button = getByRole("button", { name: "Mute sound" });
+    expect(button).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(button);
+    expect(useGameStore.getState().soundMuted).toBe(true);
   });
 
   it("enables add only for a valid selected move", () => {
