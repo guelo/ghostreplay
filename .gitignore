@@ -37,12 +37,6 @@ __pycache__/
 .ruff_cache/
 .test-results/
 
-# Models
-maia2/maia2_models/
-
-backend/maia2_models/
-maia2_models/
-
 # Playwright
 playwright-report/
 test-results/
