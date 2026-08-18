@@ -26,6 +26,7 @@ from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import BranchSummary, RootScore
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_roots_transport import opening_roots_representations
 from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.fen import active_color
 
@@ -103,9 +104,10 @@ def _mock_singletons():
     # request_recompute (warm path) become no-ops so the reader simply serves
     # whatever list_cached returns without spawning the worker thread. Recompute
     # decisions are covered by the worker-path tests in test_opening_cache.
+    roots = _make_roots()
     with (
         patch(_PATCH_GRAPH, return_value=_make_graph()),
-        patch(_PATCH_ROOTS, return_value=_make_roots()),
+        patch(_PATCH_ROOTS, return_value=roots),
         patch(
             "app.api.openings.load_strict_densified_edges",
             return_value=EMPTY_DENSIFIED_EDGES,
@@ -117,7 +119,7 @@ def _mock_singletons():
         patch("app.opening_score_scheduler.refresh_now", return_value=False),
         patch("app.opening_score_scheduler.request_recompute"),
     ):
-        yield
+        yield roots
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +309,14 @@ def test_score_no_auth_returns_401(client):
 
 
 def test_roots_list(client, auth_headers):
-    resp = client.get("/api/openings/roots", headers=auth_headers())
+    headers = {**auth_headers(), "Accept-Encoding": "identity"}
+    resp = client.get("/api/openings/roots", headers=headers)
     assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "private, no-cache"
+    assert resp.headers["content-length"] == str(len(resp.content))
+    assert "content-encoding" not in resp.headers
+    assert resp.headers["vary"] == "Accept-Encoding"
+    assert resp.headers["etag"].startswith('"')
     data = resp.json()
     assert data["total_families"] == 1
     assert data["total_roots"] == 1
@@ -317,6 +325,87 @@ def test_roots_list(client, auth_headers):
     root = fam["roots"][0]
     assert root["opening_key"] == ROOT_FEN
     assert root["eco"] == "B00"
+
+
+def test_roots_gzip_and_conditional_reuse(
+    client,
+    auth_headers,
+    _mock_singletons,
+):
+    gzip_headers = {**auth_headers(), "Accept-Encoding": "gzip"}
+    compressed = client.get("/api/openings/roots", headers=gzip_headers)
+    expected = opening_roots_representations(_mock_singletons, None).gzip
+
+    assert compressed.status_code == 200
+    assert compressed.headers["content-encoding"] == "gzip"
+    assert compressed.headers["vary"] == "Accept-Encoding"
+    assert compressed.headers["cache-control"] == "private, no-cache"
+    assert compressed.headers["content-length"] == str(len(expected.body))
+    assert compressed.headers["etag"] == expected.etag
+    assert len(expected.body) < len(compressed.content)
+    assert compressed.json()["families"][0]["roots"][0]["opening_key"] == ROOT_FEN
+
+    gzip_etag = compressed.headers["etag"]
+    revalidated = client.get(
+        "/api/openings/roots",
+        headers={
+            **gzip_headers,
+            "If-None-Match": f'"unrelated", W/{gzip_etag}',
+        },
+    )
+    assert revalidated.status_code == 304
+    assert revalidated.content == b""
+    assert revalidated.headers["etag"] == gzip_etag
+    assert "content-encoding" not in revalidated.headers
+    assert "content-type" not in revalidated.headers
+    assert revalidated.headers["cache-control"] == "private, no-cache"
+    assert revalidated.headers["vary"] == "Accept-Encoding"
+    assert (
+        revalidated.headers["content-length"]
+        == compressed.headers["content-length"]
+    )
+
+    identity = client.get(
+        "/api/openings/roots",
+        headers={
+            **auth_headers(),
+            "Accept-Encoding": "identity",
+            "If-None-Match": gzip_etag,
+        },
+    )
+    assert identity.status_code == 200
+    assert identity.headers["etag"] != gzip_etag
+    assert "content-encoding" not in identity.headers
+    assert identity.json() == compressed.json()
+
+    identity_revalidated = client.get(
+        "/api/openings/roots",
+        headers={
+            **auth_headers(),
+            "Accept-Encoding": "identity",
+            "If-None-Match": identity.headers["etag"],
+        },
+    )
+    assert identity_revalidated.status_code == 304
+    assert identity_revalidated.content == b""
+    assert identity_revalidated.headers["content-length"] == str(
+        len(identity.content)
+    )
+
+
+def test_roots_rejects_unacceptable_encodings(client, auth_headers):
+    resp = client.get(
+        "/api/openings/roots",
+        headers={
+            **auth_headers(),
+            "Accept-Encoding": "gzip;q=0, identity;q=0",
+        },
+    )
+
+    assert resp.status_code == 406
+    assert resp.content == b""
+    assert resp.headers["content-length"] == "0"
+    assert resp.headers["vary"] == "Accept-Encoding"
 
 
 def test_roots_list_family_filter(client, auth_headers):

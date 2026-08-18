@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Literal
 
 import chess
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,7 @@ from app.opening_rootcalc import (
     compute_root_score,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
+from app.opening_roots_transport import opening_roots_response
 from app.opening_score_delta import OpeningScoreDeltaItem, read_opening_score_delta
 from app.security import TokenPayload, get_current_user
 from app.tree_eval import lookup_move_evals, lookup_root_eval
@@ -497,36 +498,16 @@ def compute_opening_score(
 
 @router.get("/roots", response_model=OpeningRootsListResponse)
 def list_opening_roots(
+    request: Request,
     family: str | None = Query(None),
     user: TokenPayload = Depends(get_current_user),
-) -> OpeningRootsListResponse:
+) -> Response:
     roots = get_opening_roots()
-
-    if family is not None:
-        family_names = [family] if roots.get_family(family) else []
-    else:
-        family_names = roots.get_families()
-
-    families: list[OpeningFamilyItem] = []
-    total_roots = 0
-    for name in family_names:
-        items = [
-            OpeningRootItem(
-                opening_key=r.opening_key,
-                opening_name=r.opening_name,
-                opening_family=r.opening_family,
-                eco=r.eco,
-                depth=r.depth,
-            )
-            for r in roots.get_family(name)
-        ]
-        families.append(OpeningFamilyItem(family_name=name, roots=items))
-        total_roots += len(items)
-
-    return OpeningRootsListResponse(
-        families=families,
-        total_roots=total_roots,
-        total_families=len(families),
+    return opening_roots_response(
+        roots,
+        family=family,
+        accept_encoding=request.headers.get("accept-encoding"),
+        if_none_match=request.headers.get("if-none-match"),
     )
 
 
