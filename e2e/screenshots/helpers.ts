@@ -376,11 +376,11 @@ export const buildIndex = (): void => {
 <style>
   :root { color-scheme: dark; }
   body { margin: 0; font-family: system-ui, sans-serif; background: #14161a; color: #e8eaed; }
-  header { padding: 16px 24px; border-bottom: 1px solid #2a2d33; position: sticky; top: 0; background: #14161a; }
+  header { padding: 16px 24px; border-bottom: 1px solid #2a2d33; background: #14161a; }
   h1 { font-size: 18px; margin: 0; }
   .meta { color: #9aa0a6; font-size: 13px; margin-top: 4px; }
   .page { padding: 16px 24px; border-bottom: 1px solid #2a2d33; }
-  .page > h2 { font-size: 16px; text-transform: capitalize; }
+  .page > h2 { position: sticky; top: 0; z-index: 1; margin: -16px -24px 16px; padding: 12px 24px; border-bottom: 1px solid #2a2d33; background: #14161a; font-size: 16px; text-transform: capitalize; }
   .state > h3 { font-size: 13px; color: #9aa0a6; font-weight: 600; margin: 16px 0 8px; }
   .row { display: flex; flex-wrap: wrap; gap: 16px; }
   .cell { margin: 0; }
