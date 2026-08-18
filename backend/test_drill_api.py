@@ -517,6 +517,104 @@ def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers
     assert observed == [("active", "failed", "accuracy")]
 
 
+def test_fail_drill_discards_move_rows_when_line_revision_is_unknown(
+    client, auth_headers, db_session
+):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.get(GameSession, session_uuid)
+    session.drill_state = "root_reached"
+
+    board = chess.Board()
+    fen_before = board.fen()
+    board.push_san("e4")
+    db_session.add(
+        SessionMove(
+            session_id=session_uuid,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=fen_before,
+            fen_after=board.fen(),
+            segment="drill",
+        )
+    )
+    db_session.commit()
+
+    with patch("app.api.drills.compute_opening_score_delta", return_value=[]):
+        response = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={
+                "terminal_reason": "accuracy",
+                "line_revision": None,
+                "discard_move_evidence": True,
+            },
+            headers=auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    session = db_session.get(GameSession, session_uuid)
+    assert session.drill_state == "failed"
+    assert session.move_line_revision == 1
+    assert session.terminal_line_reconciled is False
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 0
+    )
+
+
+def test_natural_end_discards_move_rows_when_line_revision_is_unknown(
+    client, auth_headers, db_session
+):
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+
+    board = chess.Board()
+    fen_before = board.fen()
+    board.push_san("e4")
+    db_session.add(
+        SessionMove(
+            session_id=session_uuid,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=fen_before,
+            fen_after=board.fen(),
+            segment="drill",
+        )
+    )
+    db_session.commit()
+
+    with patch("app.api.drills.compute_opening_score_delta", return_value=[]):
+        response = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={
+                "result": "draw",
+                "pgn": "1. e4 *",
+                "line_revision": None,
+                "discard_move_evidence": True,
+            },
+            headers=auth_headers(),
+        )
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    session = db_session.get(GameSession, session_uuid)
+    assert session.status == "ended"
+    assert session.move_line_revision == 1
+    assert session.terminal_line_reconciled is False
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 0
+    )
+
+
 def test_fail_drill_rejects_active_and_non_accuracy_reason(client, auth_headers, db_session):
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
@@ -2636,6 +2734,58 @@ def test_abandon_accuracy_failed_drill_does_not_bump_cursor(client, auth_headers
     assert current_evidence_seq(db_session, 123, "black") == seq_before
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.status == "ended"
+
+
+def test_abandon_accuracy_failed_drill_discards_stale_line_and_bumps_cursor(
+    client, auth_headers, db_session
+):
+    """Deleting already-visible evidence is a cursor change even though the
+    terminal mutation leaves eligibility true on both sides."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.get(GameSession, session_uuid)
+    session.drill_state = "failed"
+    session.drill_terminal_reason = "accuracy"
+    session.move_line_revision = 1
+
+    board = chess.Board()
+    fen_before = board.fen()
+    board.push_san("e4")
+    db_session.add(
+        SessionMove(
+            session_id=session_uuid,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=fen_before,
+            fen_after=board.fen(),
+            segment="drill",
+        )
+    )
+    db_session.commit()
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    response = client.post(
+        f"/api/drills/{session_id}/abandon",
+        json={"line_revision": 0, "discard_move_evidence": False},
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    db_session.expire_all()
+    session = db_session.get(GameSession, session_uuid)
+    assert session.status == "ended"
+    assert session.drill_state == "failed"
+    assert session.move_line_revision == 2
+    assert session.terminal_line_reconciled is False
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 0
+    )
+    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
 
 
 # ---------------------------------------------------------------------------

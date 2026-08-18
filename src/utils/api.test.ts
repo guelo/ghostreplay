@@ -6,6 +6,9 @@ import {
   resolveApiEndpointBaseUrl,
   startGame,
   endGame,
+  failDrill,
+  naturalEndDrill,
+  abandonDrill,
   uploadSessionMoves,
   truncateSessionMoves,
   recordBlunder,
@@ -14,6 +17,7 @@ import {
   getNextOpponentMove,
   reviewSrsBlunder,
   getOpeningFamilyScores,
+  getStatsActivity,
   getStatsSummary,
   getStatsAchievements,
   submitAnalysisEvidence,
@@ -205,6 +209,43 @@ describe('startGame', () => {
   })
 })
 
+describe('drill terminal line fence', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('threads an acknowledged revision through fail and natural end', async () => {
+    mockResponse({ session_id: 'sess-1' })
+    await failDrill('sess-1', 'accuracy', 2)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      terminal_reason: 'accuracy',
+      line_revision: 2,
+      discard_move_evidence: false,
+    })
+
+    mockResponse({ session_id: 'sess-1' })
+    await naturalEndDrill('sess-1', 'draw', '1. e4 e5', 2)
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      result: 'draw',
+      pgn: '1. e4 e5',
+      line_revision: 2,
+      discard_move_evidence: false,
+    })
+  })
+
+  it('marks drill evidence for discard when the revision is unknown', async () => {
+    mockResponse({ session_id: 'sess-1' })
+
+    await abandonDrill('sess-1', null)
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      line_revision: null,
+      discard_move_evidence: true,
+    })
+  })
+})
+
 describe('endGame', () => {
   beforeEach(() => {
     fetchMock.mockReset()
@@ -237,6 +278,30 @@ describe('endGame', () => {
     const result = await endGame('sess-1', 'resign', '1. e4')
 
     expect(result).toEqual(expected)
+  })
+
+  it('sends the acknowledged line revision', async () => {
+    mockResponse({ session_id: 'sess-1' })
+
+    await endGame('sess-1', 'resign', '1. e4', true, 4)
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual(expect.objectContaining({
+      line_revision: 4,
+      discard_move_evidence: false,
+    }))
+  })
+
+  it('marks move evidence for discard when the line revision is unknown', async () => {
+    mockResponse({ session_id: 'sess-1' })
+
+    await endGame('sess-1', 'resign', '1. e4', true, null)
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual(expect.objectContaining({
+      line_revision: null,
+      discard_move_evidence: true,
+    }))
   })
 
   it('throws on non-ok response', async () => {
@@ -459,7 +524,7 @@ describe('uploadSessionMoves', () => {
     expect(body.recompute_opportunity).toBe(true)
   })
 
-  it('serializes the revision and terminal line-sync verdict', async () => {
+  it('serializes the shared branch revision', async () => {
     mockResponse({
       moves_inserted: 1,
       line_revision: 4,
@@ -471,12 +536,11 @@ describe('uploadSessionMoves', () => {
       terminalAction: 'game_end',
       deadlineMs: 3700,
       lineRevision: 4,
-      lineSyncVerdict: 'deadline_expired',
     })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(body.line_revision).toBe(4)
-    expect(body.line_sync_verdict).toBe('deadline_expired')
+    expect(body).not.toHaveProperty('line_sync_verdict')
   })
 
   // Type-level contract (enforced by `tsc -b` in the build): the discriminated
@@ -509,21 +573,13 @@ describe('uploadSessionMoves', () => {
 })
 
 describe('truncateSessionMoves', () => {
-  it('forwards the stable idempotency body and abort signal', async () => {
+  it('forwards the one-shot branch body and abort signal', async () => {
     const controller = new AbortController()
     const body = {
-      client_request_id: '11111111-1111-4111-8111-111111111111',
       line_revision: 3,
       after_ply: 8,
     }
-    mockResponse({
-      ...body,
-      from_revision: 3,
-      to_revision: 4,
-      line_revision: 4,
-      deleted_move_count: 2,
-      evidence_changed: false,
-    })
+    mockResponse({ line_revision: 4 })
 
     await truncateSessionMoves('sess-1', body, {
       signal: controller.signal,
@@ -1159,6 +1215,69 @@ describe('getStatsSummary', () => {
     await expect(getStatsSummary(30)).rejects.toThrow(
       'Failed to load stats summary: Bad Request',
     )
+  })
+})
+
+describe('getStatsActivity', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = { ghost_replay_token: 'activity-token' }
+  })
+
+  it('sends an authenticated GET and returns the focused wire shape', async () => {
+    mockResponse({ has_game_or_drill: true })
+
+    await expect(getStatsActivity()).resolves.toEqual({
+      has_game_or_drill: true,
+    })
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toContain('/api/stats/activity')
+    expect(options).toEqual(
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer activity-token',
+        }),
+      }),
+    )
+  })
+
+  it('wires a 5-second timeout signal into the real request', async () => {
+    const controller = new AbortController()
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal)
+    fetchMock.mockImplementationOnce(
+      (_url: string, options: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => {
+            reject(options.signal?.reason)
+          })
+        }),
+    )
+
+    const request = getStatsActivity()
+    expect(timeoutSpy).toHaveBeenCalledWith(5_000)
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal)
+
+    const timeoutError = new DOMException('activity deadline', 'TimeoutError')
+    controller.abort(timeoutError)
+
+    await expect(request).rejects.toBe(timeoutError)
+    timeoutSpy.mockRestore()
+  })
+
+  it('preserves the HTTP status on ApiError', async () => {
+    mockResponse({}, false, 'Unauthorized', 401)
+
+    try {
+      await getStatsActivity()
+      throw new Error('expected getStatsActivity to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError)
+      expect((error as ApiError).status).toBe(401)
+    }
   })
 })
 

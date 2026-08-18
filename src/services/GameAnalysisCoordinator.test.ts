@@ -68,18 +68,11 @@ beforeEach(() => {
   truncateSessionMovesMock.mockReset()
   truncateSessionMovesMock.mockImplementation(
     (_sessionId: string, request: {
-      client_request_id: string
       line_revision: number
       after_ply: number
     }) =>
       Promise.resolve({
-        client_request_id: request.client_request_id,
-        from_revision: request.line_revision,
-        to_revision: request.line_revision + 1,
         line_revision: request.line_revision + 1,
-        after_ply: request.after_ply,
-        deleted_move_count: 0,
-        evidence_changed: false,
       }),
   )
   // Default: cache misses, so the worker fallback is released. Tests that
@@ -431,6 +424,28 @@ describe('GameAnalysisCoordinator', () => {
       })
     }
 
+    it('publishes transition availability when a session starts', () => {
+      const listener = vi.fn()
+      coordinator.addLineSyncDiagnosticListener(listener)
+
+      coordinator.startSession('session-line', 0)
+
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(true)
+      expect(listener).toHaveBeenCalledOnce()
+    })
+
+    it('publishes transition availability when terminal upload shutdown disables it', () => {
+      coordinator.startSession('session-line', 0)
+      const listener = vi.fn()
+      coordinator.addLineSyncDiagnosticListener(listener)
+
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(true)
+      coordinator.stopSessionUploads()
+
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(false)
+      expect(listener).toHaveBeenCalledOnce()
+    })
+
     it('aborts the old epoch, restores an analyzed in-flight survivor, then uploads it on the acknowledged revision', async () => {
       coordinator.startSession('session-line', 5)
       const history = makeLegalMoveHistory(['e4', 'e5'])
@@ -492,235 +507,61 @@ describe('GameAnalysisCoordinator', () => {
       expect(replacement.lineSyncPaused).toBe(true)
     })
 
-    it('retries a lost truncation response with the exact request id and body', async () => {
+    it('fails a lost response closed without retrying or exposing a revision', async () => {
       coordinator.startSession('session-line', 2)
-      truncateSessionMovesMock
-        .mockRejectedValueOnce(new Error('offline'))
-        .mockImplementationOnce(
-          (_sessionId: string, request: {
-            client_request_id: string
-            line_revision: number
-            after_ply: number
-          }) => Promise.resolve({
-            client_request_id: request.client_request_id,
-            from_revision: request.line_revision,
-            to_revision: request.line_revision + 1,
-            line_revision: request.line_revision + 1,
-            after_ply: request.after_ply,
-            deleted_move_count: 0,
-            evidence_changed: false,
-          }),
-        )
+      truncateSessionMovesMock.mockRejectedValueOnce(new Error('offline'))
 
-      coordinator.transitionMoveLine(0)
+      expect(coordinator.transitionMoveLine(0)).toBe(true)
       await vi.advanceTimersByTimeAsync(0)
-      const firstBody = truncateSessionMovesMock.mock.calls[0][1]
-      await vi.advanceTimersByTimeAsync(1000)
+      await vi.advanceTimersByTimeAsync(60_000)
 
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
-      expect(truncateSessionMovesMock.mock.calls[1][1]).toEqual(firstBody)
-      expect(coordinator.getLineRevision('session-line')).toBe(3)
-    })
-
-    it('serializes fast takebacks and converges to the smallest desired ply', async () => {
-      coordinator.startSession('session-line', 0)
-      let finishFirst!: (value: unknown) => void
-      let finishSecond!: (value: unknown) => void
-      truncateSessionMovesMock
-        .mockReturnValueOnce(new Promise((resolve) => { finishFirst = resolve }))
-        .mockReturnValueOnce(new Promise((resolve) => { finishSecond = resolve }))
-
-      coordinator.transitionMoveLine(3)
-      const firstBody = truncateSessionMovesMock.mock.calls[0][1]
-      coordinator.transitionMoveLine(1)
       expect(truncateSessionMovesMock).toHaveBeenCalledTimes(1)
-
-      finishFirst({
-        client_request_id: firstBody.client_request_id,
-        from_revision: 0,
-        to_revision: 1,
-        line_revision: 1,
-        after_ply: 3,
-        deleted_move_count: 0,
-        evidence_changed: false,
-      })
-      await vi.advanceTimersByTimeAsync(0)
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
-      const secondBody = truncateSessionMovesMock.mock.calls[1][1]
-      expect(secondBody).toEqual(
-        expect.objectContaining({ line_revision: 1, after_ply: 1 }),
-      )
-
-      finishSecond({
-        client_request_id: secondBody.client_request_id,
-        from_revision: 1,
-        to_revision: 2,
-        line_revision: 2,
-        after_ply: 1,
-        deleted_move_count: 0,
-        evidence_changed: false,
-      })
-      await vi.advanceTimersByTimeAsync(0)
-      expect(coordinator.getLineRevision('session-line')).toBe(2)
-      expect(uploadState().lineSyncPaused).toBe(false)
-    })
-
-    it('fails a foreign branch closed and returns permanent_conflict immediately', async () => {
-      coordinator.startSession('session-line', 0)
-      truncateSessionMovesMock.mockRejectedValueOnce({
-        status: 409,
-        details: {
-          error_code: 'FOREIGN_BRANCH_REVISION',
-          current_revision: 4,
-        },
-      })
-      coordinator.transitionMoveLine(0)
-      await vi.advanceTimersByTimeAsync(0)
-
-      await expect(
-        coordinator.settleLineSynchronizationWithin(300),
-      ).resolves.toBe('permanent_conflict')
-      expect(coordinator.getLineSyncDiagnostic()).toBe(
-        'foreign_branch_revision',
-      )
-      expect(coordinator.getLineRevision('session-line')).toBe(0)
-      coordinator.retryLineSynchronization()
-      await vi.advanceTimersByTimeAsync(0)
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(1)
-    })
-
-    it.each([
-      [403, undefined],
-      [404, undefined],
-      [409, 'MOVE_LINE_TRUNCATION_NOT_ALLOWED'],
-      [409, 'TRUNCATION_IDEMPOTENCY_CONFLICT'],
-      [422, undefined],
-    ])(
-      'halts a non-retryable truncate HTTP %s without retaining idle work',
-      async (status, errorCode) => {
-        coordinator.startSession('session-line', 0)
-        truncateSessionMovesMock.mockRejectedValueOnce({
-          status,
-          ...(errorCode
-            ? { details: { error_code: errorCode } }
-            : {}),
-        })
-
-        coordinator.transitionMoveLine(0)
-        await vi.advanceTimersByTimeAsync(0)
-
-        expect(coordinator.getLineSyncDiagnostic()).toBe('line_sync_conflict')
-        expect(
-          (coordinator as unknown as { hasPendingUploads: () => boolean })
-            .hasPendingUploads(),
-        ).toBe(false)
-        await expect(
-          coordinator.settleLineSynchronizationWithin(300),
-        ).resolves.toBe('permanent_conflict')
-
-        await vi.advanceTimersByTimeAsync(60_000)
-        expect(truncateSessionMovesMock).toHaveBeenCalledTimes(1)
-      },
-    )
-
-    it.each([408, 429])('retries a transient truncate HTTP %s', async (status) => {
-      coordinator.startSession('session-line', 0)
-      truncateSessionMovesMock.mockRejectedValueOnce({ status })
-
-      coordinator.transitionMoveLine(0)
-      await vi.advanceTimersByTimeAsync(0)
-      expect(coordinator.getLineSyncDiagnostic()).toBeNull()
-
-      await vi.advanceTimersByTimeAsync(1000)
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
-      expect(coordinator.getLineRevision('session-line')).toBe(1)
-    })
-
-    it('allows an explicit retry after a non-identity truncate 4xx', async () => {
-      coordinator.startSession('session-line', 0)
-      truncateSessionMovesMock.mockRejectedValueOnce({
-        status: 409,
-        details: { error_code: 'MOVE_LINE_TRUNCATION_NOT_ALLOWED' },
-      })
-
-      coordinator.transitionMoveLine(0)
-      await vi.advanceTimersByTimeAsync(0)
-      const firstBody = truncateSessionMovesMock.mock.calls[0][1]
-      expect(coordinator.getLineSyncDiagnostic()).toBe('line_sync_conflict')
-
-      coordinator.retryLineSynchronization()
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
-      expect(truncateSessionMovesMock.mock.calls[1][1]).toEqual(firstBody)
-      expect(coordinator.getLineSyncDiagnostic()).toBeNull()
-      expect(coordinator.getLineRevision('session-line')).toBe(1)
-    })
-
-    it('retries an inconsistent acknowledgement with the same truncation body', async () => {
-      coordinator.startSession('session-line', 0)
-      const listener = vi.fn()
-      coordinator.addLineSyncDiagnosticListener(listener)
-      truncateSessionMovesMock.mockResolvedValueOnce({
-        client_request_id: 'wrong-request',
-        from_revision: 0,
-        to_revision: 1,
-        line_revision: 1,
-        after_ply: 0,
-        deleted_move_count: 0,
-        evidence_changed: false,
-      })
-
-      coordinator.transitionMoveLine(0)
-      await vi.advanceTimersByTimeAsync(0)
-      const firstBody = truncateSessionMovesMock.mock.calls[0][1]
-      expect(coordinator.getLineSyncDiagnostic()).toBe(
-        'line_sync_conflict',
-      )
-      expect(listener).toHaveBeenCalledTimes(1)
-
-      coordinator.retryLineSynchronization()
-      await vi.advanceTimersByTimeAsync(0)
-
-      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
-      expect(truncateSessionMovesMock.mock.calls[1][1]).toEqual(firstBody)
-      expect(coordinator.getLineSyncDiagnostic()).toBeNull()
-      expect(coordinator.getLineRevision('session-line')).toBe(1)
-      expect(listener).toHaveBeenCalledTimes(2)
-    })
-
-    it('does not adopt a later live revision returned with an older idempotent receipt', async () => {
-      coordinator.startSession('session-line', 2)
-      truncateSessionMovesMock.mockImplementationOnce(
-        (_sessionId: string, request: {
-          client_request_id: string
-          line_revision: number
-          after_ply: number
-        }) => Promise.resolve({
-          client_request_id: request.client_request_id,
-          from_revision: 2,
-          to_revision: 3,
-          line_revision: 4,
-          after_ply: request.after_ply,
-          deleted_move_count: 1,
-          evidence_changed: false,
-        }),
-      )
-
-      coordinator.transitionMoveLine(0)
-      await vi.advanceTimersByTimeAsync(0)
-
-      await expect(
-        coordinator.settleLineSynchronizationWithin(300),
-      ).resolves.toBe('permanent_conflict')
-      expect(coordinator.getLineRevision('session-line')).toBe(2)
-      expect(coordinator.getLineSyncDiagnostic()).toBe(
-        'foreign_branch_revision',
-      )
+      expect(coordinator.getLineRevision('session-line')).toBeNull()
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(false)
+      expect(coordinator.getLineSyncDiagnostic()).toBe('move_line_sync_failed')
       expect(uploadState().lineSyncPaused).toBe(true)
     })
 
-    it('expires and detaches a hung chain at the supplied terminal subdeadline', async () => {
+    it('disables a second takeback until the single transition is acknowledged', async () => {
+      coordinator.startSession('session-line', 0)
+      let finish!: (value: { line_revision: number }) => void
+      truncateSessionMovesMock.mockReturnValueOnce(
+        new Promise((resolve) => { finish = resolve }),
+      )
+
+      expect(coordinator.transitionMoveLine(3)).toBe(true)
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(false)
+      expect(coordinator.transitionMoveLine(1)).toBe(false)
+      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(1)
+
+      finish({ line_revision: 1 })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(true)
+      expect(coordinator.getLineRevision('session-line')).toBe(1)
+
+      expect(coordinator.transitionMoveLine(1)).toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(truncateSessionMovesMock).toHaveBeenCalledTimes(2)
+      expect(truncateSessionMovesMock.mock.calls[1][1]).toEqual({
+        line_revision: 1,
+        after_ply: 1,
+      })
+    })
+
+    it('fails an inconsistent acknowledgement closed without adopting it', async () => {
+      coordinator.startSession('session-line', 2)
+      truncateSessionMovesMock.mockResolvedValueOnce({ line_revision: 4 })
+
+      coordinator.transitionMoveLine(0)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getLineRevision('session-line')).toBeNull()
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(false)
+      expect(coordinator.getLineSyncDiagnostic()).toBe('move_line_sync_failed')
+      expect(uploadState().lineRevision).toBe(2)
+    })
+
+    it('aborts and forgets the transition when a new session starts', async () => {
       coordinator.startSession('session-line', 0)
       let signal: AbortSignal | undefined
       truncateSessionMovesMock.mockImplementationOnce(
@@ -729,18 +570,14 @@ describe('GameAnalysisCoordinator', () => {
           return new Promise(() => {})
         },
       )
-      coordinator.transitionMoveLine(0)
 
-      const waiting = coordinator.settleLineSynchronizationWithin(300)
-      await vi.advanceTimersByTimeAsync(299)
-      let settled = false
-      void waiting.then(() => { settled = true })
-      await vi.advanceTimersByTimeAsync(0)
-      expect(settled).toBe(false)
-      await vi.advanceTimersByTimeAsync(1)
-      await expect(waiting).resolves.toBe('deadline_expired')
-      expect(coordinator.getLineRevision('session-line')).toBe(0)
-      expect(signal?.aborted).toBe(false)
+      coordinator.transitionMoveLine(0)
+      coordinator.startSession('session-next', 7)
+
+      expect(signal?.aborted).toBe(true)
+      expect(coordinator.canTransitionMoveLine('session-line')).toBe(false)
+      expect(coordinator.getLineRevision('session-next')).toBe(7)
+      expect(coordinator.getLineSyncDiagnostic()).toBeNull()
     })
   })
 
@@ -827,6 +664,11 @@ describe('GameAnalysisCoordinator', () => {
     it('stops a permanent identity conflict without retrying the unchanged payload', async () => {
       coordinator.startSession('session-identity')
       seedResolvedHistory(1)
+      // A prior, non-pausing conflict may already have surfaced this diagnostic.
+      // The later incremental conflict must still publish its pause-state change.
+      ;(coordinator as any).setLineSyncDiagnostic('move_line_sync_failed')
+      const lineSyncListener = vi.fn()
+      coordinator.addLineSyncDiagnosticListener(lineSyncListener)
       uploadSessionMovesMock.mockRejectedValueOnce({
         status: 409,
         details: {
@@ -839,18 +681,17 @@ describe('GameAnalysisCoordinator', () => {
       await flushIndices(0)
       await vi.advanceTimersByTimeAsync(0)
       expect(coordinator.getLineSyncDiagnostic()).toBe(
-        'move_line_identity_conflict',
+        'move_line_sync_failed',
       )
+      expect(coordinator.canTransitionMoveLine('session-identity')).toBe(false)
+      expect(lineSyncListener).toHaveBeenCalledOnce()
 
       await vi.advanceTimersByTimeAsync(120_000)
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
 
-      uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
-      coordinator.retryLineSynchronization()
-      await vi.advanceTimersByTimeAsync(0)
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
       expect(coordinator.getLineSyncDiagnostic()).toBe(
-        'move_line_identity_conflict',
+        'move_line_sync_failed',
       )
       expect(coordinator.getUploadCommitRevision('session-identity')).toBe(0)
     })

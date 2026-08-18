@@ -56,6 +56,7 @@ export const resolveApiEndpointBaseUrl = (
 
 const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
 const RETRY_BASE_DELAY_MS = 200
+const HOME_ACTIVITY_TIMEOUT_MS = 5_000
 
 // ---- Client request timing (analytics) ----------------------------
 const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
@@ -190,11 +191,6 @@ export type UploadKind =
   | 'revert'
   | 'late_eval_repair'
 
-export type LineSyncVerdict =
-  | 'synchronized'
-  | 'deadline_expired'
-  | 'permanent_conflict'
-
 export type LineProofVerdict =
   | 'passed'
   | 'wrong_row_count'
@@ -232,7 +228,6 @@ export interface ApiRequestTelemetry {
   deadlineMs?: number
   /** `document.visibilityState` captured at call time (before the fetch). */
   visibilityStateStart?: string
-  lineSyncVerdict?: LineSyncVerdict
 }
 
 /**
@@ -273,7 +268,6 @@ export const reportApiRequest = (params: {
     move_count: t?.moveCount ?? null,
     payload_bytes: t?.payloadBytes ?? null,
     deadline_ms: t?.deadlineMs ?? null,
-    line_sync_verdict: t?.lineSyncVerdict ?? null,
     visibility_state_start: t?.visibilityStateStart ?? null,
     visibility_state_end: visibilityEnd ?? null,
     // A tab hidden mid-request: start !== end. Null unless both are known.
@@ -686,6 +680,8 @@ interface EndGameRequest {
   result: 'checkmate_win' | 'checkmate_loss' | 'resign' | 'draw' | 'abandon'
   pgn: string
   is_rated: boolean
+  line_revision?: number | null
+  discard_move_evidence?: boolean
 }
 
 export interface RatingChange {
@@ -836,7 +832,6 @@ interface SessionMovesRequest {
   /** Exact final_full receipt this sparse repair must follow. */
   final_client_request_id?: string
   line_revision?: number
-  line_sync_verdict?: LineSyncVerdict
 }
 
 export interface SessionMovesResponse {
@@ -848,13 +843,7 @@ export interface SessionMovesResponse {
 }
 
 export interface TruncateSessionMovesResponse {
-  client_request_id: string
-  from_revision: number
-  to_revision: number
   line_revision: number
-  after_ply: number
-  deleted_move_count: number
-  evidence_changed: boolean
 }
 
 /**
@@ -1000,13 +989,22 @@ export const continueDrill = async (
 export const failDrill = async (
   sessionId: string,
   terminalReason: 'accuracy' = 'accuracy',
+  lineRevision?: number | null,
 ): Promise<DrillSessionContract> => {
   return requestJson<DrillSessionContract>(
     `${API_BASE_URL}/api/drills/${sessionId}/fail`,
     {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ terminal_reason: terminalReason }),
+      body: JSON.stringify({
+        terminal_reason: terminalReason,
+        ...(lineRevision === undefined
+          ? {}
+          : {
+              line_revision: lineRevision,
+              discard_move_evidence: lineRevision === null,
+            }),
+      }),
     },
     { fallbackMessage: 'Failed to record drill failure' },
   )
@@ -1044,13 +1042,23 @@ export const naturalEndDrill = async (
   sessionId: string,
   result: 'checkmate_win' | 'checkmate_loss' | 'draw',
   pgn: string,
+  lineRevision?: number | null,
 ): Promise<DrillSessionContract> => {
   return requestJson<DrillSessionContract>(
     `${API_BASE_URL}/api/drills/${sessionId}/natural-end`,
     {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ result, pgn }),
+      body: JSON.stringify({
+        result,
+        pgn,
+        ...(lineRevision === undefined
+          ? {}
+          : {
+              line_revision: lineRevision,
+              discard_move_evidence: lineRevision === null,
+            }),
+      }),
     },
     { fallbackMessage: 'Failed to end drill' },
   )
@@ -1059,10 +1067,24 @@ export const naturalEndDrill = async (
 /**
  * Abandon the current drill.
  */
-export const abandonDrill = async (sessionId: string): Promise<DrillSessionContract> => {
+export const abandonDrill = async (
+  sessionId: string,
+  lineRevision?: number | null,
+): Promise<DrillSessionContract> => {
   return requestJson<DrillSessionContract>(
     `${API_BASE_URL}/api/drills/${sessionId}/abandon`,
-    { method: 'POST', headers: getAuthHeaders() },
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      ...(lineRevision === undefined
+        ? {}
+        : {
+            body: JSON.stringify({
+              line_revision: lineRevision,
+              discard_move_evidence: lineRevision === null,
+            }),
+          }),
+    },
     { fallbackMessage: 'Failed to abandon drill' },
   )
 }
@@ -1093,11 +1115,23 @@ export const endGame = async (
   result: EndGameRequest['result'],
   pgn: string,
   isRated: boolean = true,
+  lineRevision?: number | null,
 ): Promise<EndGameResponse> => {
   return requestJson<EndGameResponse>(`${API_BASE_URL}/api/game/end`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ session_id: sessionId, result, pgn, is_rated: isRated } satisfies EndGameRequest),
+    body: JSON.stringify({
+      session_id: sessionId,
+      result,
+      pgn,
+      is_rated: isRated,
+      ...(lineRevision === undefined
+        ? {}
+        : {
+            line_revision: lineRevision,
+            discard_move_evidence: lineRevision === null,
+          }),
+    } satisfies EndGameRequest),
   }, { fallbackMessage: 'Failed to end game' })
 }
 
@@ -1141,34 +1175,32 @@ export const fetchRatingHistory = async (
  * The union guarantees `deadlineMs`/`terminalAction` and `signal` are never both
  * present, so no signal-combining is ever needed.
  */
-export type UploadSessionMovesOptions =
+export type UploadSessionMovesOptions = {
+  lineRevision?: number
+} & (
   | {
       uploadKind: 'final_full'
       terminalAction: TerminalAction
       deadlineMs: number
       clientRequestId?: string
       recomputeOpportunity?: boolean
-      lineRevision?: number
-      lineSyncVerdict?: LineSyncVerdict
     }
   | {
       uploadKind: 'incremental'
       signal?: AbortSignal
       recomputeOpportunity?: boolean
-      lineRevision?: number
     }
   | {
       uploadKind: 'revert'
       recomputeOpportunity?: boolean
-      lineRevision?: number
     }
   | {
       uploadKind: 'late_eval_repair'
       finalClientRequestId: string
       signal?: AbortSignal
       recomputeOpportunity?: false
-      lineRevision?: number
     }
+)
 
 /**
  * Upload analyzed session moves in a single batch.
@@ -1197,12 +1229,7 @@ export const uploadSessionMoves = async (
           final_client_request_id: options.finalClientRequestId,
         }
       : {}),
-    ...(options.lineRevision === undefined
-      ? {}
-      : { line_revision: options.lineRevision }),
-    ...(options.uploadKind === 'final_full' && options.lineSyncVerdict
-      ? { line_sync_verdict: options.lineSyncVerdict }
-      : {}),
+    line_revision: options.lineRevision,
   }
   // Serialize ONCE: reuse the exact bytes for the fetch body AND the measured
   // payload size. payloadBytes is the transmitted UTF-8 byte length (TextEncoder),
@@ -1235,8 +1262,6 @@ export const uploadSessionMoves = async (
     deadlineMs:
       options.uploadKind === 'final_full' ? options.deadlineMs : undefined,
     visibilityStateStart: readVisibilityState(),
-    lineSyncVerdict:
-      options.uploadKind === 'final_full' ? options.lineSyncVerdict : undefined,
   }
   // A dedicated route makes mixed-version rollout fail closed: an old backend
   // returns 404 instead of ignoring eval_repair and accepting the sparse row as
@@ -1258,11 +1283,10 @@ export const uploadSessionMoves = async (
   )
 }
 
-/** Idempotently delete the persisted tail and advance the server branch token. */
+/** Delete the persisted tail once and advance the server branch token. */
 export const truncateSessionMoves = async (
   sessionId: string,
   request: {
-    client_request_id: string
     line_revision: number
     after_ply: number
   },
@@ -2178,6 +2202,10 @@ export interface StatsSummaryResponse {
   openings: StatsOpeningsSummary
 }
 
+export interface StatsActivityResponse {
+  has_game_or_drill: boolean
+}
+
 // Perfect Streak is served only by the standalone /achievements endpoint (used
 // by the in-game streak toast); it is no longer part of the stats summary.
 export interface PerfectStreakSummary {
@@ -2202,6 +2230,19 @@ export const getStatsSummary = async (
     `${API_BASE_URL}/api/stats/summary?${params}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load stats summary' },
+  )
+}
+
+/** Resolve whether the current account owns any durable game or drill session. */
+export const getStatsActivity = async (): Promise<StatsActivityResponse> => {
+  return requestJson<StatsActivityResponse>(
+    `${API_BASE_URL}/api/stats/activity`,
+    {
+      method: 'GET',
+      headers: getAuthHeaders(),
+      signal: AbortSignal.timeout(HOME_ACTIVITY_TIMEOUT_MS),
+    },
+    { fallbackMessage: 'Failed to load account activity' },
   )
 }
 

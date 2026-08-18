@@ -45,7 +45,12 @@ from app.session_contracts import (
     resegment_session_moves,
     utcnow,
 )
-from app.terminal_row_reconcile import reconcile_terminal_move_rows
+from app.terminal_row_reconcile import (
+    OUTCOME_LINE_UNACKNOWLEDGED,
+    ReconcileResult,
+    reconcile_terminal_move_rows,
+    suppress_unacknowledged_move_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,13 @@ class DrillContinueRequest(BaseModel):
 
 class DrillFailRequest(BaseModel):
     terminal_reason: str
+    line_revision: int | None = Field(None, ge=0)
+    discard_move_evidence: bool = False
+
+
+class DrillTerminalLineRequest(BaseModel):
+    line_revision: int | None = Field(None, ge=0)
+    discard_move_evidence: bool = False
 
 
 class DrillRouteCheckRequest(BaseModel):
@@ -646,10 +658,18 @@ def fail_drill(
     # Accuracy-fail flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true without any
     # timestamp write, so the opening-evidence counter carries the change (g-jact).
     was_evidence_eligible = session_is_evidence_eligible(session)
+    line_fence = suppress_unacknowledged_move_line(
+        db,
+        session,
+        line_revision=request.line_revision,
+        discard_move_evidence=request.discard_move_evidence,
+    )
     session.drill_state = "failed"
     session.drill_terminal_reason = "accuracy"
     db.flush()
-    if session_is_evidence_eligible(session) != was_evidence_eligible:
+    if session_is_evidence_eligible(session) != was_evidence_eligible or (
+        was_evidence_eligible and line_fence.deleted_rows > 0
+    ):
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
@@ -857,6 +877,8 @@ def check_drill_route(
 class DrillNaturalEndRequest(BaseModel):
     result: str
     pgn: str | None = None
+    line_revision: int | None = Field(None, ge=0)
+    discard_move_evidence: bool = False
 
 
 @router.post("/{session_id}/natural-end", response_model=DrillSessionContract)
@@ -876,6 +898,12 @@ def natural_end_drill(
         raise HTTPException(status_code=400, detail="Invalid natural-end result")
     # status->'ended' flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true (g-jact).
     was_evidence_eligible = session_is_evidence_eligible(session)
+    line_fence = suppress_unacknowledged_move_line(
+        db,
+        session,
+        line_revision=request.line_revision,
+        discard_move_evidence=request.discard_move_evidence,
+    )
     session.drill_state = "failed"
     session.drill_terminal_reason = "natural_end"
     session.status = "ended"
@@ -886,19 +914,26 @@ def natural_end_drill(
     # Natural drill termination is the second live terminal writer. It must
     # restore a lost/sparse final upload before the status transition exposes
     # the session to opening evidence, just like /api/game/end does.
-    reconcile_result = reconcile_terminal_move_rows(
-        db,
-        session,
-        allow_sparse=True,
+    reconcile_result = (
+        reconcile_terminal_move_rows(db, session, allow_sparse=True)
+        if line_fence.acknowledged
+        else ReconcileResult(
+            outcome=OUTCOME_LINE_UNACKNOWLEDGED,
+            expected_plies=None,
+            stored_rows=0,
+            derived_rows=0,
+        )
     )
-    session.terminal_line_reconciled = True
+    session.terminal_line_reconciled = line_fence.acknowledged
     if reconcile_result.derived_rows:
         # Match /api/game/end's durable audit marker. Once the missing rows are
         # present, the row grid alone cannot show that terminal reconciliation
         # repaired a lost final upload.
         session.derived_tail_rows = reconcile_result.derived_rows
     db.flush()
-    if session_is_evidence_eligible(session) != was_evidence_eligible:
+    if session_is_evidence_eligible(session) != was_evidence_eligible or (
+        was_evidence_eligible and line_fence.deleted_rows > 0
+    ):
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
@@ -917,6 +952,7 @@ def natural_end_drill(
 @router.post("/{session_id}/abandon", response_model=DrillSessionContract)
 def abandon_drill(
     session_id: uuid.UUID,
+    request: DrillTerminalLineRequest | None = None,
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
@@ -946,6 +982,14 @@ def abandon_drill(
         # natural-end writes checkmate_win|checkmate_loss|draw, this path writes
         # 'drill_abandon'. That difference is what lets the g-drill-failed-backfill
         # predicate target only rows this endpoint clobbered.
+        line_fence = suppress_unacknowledged_move_line(
+            db,
+            session,
+            line_revision=request.line_revision if request is not None else None,
+            discard_move_evidence=(
+                request.discard_move_evidence if request is not None else False
+            ),
+        )
         if session.drill_state != "failed":
             session.drill_state = "abandoned"
         session.status = "ended"
@@ -953,7 +997,9 @@ def abandon_drill(
         session.ended_at = utcnow()
         session.is_rated = False
         db.flush()
-        if session_is_evidence_eligible(session) != was_evidence_eligible:
+        if session_is_evidence_eligible(session) != was_evidence_eligible or (
+            was_evidence_eligible and line_fence.deleted_rows > 0
+        ):
             bump_evidence_seq(db, user.user_id, session.player_color)
         db.commit()
         db.refresh(session)

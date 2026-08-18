@@ -8,7 +8,6 @@ import chess
 from app.models import (
     GameSession,
     SessionMove,
-    SessionMoveTruncationReceipt,
     SessionUploadReceipt,
 )
 
@@ -86,26 +85,16 @@ def test_truncation_deletes_tail_once_and_fences_stale_uploads(
     assert uploaded.status_code == 200, uploaded.text
     assert uploaded.json()["line_revision"] == 0
 
-    request_id = str(uuid.uuid4())
     truncated = client.post(
         f"/api/session/{session_id}/moves/truncate",
         json={
-            "client_request_id": request_id,
             "line_revision": 0,
             "after_ply": 2,
         },
         headers=headers,
     )
     assert truncated.status_code == 200, truncated.text
-    assert truncated.json() == {
-        "client_request_id": request_id,
-        "from_revision": 0,
-        "to_revision": 1,
-        "line_revision": 1,
-        "after_ply": 2,
-        "deleted_move_count": 2,
-        "evidence_changed": False,
-    }
+    assert truncated.json() == {"line_revision": 1}
     db_session.expire_all()
     assert db_session.query(SessionMove).count() == 2
 
@@ -126,25 +115,9 @@ def test_truncation_deletes_tail_once_and_fences_stale_uploads(
         "d4",
     ]
 
-    reused_id = client.post(
-        f"/api/session/{session_id}/moves/truncate",
-        json={
-            "client_request_id": request_id,
-            "line_revision": 0,
-            "after_ply": 1,
-        },
-        headers=headers,
-    )
-    assert reused_id.status_code == 409
-    assert (
-        reused_id.json()["error"]["details"]["error_code"]
-        == "TRUNCATION_IDEMPOTENCY_CONFLICT"
-    )
-
     stale_truncation = client.post(
         f"/api/session/{session_id}/moves/truncate",
         json={
-            "client_request_id": str(uuid.uuid4()),
             "line_revision": 0,
             "after_ply": 0,
         },
@@ -153,24 +126,7 @@ def test_truncation_deletes_tail_once_and_fences_stale_uploads(
     assert stale_truncation.status_code == 409
     db_session.expire_all()
     assert _session(db_session, session_id).move_line_revision == 1
-    assert db_session.query(SessionMoveTruncationReceipt).count() == 1
     assert db_session.query(SessionMove).count() == 3
-    assert _session(db_session, session_id).move_line_revision == 1
-
-    retried = client.post(
-        f"/api/session/{session_id}/moves/truncate",
-        json={
-            "client_request_id": request_id,
-            "line_revision": 0,
-            "after_ply": 2,
-        },
-        headers=headers,
-    )
-    assert retried.status_code == 200
-    assert retried.json()["deleted_move_count"] == 2
-    assert db_session.query(SessionMoveTruncationReceipt).count() == 1
-    db_session.expire_all()
-    assert _session(db_session, session_id).move_line_revision == 1
 
     stale = _post_moves(client, headers, session_id, original)
     assert stale.status_code == 409
@@ -190,15 +146,13 @@ def test_empty_truncation_still_advances_revision(
     response = client.post(
         f"/api/session/{session_id}/moves/truncate",
         json={
-            "client_request_id": str(uuid.uuid4()),
             "line_revision": 0,
             "after_ply": 0,
         },
         headers=auth_headers(user_id=user_id),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["deleted_move_count"] == 0
-    assert response.json()["line_revision"] == 1
+    assert response.json() == {"line_revision": 1}
 
 
 def test_versioned_upload_keeps_line_identity_but_allows_eval_enrichment(
@@ -255,7 +209,6 @@ def test_failed_final_full_proof_commits_rows_and_receipt_but_suppresses_evidenc
             session_id,
             incomplete,
             line_revision=0,
-            line_sync_verdict="synchronized",
             terminal_action="game_end",
             recompute_opportunity=True,
         )
@@ -271,7 +224,6 @@ def test_failed_final_full_proof_commits_rows_and_receipt_but_suppresses_evidenc
     receipt = db_session.query(SessionUploadReceipt).one()
     assert receipt.move_line_revision == 0
     assert receipt.line_proof_verdict == "nonstandard_start"
-    assert receipt.line_sync_verdict == "synchronized"
 
 
 def test_passing_final_full_proof_retains_evidence_enqueue(
@@ -288,7 +240,6 @@ def test_passing_final_full_proof_retains_evidence_enqueue(
             session_id,
             _line("e4", "e5"),
             line_revision=0,
-            line_sync_verdict="deadline_expired",
             terminal_action="game_end",
         )
     assert response.status_code == 200, response.text
@@ -296,7 +247,7 @@ def test_passing_final_full_proof_retains_evidence_enqueue(
     enqueue.assert_called_once()
     db_session.expire_all()
     receipt = db_session.query(SessionUploadReceipt).one()
-    assert receipt.line_sync_verdict == "deadline_expired"
+    assert receipt.move_line_revision == 0
 
 
 def test_empty_final_full_noop_proves_the_persisted_line(
@@ -321,7 +272,6 @@ def test_empty_final_full_noop_proves_the_persisted_line(
         session_id,
         [],
         line_revision=0,
-        line_sync_verdict="synchronized",
         terminal_action="game_end",
     )
     assert no_op.status_code == 200, no_op.text
@@ -346,7 +296,6 @@ def test_generic_dialect_final_full_proof_commits_and_returns_typed_verdict(
             session_id,
             _line("e4", "e5"),
             line_revision=0,
-            line_sync_verdict="synchronized",
             terminal_action="game_end",
         )
 
@@ -356,22 +305,6 @@ def test_generic_dialect_final_full_proof_commits_and_returns_typed_verdict(
     db_session.expire_all()
     assert db_session.query(SessionMove).count() == 2
     assert db_session.query(SessionUploadReceipt).one().line_proof_verdict == "passed"
-
-
-def test_line_sync_verdict_is_terminal_observability_only(
-    client, auth_headers, create_game_session, db_session
-):
-    session_id = create_game_session(user_id=8109)
-    response = _post_moves(
-        client,
-        auth_headers(user_id=8109),
-        session_id,
-        _line("e4"),
-        line_revision=0,
-        line_sync_verdict="permanent_conflict",
-    )
-    assert response.status_code == 400
-    assert db_session.query(SessionMove).count() == 0
 
 
 def test_eligible_truncation_bumps_evidence_once_after_deleting_a_row(
@@ -397,19 +330,15 @@ def test_eligible_truncation_bumps_evidence_once_after_deleting_a_row(
         response = client.post(
             f"/api/session/{session_id}/moves/truncate",
             json={
-                "client_request_id": str(uuid.uuid4()),
                 "line_revision": 0,
                 "after_ply": 1,
             },
             headers=headers,
         )
     assert response.status_code == 200, response.text
-    assert response.json()["deleted_move_count"] == 1
-    assert response.json()["evidence_changed"] is True
+    assert response.json() == {"line_revision": 1}
     bump.assert_called_once()
     recompute.assert_called_once()
-    db_session.expire_all()
-    assert db_session.query(SessionMoveTruncationReceipt).one().evidence_changed is True
 
 
 def test_truncation_rejects_rated_and_foreign_sessions(
@@ -418,7 +347,6 @@ def test_truncation_rejects_rated_and_foreign_sessions(
     owner = 8107
     session_id = create_game_session(user_id=owner)
     body = {
-        "client_request_id": str(uuid.uuid4()),
         "line_revision": 0,
         "after_ply": 0,
     }
@@ -441,7 +369,89 @@ def test_truncation_rejects_rated_and_foreign_sessions(
     db_session.commit()
     ended = client.post(
         f"/api/session/{session_id}/moves/truncate",
-        json={**body, "client_request_id": str(uuid.uuid4())},
+        json=body,
         headers=auth_headers(user_id=owner),
     )
     assert ended.status_code == 409
+
+
+def test_terminal_unknown_transition_discards_rows_and_fences_old_requests(
+    client, auth_headers, create_game_session, db_session
+):
+    user_id = 8113
+    session_id = create_game_session(user_id=user_id)
+    _make_unrated(db_session, session_id)
+    headers = auth_headers(user_id=user_id)
+    moves = _line("e4", "e5")
+    assert (
+        _post_moves(client, headers, session_id, moves, line_revision=0).status_code
+        == 200
+    )
+
+    ended = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign",
+            "pgn": "1. e4 e5 *",
+            "is_rated": False,
+            "line_revision": None,
+            "discard_move_evidence": True,
+        },
+        headers=headers,
+    )
+    assert ended.status_code == 200, ended.text
+    db_session.expire_all()
+    session = _session(db_session, session_id)
+    assert session.status == "ended"
+    assert session.move_line_revision == 1
+    assert session.terminal_line_reconciled is False
+    assert db_session.query(SessionMove).count() == 0
+
+    stale_upload = _post_moves(client, headers, session_id, moves, line_revision=0)
+    assert stale_upload.status_code == 409
+    stale_truncate = client.post(
+        f"/api/session/{session_id}/moves/truncate",
+        json={"line_revision": 0, "after_ply": 0},
+        headers=headers,
+    )
+    assert stale_truncate.status_code == 409
+
+
+def test_terminal_stale_acknowledged_revision_discards_the_foreign_branch(
+    client, auth_headers, create_game_session, db_session
+):
+    user_id = 8114
+    session_id = create_game_session(user_id=user_id)
+    _make_unrated(db_session, session_id)
+    headers = auth_headers(user_id=user_id)
+    moves = _line("e4", "e5")
+    assert (
+        _post_moves(client, headers, session_id, moves, line_revision=0).status_code
+        == 200
+    )
+    truncated = client.post(
+        f"/api/session/{session_id}/moves/truncate",
+        json={"line_revision": 0, "after_ply": 1},
+        headers=headers,
+    )
+    assert truncated.status_code == 200, truncated.text
+
+    ended = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign",
+            "pgn": "1. e4 *",
+            "is_rated": False,
+            "line_revision": 0,
+            "discard_move_evidence": False,
+        },
+        headers=headers,
+    )
+    assert ended.status_code == 200, ended.text
+    db_session.expire_all()
+    session = _session(db_session, session_id)
+    assert session.move_line_revision == 2
+    assert session.terminal_line_reconciled is False
+    assert db_session.query(SessionMove).count() == 0

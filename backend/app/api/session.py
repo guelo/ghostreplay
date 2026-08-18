@@ -73,7 +73,6 @@ from app.models import (
     Move,
     Position,
     SessionMove,
-    SessionMoveTruncationReceipt,
     SessionUploadReceipt,
     decode_uci_line,
     encode_uci_line,
@@ -203,10 +202,6 @@ class SessionMovesRequest(BaseModel):
     # Server-owned branch token. Omission is accepted only while the session is
     # still at revision zero for mixed-version rollout.
     line_revision: int | None = Field(None, ge=0)
-    # Validated client telemetry only; never authorizes a branch or evidence.
-    line_sync_verdict: (
-        Literal["synchronized", "deadline_expired", "permanent_conflict"] | None
-    ) = None
 
 
 class SessionMovesResponse(BaseModel):
@@ -218,19 +213,12 @@ class SessionMovesResponse(BaseModel):
 
 
 class SessionMovesTruncateRequest(BaseModel):
-    client_request_id: uuid.UUID
     line_revision: int = Field(..., ge=0)
     after_ply: int = Field(..., ge=0)
 
 
 class SessionMovesTruncateResponse(BaseModel):
-    client_request_id: uuid.UUID
-    from_revision: int
-    to_revision: int
     line_revision: int
-    after_ply: int
-    deleted_move_count: int
-    evidence_changed: bool
 
 
 class SessionAnalysisMove(BaseModel):
@@ -1479,36 +1467,6 @@ def truncate_session_moves(
             detail={"error_code": "MOVE_LINE_TRUNCATION_NOT_ALLOWED"},
         )
 
-    receipt = (
-        db.query(SessionMoveTruncationReceipt)
-        .filter(
-            SessionMoveTruncationReceipt.session_id == session_id,
-            SessionMoveTruncationReceipt.client_request_id == request.client_request_id,
-        )
-        .first()
-    )
-    if receipt is not None:
-        if (
-            receipt.from_revision != request.line_revision
-            or receipt.after_ply != request.after_ply
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_code": "TRUNCATION_IDEMPOTENCY_CONFLICT",
-                    "current_revision": game_session.move_line_revision,
-                },
-            )
-        return SessionMovesTruncateResponse(
-            client_request_id=receipt.client_request_id,
-            from_revision=receipt.from_revision,
-            to_revision=receipt.to_revision,
-            line_revision=game_session.move_line_revision,
-            after_ply=receipt.after_ply,
-            deleted_move_count=receipt.deleted_move_count,
-            evidence_changed=receipt.evidence_changed,
-        )
-
     if request.line_revision != game_session.move_line_revision:
         _raise_line_revision_conflict(game_session.move_line_revision)
 
@@ -1521,25 +1479,12 @@ def truncate_session_moves(
         )
         .delete(synchronize_session=False)
     )
-    from_revision = game_session.move_line_revision
-    to_revision = from_revision + 1
-    game_session.move_line_revision = to_revision
+    game_session.move_line_revision += 1
     evidence_changed = bool(
         deleted_move_count and session_is_evidence_eligible(game_session)
     )
-    db.add(
-        SessionMoveTruncationReceipt(
-            session_id=session_id,
-            client_request_id=request.client_request_id,
-            from_revision=from_revision,
-            to_revision=to_revision,
-            after_ply=request.after_ply,
-            deleted_move_count=deleted_move_count,
-            evidence_changed=evidence_changed,
-        )
-    )
-    # Drain the delete/session/receipt writes before the cursor bump, which stays
-    # the transaction's final potentially-blocking statement.
+    # Drain the delete/session writes before the cursor bump, which stays the
+    # transaction's final potentially-blocking statement.
     db.flush()
     if evidence_changed:
         bump_evidence_seq(db, user.user_id, game_session.player_color)
@@ -1551,15 +1496,7 @@ def truncate_session_moves(
             game_session.player_color,
             source=OpeningScoreTrigger.SESSION_EVIDENCE,
         )
-    return SessionMovesTruncateResponse(
-        client_request_id=request.client_request_id,
-        from_revision=from_revision,
-        to_revision=to_revision,
-        line_revision=to_revision,
-        after_ply=request.after_ply,
-        deleted_move_count=deleted_move_count,
-        evidence_changed=evidence_changed,
-    )
+    return SessionMovesTruncateResponse(line_revision=game_session.move_line_revision)
 
 
 @router.post(
@@ -1604,11 +1541,6 @@ def upsert_session_moves(
     is_final_full = request.terminal_action is not None
     client_request_id = getattr(http_request.state, "client_request_id", None)
     server_request_id = getattr(http_request.state, "request_id", None)
-    if request.line_sync_verdict is not None and not is_final_full:
-        raise HTTPException(
-            status_code=400,
-            detail="line_sync_verdict is valid only for final_full",
-        )
     if (request.line_revision is None and game_session.move_line_revision > 0) or (
         request.line_revision is not None
         and request.line_revision != game_session.move_line_revision
@@ -1697,7 +1629,6 @@ def upsert_session_moves(
             terminal_action=request.terminal_action,
             content_length_bytes=_validated_content_length(http_request),
             move_line_revision=request.line_revision,
-            line_sync_verdict=request.line_sync_verdict,
         )
         db.add(upload_receipt)
 

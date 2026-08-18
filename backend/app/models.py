@@ -569,7 +569,6 @@ class SessionUploadReceipt(Base):
     # this upload without rolling back otherwise-valid move persistence.
     move_line_revision: Mapped[int | None] = mapped_column(Integer)
     line_proof_verdict: Mapped[str | None] = mapped_column(Text)
-    line_sync_verdict: Mapped[str | None] = mapped_column(Text)
     # INSERT time (pre-commit, before the cursor bump), NOT commit-completion time.
     # Stamped APP-SIDE at flush rather than by ``now()``: Postgres defines now() as
     # TRANSACTION-start time, so a request that waited seconds on the session row
@@ -578,67 +577,6 @@ class SessionUploadReceipt(Base):
     # backstop for any non-ORM insert (never ``now()``, for the same reason), and
     # matches the migration on both dialects. Coarse adjudication ordering only;
     # server-commit TIMING comes from the joined api_request, not this column.
-    created_at: Mapped[DateTime] = mapped_column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        server_default=statement_timestamp(),
-        nullable=False,
-    )
-
-
-class SessionMoveTruncationReceipt(Base):
-    """Idempotency/linearization record for one canonical-line truncation."""
-
-    __tablename__ = "session_move_truncation_receipt"
-    __table_args__ = (
-        UniqueConstraint(
-            "session_id",
-            "client_request_id",
-            name="uq_session_move_truncation_receipt_request",
-        ),
-        UniqueConstraint(
-            "session_id",
-            "to_revision",
-            name="uq_session_move_truncation_receipt_revision",
-        ),
-        CheckConstraint(
-            "from_revision >= 0",
-            name="ck_session_move_truncation_receipt_from_revision",
-        ),
-        CheckConstraint(
-            "to_revision >= 0",
-            name="ck_session_move_truncation_receipt_to_revision",
-        ),
-        CheckConstraint(
-            "after_ply >= 0",
-            name="ck_session_move_truncation_receipt_after_ply",
-        ),
-        CheckConstraint(
-            "deleted_move_count >= 0",
-            name="ck_session_move_truncation_receipt_deleted_move_count",
-        ),
-        CheckConstraint(
-            "to_revision = from_revision + 1",
-            name="ck_session_move_truncation_receipt_revision_step",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("game_sessions.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    client_request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False
-    )
-    from_revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    to_revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    after_ply: Mapped[int] = mapped_column(Integer, nullable=False)
-    deleted_move_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    evidence_changed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

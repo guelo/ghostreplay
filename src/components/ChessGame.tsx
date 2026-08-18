@@ -204,9 +204,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     readLineSyncDiagnostic,
     readLineSyncDiagnostic,
   );
-  const retryLineSynchronization = useCallback(
-    () => coordinator.retryLineSynchronization(),
+  const readCanTransitionMoveLine = useCallback(
+    () =>
+      coordinator.canTransitionMoveLine(
+        useGameStore.getState().sessionId,
+      ),
     [coordinator],
+  );
+  const canTransitionMoveLine = useSyncExternalStore(
+    subscribeToLineSyncDiagnostic,
+    readCanTransitionMoveLine,
+    readCanTransitionMoveLine,
   );
 
   // --- Cross-boundary state from zustand store ---
@@ -1610,8 +1618,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Durably upload the full move history before failDrill computes the
       // opening-score delta, so the recompute sees this drill's complete chain
       // (mirrors the natural-end barrier). Bounded; degrades on timeout.
-      await uploadFullMoveHistoryBeforeEnd(sessionId, "accuracy_fail");
-      const contract = await failDrill(sessionId, "accuracy");
+      const lineRevision = await uploadFullMoveHistoryBeforeEnd(
+        sessionId,
+        "accuracy_fail",
+      );
+      if (lineRevision === undefined) return;
+      const contract = await failDrill(sessionId, "accuracy", lineRevision);
       if (!isPostRootMoveStillCurrent(sessionId, result)) {
         return;
       }
@@ -2685,24 +2697,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             {isGameActive && lineSyncDiagnostic && (
               <div className="line-sync-alert" role="alert">
                 <p>
-                  {lineSyncDiagnostic === "foreign_branch_revision"
-                    ? "This game changed in another tab. Move uploads are paused for this session."
-                    : lineSyncDiagnostic === "move_line_identity_conflict"
-                      ? "The saved move line conflicts with the server. Move uploads are paused for this session."
-                      : "The truncation acknowledgement was inconsistent. Move uploads are paused."}
+                  The saved move line could not be synchronized. Move uploads and
+                  further takebacks are paused for this session.
                 </p>
                 <button
                   className="chess-button"
                   type="button"
-                  onClick={
-                    lineSyncDiagnostic === "line_sync_conflict"
-                      ? retryLineSynchronization
-                      : () => void handleNewGame()
-                  }
+                  onClick={() => void handleNewGame()}
                 >
-                  {lineSyncDiagnostic === "line_sync_conflict"
-                    ? "Retry sync"
-                    : "Start new game"}
+                  Start new game
                 </button>
               </div>
             )}
@@ -2764,7 +2767,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               onResign={handleResignClick}
               isResignDisabled={!isGameActive || chess.isGameOver()}
               onRevert={handleRevertClick}
-              isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
+              isRevertDisabled={
+                moveHistory.length === 0 ||
+                chess.isGameOver() ||
+                (!isRated &&
+                  !isPracticeContinuation &&
+                  !canTransitionMoveLine)
+              }
               onFlipBoard={flipBoard}
               onCopyPosition={handleCopyPosition}
               onReset={handleReset}

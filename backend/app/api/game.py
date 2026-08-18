@@ -67,7 +67,12 @@ from app.srs_opportunity import (
     load_review_counters,
     opening_weight,
 )
-from app.terminal_row_reconcile import reconcile_terminal_move_rows
+from app.terminal_row_reconcile import (
+    OUTCOME_LINE_UNACKNOWLEDGED,
+    ReconcileResult,
+    reconcile_terminal_move_rows,
+    suppress_unacknowledged_move_line,
+)
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 logger = logging.getLogger(__name__)
@@ -580,6 +585,12 @@ class GameEndRequest(BaseModel):
     result: GameResult = Field(..., description="Game result")
     pgn: str = Field(..., description="PGN of the game")
     is_rated: bool = Field(True, description="Whether this game counts for rating")
+    # Current clients always send the last browser-acknowledged branch token.
+    # Omission is legacy-compatible only at server revision zero.
+    line_revision: int | None = Field(None, ge=0)
+    # True when a takeback request has an unknown outcome. Terminalization still
+    # succeeds, but session-move evidence is discarded under the session lock.
+    discard_move_evidence: bool = False
 
 
 class RatingChange(BaseModel):
@@ -824,6 +835,12 @@ def end_game(
     # flips SESSION_EVIDENCE_ELIGIBLE_SQL's truth value (g-jact): ending a session
     # makes its already-uploaded moves digest-visible in one transition.
     was_evidence_eligible = session_is_evidence_eligible(session)
+    line_fence = suppress_unacknowledged_move_line(
+        db,
+        session,
+        line_revision=request.line_revision,
+        discard_move_evidence=request.discard_move_evidence,
+    )
     session.status = "ended"
     session.result = request.result.value
     session.ended_at = utcnow()
@@ -841,13 +858,20 @@ def end_game(
     # sparse completion is safe here because this session is still active and
     # locked for terminal finalization. The flush is load-bearing: autoflush is
     # off, and recompute's scoped SELECT below must see the staged rows.
-    row_reconcile = reconcile_terminal_move_rows(
-        db, session, allow_sparse=True
+    row_reconcile = (
+        reconcile_terminal_move_rows(db, session, allow_sparse=True)
+        if line_fence.acknowledged
+        else ReconcileResult(
+            outcome=OUTCOME_LINE_UNACKNOWLEDGED,
+            expected_plies=None,
+            stored_rows=0,
+            derived_rows=0,
+        )
     )
     # Admission marker for the independent fresh-replay proof. Historical
     # sessions default false because no terminal reconcile ever covered them;
     # this flips only in the same transaction that ran the boundary above.
-    session.terminal_line_reconciled = True
+    session.terminal_line_reconciled = line_fence.acknowledged
     if row_reconcile.derived_rows:
         # Durable marker: after derivation the row grid alone can't distinguish
         # a reconciled session from ordinary unresolved uploads, and the
@@ -952,7 +976,9 @@ def end_game(
         score_changes = None
 
     db.flush()
-    if session_is_evidence_eligible(session) != was_evidence_eligible:
+    if session_is_evidence_eligible(session) != was_evidence_eligible or (
+        was_evidence_eligible and line_fence.deleted_rows > 0
+    ):
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)

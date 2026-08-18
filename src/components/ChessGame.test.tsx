@@ -205,6 +205,7 @@ let mockUploadCommitSessionId: string | null = null;
 let mockUploadCommitRevision = 0;
 const mockUploadCommitListeners = new Set<() => void>();
 let mockLineSyncDiagnostic: LineSyncDiagnostic | null = null;
+let mockCanTransitionMoveLine = true;
 const mockLineSyncDiagnosticListeners = new Set<() => void>();
 
 const emitUploadCommit = (sessionId: string) => {
@@ -233,19 +234,25 @@ const mockCoordinator = {
   startSession: vi.fn((sessionId: string) => {
     mockUploadCommitSessionId = sessionId;
     mockUploadCommitRevision = 0;
+    mockCanTransitionMoveLine = true;
     for (const listener of mockUploadCommitListeners) listener();
+    for (const listener of mockLineSyncDiagnosticListeners) listener();
     mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null });
   }),
   clearSession: vi.fn(() => {
     mockUploadCommitSessionId = null;
     mockUploadCommitRevision = 0;
+    mockCanTransitionMoveLine = false;
     for (const listener of mockUploadCommitListeners) listener();
+    for (const listener of mockLineSyncDiagnosticListeners) listener();
     mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null });
   }),
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
-  stopSessionUploads: vi.fn(),
+  stopSessionUploads: vi.fn(() => {
+    mockCanTransitionMoveLine = false;
+    for (const listener of mockLineSyncDiagnosticListeners) listener();
+  }),
   settleWithin: vi.fn().mockResolvedValue(undefined),
-  settleLineSynchronizationWithin: vi.fn().mockResolvedValue("synchronized"),
   ensurePendingAnalysis: vi.fn().mockReturnValue(false),
   getLineRevision: vi.fn(() => useGameStore.getState().moveLineRevision),
   armLateEvaluationRepair: vi.fn().mockReturnValue(false),
@@ -264,11 +271,11 @@ const mockCoordinator = {
     return () => mockUploadCommitListeners.delete(listener);
   }),
   getLineSyncDiagnostic: vi.fn(() => mockLineSyncDiagnostic),
+  canTransitionMoveLine: vi.fn(() => mockCanTransitionMoveLine),
   addLineSyncDiagnosticListener: vi.fn((listener: () => void) => {
     mockLineSyncDiagnosticListeners.add(listener);
     return () => mockLineSyncDiagnosticListeners.delete(listener);
   }),
-  retryLineSynchronization: vi.fn(),
   store: gameAnalysisStore,
   markSkipped: vi.fn(),
   pruneFromMoveIndex: vi.fn((k: number) =>
@@ -396,12 +403,12 @@ beforeEach(() => {
   mockUploadCommitRevision = 0;
   mockUploadCommitListeners.clear();
   mockLineSyncDiagnostic = null;
+  mockCanTransitionMoveLine = true;
   mockLineSyncDiagnosticListeners.clear();
   mockCoordinator.getUploadCommitRevision.mockClear();
   mockCoordinator.addUploadCommitListener.mockClear();
   mockCoordinator.getLineSyncDiagnostic.mockClear();
   mockCoordinator.addLineSyncDiagnosticListener.mockClear();
-  mockCoordinator.retryLineSynchronization.mockClear();
   // Isolate persisted drill prefs between tests — a successful drill start
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
   // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
@@ -417,8 +424,6 @@ beforeEach(() => {
   mockCoordinator.flushPendingUploads.mockClear();
   mockCoordinator.flushPendingUploads.mockResolvedValue(undefined);
   mockCoordinator.stopSessionUploads.mockClear();
-  mockCoordinator.settleLineSynchronizationWithin.mockClear();
-  mockCoordinator.settleLineSynchronizationWithin.mockResolvedValue("synchronized");
   mockCoordinator.ensurePendingAnalysis.mockClear();
   mockCoordinator.ensurePendingAnalysis.mockReturnValue(false);
   mockCoordinator.getLineRevision.mockClear();
@@ -661,7 +666,7 @@ describe("ChessGame characterization safeguards", () => {
     );
   });
 
-  it("starts a new game for a permanent move-line identity conflict", async () => {
+  it("offers only new-session recovery for a failed move-line transition", async () => {
     useGameStore.setState({
       sessionId: "session-line-sync",
       isGameActive: true,
@@ -676,37 +681,15 @@ describe("ChessGame characterization safeguards", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     act(() => {
-      mockLineSyncDiagnostic = "move_line_identity_conflict";
+      mockLineSyncDiagnostic = "move_line_sync_failed";
       for (const listener of mockLineSyncDiagnosticListeners) listener();
     });
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "The saved move line conflicts with the server.",
+      "The saved move line could not be synchronized.",
     );
     fireEvent.click(screen.getByRole("button", { name: "Start new game" }));
     await waitFor(() => expect(startGameMock).toHaveBeenCalledOnce());
-    expect(mockCoordinator.retryLineSynchronization).not.toHaveBeenCalled();
-  });
-
-  it("offers idempotent retry only for a local truncation acknowledgement conflict", async () => {
-    useGameStore.setState({
-      sessionId: "session-line-sync",
-      isGameActive: true,
-      playerColor: "white",
-      boardOrientation: "white",
-      liveFen: STARTING_FEN,
-    });
-
-    await act(async () => {
-      render(<ChessGame />);
-    });
-    act(() => {
-      mockLineSyncDiagnostic = "line_sync_conflict";
-      for (const listener of mockLineSyncDiagnosticListeners) listener();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
-    expect(mockCoordinator.retryLineSynchronization).toHaveBeenCalledOnce();
   });
 
   it("shows the drilling label while a drill is active or at root, but not once converted", async () => {
@@ -1505,7 +1488,11 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     await waitFor(() => {
-      expect(failDrillMock).toHaveBeenCalledWith("session-characterization", "accuracy");
+      expect(failDrillMock).toHaveBeenCalledWith(
+        "session-characterization",
+        "accuracy",
+        0,
+      );
       expect(useGameStore.getState().drillState).toBe("failed");
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
       expect(useGameStore.getState().viewIndex).toBe(-1);
@@ -1527,7 +1514,7 @@ describe("ChessGame characterization safeguards", () => {
     // g-y90g: the accuracy-fail path goes through uploadFullMoveHistoryBeforeEnd,
     // which stops the incremental uploader BEFORE this final upload (so no stray
     // mid-game upload races it) and flags it for the single opportunity recompute.
-    // This is the structural guard for the review's P1 miss (no ChessGame change).
+    // This is the structural guard for the final-upload ordering.
     expect(mockCoordinator.stopSessionUploads).toHaveBeenCalled();
     expect(
       vi.mocked(mockCoordinator.stopSessionUploads).mock.invocationCallOrder[0],
@@ -1535,6 +1522,44 @@ describe("ChessGame characterization safeguards", () => {
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
       expect.objectContaining({ recomputeOpportunity: true }),
     );
+  });
+
+  it("disables takeback when an active unrated drill stops after accuracy failure", async () => {
+    const board = new Chess();
+    const move = board.move("e4");
+    useGameStore.setState({
+      sessionId: "session-accuracy-failed",
+      isGameActive: true,
+      isRated: false,
+      isPracticeContinuation: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+      moveHistory: [
+        {
+          san: move.san,
+          fen: board.fen(),
+          uci: move.from + move.to,
+        },
+      ],
+      liveFen: board.fen(),
+    });
+
+    render(<ChessGame />);
+    await waitFor(() => {
+      expect(fetchCurrentRatingMock).toHaveBeenCalled();
+    });
+    expect(screen.getByTitle("Revert last move")).toBeEnabled();
+
+    act(() => {
+      useGameStore.getState().setDrillState("failed");
+      useGameStore.getState().setDrillTerminalReason("accuracy");
+      mockCoordinator.stopSessionUploads();
+    });
+
+    expect(screen.getByTitle("Revert last move")).toBeDisabled();
   });
 
   it("shows the opening-score badge in the lineage (not DrillStopActions) when a drill fails on accuracy (g-3gmc)", async () => {
@@ -1771,7 +1796,11 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     await waitFor(() => {
-      expect(failDrillMock).toHaveBeenCalledWith("session-position-fail", "accuracy");
+      expect(failDrillMock).toHaveBeenCalledWith(
+        "session-position-fail",
+        "accuracy",
+        0,
+      );
       expect(useGameStore.getState().drillState).toBe("failed");
     });
     expect(mockCoordinator.waitForDrillGrade).toHaveBeenCalledWith(0, "e2e4", 0);
@@ -1891,7 +1920,10 @@ describe("ChessGame characterization safeguards", () => {
 
     // Targeted barrier ran for the failed move index (0).
     expect(mockCoordinator.waitForAnalysis).toHaveBeenCalledWith(0);
-    expect(abandonDrillMock).toHaveBeenCalledWith("session-characterization");
+    expect(abandonDrillMock).toHaveBeenCalledWith(
+      "session-characterization",
+      0,
+    );
     expect(mockCoordinator.clearSession).toHaveBeenCalled();
     expect(useGameStore.getState().isGameActive).toBe(false);
     // Server says 'failed' (outcome preserved); the client store finalizes to
@@ -2101,6 +2133,7 @@ describe("ChessGame characterization safeguards", () => {
       "resign",
       expect.any(String),
       true,
+      0,
     );
 
     await act(async () => {
@@ -2755,7 +2788,11 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     await waitFor(() => {
-      expect(failDrillMock).toHaveBeenCalledWith("drill-restart", "accuracy");
+      expect(failDrillMock).toHaveBeenCalledWith(
+        "drill-restart",
+        "accuracy",
+        0,
+      );
       expect(useGameStore.getState().drillState).toBe("failed");
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
     });
@@ -4893,6 +4930,7 @@ describe("ChessGame move analysis", () => {
         "resign",
         expect.any(String),
         expect.any(Boolean),
+        0,
       );
     });
   });
@@ -5280,7 +5318,10 @@ describe("ChessGame opening lineage", () => {
     });
 
     await waitFor(() =>
-      expect(abandonDrillMock).toHaveBeenCalledWith("session-active-drill"),
+      expect(abandonDrillMock).toHaveBeenCalledWith(
+        "session-active-drill",
+        0,
+      ),
     );
     expect(startDrillMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -5435,7 +5476,10 @@ describe("ChessGame opening lineage", () => {
     });
 
     await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(2));
-    expect(abandonDrillMock).toHaveBeenCalledWith("session-mounted-drill");
+    expect(abandonDrillMock).toHaveBeenCalledWith(
+      "session-mounted-drill",
+      0,
+    );
     expect(startDrillMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         opening_key: targetOpeningKey,
@@ -5911,6 +5955,7 @@ describe("ChessGame remount persistence", () => {
         "resign",
         expect.any(String),
         expect.any(Boolean),
+        0,
       );
     });
 
@@ -6852,7 +6897,11 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
 
       if (shouldFail) {
         await waitFor(() => {
-          expect(failDrillMock).toHaveBeenCalledWith("drill-matrix", "accuracy");
+          expect(failDrillMock).toHaveBeenCalledWith(
+            "drill-matrix",
+            "accuracy",
+            0,
+          );
         });
         expect(useGameStore.getState().drillState).toBe("failed");
       } else {

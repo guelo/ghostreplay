@@ -72,9 +72,9 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
     })),
     ensurePendingAnalysis: vi.fn().mockReturnValue(true),
     settleWithin: vi.fn().mockResolvedValue(undefined),
-    settleLineSynchronizationWithin: vi.fn().mockResolvedValue("synchronized"),
     getLineRevision: vi.fn().mockReturnValue(0),
-    transitionMoveLine: vi.fn().mockReturnValue(false),
+    canTransitionMoveLine: vi.fn().mockReturnValue(true),
+    transitionMoveLine: vi.fn().mockReturnValue(true),
     armLateEvaluationRepair: vi.fn().mockReturnValue(false),
     releaseLateEvaluationRepair: vi.fn(),
     cancelLateEvaluationRepair: vi.fn(),
@@ -342,6 +342,7 @@ describe("useChessGameLifecycle", () => {
       "resign",
       expect.any(String),
       true,
+      0,
     );
     expect(setIsRevertPending).toHaveBeenNthCalledWith(1, true);
     expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
@@ -410,8 +411,9 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().moveHistory).toHaveLength(2);
     // SRS reviews for reverted indices (>= new length) are cancelled on the owner.
     expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
-    // M1: revert synchronously prunes coordinator-owned state from the new length.
-    expect(coordinator.pruneFromMoveIndex).toHaveBeenCalledWith(2);
+    // The line transition owns coordinator pruning before the local rewind.
+    expect(coordinator.transitionMoveLine).toHaveBeenCalledWith(2);
+    expect(coordinator.pruneFromMoveIndex).not.toHaveBeenCalled();
   });
 
   it("starts active-unrated line synchronization before the optimistic board rewind", async () => {
@@ -450,6 +452,86 @@ describe("useChessGameLifecycle", () => {
     expect(coordinator.pruneFromMoveIndex).not.toHaveBeenCalled();
     expect(useGameStore.getState().moveHistory).toHaveLength(2);
     expect(chess.history()).toHaveLength(2);
+  });
+
+  it("keeps the board and SRS state intact when a residual transition race refuses takeback", async () => {
+    const chess = new Chess();
+    const moveHistory = ["e4", "e5", "Nf3"].map((san) => {
+      const move = chess.move(san);
+      return {
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to + (move.promotion ?? ""),
+      };
+    });
+    const resolvedReview = {
+      analysisId: "review-2",
+      moveIndex: 2,
+      result: "pending" as const,
+    };
+    const {
+      result,
+      coordinator,
+      setIsRevertPending,
+      setRevertError,
+      getResolvedReview,
+    } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: false,
+      isPracticeContinuation: false,
+      resolvedReview,
+    });
+    vi.mocked(coordinator.transitionMoveLine).mockReturnValueOnce(false);
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(useGameStore.getState().moveHistory).toEqual(moveHistory);
+    expect(chess.history()).toHaveLength(3);
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).not.toHaveBeenCalled();
+    expect(getResolvedReview()).toEqual(resolvedReview);
+    expect(setIsRevertPending).not.toHaveBeenCalled();
+    expect(setRevertError).not.toHaveBeenCalled();
+  });
+
+  it("does not invent revision zero for a rated revert with unknown line state", async () => {
+    const chess = new Chess();
+    const moveHistory = ["e4", "e5"].map((san) => {
+      const move = chess.move(san);
+      return {
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to + (move.promotion ?? ""),
+      };
+    });
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: true,
+    });
+    vi.mocked(coordinator.getLineRevision).mockReturnValue(null);
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+    });
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(uploadSessionMovesMock).not.toHaveBeenCalled();
+    expect(endGameMock).toHaveBeenCalledWith(
+      "session-123",
+      "resign",
+      expect.any(String),
+      true,
+      null,
+    );
   });
 
   it("prunes pending SRS reviews before rated revert network calls resolve", async () => {
@@ -1351,7 +1433,7 @@ describe("useChessGameLifecycle", () => {
     });
 
     await waitFor(() =>
-      expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-123"),
+      expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-123", 0),
     );
     expect(endGameMock).not.toHaveBeenCalled();
     expect(coordinator.flushPendingUploads).not.toHaveBeenCalled();
@@ -1394,7 +1476,7 @@ describe("useChessGameLifecycle", () => {
       await result.current.abandonStoppedDrill();
     });
 
-    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-456");
+    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-456", 0);
     expect(endGameMock).not.toHaveBeenCalled();
     expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
     expect(useGameStore.getState()).toEqual(
@@ -1524,7 +1606,7 @@ describe("useChessGameLifecycle", () => {
     });
 
     await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(1));
-    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-old");
+    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-old", 0);
     expect(abandonDrillMock.mock.invocationCallOrder[0]).toBeLessThan(
       startDrillMock.mock.invocationCallOrder[0],
     );
@@ -2238,84 +2320,53 @@ describe("useChessGameLifecycle", () => {
       expect(Number.isInteger(granted)).toBe(true);
     });
 
-    it("gives the tail first claim and line sync only the unused 300ms subdeadline", async () => {
+    it("returns an unknown revision immediately and skips branch-dependent final data", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
         chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
       });
-      let now = 1000;
-      vi.spyOn(performance, "now").mockImplementation(() => now);
-      vi.mocked(coordinator.settleWithin).mockImplementationOnce(async () => {
-        now += 5;
-      });
+      vi.mocked(coordinator.getLineRevision).mockReturnValueOnce(null);
 
+      let revision: number | null | undefined;
       await act(async () => {
-        await result.current.uploadFullMoveHistoryBeforeEnd(
+        revision = await result.current.uploadFullMoveHistoryBeforeEnd(
           "session-123",
           "game_end",
         );
       });
 
-      expect(coordinator.settleWithin).toHaveBeenCalledWith([0, 1, 2], 300);
-      expect(
-        coordinator.settleLineSynchronizationWithin,
-      ).toHaveBeenCalledWith(295);
-      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-        expect.objectContaining({ deadlineMs: 3995 }),
-      );
+      expect(revision).toBeNull();
+      expect(coordinator.stopSessionUploads).toHaveBeenCalledOnce();
+      expect(coordinator.settleWithin).not.toHaveBeenCalled();
+      expect(coordinator.armLateEvaluationRepair).not.toHaveBeenCalled();
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled();
     });
 
-    it("a full 300ms tail leaves no extra sync wait and preserves the 3700ms final_full floor", async () => {
+    it("terminalizes immediately with an explicit unknown generation", async () => {
       const { chess, moveHistory } = buildTerminalGame();
       const { result, coordinator } = setup({
-        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+        chess,
+        moveHistory,
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
       });
-      let now = 2000;
-      vi.spyOn(performance, "now").mockImplementation(() => now);
-      vi.mocked(coordinator.settleWithin).mockImplementationOnce(async () => {
-        now += 300;
-      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      endGameOnce();
+      vi.mocked(coordinator.getLineRevision).mockReturnValueOnce(null);
 
       await act(async () => {
-        await result.current.uploadFullMoveHistoryBeforeEnd(
-          "session-123",
-          "game_end",
-        );
+        await result.current.handleGameEnd();
       });
 
-      expect(
-        coordinator.settleLineSynchronizationWithin,
-      ).toHaveBeenCalledWith(0);
-      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-        expect.objectContaining({ deadlineMs: 3700 }),
-      );
-    });
-
-    it("records an unsynchronized verdict and still attempts final_full", async () => {
-      const { chess, moveHistory } = buildTerminalGame();
-      const { result, coordinator } = setup({
-        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
-      });
-      vi.mocked(coordinator.settleLineSynchronizationWithin).mockResolvedValueOnce(
-        "permanent_conflict",
-      );
-      vi.mocked(coordinator.getLineRevision).mockReturnValueOnce(7);
-
-      await act(async () => {
-        await result.current.uploadFullMoveHistoryBeforeEnd(
-          "session-123",
-          "game_end",
-        );
-      });
-
-      expect(uploadSessionMovesMock).toHaveBeenCalledOnce();
-      expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-        expect.objectContaining({
-          lineRevision: 7,
-          lineSyncVerdict: "permanent_conflict",
-          recomputeOpportunity: true,
-          clientRequestId: "final-request-123",
-        }),
+      expect(coordinator.settleWithin).not.toHaveBeenCalled();
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled();
+      expect(endGameMock).toHaveBeenCalledWith(
+        "session-123",
+        "checkmate_loss",
+        expect.any(String),
+        false,
+        null,
       );
     });
 

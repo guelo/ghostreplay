@@ -59,6 +59,55 @@ OUTCOME_PGN_UNKNOWN = "pgn_unknown"
 OUTCOME_PREFIX_MISMATCH = "prefix_mismatch"
 OUTCOME_OVER_CEILING = "over_ceiling"
 OUTCOME_DERIVED = "derived"
+OUTCOME_LINE_UNACKNOWLEDGED = "line_unacknowledged"
+
+
+@dataclass(frozen=True)
+class TerminalLineFenceResult:
+    acknowledged: bool
+    deleted_rows: int
+
+
+def suppress_unacknowledged_move_line(
+    db: Session,
+    session: GameSession,
+    *,
+    line_revision: int | None,
+    discard_move_evidence: bool,
+) -> TerminalLineFenceResult:
+    """Discard an unacknowledged branch and fence every stale writer.
+
+    Terminal actions must never wait for a browser-side takeback request.  A
+    current client sends its last acknowledged generation; legacy clients omit
+    it and remain compatible only while the server is still at generation zero.
+    If the client explicitly reports an unknown transition, or its generation
+    no longer matches under the session lock, remove every move row and advance
+    the generation in this same transaction.  The terminal action can then
+    commit normally while an already-sent upload or truncate is guaranteed to
+    fail its generation/active-session check instead of restoring evidence.
+
+    Returns whether the branch was acknowledged plus the number of deleted rows,
+    so callers can skip reconciliation and advance an already-visible evidence
+    cursor when needed.
+    """
+    revision_acknowledged = not discard_move_evidence and (
+        line_revision == session.move_line_revision
+        if line_revision is not None
+        else session.move_line_revision == 0
+    )
+    if revision_acknowledged:
+        return TerminalLineFenceResult(acknowledged=True, deleted_rows=0)
+
+    deleted = (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session.id)
+        .delete(synchronize_session=False)
+    )
+    session.move_line_revision += 1
+    session.terminal_line_reconciled = False
+    session.derived_tail_rows = None
+    return TerminalLineFenceResult(acknowledged=False, deleted_rows=deleted)
+
 
 # Derivation ceilings. ``GameEndRequest.pgn`` is unbounded, and without a bound
 # one terminal request could expand into thousands of staged INSERTs under the

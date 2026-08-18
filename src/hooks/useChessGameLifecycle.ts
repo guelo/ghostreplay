@@ -4,7 +4,6 @@ import { Chess } from "chess.js";
 import type {
   DrillSessionContract,
   DrillStrictness,
-  LineSyncVerdict,
   TargetBlunderSrs,
   TerminalAction,
 } from "../utils/api";
@@ -40,7 +39,6 @@ import {
 } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
-import { captureEvent } from "../analytics/posthog";
 
 // Upper bound on the final pre-terminal move upload (g-xanz). Keeps a hung or
 // lock-bound /moves from blocking game/drill end; the opening-score delta is
@@ -65,9 +63,6 @@ const FINAL_UPLOAD_TIMEOUT_MS = 4000;
 // analysis has been running since its move was played), and leaves
 // the upload budget essentially intact.
 const TAIL_SETTLE_BUDGET_MS = 300;
-// Shares TAIL_SETTLE_BUDGET_MS's absolute subdeadline. The tail gets first
-// claim; branch synchronization may consume only the unused remainder.
-const LINE_SYNC_WAIT_BUDGET_MS = 300;
 
 const hasUsableMoveEvaluation = (
   analysis:
@@ -332,7 +327,14 @@ export const useChessGameLifecycle = ({
   // hung or lock-bound /moves is cut off by an AbortSignal timeout; on
   // abort/reject we log and proceed, leaving the delta to degrade.
   const uploadFullMoveHistoryBeforeEnd = useCallback(
-    async (sessionId: string, terminalAction: TerminalAction) => {
+    async (
+      sessionId: string,
+      terminalAction: TerminalAction,
+    ): Promise<number | null | undefined> => {
+      // `undefined` is an ownership-cancellation sentinel, not an unknown line
+      // revision: callers must skip their terminal request because this async
+      // invocation no longer owns the session. `null` means the current session
+      // has unknown line state and must still terminalize fail-closed.
       // Stop the ordinary incremental uploader FIRST so this is the sole
       // FULL/finality upload this client emits for the session (g-y90g). Folding
       // the stop in here — rather than at each terminal call site — makes that
@@ -354,13 +356,20 @@ export const useChessGameLifecycle = ({
         useGameStore.getState().sessionId !== sessionId ||
         epochBefore.sessionId !== sessionId
       ) {
-        return;
+        return undefined;
       }
       const deadlineStartedAt = performance.now();
       const preUploadDeadlineAt =
-        deadlineStartedAt + LINE_SYNC_WAIT_BUDGET_MS;
+        deadlineStartedAt + TAIL_SETTLE_BUDGET_MS;
+
+      // A takeback response that has not been cleanly acknowledged leaves the
+      // branch generation unknown. Never wait for it and never publish a final
+      // upload from that branch; the terminal endpoint receives null and
+      // atomically discards move evidence while still completing the action.
+      const lineRevision = coordinator.getLineRevision(sessionId);
 
       coordinator.stopSessionUploads();
+      if (lineRevision === null) return null;
 
       // Freeze the history BEFORE the wait so the payload can never mix this
       // session's plies with a later session's. Stopping uploads does not stop
@@ -407,40 +416,15 @@ export const useChessGameLifecycle = ({
       }
 
       if (unresolvedEvalIndices.length > 0) {
-        const tailBudgetMs = Math.min(
-          TAIL_SETTLE_BUDGET_MS,
-          Math.max(0, Math.floor(preUploadDeadlineAt - performance.now())),
+        const tailBudgetMs = Math.max(
+          0,
+          Math.floor(preUploadDeadlineAt - performance.now()),
         );
         await coordinator.settleWithin(
           unresolvedEvalIndices,
           tailBudgetMs,
         );
       }
-
-      const lineSyncBudgetMs = Math.max(
-        0,
-        Math.floor(preUploadDeadlineAt - performance.now()),
-      );
-      let lineSyncVerdict: LineSyncVerdict = "synchronized";
-      try {
-        if (
-          typeof coordinator.settleLineSynchronizationWithin === "function"
-        ) {
-          lineSyncVerdict = await coordinator.settleLineSynchronizationWithin(
-            lineSyncBudgetMs,
-          );
-        }
-      } catch (err) {
-        // The coordinator's contract is non-throwing; retain a fail-closed
-        // terminal classification if an unexpected implementation error leaks.
-        lineSyncVerdict = "permanent_conflict";
-        console.error("[SessionMoves] Line synchronization wait failed:", err);
-      }
-      captureEvent("terminal_line_sync", {
-        session_id: sessionId,
-        terminal_action: terminalAction,
-        verdict: lineSyncVerdict,
-      });
 
       // REVALIDATE after the await. If startSession() ran during the wait it
       // bumped the generation, replaced uploadState and cleared analysisMap —
@@ -451,7 +435,7 @@ export const useChessGameLifecycle = ({
         useGameStore.getState().sessionId !== sessionId ||
         epochAfter.generation !== epochBefore.generation
       ) {
-        return;
+        return undefined;
       }
 
       const finalClientRequestId = newClientRequestId();
@@ -548,11 +532,7 @@ export const useChessGameLifecycle = ({
             deadlineMs: remainingBudgetMs,
             clientRequestId: finalClientRequestId,
             recomputeOpportunity: true,
-            lineRevision:
-              typeof coordinator.getLineRevision === "function"
-                ? (coordinator.getLineRevision(sessionId) ?? 0)
-                : 0,
-            lineSyncVerdict,
+            lineRevision,
           });
         }
       } catch (err) {
@@ -577,6 +557,7 @@ export const useChessGameLifecycle = ({
           }
         }
       }
+      return lineRevision;
     },
     [coordinator],
   );
@@ -630,11 +611,16 @@ export const useChessGameLifecycle = ({
           // so the opening-score delta reflects this drill (g-xanz). This also
           // stops the incremental uploader (folded into the helper, g-y90g),
           // discarding the unresolved tail and flagging the opportunity recompute.
-          await uploadFullMoveHistoryBeforeEnd(store.sessionId, "drill_natural_end");
+          const lineRevision = await uploadFullMoveHistoryBeforeEnd(
+            store.sessionId,
+            "drill_natural_end",
+          );
+          if (lineRevision === undefined) return;
           const contract = await naturalEndDrill(
             store.sessionId,
             result.type,
             chess.pgn(),
+            lineRevision,
           );
           if (useGameStore.getState().sessionId !== finalizingSessionId) {
             return;
@@ -673,13 +659,18 @@ export const useChessGameLifecycle = ({
         // Await a complete move upload so the opening-score delta sees the full
         // played chain and fresh after-scores (replaces the prior fire-and-forget
         // resolved-only flush, which could race the recompute).
-        await uploadFullMoveHistoryBeforeEnd(store.sessionId, "game_end");
+        const lineRevision = await uploadFullMoveHistoryBeforeEnd(
+          store.sessionId,
+          "game_end",
+        );
+        if (lineRevision === undefined) return;
 
         const endResponse = await endGame(
           store.sessionId,
           result.type,
           chess.pgn(),
           store.isRated,
+          lineRevision,
         );
         if (useGameStore.getState().sessionId !== finalizingSessionId) {
           return;
@@ -762,6 +753,20 @@ export const useChessGameLifecycle = ({
     const store = useGameStore.getState();
     if (!store.isGameActive || store.moveHistory.length === 0 || chess.isGameOver()) return;
 
+    const snapshotMoveHistory = [...store.moveHistory];
+    const afterPly = getRewindHistoryLength(snapshotMoveHistory);
+    const synchronizeActiveUnratedLine =
+      !store.isRated && !store.isPracticeContinuation;
+    const coordinatorPruned = synchronizeActiveUnratedLine
+      ? coordinator.transitionMoveLine(afterPly)
+      : false;
+    if (synchronizeActiveUnratedLine && !coordinatorPruned) {
+      // canTransitionMoveLine disables the ordinary refusal cases in the UI.
+      // This is only a race backstop between the subscribed render and click:
+      // preserve every local/SRS state change and leave the board untouched.
+      return;
+    }
+
     const executionId = revertExecutionIdRef.current + 1;
     revertExecutionIdRef.current = executionId;
     setShowResignWarning(false);
@@ -769,8 +774,6 @@ export const useChessGameLifecycle = ({
     setIsRevertPending(true);
     clearBlunderBoardOverride?.();
 
-    const snapshotMoveHistory = [...store.moveHistory];
-    const afterPly = getRewindHistoryLength(snapshotMoveHistory);
     // Cancel pending SRS reviews for the reverted indices BEFORE the awaited
     // upload/endGame, so an analysis resolving during that async window cannot
     // POST a review the revert is cancelling (durable resolved slots survive).
@@ -782,6 +785,7 @@ export const useChessGameLifecycle = ({
     try {
       if (!store.isPracticeContinuation && store.isRated) {
         const snapshotPgn = chess.pgn();
+        const lineRevision = coordinator.getLineRevision(store.sessionId!);
         const snapshotUploads = buildSessionMoveUploads(
           snapshotMoveHistory,
           new Map(coordinator.store.getState().analysisMap),
@@ -794,14 +798,13 @@ export const useChessGameLifecycle = ({
         // revert upload is the last /moves emitted, and flag it for the single
         // opportunity recompute (g-y90g).
         coordinator.stopSessionUploads();
-        await uploadSessionMoves(store.sessionId!, snapshotUploads, {
-          uploadKind: "revert",
-          recomputeOpportunity: true,
-          lineRevision:
-            typeof coordinator.getLineRevision === "function"
-              ? (coordinator.getLineRevision(store.sessionId!) ?? 0)
-              : 0,
-        });
+        if (lineRevision !== null) {
+          await uploadSessionMoves(store.sessionId!, snapshotUploads, {
+            uploadKind: "revert",
+            recomputeOpportunity: true,
+            lineRevision,
+          });
+        }
         if (!isCurrentRevertExecution(executionId)) {
           return;
         }
@@ -810,6 +813,7 @@ export const useChessGameLifecycle = ({
           "resign",
           snapshotPgn,
           true,
+          lineRevision,
         );
         if (!isCurrentRevertExecution(executionId)) {
           return;
@@ -839,13 +843,6 @@ export const useChessGameLifecycle = ({
         return;
       }
 
-      const synchronizeActiveUnratedLine =
-        !store.isRated && !store.isPracticeContinuation;
-      const coordinatorPruned =
-        synchronizeActiveUnratedLine &&
-        typeof coordinator.transitionMoveLine === "function"
-        ? coordinator.transitionMoveLine(afterPly)
-        : false;
       rewindBoardLocally(snapshotMoveHistory, coordinatorPruned);
       setShowRevertWarning(false);
     } catch (error) {
@@ -913,13 +910,22 @@ export const useChessGameLifecycle = ({
           coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
           if (store.drillOpeningKey && store.drillState !== "converted") {
-            await abandonDrill(store.sessionId);
+            await abandonDrill(
+              store.sessionId,
+              coordinator.getLineRevision(store.sessionId),
+            );
             coordinator.stopSessionUploads();
           } else {
             coordinator.flushPendingUploads().catch((err) =>
               console.error("[SessionMoves] Flush failed:", err),
             );
-            await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+            await endGame(
+              store.sessionId,
+              "abandon",
+              chess.pgn(),
+              store.isRated,
+              coordinator.getLineRevision(store.sessionId),
+            );
           }
         }
 
@@ -1058,7 +1064,10 @@ export const useChessGameLifecycle = ({
           setResolvedReview(null);
           if (store.drillOpeningKey && store.drillState !== "converted") {
             const abandonedSessionId = store.sessionId;
-            await abandonDrill(abandonedSessionId);
+            await abandonDrill(
+              abandonedSessionId,
+              coordinator.getLineRevision(abandonedSessionId),
+            );
             if (useGameStore.getState().sessionId !== abandonedSessionId) {
               setIsStartingGame(false);
               return null;
@@ -1081,7 +1090,13 @@ export const useChessGameLifecycle = ({
             coordinator.flushPendingUploads().catch((err) =>
               console.error("[SessionMoves] Flush failed:", err),
             );
-            await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+            await endGame(
+              store.sessionId,
+              "abandon",
+              chess.pgn(),
+              store.isRated,
+              coordinator.getLineRevision(store.sessionId),
+            );
           }
         }
 
@@ -1244,7 +1259,10 @@ export const useChessGameLifecycle = ({
     // on a backend failure would leave an active failed drill with no cleanup
     // opportunity. The caller keeps the drill active and surfaces an error.
     if (store.drillOpeningKey && store.drillState !== "converted") {
-      await abandonDrill(store.sessionId);
+      await abandonDrill(
+        store.sessionId,
+        coordinator.getLineRevision(store.sessionId),
+      );
       if (useGameStore.getState().sessionId !== finalizingSessionId) {
         return;
       }
@@ -1286,7 +1304,10 @@ export const useChessGameLifecycle = ({
 
     try {
       if (store.drillOpeningKey && store.drillState !== "converted") {
-        await abandonDrill(store.sessionId);
+        await abandonDrill(
+          store.sessionId,
+          coordinator.getLineRevision(store.sessionId),
+        );
         if (useGameStore.getState().sessionId !== finalizingSessionId) {
           return;
         }
@@ -1305,13 +1326,18 @@ export const useChessGameLifecycle = ({
 
       // Await a complete move upload so the resigned game's opening-score delta
       // reflects the full played chain (matches handleGameEnd).
-      await uploadFullMoveHistoryBeforeEnd(store.sessionId, "resign");
+      const lineRevision = await uploadFullMoveHistoryBeforeEnd(
+        store.sessionId,
+        "resign",
+      );
+      if (lineRevision === undefined) return;
 
       const endResponse = await endGame(
         store.sessionId,
         "resign",
         chess.pgn(),
         store.isRated,
+        lineRevision,
       );
       if (useGameStore.getState().sessionId !== finalizingSessionId) {
         return;

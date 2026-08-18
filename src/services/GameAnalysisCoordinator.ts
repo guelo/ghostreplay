@@ -26,7 +26,6 @@ import {
   uploadSessionMoves,
 } from '../utils/api'
 import type {
-  LineSyncVerdict,
   ReusableAnalysis,
   SessionMoveUpload,
   TruncateSessionMovesResponse,
@@ -44,16 +43,6 @@ const createRequestId = () => {
     return crypto.randomUUID()
   }
   return Math.random().toString(36).slice(2)
-}
-
-const createLineRequestId = (): string => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID()
-  }
-  const suffix = Math.floor(Math.random() * 0xffffffffffff)
-    .toString(16)
-    .padStart(12, '0')
-  return `00000000-0000-4000-8000-${suffix}`
 }
 
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
@@ -216,10 +205,7 @@ export type AnalysisOutcome = {
   result?: AnalysisResult
 }
 
-export type LineSyncDiagnostic =
-  | 'foreign_branch_revision'
-  | 'move_line_identity_conflict'
-  | 'line_sync_conflict'
+export type LineSyncDiagnostic = 'move_line_sync_failed'
 
 /**
  * Narrow read interface the React consumer (AnalysisEffects) depends on. Lets
@@ -371,25 +357,12 @@ type LateEvalRepairState = {
   retryTimer: ReturnType<typeof setTimeout> | null
 }
 
-type LineSyncHead = {
-  requestId: string
+type LineTransition = {
+  sessionId: string
+  generation: number
   fromRevision: number
   afterPly: number
   controller: AbortController | null
-}
-
-type LineSyncChain = {
-  id: string
-  sessionId: string
-  generation: number
-  acknowledgedRevision: number
-  desiredAfterPly: number
-  head: LineSyncHead | null
-  retryTimer: ReturnType<typeof setTimeout> | null
-  retryCount: number
-  permanentConflict: boolean
-  detached: boolean
-  waiters: Set<(verdict: LineSyncVerdict) => void>
 }
 
 const isAbortError = (err: unknown): boolean =>
@@ -397,20 +370,6 @@ const isAbortError = (err: unknown): boolean =>
   err !== null &&
   'name' in err &&
   err.name === 'AbortError'
-
-const isNonRetryableClientError = (err: unknown): boolean => {
-  if (typeof err !== 'object' || err === null || !('status' in err)) {
-    return false
-  }
-  const status = (err as { status?: unknown }).status
-  return (
-    typeof status === 'number' &&
-    status >= 400 &&
-    status < 500 &&
-    status !== 408 &&
-    status !== 429
-  )
-}
 
 export class GameAnalysisCoordinator {
   // Worker state
@@ -449,7 +408,7 @@ export class GameAnalysisCoordinator {
   private uploadState: UploadState | null = null
   /** One independently retryable receipt-gated repair per unresolved move. */
   private lateEvalRepairStates = new Map<number, LateEvalRepairState>()
-  private lineSyncChain: LineSyncChain | null = null
+  private lineTransition: LineTransition | null = null
   private lineEpoch = 0
   private lineSyncDiagnostic: LineSyncDiagnostic | null = null
 
@@ -556,9 +515,23 @@ export class GameAnalysisCoordinator {
   }
 
   getLineRevision(sessionId: string | null): number | null {
-    return sessionId !== null && this.uploadState?.sessionId === sessionId
+    return sessionId !== null &&
+      this.uploadState?.sessionId === sessionId &&
+      !this.uploadState.lineSyncPaused
       ? this.uploadState.lineRevision
       : null
+  }
+
+  canTransitionMoveLine(sessionId: string | null): boolean {
+    const state = this.uploadState
+    return sessionId !== null &&
+      state !== null &&
+      state.sessionId === sessionId &&
+      state.uploadsEnabled &&
+      !state.lineSyncPaused &&
+      this.lineTransition === null &&
+      state.sessionId === this.activeSessionId &&
+      state.generation === this.sessionGeneration
   }
 
   getLineSyncDiagnostic(): LineSyncDiagnostic | null {
@@ -588,6 +561,10 @@ export class GameAnalysisCoordinator {
   private setLineSyncDiagnostic(diagnostic: LineSyncDiagnostic | null): void {
     if (this.lineSyncDiagnostic === diagnostic) return
     this.lineSyncDiagnostic = diagnostic
+    this.emitLineSyncChange()
+  }
+
+  private emitLineSyncChange(): void {
     for (const listener of this.lineSyncDiagnosticListeners) listener()
   }
 
@@ -697,9 +674,7 @@ export class GameAnalysisCoordinator {
       !Number.isInteger(afterPly) ||
       afterPly < 0 ||
       !oldState ||
-      !oldState.uploadsEnabled ||
-      oldState.sessionId !== this.activeSessionId ||
-      oldState.generation !== this.sessionGeneration
+      !this.canTransitionMoveLine(oldState.sessionId)
     ) {
       return false
     }
@@ -748,265 +723,90 @@ export class GameAnalysisCoordinator {
       lineSyncPaused: true,
     }
     this.uploadState = nextState
-
-    let chain = this.lineSyncChain
-    if (
-      !chain ||
-      chain.detached ||
-      chain.sessionId !== oldState.sessionId ||
-      chain.generation !== oldState.generation
-    ) {
-      chain = {
-        id: createRequestId(),
-        sessionId: oldState.sessionId,
-        generation: oldState.generation,
-        acknowledgedRevision: oldState.lineRevision,
-        desiredAfterPly: afterPly,
-        head: null,
-        retryTimer: null,
-        retryCount: 0,
-        permanentConflict: false,
-        detached: false,
-        waiters: new Set(),
-      }
-      this.lineSyncChain = chain
-    } else {
-      chain.desiredAfterPly = Math.min(chain.desiredAfterPly, afterPly)
-    }
-    this.issueLineTruncation(chain)
-    return true
-  }
-
-  private issueLineTruncation(chain: LineSyncChain): void {
-    if (
-      this.lineSyncChain !== chain ||
-      chain.detached ||
-      chain.permanentConflict ||
-      chain.head !== null
-    ) {
-      return
-    }
-    const head: LineSyncHead = {
-      requestId: createLineRequestId(),
-      fromRevision: chain.acknowledgedRevision,
-      afterPly: chain.desiredAfterPly,
-      controller: null,
-    }
-    chain.head = head
-    this.sendLineTruncation(chain, head)
-  }
-
-  private sendLineTruncation(chain: LineSyncChain, head: LineSyncHead): void {
-    if (
-      this.lineSyncChain !== chain ||
-      chain.detached ||
-      chain.head !== head ||
-      chain.permanentConflict
-    ) {
-      return
-    }
     const controller =
       typeof AbortController !== 'undefined' ? new AbortController() : null
-    head.controller = controller
+    const transition: LineTransition = {
+      sessionId: oldState.sessionId,
+      generation: oldState.generation,
+      fromRevision: oldState.lineRevision,
+      afterPly,
+      controller,
+    }
+    this.lineTransition = transition
+    this.setLineSyncDiagnostic(null)
+    this.emitLineSyncChange()
     truncateSessionMoves(
-      chain.sessionId,
+      transition.sessionId,
       {
-        client_request_id: head.requestId,
-        line_revision: head.fromRevision,
-        after_ply: head.afterPly,
+        line_revision: transition.fromRevision,
+        after_ply: transition.afterPly,
       },
       controller ? { signal: controller.signal } : undefined,
     )
-      .then((response) => this.acceptLineTruncation(chain, head, response))
-      .catch((error) => this.rejectLineTruncation(chain, head, error))
+      .then((response) => this.acceptLineTruncation(transition, response))
+      .catch((error) => this.rejectLineTruncation(transition, error))
+    return true
   }
 
   private acceptLineTruncation(
-    chain: LineSyncChain,
-    head: LineSyncHead,
+    transition: LineTransition,
     response: TruncateSessionMovesResponse,
   ): void {
-    if (
-      this.lineSyncChain !== chain ||
-      chain.detached ||
-      chain.head !== head
-    ) {
-      return
-    }
-    if (
-      response.client_request_id !== head.requestId ||
-      response.from_revision !== chain.acknowledgedRevision ||
-      response.from_revision !== head.fromRevision ||
-      response.to_revision !== head.fromRevision + 1 ||
-      response.line_revision !== response.to_revision ||
-      response.after_ply !== head.afterPly
-    ) {
-      head.controller = null
-      chain.permanentConflict = true
-      this.setLineSyncDiagnostic(
-        response.line_revision !== response.to_revision
-          ? 'foreign_branch_revision'
-          : 'line_sync_conflict',
-      )
-      this.resolveLineSyncWaiters(chain, 'permanent_conflict')
+    if (this.lineTransition !== transition) return
+    transition.controller = null
+    if (response.line_revision !== transition.fromRevision + 1) {
+      this.setLineSyncDiagnostic('move_line_sync_failed')
       console.error(
         '[Coordinator] Move-line synchronization returned an inconsistent acknowledgement',
         response,
       )
       return
     }
-    head.controller = null
-    chain.retryCount = 0
-    chain.acknowledgedRevision = response.to_revision
-    chain.head = null
-    this.setLineSyncDiagnostic(null)
-
-    if (head.afterPly !== chain.desiredAfterPly) {
-      this.issueLineTruncation(chain)
-      return
-    }
 
     const state = this.uploadState
     if (
       state &&
-      state.sessionId === chain.sessionId &&
-      state.generation === chain.generation &&
+      state.sessionId === transition.sessionId &&
+      state.generation === transition.generation &&
       state.lineEpoch === this.lineEpoch
     ) {
-      state.lineRevision = chain.acknowledgedRevision
+      state.lineRevision = response.line_revision
       const gameState = useGameStore.getState()
-      if (gameState.sessionId === chain.sessionId) {
-        gameState.setMoveLineRevision(chain.acknowledgedRevision)
+      if (gameState.sessionId === transition.sessionId) {
+        gameState.setMoveLineRevision(response.line_revision)
       }
       state.lineSyncPaused = false
       for (const index of this.store.getState().analysisMap.keys()) {
         if (!state.uploadedIndices.has(index)) state.dirtyIndices.add(index)
       }
     }
-    this.lineSyncChain = null
-    this.resolveLineSyncWaiters(chain, 'synchronized')
+    this.lineTransition = null
+    this.setLineSyncDiagnostic(null)
+    this.emitLineSyncChange()
     if (state?.uploadsEnabled && !state.lineSyncPaused) {
       this.flushIncrementalUpload(state)
     }
   }
 
   private rejectLineTruncation(
-    chain: LineSyncChain,
-    head: LineSyncHead,
+    transition: LineTransition,
     error: unknown,
   ): void {
-    if (
-      this.lineSyncChain !== chain ||
-      chain.detached ||
-      chain.head !== head
-    ) {
-      return
-    }
-    head.controller = null
-    if (isAbortError(error)) return
-
-    const diagnostic = this.lineSyncDiagnosticForError(error)
-    if (diagnostic !== null) {
-      chain.permanentConflict = true
-      this.setLineSyncDiagnostic(diagnostic)
-      this.resolveLineSyncWaiters(chain, 'permanent_conflict')
-      console.error('[Coordinator] Move-line synchronization conflict:', error)
-      return
-    }
-    if (isNonRetryableClientError(error)) {
-      chain.permanentConflict = true
-      this.setLineSyncDiagnostic('line_sync_conflict')
-      this.resolveLineSyncWaiters(chain, 'permanent_conflict')
-      console.error(
-        '[Coordinator] Move-line synchronization rejected by a non-retryable client error:',
-        error,
-      )
-      return
-    }
-
-    chain.retryCount += 1
-    const delay = Math.min(
-      1000 * Math.pow(2, chain.retryCount - 1),
-      RETRY_MAX_DELAY_MS,
-    )
-    chain.retryTimer = setTimeout(() => {
-      if (
-        this.lineSyncChain !== chain ||
-        chain.detached ||
-        chain.head !== head
-      ) {
-        return
-      }
-      chain.retryTimer = null
-      this.sendLineTruncation(chain, head)
-    }, delay)
-  }
-
-  retryLineSynchronization(): void {
-    const chain = this.lineSyncChain
-    if (
-      chain &&
-      !chain.detached &&
-      chain.head &&
-      chain.permanentConflict &&
-      this.lineSyncDiagnostic === 'line_sync_conflict'
-    ) {
-      chain.permanentConflict = false
-      this.setLineSyncDiagnostic(null)
-      this.sendLineTruncation(chain, chain.head)
+    if (this.lineTransition !== transition) return
+    transition.controller = null
+    this.setLineSyncDiagnostic('move_line_sync_failed')
+    if (!isAbortError(error)) {
+      console.error('[Coordinator] Move-line synchronization failed closed:', error)
     }
   }
 
-  private resolveLineSyncWaiters(
-    chain: LineSyncChain,
-    verdict: LineSyncVerdict,
-  ): void {
-    const waiters = [...chain.waiters]
-    chain.waiters.clear()
-    for (const resolve of waiters) resolve(verdict)
-  }
-
-  private detachLineSyncChain(expected?: LineSyncChain): void {
-    const chain = this.lineSyncChain
-    if (!chain || (expected && chain !== expected)) return
-    this.lineSyncChain = null
-    chain.detached = true
-    if (chain.retryTimer) clearTimeout(chain.retryTimer)
-    chain.retryTimer = null
-    // Detachment drops local callback/retry ownership only. An already-sent
-    // truncate may still commit server-side and remains worth completing; the
-    // terminal caller has merely stopped waiting for its acknowledgement.
-    if (chain.head) chain.head.controller = null
-    this.resolveLineSyncWaiters(chain, 'deadline_expired')
-  }
-
-  async settleLineSynchronizationWithin(budgetMs: number): Promise<LineSyncVerdict> {
-    const chain = this.lineSyncChain
-    if (!chain) return 'synchronized'
-    if (chain.permanentConflict) {
-      this.detachLineSyncChain(chain)
-      return 'permanent_conflict'
-    }
-    if (budgetMs <= 0) {
-      this.detachLineSyncChain(chain)
-      return 'deadline_expired'
-    }
-
-    let timer: ReturnType<typeof setTimeout> | undefined
-    let waiter: ((verdict: LineSyncVerdict) => void) | undefined
-    const verdict = await Promise.race<LineSyncVerdict>([
-      new Promise<LineSyncVerdict>((resolve) => {
-        waiter = resolve
-        chain.waiters.add(resolve)
-      }),
-      new Promise<LineSyncVerdict>((resolve) => {
-        timer = setTimeout(() => resolve('deadline_expired'), budgetMs)
-      }),
-    ])
-    if (timer !== undefined) clearTimeout(timer)
-    if (waiter) chain.waiters.delete(waiter)
-    if (verdict !== 'synchronized') this.detachLineSyncChain(chain)
-    return verdict
+  private cancelLineTransition(): void {
+    const transition = this.lineTransition
+    if (!transition) return
+    this.lineTransition = null
+    transition.controller?.abort()
+    transition.controller = null
+    this.emitLineSyncChange()
   }
 
   /** Emit `failed` for every still-unresolved index, then the caller clears
@@ -1318,8 +1118,7 @@ export class GameAnalysisCoordinator {
   private hasPendingUploads(): boolean {
     return (
       (this.uploadState !== null && this.uploadState.dirtyIndices.size > 0) ||
-      this.lateEvalRepairStates.size > 0 ||
-      (this.lineSyncChain !== null && !this.lineSyncChain.permanentConflict)
+      this.lateEvalRepairStates.size > 0
     )
   }
 
@@ -1338,7 +1137,7 @@ export class GameAnalysisCoordinator {
 
     this.activeSessionId = sessionId
     this.sessionGeneration++
-    this.detachLineSyncChain()
+    this.cancelLineTransition()
     this.lineEpoch = 0
     this.setLineSyncDiagnostic(null)
     // Synchronous reset BEFORE clearing pending requests, so a buffered
@@ -1387,6 +1186,7 @@ export class GameAnalysisCoordinator {
       lineSyncPaused: false,
     }
     this.emitUploadCommitChange()
+    this.emitLineSyncChange()
 
     this.startIncrementalUploadTimer()
     this.ensureWorker()
@@ -1394,7 +1194,7 @@ export class GameAnalysisCoordinator {
 
   clearSession() {
     this.cancelAllLateEvalRepairs()
-    this.detachLineSyncChain()
+    this.cancelLineTransition()
     this.finalizeOldSession()
     this.activeSessionId = null
     this.sessionGeneration++
@@ -2359,11 +2159,9 @@ export class GameAnalysisCoordinator {
     )
   }
 
-  private lineSyncDiagnosticForError(
-    err: unknown,
-  ): Exclude<LineSyncDiagnostic, 'line_sync_conflict'> | null {
+  private isMoveLineConflict(err: unknown): boolean {
     const candidate = err as { status?: unknown; details?: unknown } | null
-    if (candidate?.status !== 409) return null
+    if (candidate?.status !== 409) return false
     const details = candidate.details
     if (
       typeof details === 'object' &&
@@ -2371,14 +2169,10 @@ export class GameAnalysisCoordinator {
       'error_code' in details
     ) {
       const errorCode = (details as { error_code?: unknown }).error_code
-      if (errorCode === 'FOREIGN_BRANCH_REVISION') {
-        return 'foreign_branch_revision'
-      }
-      if (errorCode === 'MOVE_LINE_IDENTITY_CONFLICT') {
-        return 'move_line_identity_conflict'
-      }
+      return errorCode === 'FOREIGN_BRANCH_REVISION' ||
+        errorCode === 'MOVE_LINE_IDENTITY_CONFLICT'
     }
-    return null
+    return false
   }
 
   private cancelLateEvalRepair(state: LateEvalRepairState) {
@@ -2503,9 +2297,8 @@ export class GameAnalysisCoordinator {
           this.cancelLateEvalRepair(state)
           return
         }
-        const diagnostic = this.lineSyncDiagnosticForError(err)
-        if (diagnostic !== null) {
-          this.setLineSyncDiagnostic(diagnostic)
+        if (this.isMoveLineConflict(err)) {
+          this.setLineSyncDiagnostic('move_line_sync_failed')
           console.error('[Coordinator] Late evaluation repair rejected by move-line identity')
           this.cancelLateEvalRepair(state)
           return
@@ -2659,12 +2452,14 @@ export class GameAnalysisCoordinator {
         if (!state.uploadsEnabled || isAbortError(err)) {
           return
         }
-        const diagnostic = this.lineSyncDiagnosticForError(err)
-        if (diagnostic !== null) {
+        if (this.isMoveLineConflict(err)) {
           for (const idx of indicesToUpload) state.dirtyIndices.add(idx)
+          const diagnosticAlreadyVisible =
+            this.lineSyncDiagnostic === 'move_line_sync_failed'
           state.uploadsEnabled = false
           state.lineSyncPaused = true
-          this.setLineSyncDiagnostic(diagnostic)
+          this.setLineSyncDiagnostic('move_line_sync_failed')
+          if (diagnosticAlreadyVisible) this.emitLineSyncChange()
           console.error(
             '[Coordinator] Incremental uploads stopped after a permanent move-line conflict',
           )
@@ -2869,9 +2664,13 @@ export class GameAnalysisCoordinator {
   stopSessionUploads() {
     this.stopIncrementalUploadTimer()
     if (!this.uploadState) return
+    const transitionWasAvailable = this.canTransitionMoveLine(
+      this.uploadState.sessionId,
+    )
     this.uploadState.uploadsEnabled = false
     this.uploadState.dirtyIndices.clear()
     this.cancelUploadState(this.uploadState)
+    if (transitionWasAvailable) this.emitLineSyncChange()
   }
 
   // --- Teardown ---
@@ -2879,7 +2678,7 @@ export class GameAnalysisCoordinator {
   destroy() {
     this.stopIncrementalUploadTimer()
     this.cancelAllLateEvalRepairs()
-    this.detachLineSyncChain()
+    this.cancelLineTransition()
     if (this.uploadState?.retryTimer) {
       clearTimeout(this.uploadState.retryTimer)
     }

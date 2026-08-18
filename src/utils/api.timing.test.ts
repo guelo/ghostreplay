@@ -331,7 +331,6 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
       uploadKind: 'final_full',
       terminalAction: 'game_end',
       deadlineMs: 4000,
-      lineSyncVerdict: 'synchronized',
     })
 
     const props = onlyClientEvent()
@@ -339,7 +338,7 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
     expect(props.terminal_action).toBe('game_end')
     expect(props.deadline_ms).toBe(4000)
     expect(props.move_count).toBe(1)
-    expect(props.line_sync_verdict).toBe('synchronized')
+    expect(props).not.toHaveProperty('line_sync_verdict')
     expect(props.client_request_id).toEqual(expect.any(String))
 
     // The header the server keys its receipt on == the event's client id.
@@ -360,7 +359,6 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
         uploadKind: 'final_full',
         terminalAction: 'resign',
         deadlineMs: 1234,
-        lineSyncVerdict: 'deadline_expired',
       }),
     ).rejects.toThrow()
 
@@ -369,7 +367,6 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
     expect(props.upload_kind).toBe('final_full')
     expect(props.terminal_action).toBe('resign')
     expect(props.deadline_ms).toBe(1234)
-    expect(props.line_sync_verdict).toBe('deadline_expired')
     // No response ⇒ no server id, but the client id is still present to join on.
     expect(props.request_id).toBeNull()
     expect(props.client_request_id).toEqual(expect.any(String))
@@ -383,7 +380,6 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
         uploadKind: 'final_full',
         terminalAction: 'game_end',
         deadlineMs: 3700,
-        lineSyncVerdict: 'permanent_conflict',
       }),
     ).rejects.toThrow()
 
@@ -391,7 +387,6 @@ describe('uploadSessionMoves client correlation + upload telemetry', () => {
     expect(props.error_kind).toBe('http')
     expect(props.upload_kind).toBe('final_full')
     expect(props.terminal_action).toBe('game_end')
-    expect(props.line_sync_verdict).toBe('permanent_conflict')
     expect(props.client_request_id).toEqual(expect.any(String))
   })
 

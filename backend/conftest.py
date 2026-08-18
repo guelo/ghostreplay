@@ -254,36 +254,7 @@ def _create_test_schema(conn) -> None:
             content_length_bytes INTEGER,
             move_line_revision INTEGER,
             line_proof_verdict TEXT,
-            line_sync_verdict TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
-        )
-    """))
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS session_move_truncation_receipt (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            client_request_id TEXT NOT NULL,
-            from_revision INTEGER NOT NULL,
-            to_revision INTEGER NOT NULL,
-            after_ply INTEGER NOT NULL,
-            deleted_move_count INTEGER NOT NULL,
-            evidence_changed BOOLEAN NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-            CONSTRAINT uq_session_move_truncation_receipt_request
-                UNIQUE (session_id, client_request_id),
-            CONSTRAINT uq_session_move_truncation_receipt_revision
-                UNIQUE (session_id, to_revision),
-            CONSTRAINT ck_session_move_truncation_receipt_from_revision
-                CHECK (from_revision >= 0),
-            CONSTRAINT ck_session_move_truncation_receipt_to_revision
-                CHECK (to_revision >= 0),
-            CONSTRAINT ck_session_move_truncation_receipt_after_ply
-                CHECK (after_ply >= 0),
-            CONSTRAINT ck_session_move_truncation_receipt_deleted_move_count
-                CHECK (deleted_move_count >= 0),
-            CONSTRAINT ck_session_move_truncation_receipt_revision_step
-                CHECK (to_revision = from_revision + 1),
-            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )
     """))
     conn.execute(text("""
@@ -636,7 +607,6 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_upload_receipt"))
-    conn.execute(text("DROP TABLE IF EXISTS session_move_truncation_receipt"))
     conn.execute(text("DROP TABLE IF EXISTS opening_session_replay_cache"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))

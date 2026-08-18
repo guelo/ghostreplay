@@ -61,7 +61,11 @@ Players begin with an anonymous account, so their games, targets, reviews, and
 progress are already account-scoped. They can later claim that same account
 with credentials for cross-device use without losing their training record.
 After a game, players can review the game, revisit saved history, and follow
-their Elo rating and summary statistics.
+their Elo rating and summary statistics. The root route remains the marketing
+surface for an authenticated account with no game-session rows; once the same
+anonymous or claimed account owns any game or drill session, the root shows its
+Stats dashboard instead. `/stats` remains directly available regardless of
+account activity.
 
 ### Openings and drills
 
@@ -162,17 +166,25 @@ comments. The service keeps both forms of the game record under the session and
 account boundary, and game completion makes the saved game available for later
 review.
 
-An active unrated takeback rewinds the board immediately and also replaces the
-durable move branch. The browser pauses uploads behind a server-owned line
-revision while FastAPI idempotently truncates the abandoned tail; stale uploads
-cannot restore it, and analysis for surviving plies is carried into the new
-upload epoch. Terminal uploads are checked as a complete standard-start line,
-but a failed proof remains advisory for raw persistence while failing closed for
-opening evidence. Fresh replay applies that fail-closed gate only after a
-terminal writer durably marks that row reconciliation ran; historical sessions
-the boundary never covered retain their prior evidence behavior. The exact
-revision, race, proof, and terminal-deadline
-contract is in [Session move-line revisions](docs/session-move-lines.md).
+An active unrated takeback is available only while the coordinator owns a
+writable, synchronized upload epoch. Once accepted, it rewinds the board
+immediately and also replaces the durable move branch. A stopped drill or
+fail-closed upload epoch disables the control instead of accepting a local-only
+rewind. The browser pauses uploads behind a server-owned line revision while
+FastAPI performs one truncation and advances that revision; the advance fences
+any older upload from restoring the abandoned tail. The client does not retry
+or negotiate an ambiguous transition. It keeps uploads and further takebacks
+paused until reload or a new session, while local play and analysis may
+continue. Terminal actions never wait for that transition: an unknown or stale
+revision causes the terminal transaction to discard move-row evidence and
+advance the fence before completing. Terminal uploads are checked
+as a complete standard-start line, but a failed proof remains advisory for raw
+persistence while failing closed for opening evidence. Fresh replay applies
+that fail-closed gate only after a terminal writer durably marks that row
+reconciliation ran; historical sessions the boundary never covered retain
+their prior evidence behavior. The exact revision, race, proof, and terminal
+degradation contract is in
+[Session move-line revisions](docs/session-move-lines.md).
 Both normal game completion and a drill's natural terminal result reconcile a
 verified missing PGN tail before exposing that session to opening evidence.
 

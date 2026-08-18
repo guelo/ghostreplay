@@ -41,63 +41,76 @@ user for an active unrated session. Its request is:
 
 ```json
 {
-  "client_request_id": "uuid",
   "line_revision": 2,
   "after_ply": 7
 }
 ```
 
 Under the session's `FOR NO KEY UPDATE` lock, the endpoint compares the
-revision, deletes the tail, advances the revision, and writes
-`session_move_truncation_receipt` in one transaction. The receipt is unique by
-both `(session_id, client_request_id)` and `(session_id, to_revision)`. Retrying
-the exact request ID and body returns its recorded result without deleting or
-advancing again; reusing the ID with another body is a conflict. Evidence is
-bumped and recomputation requested only when a deleted row belongs to a session
-that is already evidence-eligible.
+revision, deletes the tail, and advances the revision in one transaction. The
+advance happens even when no rows matched: it is the durable fence that makes
+every already-sent upload carrying revision 2 stale after this transaction.
+Evidence is bumped and recomputation requested only when a deleted row belongs
+to a session that is already evidence-eligible.
 
-The success response records the linearized operation:
+The request is intentionally one-shot. There is no truncation receipt or
+idempotency key. If the browser does not receive a clean acknowledgement, it
+does not know whether the generation advanced and must not retry the deletion
+after replacement play may have accumulated.
+
+The success response returns only the newly acknowledged generation:
 
 ```json
 {
-  "client_request_id": "uuid",
-  "from_revision": 2,
-  "to_revision": 3,
-  "line_revision": 3,
-  "after_ply": 7,
-  "deleted_move_count": 4,
-  "evidence_changed": false
+  "line_revision": 3
 }
 ```
 
 ## Browser race ordering
 
-The analysis coordinator rewinds optimistically. Before the board changes, it
-synchronously creates a new line epoch, pauses ordinary uploads, aborts the old
-batch/retry timer, prunes reverted analysis, and carries every analyzed
-surviving ply that is not known committed into the replacement upload state.
-Callbacks from an older epoch cannot mark rows uploaded or schedule retries.
+The takeback control subscribes to the coordinator's transition-availability
+guard. It is enabled only while the current session owns a writable,
+synchronized upload epoch; a stopped accuracy-failed drill and a fail-closed
+epoch therefore cannot offer a takeback that would become a local-only rewind.
+Once that shared guard accepts the transition, the coordinator rewinds
+optimistically. Before the board changes, it synchronously creates a new line
+epoch, pauses ordinary uploads, aborts the old batch/retry timer, prunes
+reverted analysis, and carries every analyzed surviving ply that is not known
+committed into the replacement upload state. Callbacks from an older epoch
+cannot mark rows uploaded or schedule retries.
 
-Truncation requests form one serial chain. Rapid takebacks only reduce the
-desired retained ply; the next request is sent after the current head is
-acknowledged and uses that acknowledgement's revision. A transient failure
-retries the same request ID and body. The typed 409
-`FOREIGN_BRANCH_REVISION` and `MOVE_LINE_IDENTITY_CONFLICT` responses halt move
-uploads as permanent identity conflicts. On the truncation request itself, any
-other 4xx except 408/429 is also terminal for automatic retry and surfaces the
-local `line_sync_conflict` diagnostic; the player may explicitly retry the
-retained idempotent request. This broader truncation rule covers terminal-state,
-authorization, validation, and idempotency rejections that cannot heal on a
-timer. Ordinary move uploads keep the narrower rule: unrelated 4xx responses
-retain their existing retry path and do not surface line-sync copy. Re-sending
-an unchanged payload cannot repair either identity conflict, so active play
-offers **Start new game** rather than retry. A locally retained truncation whose
-acknowledgement is internally inconsistent also uses `line_sync_conflict` and
-may retry that exact request ID and body. There is no cross-tab leader or merge
-protocol; a second stale tab is intentionally stalled until the player starts a
-new session.
+Only one takeback transition may be in flight. Local play and analysis may
+continue behind the paused upload state, but the takeback control remains
+disabled until that request succeeds. A clean response exactly one revision
+ahead installs the new revision, re-enables uploads, and uploads surviving plus
+newly analyzed dirty plies. A timeout, network failure, conflict, or malformed
+acknowledgement keeps the revision unknown and leaves uploads and takebacks
+disabled for that session. The only recovery offered is reload or **Start new
+game**; there is no automatic retry, response-negotiation chain, cross-tab
+leader, revision adoption, or branch merge protocol.
 
-## Complete-line proof and terminal deadline
+Typed `FOREIGN_BRANCH_REVISION` and `MOVE_LINE_IDENTITY_CONFLICT` responses from
+ordinary move writers use the same fail-closed diagnostic. Unrelated upload
+failures retain their existing bounded retry behavior.
+
+## Terminal behavior while the generation is unknown
+
+Every current terminal route carries the browser's last acknowledged line
+revision. This includes game end/resign/abandon and drill fail/natural-end/
+abandon. A terminal call never waits for a takeback request. If the browser
+reports an unknown transition, or its supplied revision does not match under
+the session row lock, the terminal transaction deletes all `session_moves`,
+advances `move_line_revision`, leaves `terminal_line_reconciled` false, and then
+completes the terminal state change. This deliberately loses branch-dependent
+evidence but prevents a stale row set from becoming score-visible. Any older
+upload or truncation that reaches the lock later is rejected by the generation
+or active-session checks.
+
+For mixed-version clients, omitting the terminal revision is accepted as an
+acknowledgement only while the server revision remains zero. Omission after a
+takeback is treated as unknown and follows the same discard path.
+
+## Complete-line proof and terminal upload
 
 A versioned `final_full` upload is checked as an exact standard-start line:
 
@@ -127,10 +140,11 @@ digest emits one fixed-width hash of those inputs per session rather than
 repeating the full PGN on every move-row line.
 
 Accuracy-failed drills are the one evidence-eligible state that remains active.
-`POST /api/drills/{id}/fail` does not receive or persist a PGN, so that cohort
-neither runs terminal reconciliation nor sets its marker and therefore skips the
-PGN-backed exact-length proof; it still uses the pre-existing row/FEN
-reconstruction checks. This is an explicit limitation, not a fail-closed claim.
+`POST /api/drills/{id}/fail` receives the line revision but does not receive or
+persist a PGN, so an acknowledged cohort neither runs terminal reconciliation
+nor sets its marker and therefore skips the PGN-backed exact-length proof; it
+still uses the pre-existing row/FEN reconstruction checks. An unknown or stale
+generation discards its rows before the state becomes evidence-eligible.
 
 Both `/api/game/end` and drill `/natural-end` reconcile a verified missing or
 sparse PGN tail in the terminal transaction before the session becomes opening-
@@ -175,18 +189,13 @@ The audit and repair dry-run intentionally work against the pre-20260814_01
 schema. The optional `--apply` phase uses the current ORM and therefore runs
 after that schema migration.
 
-Terminalization retains one 4,000 ms absolute deadline. Penultimate-analysis
-settling has first claim on a shared 300 ms pre-upload window; the already
-running truncation chain may block only for what remains. A synchronized chain
-uses its acknowledged revision. A permanent conflict returns immediately, and
-an unresolved chain at the subdeadline is detached as `deadline_expired`.
-Detachment cancels local retries and callback ownership but does not abort an
-already-sent truncation request, which may still commit server-side.
-Final-full then receives the remaining global budget—nominally at least about
-3,700 ms—and the game or drill terminal request proceeds even if that upload
-receives a revision 409. The client records `synchronized`, `deadline_expired`,
-or `permanent_conflict` in terminal telemetry and, when final-full commits, in
-`session_upload_receipt.line_sync_verdict`.
+Terminal final-full upload retains one 4,000 ms absolute deadline, with the
+existing 300 ms analysis-settling window counted inside it. Branch
+synchronization consumes none of that budget. If the revision is acknowledged,
+the final upload uses it and the terminal route receives the same value. If the
+revision is unknown, the client skips settling, final-full upload, and late
+evaluation repair, calls the terminal route immediately with an explicit
+discard flag, and lets the server-side terminal fence suppress the evidence.
 
 ## Authorities
 
@@ -198,7 +207,8 @@ or `permanent_conflict` in terminal telemetry and, when final-full commits, in
   `backend/scripts/audit_opening_line_proof.py`; guarded repair:
   `backend/app/opening_line_proof_backfill.py` and
   `backend/scripts/repair_opening_line_proof_rows.py`.
-- Browser chain and deadline: `src/services/GameAnalysisCoordinator.ts` and
+- Browser epoch and terminal handling:
+  `src/services/GameAnalysisCoordinator.ts` and
   `src/hooks/useChessGameLifecycle.ts`.
 - Behavioral gates: `backend/test_session_move_line*.py`, coordinator/lifecycle
   tests, and `src/utils/api.test.ts`.
