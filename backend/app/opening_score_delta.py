@@ -656,8 +656,41 @@ def _conditional_store_baseline(
             GameSession.baseline_watermark_fingerprint == watermark_fingerprint,
         )
         .values(opening_score_baseline=baseline_json)
+        .execution_options(synchronize_session=False)
     )
-    return db.execute(stmt).rowcount == 1
+    stored = db.execute(stmt).rowcount == 1
+    if stored:
+        # The worker's ORM row was loaded before its potentially long baseline
+        # proof. A boundary request can commit an exact candidate during that
+        # computation, so readiness must be derived from current database columns,
+        # never the stale Python object. The baseline UPDATE above owns the row lock;
+        # this second UPDATE therefore observes either the boundary-before-worker
+        # candidate or no candidate, in which case boundary-after-worker stamps
+        # readiness itself. Both writes commit atomically.
+        ready_at = datetime.now(timezone.utc)
+        db.execute(
+            update(GameSession)
+            .where(
+                GameSession.id == session.id,
+                GameSession.status == "active",
+                GameSession.opening_score_baseline.is_not(None),
+                GameSession.opening_middle_candidate_ply.is_not(None),
+                GameSession.opening_middle_ready_at.is_(None),
+                GameSession.opening_phase_exhausted.is_(False),
+            )
+            .values(opening_middle_ready_at=ready_at)
+            .execution_options(synchronize_session=False)
+        )
+        # Preserve the helper's existing immediate-coherence contract for callers
+        # and tests without refreshing unrelated fields from a concurrent request.
+        db.refresh(
+            session,
+            attribute_names=[
+                "opening_score_baseline",
+                "opening_middle_ready_at",
+            ],
+        )
+    return stored
 
 
 def _empty_start_mismatch(

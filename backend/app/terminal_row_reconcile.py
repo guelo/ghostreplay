@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.fen import normalize_fen
 from app.models import GameSession, SessionMove
+from app.opening_boundary import clear_boundary_observation
 from app.session_contracts import segment_for_move
 from app.terminal_pgn import (
     MAX_DERIVABLE_PLIES,
@@ -104,6 +105,7 @@ def suppress_unacknowledged_move_line(
         .delete(synchronize_session=False)
     )
     session.move_line_revision += 1
+    clear_boundary_observation(session)
     session.terminal_line_reconciled = False
     session.derived_tail_rows = None
     return TerminalLineFenceResult(acknowledged=False, deleted_rows=deleted)

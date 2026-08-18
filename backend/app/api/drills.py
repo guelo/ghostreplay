@@ -27,6 +27,10 @@ from app.drill_steering import (
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import GameSession, OpponentDecision, decode_uci_line, encode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_boundary import (
+    claim_opening_boundary_shadow_terminal,
+    emit_opening_boundary_shadow_terminal,
+)
 from app.opening_cache import bump_evidence_seq
 from app.opening_densify import routing_view
 from app.opening_evidence import session_is_evidence_eligible
@@ -666,6 +670,11 @@ def fail_drill(
     )
     session.drill_state = "failed"
     session.drill_terminal_reason = "accuracy"
+    shadow_terminal_at = utcnow()
+    shadow_terminal_claimed = claim_opening_boundary_shadow_terminal(
+        session,
+        terminal_at=shadow_terminal_at,
+    )
     db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible or (
         was_evidence_eligible and line_fence.deleted_rows > 0
@@ -674,6 +683,12 @@ def fail_drill(
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_failed", {"reason": session.drill_terminal_reason})
+    if shadow_terminal_claimed:
+        emit_opening_boundary_shadow_terminal(
+            session,
+            terminal_trigger="accuracy_fail",
+            terminal_at=shadow_terminal_at,
+        )
     # The opening root was reached before the accuracy slip, so the played chain
     # carries a meaningful delta to surface in the stopped-drill banner.
     return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
@@ -930,6 +945,13 @@ def natural_end_drill(
         # present, the row grid alone cannot show that terminal reconciliation
         # repaired a lost final upload.
         session.derived_tail_rows = reconcile_result.derived_rows
+    shadow_terminal_claimed = bool(
+        session.ended_at is not None
+        and claim_opening_boundary_shadow_terminal(
+            session,
+            terminal_at=session.ended_at,
+        )
+    )
     db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible or (
         was_evidence_eligible and line_fence.deleted_rows > 0
@@ -946,6 +968,12 @@ def natural_end_drill(
             "derived_tail_rows": reconcile_result.derived_rows,
         },
     )
+    if shadow_terminal_claimed and session.ended_at is not None:
+        emit_opening_boundary_shadow_terminal(
+            session,
+            terminal_trigger="drill_natural_end",
+            terminal_at=session.ended_at,
+        )
     return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
 
 

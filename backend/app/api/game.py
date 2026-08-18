@@ -36,6 +36,10 @@ from app.models import (
     decode_uci_line,
 )
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_boundary import (
+    claim_opening_boundary_shadow_terminal,
+    emit_opening_boundary_shadow_terminal,
+)
 from app.opening_cache import bump_evidence_seq
 from app.opening_densify import routing_view
 from app.opening_evidence import session_is_evidence_eligible
@@ -975,6 +979,14 @@ def end_game(
         scores_after = None
         score_changes = None
 
+    shadow_terminal_claimed = bool(
+        request.result != GameResult.ABANDON
+        and session.ended_at is not None
+        and claim_opening_boundary_shadow_terminal(
+            session,
+            terminal_at=session.ended_at,
+        )
+    )
     db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible or (
         was_evidence_eligible and line_fence.deleted_rows > 0
@@ -1018,6 +1030,12 @@ def end_game(
             "derived_tail_rows": row_reconcile.derived_rows,
         },
     )
+    if shadow_terminal_claimed and session.ended_at is not None:
+        emit_opening_boundary_shadow_terminal(
+            session,
+            terminal_trigger="game_end",
+            terminal_at=session.ended_at,
+        )
 
     return GameEndResponse(
         session_id=session.id,

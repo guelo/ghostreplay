@@ -220,6 +220,9 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     # receipt, FK/uniques/checks, invalid writes, and downgrade/re-upgrade.
     "test_session_move_line_migration.py::"
     "test_pg_move_line_migration_catalog_defaults_and_constraints",
+    # Observation-only opening-boundary additions: all named PostgreSQL checks
+    # are installed validated and reject invalid direct writes.
+    "test_opening_boundary_migration.py::test_pg_boundary_migration_constraints",
     # Release-B backfill/repair correctness core (g-b-backfill-core). The
     # NOT VALID -> validated CHECK transition, the frozen visibility predicate's
     # parity with app/session_contracts.py, and the ply-coordinate detectors'

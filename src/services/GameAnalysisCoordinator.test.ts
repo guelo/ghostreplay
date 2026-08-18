@@ -10,6 +10,7 @@ import { withLookupSurfaces } from '../test/cacheLookupFixture'
 const lookupAnalysisCacheMock = vi.fn()
 const uploadSessionMovesMock = vi.fn()
 const truncateSessionMovesMock = vi.fn()
+const proveOpeningBoundaryMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
   // Fixtures describe a lookup entry in its pre-g-v21l shorthand (the generic
@@ -20,6 +21,7 @@ vi.mock('../utils/api', () => ({
     Promise.resolve(lookupAnalysisCacheMock(...args)).then(withLookupSurfaces),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   truncateSessionMoves: (...args: unknown[]) => truncateSessionMovesMock(...args),
+  proveOpeningBoundary: (...args: unknown[]) => proveOpeningBoundaryMock(...args),
 }))
 
 // Stub Worker so the coordinator can instantiate without a real WASM runtime.
@@ -66,6 +68,7 @@ beforeEach(() => {
   lookupAnalysisCacheMock.mockReset()
   uploadSessionMovesMock.mockReset()
   truncateSessionMovesMock.mockReset()
+  proveOpeningBoundaryMock.mockReset()
   truncateSessionMovesMock.mockImplementation(
     (_sessionId: string, request: {
       line_revision: number
@@ -75,6 +78,14 @@ beforeEach(() => {
         line_revision: request.line_revision + 1,
       }),
   )
+  proveOpeningBoundaryMock.mockResolvedValue({
+    line_revision: 0,
+    probe_ply: 1,
+    opening_middle_candidate_ply: 1,
+    exhausted: false,
+    state: 'baseline_pending',
+    proof_verdict: 'passed',
+  })
   // Default: cache misses, so the worker fallback is released. Tests that
   // exercise a trusted cache hit override this with `mockReturnValueOnce`.
   lookupAnalysisCacheMock.mockResolvedValue(new Map())
@@ -659,6 +670,83 @@ describe('GameAnalysisCoordinator', () => {
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(2)
       expect(coordinator.getUploadCommitRevision('session-retry')).toBe(1)
       expect(listener).toHaveBeenCalledTimes(1)
+    })
+
+    it('proves an echoed opening hint only after the full prefix is acknowledged', async () => {
+      coordinator.startSession('session-boundary')
+      seedResolvedHistory(3)
+      uploadSessionMovesMock.mockResolvedValue({
+        moves_inserted: 1,
+        line_revision: 0,
+        opening_phase_protocol_version: 1,
+        opening_phase_probe_ply: 3,
+        opening_phase_exhausted: false,
+      })
+      proveOpeningBoundaryMock.mockResolvedValueOnce({
+        line_revision: 0,
+        probe_ply: 3,
+        opening_middle_candidate_ply: 3,
+        exhausted: false,
+        state: 'baseline_pending',
+        proof_verdict: 'passed',
+      })
+
+      await flushIndices(2)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(proveOpeningBoundaryMock).not.toHaveBeenCalled()
+
+      await flushIndices(0)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(proveOpeningBoundaryMock).not.toHaveBeenCalled()
+
+      await flushIndices(1)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(proveOpeningBoundaryMock).toHaveBeenCalledOnce()
+      expect(proveOpeningBoundaryMock).toHaveBeenCalledWith(
+        'session-boundary',
+        { line_revision: 0, probe_ply: 3 },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      )
+    })
+
+    it('aborts and fences an opening proof immediately on local takeback', async () => {
+      coordinator.startSession('session-boundary-rewind')
+      seedResolvedHistory(1)
+      uploadSessionMovesMock.mockResolvedValueOnce({
+        moves_inserted: 1,
+        line_revision: 0,
+        opening_phase_protocol_version: 1,
+        opening_phase_probe_ply: 1,
+        opening_phase_exhausted: false,
+      })
+      let proofSignal: AbortSignal | undefined
+      let resolveProof!: (value: {
+        line_revision: number
+        exhausted: boolean
+        state: 'baseline_pending'
+      }) => void
+      proveOpeningBoundaryMock.mockImplementationOnce(
+        (_sessionId: string, _request: unknown, options?: { signal?: AbortSignal }) => {
+          proofSignal = options?.signal
+          return new Promise((resolve) => { resolveProof = resolve })
+        },
+      )
+
+      await flushIndices(0)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(proveOpeningBoundaryMock).toHaveBeenCalledOnce()
+
+      expect(coordinator.transitionMoveLine(0)).toBe(true)
+      expect(proofSignal?.aborted).toBe(true)
+      resolveProof({
+        line_revision: 0,
+        exhausted: false,
+        state: 'baseline_pending',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect((coordinator as any).openingBoundaryState).toBeNull()
+      expect(proveOpeningBoundaryMock).toHaveBeenCalledTimes(1)
     })
 
     it('stops a permanent identity conflict without retrying the unchanged payload', async () => {

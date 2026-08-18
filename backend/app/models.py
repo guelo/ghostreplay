@@ -239,6 +239,50 @@ class GameSession(Base):
             name="ck_game_sessions_move_line_revision",
         ),
         CheckConstraint(
+            "opening_phase_protocol_version is null or opening_phase_protocol_version = 1",
+            name="ck_game_sessions_opening_phase_protocol",
+        ),
+        CheckConstraint(
+            "opening_phase_probe_ply is null or opening_phase_probe_ply > 0",
+            name="ck_game_sessions_opening_probe_ply",
+        ),
+        CheckConstraint(
+            "opening_middle_candidate_ply is null or opening_middle_candidate_ply > 0",
+            name="ck_game_sessions_opening_candidate_ply",
+        ),
+        CheckConstraint(
+            "opening_middle_ply is null or opening_middle_ply > 0",
+            name="ck_game_sessions_opening_middle_ply",
+        ),
+        CheckConstraint(
+            "opening_phase_probe_verdict is null or opening_phase_probe_verdict in "
+            "('passed','wrong_row_count','coordinate_mismatch','nonstandard_start',"
+            "'illegal_or_discontinuous_line','exhausted','capped')",
+            name="ck_game_sessions_opening_probe_verdict",
+        ),
+        CheckConstraint(
+            "opening_middle_ready_at is null or "
+            "(opening_middle_candidate_ply is not null and opening_score_baseline is not null)",
+            name="ck_game_sessions_opening_ready_requires_candidate_baseline",
+        ),
+        CheckConstraint(
+            "opening_middle_ply is null or "
+            "(opening_score_baseline is not null and opening_middle_ply = opening_middle_candidate_ply)",
+            name="ck_game_sessions_opening_marker_requires_baseline",
+        ),
+        CheckConstraint(
+            "not opening_phase_exhausted or "
+            "(opening_phase_probe_ply is null and opening_middle_candidate_ply is null "
+            "and opening_middle_ready_at is null and opening_middle_ply is null "
+            "and opening_phase_probe_verdict = 'exhausted')",
+            name="ck_game_sessions_opening_exhausted_clears_state",
+        ),
+        CheckConstraint(
+            "opening_boundary_shadow_terminal_at is null or "
+            "opening_phase_protocol_version = 1",
+            name="ck_game_sessions_opening_shadow_requires_protocol",
+        ),
+        CheckConstraint(
             "(baseline_watermark_seq is null and baseline_watermark_epoch is null "
             "and baseline_watermark_fingerprint is null) or "
             "(baseline_watermark_seq is not null and baseline_watermark_epoch is not null "
@@ -358,6 +402,27 @@ class GameSession(Base):
     # can never resurrect an abandoned tail.
     move_line_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
+    )
+    # Observation-only opening-boundary rollout (g-je81 Stage 0). The explicit
+    # protocol stamp supplies the updated-client denominator. A raw probe is only
+    # a scheduling hint; candidate is written solely after complete-line proof.
+    # ``opening_middle_ply`` remains NULL while promotion is disabled.
+    opening_phase_protocol_version: Mapped[int | None] = mapped_column(SmallInteger)
+    opening_phase_probe_ply: Mapped[int | None] = mapped_column(Integer)
+    opening_phase_probe_verdict: Mapped[str | None] = mapped_column(String(40))
+    opening_middle_candidate_ply: Mapped[int | None] = mapped_column(Integer)
+    opening_middle_ready_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    opening_middle_ply: Mapped[int | None] = mapped_column(Integer)
+    opening_phase_exhausted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Durable once-per-session claim for the first delta-bearing observation.
+    # Analytics delivery remains best-effort; the marker prevents a continued
+    # accuracy-failed drill from emitting again at its later game end.
+    opening_boundary_shadow_terminal_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     # Fresh opening replay enforces the PGN-backed complete-line proof only
     # after a terminal writer has run reconciliation. Historical rows default

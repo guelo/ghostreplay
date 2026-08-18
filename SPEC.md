@@ -168,6 +168,17 @@ comments. The service keeps both forms of the game record under the session and
 account boundary, and game completion makes the saved game available for later
 review.
 
+Boundary-capable browsers also stamp an explicit phase-observation protocol on
+move uploads. A raw postmove FEN that satisfies the Lichess middlegame predicate
+is only a scheduling hint. After the coordinator has server acknowledgements
+for every move in that prefix, FastAPI replays the bounded canonical line and
+stores the exact opening/middlegame boundary for aggregate shadow measurement.
+This rollout is observation-only: it does not expose active-session moves to
+opening evidence, recompute a live score, poll a delta, or change the existing
+opening cards. Delta-bearing terminal transitions emit a content-free aggregate
+event so rollout yield and available lead time can be reviewed before any live
+publication is enabled.
+
 An active unrated takeback is available only while the coordinator owns a
 writable, synchronized upload epoch. Once accepted, it rewinds the board
 immediately and also replaces the durable move branch. A stopped drill or

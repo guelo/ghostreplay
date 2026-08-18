@@ -11,6 +11,7 @@ import {
   abandonDrill,
   uploadSessionMoves,
   truncateSessionMoves,
+  proveOpeningBoundary,
   recordBlunder,
   recordManualBlunder,
   fetchBlunders,
@@ -360,7 +361,10 @@ describe('uploadSessionMoves', () => {
       expect.stringContaining('/api/session/sess-1/moves'),
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ moves: [sampleMove] }),
+        body: JSON.stringify({
+          moves: [sampleMove],
+          opening_phase_protocol_version: 1,
+        }),
       }),
     )
   })
@@ -494,7 +498,10 @@ describe('uploadSessionMoves', () => {
     await uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
-    expect(body).toEqual({ moves: [] })
+    expect(body).toEqual({
+      moves: [],
+      opening_phase_protocol_version: 1,
+    })
     expect('recompute_opportunity' in body).toBe(false)
   })
 
@@ -587,6 +594,32 @@ describe('truncateSessionMoves', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/session/sess-1/moves/truncate'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }),
+    )
+  })
+})
+
+describe('proveOpeningBoundary', () => {
+  it('forwards the revision-fenced probe and abort signal', async () => {
+    const controller = new AbortController()
+    const body = { line_revision: 4, probe_ply: 17 }
+    mockResponse({
+      line_revision: 4,
+      probe_ply: 17,
+      exhausted: false,
+      state: 'shadow_ready',
+    })
+
+    await proveOpeningBoundary('sess-1', body, {
+      signal: controller.signal,
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/sess-1/opening-boundary'),
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify(body),

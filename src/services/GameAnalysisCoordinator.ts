@@ -22,11 +22,13 @@ import { workerTupleProvenance } from '../workers/browserProvenance'
 import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import {
   lookupAnalysisCache,
+  proveOpeningBoundary,
   truncateSessionMoves,
   uploadSessionMoves,
 } from '../utils/api'
 import type {
   ReusableAnalysis,
+  SessionMovesResponse,
   SessionMoveUpload,
   TruncateSessionMovesResponse,
 } from '../utils/api'
@@ -365,6 +367,20 @@ type LineTransition = {
   controller: AbortController | null
 }
 
+type OpeningBoundaryState = {
+  sessionId: string
+  generation: number
+  lineEpoch: number
+  lineRevision: number
+  probePly: number
+  transitionRevision: number
+  openingMiddlePly: number | null
+  exhausted: boolean
+  settled: boolean
+  inFlight: boolean
+  controller: AbortController | null
+}
+
 const isAbortError = (err: unknown): boolean =>
   typeof err === 'object' &&
   err !== null &&
@@ -411,6 +427,10 @@ export class GameAnalysisCoordinator {
   private lineTransition: LineTransition | null = null
   private lineEpoch = 0
   private lineSyncDiagnostic: LineSyncDiagnostic | null = null
+  /** Observation-only boundary proof state. It is coordinator-owned so a React
+   * remount cannot lose an echoed probe or let a stale response publish state. */
+  private openingBoundaryState: OpeningBoundaryState | null = null
+  private openingBoundaryTransitionRevision = 0
 
   // Incremental upload timer
   private incrementalUploadTimer: ReturnType<typeof setTimeout> | null = null
@@ -679,6 +699,10 @@ export class GameAnalysisCoordinator {
       return false
     }
 
+    // The optimistic local epoch fences the old boundary immediately; never let
+    // its response survive until the server's truncation acknowledgement.
+    this.cancelOpeningBoundary()
+
     const frozenInFlight = new Set(oldState.inFlightIndices ?? [])
     const retainedUploaded = new Set(
       [...oldState.uploadedIndices].filter((index) => index < afterPly),
@@ -807,6 +831,143 @@ export class GameAnalysisCoordinator {
     transition.controller?.abort()
     transition.controller = null
     this.emitLineSyncChange()
+  }
+
+  private cancelOpeningBoundary(): void {
+    const boundary = this.openingBoundaryState
+    this.openingBoundaryState = null
+    this.openingBoundaryTransitionRevision += 1
+    if (!boundary) return
+    boundary.controller?.abort()
+    boundary.controller = null
+    boundary.inFlight = false
+  }
+
+  private observeOpeningBoundaryEcho(
+    uploadState: UploadState,
+    response: SessionMovesResponse,
+  ): void {
+    if (
+      response.opening_phase_protocol_version !== 1 ||
+      response.line_revision !== uploadState.lineRevision ||
+      this.uploadState !== uploadState ||
+      uploadState.sessionId !== this.activeSessionId ||
+      uploadState.generation !== this.sessionGeneration ||
+      uploadState.lineEpoch !== this.lineEpoch ||
+      uploadState.lineSyncPaused
+    ) {
+      return
+    }
+    // The server already proved or exhausted this revision. Stage 0 has no UI
+    // consumer; retaining another local request would only duplicate work.
+    if (
+      response.opening_middle_candidate_ply != null ||
+      response.opening_phase_exhausted ||
+      response.opening_middle_ply != null
+    ) {
+      this.cancelOpeningBoundary()
+      return
+    }
+
+    const probePly = response.opening_phase_probe_ply
+    if (probePly == null || !Number.isInteger(probePly) || probePly < 1) return
+    const current = this.openingBoundaryState
+    if (
+      !current ||
+      current.sessionId !== uploadState.sessionId ||
+      current.generation !== uploadState.generation ||
+      current.lineEpoch !== uploadState.lineEpoch ||
+      current.lineRevision !== uploadState.lineRevision ||
+      current.probePly !== probePly
+    ) {
+      this.cancelOpeningBoundary()
+      this.openingBoundaryState = {
+        sessionId: uploadState.sessionId,
+        generation: uploadState.generation,
+        lineEpoch: uploadState.lineEpoch,
+        lineRevision: uploadState.lineRevision,
+        probePly,
+        transitionRevision: ++this.openingBoundaryTransitionRevision,
+        openingMiddlePly: null,
+        exhausted: false,
+        settled: false,
+        inFlight: false,
+        controller: null,
+      }
+    }
+    this.maybeProveOpeningBoundary(uploadState)
+  }
+
+  private maybeProveOpeningBoundary(uploadState: UploadState): void {
+    const boundary = this.openingBoundaryState
+    if (
+      !boundary ||
+      boundary.inFlight ||
+      boundary.settled ||
+      boundary.exhausted ||
+      boundary.openingMiddlePly !== null ||
+      this.uploadState !== uploadState ||
+      boundary.sessionId !== uploadState.sessionId ||
+      boundary.generation !== uploadState.generation ||
+      boundary.lineEpoch !== uploadState.lineEpoch ||
+      boundary.lineRevision !== uploadState.lineRevision ||
+      uploadState.lineSyncPaused
+    ) {
+      return
+    }
+    for (let index = 0; index < boundary.probePly; index += 1) {
+      if (!uploadState.uploadedIndices.has(index)) return
+    }
+
+    const controller =
+      typeof AbortController !== 'undefined' ? new AbortController() : null
+    const transitionRevision = boundary.transitionRevision
+    boundary.inFlight = true
+    boundary.controller = controller
+    proveOpeningBoundary(
+      boundary.sessionId,
+      {
+        line_revision: boundary.lineRevision,
+        probe_ply: boundary.probePly,
+      },
+      controller ? { signal: controller.signal } : undefined,
+    )
+      .then((response) => {
+        if (
+          this.openingBoundaryState !== boundary ||
+          boundary.transitionRevision !== transitionRevision ||
+          this.uploadState !== uploadState ||
+          boundary.sessionId !== this.activeSessionId ||
+          boundary.generation !== this.sessionGeneration ||
+          boundary.lineEpoch !== this.lineEpoch ||
+          response.line_revision !== boundary.lineRevision
+        ) {
+          return
+        }
+        boundary.inFlight = false
+        if (boundary.controller === controller) boundary.controller = null
+        boundary.openingMiddlePly =
+          response.opening_middle_candidate_ply ?? response.opening_middle_ply ?? null
+        boundary.exhausted = response.exhausted
+        boundary.settled =
+          response.state === 'baseline_pending' ||
+          response.state === 'shadow_ready' ||
+          response.state === 'exhausted' ||
+          response.state === 'capped'
+      })
+      .catch((error) => {
+        if (
+          this.openingBoundaryState !== boundary ||
+          boundary.transitionRevision !== transitionRevision
+        ) {
+          return
+        }
+        boundary.inFlight = false
+        if (boundary.controller === controller) boundary.controller = null
+        if (!isAbortError(error)) {
+          console.warn('[Coordinator] Opening boundary shadow proof deferred:', error)
+        }
+      })
   }
 
   /** Emit `failed` for every still-unresolved index, then the caller clears
@@ -1129,6 +1290,7 @@ export class GameAnalysisCoordinator {
     // An already-dispatched request remains frozen to the old session id, but
     // aborting here prevents any later attempt after replacement.
     this.cancelAllLateEvalRepairs()
+    this.cancelOpeningBoundary()
 
     // If switching sessions, finalize old one
     if (this.activeSessionId && this.activeSessionId !== sessionId) {
@@ -1194,6 +1356,7 @@ export class GameAnalysisCoordinator {
 
   clearSession() {
     this.cancelAllLateEvalRepairs()
+    this.cancelOpeningBoundary()
     this.cancelLineTransition()
     this.finalizeOldSession()
     this.activeSessionId = null
@@ -1221,6 +1384,7 @@ export class GameAnalysisCoordinator {
 
   private finalizeOldSession() {
     this.stopIncrementalUploadTimer()
+    this.cancelOpeningBoundary()
 
     if (this.uploadState) {
       if (!this.uploadState.uploadsEnabled) {
@@ -2394,7 +2558,7 @@ export class GameAnalysisCoordinator {
             lineRevision: capturedLineRevision,
           },
     )
-      .then(() => {
+      .then((response) => {
         if (
           !this.ownsUploadContinuation(
             state,
@@ -2411,6 +2575,7 @@ export class GameAnalysisCoordinator {
         for (const idx of indicesToUpload) {
           state.uploadedIndices.add(idx)
         }
+        this.observeOpeningBoundaryEcho(state, response)
         state.retryCount = 0
         state.uploadInFlight = false
         if (!state.uploadsEnabled) {
@@ -2663,6 +2828,7 @@ export class GameAnalysisCoordinator {
 
   stopSessionUploads() {
     this.stopIncrementalUploadTimer()
+    this.cancelOpeningBoundary()
     if (!this.uploadState) return
     const transitionWasAvailable = this.canTransitionMoveLine(
       this.uploadState.sessionId,
@@ -2679,6 +2845,7 @@ export class GameAnalysisCoordinator {
     this.stopIncrementalUploadTimer()
     this.cancelAllLateEvalRepairs()
     this.cancelLineTransition()
+    this.cancelOpeningBoundary()
     if (this.uploadState?.retryTimer) {
       clearTimeout(this.uploadState.retryTimer)
     }

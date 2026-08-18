@@ -55,9 +55,22 @@ from app.accuracy import (
     recompute_session_accuracy,
 )
 from app.fen import active_color, fen_hash, normalize_fen
-from app.game_phase import CompleteLineProofVerdict, prove_complete_standard_line
+from app.game_phase import (
+    CompleteLineProofVerdict,
+    divide,
+    is_middlegame_position,
+    prove_complete_standard_line,
+)
 from app.graph_write_lock import acquire_graph_write_lock
 from app.opening_cache import bump_evidence_seq, load_cached_rows_nonblocking
+from app.opening_boundary import (
+    OPENING_BOUNDARY_MAX_PROBE_PLY,
+    OPENING_PHASE_PROTOCOL_VERSION,
+    OpeningBoundaryProbeVerdict,
+    clear_boundary_observation,
+    observe_raw_boundary_hint,
+    stamp_shadow_ready,
+)
 from app.opening_evidence import session_is_evidence_eligible
 from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
@@ -202,6 +215,21 @@ class SessionMovesRequest(BaseModel):
     # Server-owned branch token. Omission is accepted only while the session is
     # still at revision zero for mixed-version rollout.
     line_revision: int | None = Field(None, ge=0)
+    # Explicit capability stamp for the observation-only opening-boundary
+    # release. Literal rejects unknown future protocols instead of silently
+    # including incompatible clients in the rollout denominator.
+    opening_phase_protocol_version: Literal[1] | None = None
+
+
+OpeningBoundaryProofVerdictValue = Literal[
+    "passed",
+    "wrong_row_count",
+    "coordinate_mismatch",
+    "nonstandard_start",
+    "illegal_or_discontinuous_line",
+    "exhausted",
+    "capped",
+]
 
 
 class SessionMovesResponse(BaseModel):
@@ -210,6 +238,12 @@ class SessionMovesResponse(BaseModel):
     drill_terminal_reason: str | None = None
     line_revision: int
     line_proof_verdict: str | None = None
+    opening_phase_protocol_version: int | None = None
+    opening_phase_probe_ply: int | None = None
+    opening_phase_probe_verdict: OpeningBoundaryProofVerdictValue | None = None
+    opening_middle_candidate_ply: int | None = None
+    opening_middle_ply: int | None = None
+    opening_phase_exhausted: bool | None = None
 
 
 class SessionMovesTruncateRequest(BaseModel):
@@ -219,6 +253,29 @@ class SessionMovesTruncateRequest(BaseModel):
 
 class SessionMovesTruncateResponse(BaseModel):
     line_revision: int
+
+
+class OpeningBoundaryRequest(BaseModel):
+    line_revision: int = Field(..., ge=0)
+    probe_ply: int = Field(..., ge=1)
+
+
+OpeningBoundaryStateValue = Literal[
+    "baseline_pending",
+    "shadow_ready",
+    "exhausted",
+    "probe_not_ready",
+    "capped",
+]
+
+class OpeningBoundaryResponse(BaseModel):
+    line_revision: int
+    probe_ply: int | None = None
+    opening_middle_candidate_ply: int | None = None
+    opening_middle_ply: int | None = None
+    exhausted: bool
+    state: OpeningBoundaryStateValue
+    proof_verdict: OpeningBoundaryProofVerdictValue | None = None
 
 
 class SessionAnalysisMove(BaseModel):
@@ -1428,19 +1485,78 @@ def _validate_versioned_line_identity(
             )
 
 
-def _ordered_session_moves(db: Session, session_id: uuid.UUID) -> list[SessionMove]:
+def _ordered_session_moves(
+    db: Session,
+    session_id: uuid.UUID,
+    *,
+    through_ply: int | None = None,
+) -> list[SessionMove]:
     color_order = case((SessionMove.color == MoveColor.WHITE.value, 0), else_=1)
-    return (
+    query = (
         db.query(SessionMove)
         .filter(SessionMove.session_id == session_id)
         # Identity validation may already have loaded these rows before the
         # Core upsert. Force authoritative post-upsert attributes instead of
         # accepting stale values from the ORM identity map.
         .populate_existing()
-        .order_by(
-            SessionMove.move_number.asc(), color_order.asc(), SessionMove.id.asc()
+    )
+    if through_ply is not None:
+        query = query.filter(
+            ply_after_expr(SessionMove.move_number, SessionMove.color) <= through_ply
         )
-        .all()
+    return query.order_by(
+        SessionMove.move_number.asc(), color_order.asc(), SessionMove.id.asc()
+    ).all()
+
+
+def _session_moves_response(
+    session: GameSession,
+    *,
+    moves_inserted: int,
+    line_proof_verdict: str | None = None,
+    include_opening_boundary: bool = False,
+) -> SessionMovesResponse:
+    """Serialize durable move-line and boundary observation state together."""
+
+    return SessionMovesResponse(
+        moves_inserted=moves_inserted,
+        drill_state=session.drill_state,
+        drill_terminal_reason=session.drill_terminal_reason,
+        line_revision=session.move_line_revision,
+        line_proof_verdict=line_proof_verdict,
+        opening_phase_protocol_version=(
+            session.opening_phase_protocol_version if include_opening_boundary else None
+        ),
+        opening_phase_probe_ply=(
+            session.opening_phase_probe_ply if include_opening_boundary else None
+        ),
+        opening_phase_probe_verdict=(
+            session.opening_phase_probe_verdict if include_opening_boundary else None
+        ),
+        opening_middle_candidate_ply=(
+            session.opening_middle_candidate_ply if include_opening_boundary else None
+        ),
+        opening_middle_ply=(
+            session.opening_middle_ply if include_opening_boundary else None
+        ),
+        opening_phase_exhausted=(
+            session.opening_phase_exhausted if include_opening_boundary else None
+        ),
+    )
+
+
+def _opening_boundary_response(
+    session: GameSession,
+    state: OpeningBoundaryStateValue,
+) -> OpeningBoundaryResponse:
+    return OpeningBoundaryResponse(
+        line_revision=session.move_line_revision,
+        probe_ply=session.opening_phase_probe_ply,
+        opening_middle_candidate_ply=session.opening_middle_candidate_ply,
+        opening_middle_ply=session.opening_middle_ply,
+        exhausted=session.opening_phase_exhausted,
+        state=state,
+        proof_verdict=session.opening_phase_probe_verdict,
     )
 
 
@@ -1479,6 +1595,11 @@ def truncate_session_moves(
         )
         .delete(synchronize_session=False)
     )
+    # Observation state belongs to the acknowledged branch. Clear it in the
+    # same transaction that advances the durable branch fence; the explicit
+    # protocol stamp remains as the updated-client denominator so the replacement
+    # line may discover and prove another candidate.
+    clear_boundary_observation(game_session)
     game_session.move_line_revision += 1
     evidence_changed = bool(
         deleted_move_count and session_is_evidence_eligible(game_session)
@@ -1497,6 +1618,119 @@ def truncate_session_moves(
             source=OpeningScoreTrigger.SESSION_EVIDENCE,
         )
     return SessionMovesTruncateResponse(line_revision=game_session.move_line_revision)
+
+
+@router.post(
+    "/{session_id}/opening-boundary",
+    response_model=OpeningBoundaryResponse,
+    response_model_exclude_none=True,
+)
+def prove_opening_boundary(
+    session_id: uuid.UUID,
+    request: OpeningBoundaryRequest,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> OpeningBoundaryResponse:
+    """Replay one bounded, acknowledged prefix and retain its exact middle ply.
+
+    This is observation-only. It never writes ``opening_middle_ply``, advances
+    opening evidence, enqueues scoring work, or returns a renderable delta.
+    """
+
+    game_session = for_no_key_update(
+        db.query(GameSession).filter(GameSession.id == session_id)
+    ).first()
+    if game_session is None:
+        raise HTTPException(status_code=404, detail="Game session not found")
+    _ensure_session_owned_by_user(game_session, user)
+    if game_session.status != "active":
+        raise HTTPException(status_code=409, detail="Game session is not active")
+    if request.line_revision != game_session.move_line_revision:
+        _raise_line_revision_conflict(game_session.move_line_revision)
+    if (
+        game_session.opening_phase_protocol_version
+        != OPENING_PHASE_PROTOCOL_VERSION
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "OPENING_PHASE_PROTOCOL_REQUIRED"},
+        )
+
+    # Successful/exhausted retries are pure echoes. A candidate may have gained
+    # its baseline between calls, so idempotently stamp shadow readiness first.
+    if game_session.opening_middle_candidate_ply is not None:
+        stamp_shadow_ready(game_session)
+        db.commit()
+        state = (
+            "shadow_ready"
+            if game_session.opening_middle_ready_at is not None
+            else "baseline_pending"
+        )
+        return _opening_boundary_response(game_session, state)
+    if game_session.opening_phase_exhausted:
+        return _opening_boundary_response(game_session, "exhausted")
+
+    hint = game_session.opening_phase_probe_ply
+    if hint is None or hint > request.probe_ply:
+        return _opening_boundary_response(game_session, "probe_not_ready")
+    if request.probe_ply > OPENING_BOUNDARY_MAX_PROBE_PLY:
+        game_session.opening_phase_probe_verdict = (
+            OpeningBoundaryProbeVerdict.CAPPED.value
+        )
+        db.commit()
+        return _opening_boundary_response(game_session, "capped")
+
+    rows = _ordered_session_moves(
+        db,
+        session_id,
+        through_ply=request.probe_ply,
+    )
+    proof = prove_complete_standard_line(rows, request.probe_ply)
+    if proof.verdict is not CompleteLineProofVerdict.PASSED:
+        game_session.opening_phase_probe_verdict = proof.verdict.value
+        db.commit()
+        return _opening_boundary_response(game_session, "probe_not_ready")
+
+    # Include the final postmove board so a request can prove the crossing that
+    # its own last uploaded move just made. The resulting middle index is an
+    # absolute ply because the proof above established exact coordinates 1..N.
+    boards = [*proof.premove_boards]
+    if proof.final_board is not None:
+        boards.append(proof.final_board)
+    division = divide(boards)
+    if division.middle is None:
+        raw_middle_seen = any(
+            is_middlegame_position(normalize_fen(board.fen())) for board in boards
+        )
+        if not raw_middle_seen:
+            # The immutable revisioned client should make this impossible, but a
+            # revision-zero mixed-version writer can still replace row identity.
+            # Retract the stale hint rather than misclassifying no-middle as an
+            # exhausted divider.
+            game_session.opening_phase_probe_ply = None
+            game_session.opening_phase_probe_verdict = None
+            db.commit()
+            return _opening_boundary_response(game_session, "probe_not_ready")
+        # A stored raw hint is present among the proven boards. Losing the middle
+        # here therefore means Lichess collapsed it at/after the end boundary.
+        clear_boundary_observation(game_session)
+        game_session.opening_phase_probe_verdict = (
+            OpeningBoundaryProbeVerdict.EXHAUSTED.value
+        )
+        game_session.opening_phase_exhausted = True
+        db.commit()
+        return _opening_boundary_response(game_session, "exhausted")
+
+    game_session.opening_phase_probe_verdict = OpeningBoundaryProbeVerdict.PASSED.value
+    game_session.opening_middle_candidate_ply = division.middle
+    stamp_shadow_ready(game_session)
+    db.commit()
+    state = (
+        "shadow_ready"
+        if game_session.opening_middle_ready_at is not None
+        else "baseline_pending"
+    )
+    return _opening_boundary_response(game_session, state)
 
 
 @router.post(
@@ -1546,6 +1780,14 @@ def upsert_session_moves(
         and request.line_revision != game_session.move_line_revision
     ):
         _raise_line_revision_conflict(game_session.move_line_revision)
+
+    observe_raw_boundary_hint(
+        game_session,
+        request.moves,
+        protocol_version=request.opening_phase_protocol_version,
+        # Sparse post-finalization repairs are not ordinary line observation.
+        allow_candidate_discovery=not is_eval_repair_route,
+    )
     if request.line_revision is not None:
         _validate_versioned_line_identity(db, session_id, request.moves)
 
@@ -1662,10 +1904,16 @@ def upsert_session_moves(
             )
             _assess_final_line(persisted_count)
             db.commit()
-        return SessionMovesResponse(
+        elif request.opening_phase_protocol_version is not None:
+            # The empty body can still be the first explicit capability stamp.
+            db.commit()
+        return _session_moves_response(
+            game_session,
             moves_inserted=0,
-            line_revision=game_session.move_line_revision,
             line_proof_verdict=line_proof_verdict,
+            include_opening_boundary=(
+                request.opening_phase_protocol_version is not None
+            ),
         )
 
     values = [
@@ -1797,12 +2045,13 @@ def upsert_session_moves(
                 recompute_opportunity=request.recompute_opportunity,
                 session_mode=game_session.session_mode,
             )
-        return SessionMovesResponse(
+        return _session_moves_response(
+            game_session,
             moves_inserted=len(values),
-            drill_state=game_session.drill_state,
-            drill_terminal_reason=game_session.drill_terminal_reason,
-            line_revision=game_session.move_line_revision,
             line_proof_verdict=line_proof_verdict,
+            include_opening_boundary=(
+                request.opening_phase_protocol_version is not None
+            ),
         )
 
     conflict_updates = {
@@ -1891,12 +2140,11 @@ def upsert_session_moves(
             recompute_opportunity=request.recompute_opportunity,
             session_mode=game_session.session_mode,
         )
-    return SessionMovesResponse(
+    return _session_moves_response(
+        game_session,
         moves_inserted=len(values),
-        drill_state=game_session.drill_state,
-        drill_terminal_reason=game_session.drill_terminal_reason,
-        line_revision=game_session.move_line_revision,
         line_proof_verdict=line_proof_verdict,
+        include_opening_boundary=request.opening_phase_protocol_version is not None,
     )
 
 

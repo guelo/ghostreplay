@@ -174,6 +174,63 @@ Consequences:
 - `DIVIDER_VERSION` is part of the score fingerprint, so a divider change
   invalidates cached snapshots.
 
+### 4.1 Active boundary observation (current rollout stage)
+
+The active-session path is currently **shadow-only**. It measures whether an
+early opening-score delta would be viable without changing evidence, caches, or
+the player-facing cards.
+
+The browser sends an explicit closed protocol version on session-move uploads.
+For an active versioned session, the backend examines only that request's raw
+postmove FENs and may retain one qualifying ply as a scheduling hint. The hint is
+not assumed monotone and is never treated as the boundary. Ordinary move uploads
+do not reconstruct the session, advance the opening-evidence cursor, or enqueue
+score work because of it.
+
+The analysis coordinator waits until every move index in the hinted prefix is in
+its server-acknowledged set. It then makes one bounded, revision-fenced proof
+request. Under the session row lock, the backend requires canonical rows at every
+ply from the standard start, proves SAN/FEN adjacency with the shared complete-line
+proof, and runs the unchanged Lichess divider over the proven premove boards plus
+the final postmove board. This lets the last uploaded move prove the crossing it
+just made while retaining an absolute opening horizon. Gaps, discontinuities,
+nonstandard starts, cap refusals, and simultaneous middle/end boundaries fail
+closed with typed observation verdicts.
+
+An exact candidate becomes shadow-ready only after the before-session opening
+score baseline is durable. Candidate, probe, and readiness writes do not advance
+opening evidence. The public active-prefix marker remains null, `raw-v8` remains
+the live evidence-input version, and no early recompute, poll, or UI write occurs.
+Baseline-before-marker is therefore structural: this stage has no code path that
+can publish a marker at all.
+
+Boundary state is scoped to the acknowledged move-line revision. A local takeback
+immediately cancels and fences the browser proof; the accepted server truncation
+clears the raw hint, proof verdict, exact candidate, readiness timestamp, and any
+future public marker in the same transaction that advances the line revision. A
+replacement branch may qualify again after its own contiguous acknowledgements.
+An ambiguous takeback outcome remains fail-closed under the move-line protocol,
+and terminalization never waits for boundary proof.
+
+At the first delta-bearing game end, accuracy failure, or natural drill end, the
+backend claims a durable once-per-session timestamp in the terminal transaction
+and emits one `opening_boundary_shadow_terminal` event for versioned clients.
+Its properties are closed, aggregate-only gates: session mode and terminal trigger,
+raw-candidate presence, proof verdict, baseline readiness, would-publish result,
+revision-zero cohort, mutually exclusive refusal reason, and ready-to-terminal
+lead time. It contains no session identifier, FEN, move, opening key, score, or
+grade. Capture completeness must be reconciled against the existing terminal
+events; a missing analytics event is not evidence that the session was ineligible.
+
+Promotion remains disabled until an observation-window report establishes viable
+yield and lead time and receives explicit review. If promotion is approved later,
+the active-prefix evidence projection, replay payload basis, a new evidence-input
+version and its global invalidation,
+scoped recompute lane, fresh-only polling, and stable live-card reconciliation are
+separate rollout work. Existing published markers, once that stage exists, must be
+honored even when the startup-read promotion switch is disabled; the switch gates
+new marker creation only.
+
 ## Core Metrics
 
 ### Metric 1: Opening Score

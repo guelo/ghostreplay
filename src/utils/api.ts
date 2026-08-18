@@ -832,6 +832,7 @@ interface SessionMovesRequest {
   /** Exact final_full receipt this sparse repair must follow. */
   final_client_request_id?: string
   line_revision?: number
+  opening_phase_protocol_version: 1
 }
 
 export interface SessionMovesResponse {
@@ -840,10 +841,40 @@ export interface SessionMovesResponse {
   drill_terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
   line_revision: number
   line_proof_verdict?: LineProofVerdict | null
+  opening_phase_protocol_version?: number | null
+  opening_phase_probe_ply?: number | null
+  opening_phase_probe_verdict?: OpeningBoundaryProofVerdict | null
+  opening_middle_candidate_ply?: number | null
+  opening_middle_ply?: number | null
+  opening_phase_exhausted?: boolean
 }
 
 export interface TruncateSessionMovesResponse {
   line_revision: number
+}
+
+export type OpeningBoundaryProofVerdict =
+  | 'passed'
+  | 'wrong_row_count'
+  | 'coordinate_mismatch'
+  | 'nonstandard_start'
+  | 'illegal_or_discontinuous_line'
+  | 'exhausted'
+  | 'capped'
+
+export interface OpeningBoundaryResponse {
+  line_revision: number
+  probe_ply?: number | null
+  opening_middle_candidate_ply?: number | null
+  opening_middle_ply?: number | null
+  exhausted: boolean
+  state:
+    | 'baseline_pending'
+    | 'shadow_ready'
+    | 'exhausted'
+    | 'probe_not_ready'
+    | 'capped'
+  proof_verdict?: OpeningBoundaryProofVerdict | null
 }
 
 /**
@@ -1217,6 +1248,7 @@ export const uploadSessionMoves = async (
   // final_full discriminator and the receipt-write gate.
   const body: SessionMovesRequest = {
     moves,
+    opening_phase_protocol_version: 1,
     ...(options.recomputeOpportunity === undefined
       ? {}
       : { recompute_opportunity: options.recomputeOpportunity }),
@@ -1301,6 +1333,26 @@ export const truncateSessionMoves = async (
       signal: options?.signal,
     },
     { fallbackMessage: 'Failed to synchronize session move line' },
+  )
+
+/** Prove one bounded, server-acknowledged opening prefix in shadow mode. */
+export const proveOpeningBoundary = async (
+  sessionId: string,
+  request: {
+    line_revision: number
+    probe_ply: number
+  },
+  options?: { signal?: AbortSignal },
+): Promise<OpeningBoundaryResponse> =>
+  requestJson<OpeningBoundaryResponse>(
+    `${API_BASE_URL}/api/session/${sessionId}/opening-boundary`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(request),
+      signal: options?.signal,
+    },
+    { fallbackMessage: 'Failed to prove opening boundary' },
   )
 
 /**
