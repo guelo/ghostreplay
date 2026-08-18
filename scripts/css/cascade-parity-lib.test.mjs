@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   assembleCssFromModuleGraph,
+  assertPostOwnerAdditionsAreAdditive,
   assertIndexedEntries,
   buildFixtureDescriptors,
   enrichCssScenariosFromTsx,
@@ -13,6 +14,48 @@ import {
   mergeComputedPropertyNames,
   selectReachableOwnerStylesheets,
 } from "./cascade-parity-lib.mjs";
+
+describe("post-owner additions", () => {
+  it("allows selectors absent from the frozen baseline", () => {
+    expect(() =>
+      assertPostOwnerAdditionsAreAdditive(
+        ".frozen { color: red; }",
+        ".added, .also-added { color: blue; }",
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects an overlay selector already present in the frozen baseline", () => {
+    expect(() =>
+      assertPostOwnerAdditionsAreAdditive(
+        ".frozen, .shared { color: red; }",
+        "@media (width > 10px) { .added, .shared { color: blue; } }",
+      ),
+    ).toThrow(
+      'Post-owner overlay may only add selectors; ".shared" already exists in the frozen baseline',
+    );
+  });
+
+  it("rejects an overlay selector inherited from index.css", () => {
+    expect(() =>
+      assertPostOwnerAdditionsAreAdditive(
+        ":root { --error: red; }",
+        ":root { --error: blue; }",
+      ),
+    ).toThrow(
+      'Post-owner overlay may only add selectors; ":root" already exists in the frozen baseline',
+    );
+  });
+
+  it("does not treat keyframe steps as selectors", () => {
+    expect(() =>
+      assertPostOwnerAdditionsAreAdditive(
+        "@keyframes frozen { from { opacity: 0; } 100% { opacity: 1; } }",
+        "@-webkit-keyframes added { from { scale: 0; } 100% { scale: 1; } }",
+      ),
+    ).not.toThrow();
+  });
+});
 
 describe("runtime CSS graph assembly", () => {
   it("follows static and lazy runtime imports while deduplicating owner CSS", () => {
@@ -346,6 +389,70 @@ describe("repository baseline provenance", () => {
     expect(baseline.toString("utf8").match(/\n/g)).toHaveLength(
       manifest.source_lines,
     );
+  });
+
+  it("includes index.css in the repository overlay baseline", () => {
+    const directory = path.dirname(fileURLToPath(import.meta.url));
+    const indexCss = fs.readFileSync(
+      path.join(directory, "../../src/index.css"),
+      "utf8",
+    );
+    const baselineAppCss = fs.readFileSync(
+      path.join(directory, "baselines/App.pre-owner.css"),
+      "utf8",
+    );
+
+    expect(() =>
+      assertPostOwnerAdditionsAreAdditive(
+        `${indexCss}\n${baselineAppCss}`,
+        ":root { --error: hotpink; }",
+      ),
+    ).toThrow(
+      'Post-owner overlay may only add selectors; ":root" already exists in the frozen baseline',
+    );
+  });
+
+  it("matches the reviewed post-owner additions manifest", () => {
+    const directory = path.dirname(fileURLToPath(import.meta.url));
+    const additions = fs.readFileSync(
+      path.join(directory, "baselines/post-owner-additions.css"),
+    );
+    const manifest = JSON.parse(
+      fs.readFileSync(
+        path.join(directory, "baselines/post-owner-additions.json"),
+        "utf8",
+      ),
+    );
+
+    expect(path.basename(manifest.artifact)).toBe(
+      "post-owner-additions.css",
+    );
+    expect(crypto.createHash("sha256").update(additions).digest("hex")).toBe(
+      manifest.artifact_sha256,
+    );
+    expect(additions.byteLength).toBe(manifest.artifact_bytes);
+    expect(additions.toString("utf8").match(/\n/g)).toHaveLength(
+      manifest.artifact_lines,
+    );
+    expect(additions.toString("utf8").endsWith("\n")).toBe(
+      manifest.final_newline,
+    );
+    expect(manifest.sources).toEqual([
+      {
+        path: "src/components/chess-game/ChessGame.css",
+        sha256: crypto
+          .createHash("sha256")
+          .update(
+            fs.readFileSync(
+              path.join(
+                directory,
+                "../../src/components/chess-game/ChessGame.css",
+              ),
+            ),
+          )
+          .digest("hex"),
+      },
+    ]);
   });
 
   it("matches the frozen owner selector corpus manifest", () => {

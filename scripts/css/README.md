@@ -9,11 +9,24 @@ global runtime insertion order. The baseline manifest records the artifact's
 SHA-256, byte count, line count, source checkpoint, and final newline; the gate
 verifies it before use.
 
+The immutable pre-owner artifact cannot contain behavior added after the CSS
+migration began. Reviewed additive UI is therefore copied declaration-for-
+declaration into `baselines/post-owner-additions.css`, checksummed by its own
+manifest, pinned to the SHA-256 of each runtime source file, and appended only
+to the baseline side of the comparison. The gate rejects an overlay selector
+that already exists in `src/index.css` or the immutable pre-owner artifact
+before concatenation. Keyframe steps are excluded because they are not document
+selectors. The candidate must still reach the real runtime owner. This is not
+an escape hatch for refactors: selector moves and declaration changes belong in
+the original parity comparison, while every true addition requires both an
+explicit overlay entry and a reviewed selector-corpus digest update.
+
 Selector discovery comes from the separately checksummed owner list in
 `baselines/owner-selector-corpus.json`, not from the candidate assembly. This is
 intentional: if a later TypeScript or route-loading cutover omits an owner, its
 selector fixtures remain present and expose the missing CSS. Owner CSS changes
-require an explicit corpus-manifest update while this migration gate is active.
+require an explicit corpus-manifest update while this migration gate is active;
+behavior additions also require the checksummed overlay described above.
 
 The gate builds two complementary fixture sets:
 

@@ -1,0 +1,22 @@
+/* Additive UI introduced after the frozen 425b owner-migration baseline.
+ * Keep this declaration-equivalent to the reviewed runtime owner rule. */
+.line-sync-alert {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--error);
+    border-radius: 0.65rem;
+    background: color-mix(in srgb, var(--error) 12%, var(--card-bg));
+    color: var(--text-primary);
+    font-size: 0.82rem;
+}
+
+.line-sync-alert p {
+    margin: 0;
+}
+
+.line-sync-alert .chess-button {
+    flex: 0 0 auto;
+}

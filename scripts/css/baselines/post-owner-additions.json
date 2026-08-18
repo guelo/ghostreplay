@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "artifact": "post-owner-additions.css",
+  "source_checkpoint": "67205c2-line-sync-alert",
+  "sources": [
+    {
+      "path": "src/components/chess-game/ChessGame.css",
+      "sha256": "8f86bb5f385e3a443f5901fed25746117d89d60da41fa0a9ae291069ea2ff337"
+    }
+  ],
+  "artifact_sha256": "31a7c9188dac5ecbcbbd2a8094d97dd1d72ff62bbff1db12605f0317a8b5905f",
+  "artifact_bytes": 583,
+  "artifact_lines": 22,
+  "final_newline": true,
+  "purpose": "Reviewed additive CSS introduced after the immutable 425b owner-migration baseline; applied only to the baseline side of computed parity."
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "source_checkpoint": "g-css-import-cutover-review",
-  "purpose": "Frozen selector-fixture corpus for detecting omitted owner CSS during import and lazy-route cutovers; regenerate only under explicit review.",
+  "source_checkpoint": "g-css-route-proof-post-owner-addition",
+  "purpose": "Frozen selector-fixture corpus for detecting omitted owner CSS during import and lazy-route cutovers; regenerate only under explicit review, with true post-baseline behavior mirrored in the checksummed additions overlay.",
   "owner_files": [
     "src/styles/app-shell.css",
     "src/styles/shared-controls.css",
@@ -33,8 +33,8 @@
     "src/components/OpeningTreeNodeCard.css"
   ],
   "owner_file_count": 28,
-  "combined_sha256": "b573f825881f8ec1d254b5ac2d0c5efb9501646f2fcde6721af78efab1547c83",
-  "combined_bytes": 259384,
-  "combined_lines": 10085,
+  "combined_sha256": "b93976160f9593469dbe62e04d17ec4b8bfd2db50b52da21955a52cb8ca09214",
+  "combined_bytes": 259819,
+  "combined_lines": 10106,
   "final_newline": true
 }

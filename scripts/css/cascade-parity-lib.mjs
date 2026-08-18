@@ -109,6 +109,33 @@ export const expandCssImports = (entryPath, stack = []) => {
   );
 };
 
+export const assertPostOwnerAdditionsAreAdditive = (
+  baselineCss,
+  additionsCss,
+) => {
+  const isKeyframeStep = (rule) =>
+    rule.parent?.type === "atrule" &&
+    /keyframes$/i.test(rule.parent.name ?? "");
+  const baselineSelectors = new Set();
+  postcss.parse(baselineCss).walkRules((rule) => {
+    if (isKeyframeStep(rule)) return;
+    for (const selector of rule.selectors) {
+      baselineSelectors.add(selector.trim());
+    }
+  });
+  postcss.parse(additionsCss).walkRules((rule) => {
+    if (isKeyframeStep(rule)) return;
+    for (const selector of rule.selectors) {
+      const normalizedSelector = selector.trim();
+      if (baselineSelectors.has(normalizedSelector)) {
+        throw new Error(
+          `Post-owner overlay may only add selectors; ${JSON.stringify(normalizedSelector)} already exists in the frozen baseline`,
+        );
+      }
+    }
+  });
+};
+
 export const assembleCssFromModuleGraph = (
   entryPath,
   { rootDir = process.cwd() } = {},

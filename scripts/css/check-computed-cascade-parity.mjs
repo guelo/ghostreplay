@@ -11,6 +11,7 @@ import ts from "typescript";
 import {
   TARGET_STATE_MARKERS,
   assembleCssFromModuleGraph,
+  assertPostOwnerAdditionsAreAdditive,
   assertIndexedEntries,
   buildFixtureDescriptors,
   enrichCssScenariosFromTsx,
@@ -28,6 +29,7 @@ const DEFAULT_HEIGHT = 900;
 const MAX_VARIANTS_PER_ATTRIBUTE = 64;
 const MAX_RECORDED_DIFFERENCES = 500;
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.resolve(SCRIPT_DIRECTORY, "../..");
 const DEFAULT_BASELINE = path.join(
   SCRIPT_DIRECTORY,
   "baselines/App.pre-owner.css",
@@ -35,6 +37,14 @@ const DEFAULT_BASELINE = path.join(
 const DEFAULT_BASELINE_MANIFEST = path.join(
   SCRIPT_DIRECTORY,
   "baselines/App.pre-owner.json",
+);
+const DEFAULT_POST_OWNER_ADDITIONS = path.join(
+  SCRIPT_DIRECTORY,
+  "baselines/post-owner-additions.css",
+);
+const DEFAULT_POST_OWNER_ADDITIONS_MANIFEST = path.join(
+  SCRIPT_DIRECTORY,
+  "baselines/post-owner-additions.json",
 );
 const DEFAULT_SELECTOR_FIXTURE_MANIFEST = path.join(
   SCRIPT_DIRECTORY,
@@ -513,6 +523,57 @@ const verifyRepositoryBaseline = (baselinePath, contents) => {
   return manifest;
 };
 
+const readRepositoryPostOwnerAdditions = (immutableBaselineCss) => {
+  const contents = fs.readFileSync(DEFAULT_POST_OWNER_ADDITIONS, "utf8");
+  const manifest = JSON.parse(
+    fs.readFileSync(DEFAULT_POST_OWNER_ADDITIONS_MANIFEST, "utf8"),
+  );
+  const actual = {
+    artifact: path.basename(DEFAULT_POST_OWNER_ADDITIONS),
+    artifact_sha256: sha256(contents),
+    artifact_bytes: Buffer.byteLength(contents),
+    artifact_lines: (contents.match(/\n/g) ?? []).length,
+    final_newline: contents.endsWith("\n"),
+  };
+  for (const key of [
+    "artifact",
+    "artifact_sha256",
+    "artifact_bytes",
+    "artifact_lines",
+    "final_newline",
+  ]) {
+    if (actual[key] !== manifest[key]) {
+      throw new Error(
+        `Repository post-owner additions ${key} mismatch: ${JSON.stringify(actual[key])} != ${JSON.stringify(manifest[key])}`,
+      );
+    }
+  }
+  if (!Array.isArray(manifest.sources) || manifest.sources.length === 0) {
+    throw new Error("Repository post-owner additions manifest has no sources");
+  }
+  for (const source of manifest.sources) {
+    if (
+      typeof source?.path !== "string" ||
+      source.path.length === 0 ||
+      typeof source.sha256 !== "string"
+    ) {
+      throw new Error(
+        "Repository post-owner additions manifest has an invalid source entry",
+      );
+    }
+    const actualSourceSha256 = sha256(
+      fs.readFileSync(path.resolve(PROJECT_ROOT, source.path), "utf8"),
+    );
+    if (actualSourceSha256 !== source.sha256) {
+      throw new Error(
+        `Repository post-owner additions source_sha256 mismatch for ${JSON.stringify(source.path)}: ${JSON.stringify(actualSourceSha256)} != ${JSON.stringify(source.sha256)}`,
+      );
+    }
+  }
+  assertPostOwnerAdditionsAreAdditive(immutableBaselineCss, contents);
+  return { contents, manifest };
+};
+
 const readRepositorySelectorCorpus = () => {
   const manifest = JSON.parse(
     fs.readFileSync(DEFAULT_SELECTOR_FIXTURE_MANIFEST, "utf8"),
@@ -569,12 +630,16 @@ const main = async () => {
     throw error;
   }
   const baselineAppCss = fs.readFileSync(args.baseline, "utf8");
+  const indexCss = fs.readFileSync("src/index.css", "utf8");
   const baselineManifest = verifyRepositoryBaseline(
     args.baseline,
     baselineAppCss,
   );
+  const immutableBaselineCss = `${indexCss}\n${baselineAppCss}`;
+  const postOwnerAdditions = baselineManifest
+    ? readRepositoryPostOwnerAdditions(immutableBaselineCss)
+    : { contents: "", manifest: null };
   const selectorCorpus = readRepositorySelectorCorpus();
-  const indexCss = fs.readFileSync("src/index.css", "utf8");
   const candidateIsCss = path.extname(args.candidate) === ".css";
   let candidateGraph;
   let candidateSourceCss;
@@ -600,7 +665,9 @@ const main = async () => {
       .map((file) => expandCssImports(file))
       .join("\n");
   }
-  const baselineCss = forcePseudoStates(`${indexCss}\n${baselineAppCss}`);
+  const baselineCss = forcePseudoStates(
+    `${immutableBaselineCss}\n${postOwnerAdditions.contents}`,
+  );
   const candidateCss = forcePseudoStates(candidateSourceCss);
   const knownCssClasses = uniqueStrings(
     [...selectorCorpus.css.matchAll(/\.(-?[_a-zA-Z]+[_a-zA-Z0-9-]*)/g)].map(
@@ -814,6 +881,7 @@ const main = async () => {
     baseline: path.resolve(args.baseline),
     baseline_sha256: sha256(baselineAppCss),
     repository_baseline_manifest: baselineManifest,
+    repository_post_owner_additions_manifest: postOwnerAdditions.manifest,
     selector_fixture_manifest: selectorCorpus.manifest,
     candidate: path.resolve(args.candidate),
     candidate_module_count: candidateGraph.modules.length,
