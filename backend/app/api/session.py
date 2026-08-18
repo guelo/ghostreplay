@@ -69,13 +69,17 @@ from app.opening_boundary import (
     OpeningBoundaryProbeVerdict,
     clear_boundary_observation,
     observe_raw_boundary_hint,
-    stamp_shadow_ready,
 )
 from app.opening_evidence import session_is_evidence_eligible
+from app.opening_score_delta import (
+    enqueue_opening_boundary_delta,
+    refresh_opening_boundary_publication_state,
+)
 from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
 from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
+from app.ply_coordinates import ply_after
 from app.row_locks import for_no_key_update
 from app.session_evidence_scheduler import enqueue_session_evidence
 from app.models import (
@@ -215,8 +219,8 @@ class SessionMovesRequest(BaseModel):
     # Server-owned branch token. Omission is accepted only while the session is
     # still at revision zero for mixed-version rollout.
     line_revision: int | None = Field(None, ge=0)
-    # Explicit capability stamp for the observation-only opening-boundary
-    # release. Literal rejects unknown future protocols instead of silently
+    # Explicit capability stamp for the opening-boundary protocol. Literal
+    # rejects unknown future protocols instead of silently
     # including incompatible clients in the rollout denominator.
     opening_phase_protocol_version: Literal[1] | None = None
 
@@ -243,6 +247,7 @@ class SessionMovesResponse(BaseModel):
     opening_phase_probe_verdict: OpeningBoundaryProofVerdictValue | None = None
     opening_middle_candidate_ply: int | None = None
     opening_middle_ply: int | None = None
+    opening_delta_token: str | None = None
     opening_phase_exhausted: bool | None = None
 
 
@@ -273,6 +278,7 @@ class OpeningBoundaryResponse(BaseModel):
     probe_ply: int | None = None
     opening_middle_candidate_ply: int | None = None
     opening_middle_ply: int | None = None
+    opening_delta_token: str | None = None
     exhausted: bool
     state: OpeningBoundaryStateValue
     proof_verdict: OpeningBoundaryProofVerdictValue | None = None
@@ -1515,6 +1521,7 @@ def _session_moves_response(
     moves_inserted: int,
     line_proof_verdict: str | None = None,
     include_opening_boundary: bool = False,
+    opening_delta_token: str | None = None,
 ) -> SessionMovesResponse:
     """Serialize durable move-line and boundary observation state together."""
 
@@ -1539,6 +1546,9 @@ def _session_moves_response(
         opening_middle_ply=(
             session.opening_middle_ply if include_opening_boundary else None
         ),
+        opening_delta_token=(
+            opening_delta_token if include_opening_boundary else None
+        ),
         opening_phase_exhausted=(
             session.opening_phase_exhausted if include_opening_boundary else None
         ),
@@ -1548,12 +1558,15 @@ def _session_moves_response(
 def _opening_boundary_response(
     session: GameSession,
     state: OpeningBoundaryStateValue,
+    *,
+    opening_delta_token: str | None = None,
 ) -> OpeningBoundaryResponse:
     return OpeningBoundaryResponse(
         line_revision=session.move_line_revision,
         probe_ply=session.opening_phase_probe_ply,
         opening_middle_candidate_ply=session.opening_middle_candidate_ply,
         opening_middle_ply=session.opening_middle_ply,
+        opening_delta_token=opening_delta_token,
         exhausted=session.opening_phase_exhausted,
         state=state,
         proof_verdict=session.opening_phase_probe_verdict,
@@ -1633,8 +1646,10 @@ def prove_opening_boundary(
 ) -> OpeningBoundaryResponse:
     """Replay one bounded, acknowledged prefix and retain its exact middle ply.
 
-    This is observation-only. It never writes ``opening_middle_ply``, advances
-    opening evidence, enqueues scoring work, or returns a renderable delta.
+    The complete line is authoritative. With publication enabled, a candidate
+    that also has a baseline receives ``opening_middle_ply`` and an opaque token
+    for the private active-prefix scoring lane. It never advances durable
+    opening evidence or schedules the whole-graph recompute.
     """
 
     game_session = for_no_key_update(
@@ -1656,17 +1671,27 @@ def prove_opening_boundary(
             detail={"error_code": "OPENING_PHASE_PROTOCOL_REQUIRED"},
         )
 
-    # Successful/exhausted retries are pure echoes. A candidate may have gained
-    # its baseline between calls, so idempotently stamp shadow readiness first.
+    # Successful/exhausted retries are pure proof echoes. A candidate may have
+    # gained its baseline between calls, so re-enter the canonical locked
+    # readiness/publication decision before responding.
     if game_session.opening_middle_candidate_ply is not None:
-        stamp_shadow_ready(game_session)
+        refresh_opening_boundary_publication_state(db, game_session)
         db.commit()
+        opening_delta_token = enqueue_opening_boundary_delta(
+            db,
+            game_session,
+            force_reenqueue=True,
+        )
         state = (
             "shadow_ready"
             if game_session.opening_middle_ready_at is not None
             else "baseline_pending"
         )
-        return _opening_boundary_response(game_session, state)
+        return _opening_boundary_response(
+            game_session,
+            state,
+            opening_delta_token=opening_delta_token,
+        )
     if game_session.opening_phase_exhausted:
         return _opening_boundary_response(game_session, "exhausted")
 
@@ -1723,14 +1748,24 @@ def prove_opening_boundary(
 
     game_session.opening_phase_probe_verdict = OpeningBoundaryProbeVerdict.PASSED.value
     game_session.opening_middle_candidate_ply = division.middle
-    stamp_shadow_ready(game_session)
+    db.flush()
+    refresh_opening_boundary_publication_state(db, game_session)
     db.commit()
+    opening_delta_token = enqueue_opening_boundary_delta(
+        db,
+        game_session,
+        force_reenqueue=True,
+    )
     state = (
         "shadow_ready"
         if game_session.opening_middle_ready_at is not None
         else "baseline_pending"
     )
-    return _opening_boundary_response(game_session, state)
+    return _opening_boundary_response(
+        game_session,
+        state,
+        opening_delta_token=opening_delta_token,
+    )
 
 
 @router.post(
@@ -1843,6 +1878,30 @@ def upsert_session_moves(
 
     upload_receipt: SessionUploadReceipt | None = None
     line_proof_verdict: str | None = None
+    opening_delta_token: str | None = None
+    boundary_publication_refreshed = False
+
+    def _refresh_boundary_publication() -> None:
+        nonlocal boundary_publication_refreshed
+        refresh_opening_boundary_publication_state(db, game_session)
+        boundary_publication_refreshed = True
+
+    def _enqueue_committed_boundary() -> None:
+        nonlocal opening_delta_token
+        if not boundary_publication_refreshed:
+            return
+        # Recompute after commit so the echoed token and queued owner reflect the
+        # latest durable prefix, not the pre-commit ORM snapshot.
+        marker = game_session.opening_middle_ply
+        request_touches_prefix = marker is None or any(
+            ply_after(move.move_number, move.color.value) <= marker
+            for move in request.moves
+        )
+        opening_delta_token = enqueue_opening_boundary_delta(
+            db,
+            game_session,
+            allow_cached_token=not request_touches_prefix,
+        )
 
     def _add_upload_receipt() -> None:
         """Stage the durable final_full receipt into the CURRENT transaction.
@@ -1903,10 +1962,14 @@ def upsert_session_moves(
                 .count()
             )
             _assess_final_line(persisted_count)
+            _refresh_boundary_publication()
             db.commit()
         elif request.opening_phase_protocol_version is not None:
             # The empty body can still be the first explicit capability stamp.
+            db.flush()
+            _refresh_boundary_publication()
             db.commit()
+        _enqueue_committed_boundary()
         return _session_moves_response(
             game_session,
             moves_inserted=0,
@@ -1914,6 +1977,7 @@ def upsert_session_moves(
             include_opening_boundary=(
                 request.opening_phase_protocol_version is not None
             ),
+            opening_delta_token=opening_delta_token,
         )
 
     values = [
@@ -2009,9 +2073,12 @@ def upsert_session_moves(
             # Persist the advisory receipt verdict ahead of the final blocking
             # cursor statement. A failed proof never rolls back valid rows.
             db.flush()
+            _refresh_boundary_publication()
+            db.flush()
             if bump_for_evidence and proof_allows_evidence:
                 bump_evidence_seq(db, user.user_id, game_session.player_color)
             db.commit()
+        _enqueue_committed_boundary()
         if not proof_allows_evidence:
             evidence_moves = []
         if evidence_moves:
@@ -2052,6 +2119,7 @@ def upsert_session_moves(
             include_opening_boundary=(
                 request.opening_phase_protocol_version is not None
             ),
+            opening_delta_token=opening_delta_token,
         )
 
     conflict_updates = {
@@ -2102,9 +2170,13 @@ def upsert_session_moves(
         db.flush()
         proof_allows_evidence = _assess_final_line(len(request.moves))
         db.flush()
+        _refresh_boundary_publication()
+        db.flush()
         if bump_for_evidence and proof_allows_evidence:
             bump_evidence_seq(db, user.user_id, game_session.player_color)
         db.commit()
+
+    _enqueue_committed_boundary()
 
     if not proof_allows_evidence:
         evidence_moves = []
@@ -2145,6 +2217,7 @@ def upsert_session_moves(
         moves_inserted=len(values),
         line_proof_verdict=line_proof_verdict,
         include_opening_boundary=request.opening_phase_protocol_version is not None,
+        opening_delta_token=opening_delta_token,
     )
 
 

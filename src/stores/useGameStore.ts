@@ -13,14 +13,17 @@ import { hasRenderableBadge } from "../utils/openingDeltaBadge";
 
 type BoardOrientation = "white" | "black";
 
-/** Whether the current session's warm opening-score delta has finished its
+/** Whether the current session's opening-score delta has finished its
  *  provably-fresh reconciliation. */
 export type OpeningDeltaFreshness = "pending" | "fresh" | "unavailable";
+export type OpeningDeltaSource = "opening_boundary" | "terminal";
 
 export type SessionOpeningDelta = {
   sessionId: string;
   items: OpeningScoreDeltaItem[] | null;
   freshness: OpeningDeltaFreshness;
+  source: OpeningDeltaSource;
+  reconciliationToken: string;
 };
 
 /** Only a provably-fresh result may be promoted to the previous-drill queue. */
@@ -60,6 +63,7 @@ export type AppliedPlayerMove = {
 export const LATE_OPENING_DELTA_LIMIT = 3;
 
 let lateDeltaNonce = 0;
+let openingDeltaReconciliationNonce = 0;
 
 /**
  * Append to the bounded late queue, dropping the OLDEST on overflow. Same loss
@@ -221,6 +225,11 @@ export type GameActions = {
     sessionId: string,
     items: OpeningScoreDeltaItem[] | null,
   ) => void;
+  /** Claim provisional live ownership only for the current active session. */
+  setBoundaryOpeningDeltaPending: (
+    sessionId: string,
+    reconciliationToken: string,
+  ) => void;
   /** Commit a reconciled poll result. Compares against the LIVE sessionId and
    *  poll token inside the updater, so the whole decision is one atomic
    *  transition against the state the commit actually lands on. */
@@ -228,12 +237,20 @@ export type GameActions = {
     sessionId: string,
     items: OpeningScoreDeltaItem[] | null,
     pollToken: number,
+    source?: OpeningDeltaSource,
+    reconciliationToken?: string,
   ) => void;
   /** Release a matching pending current-session gate when polling genuinely
    *  gives up. Retains the warm items for display. */
   markOpeningDeltaUnavailable: (
     sessionId: string,
     pollToken: number,
+    source?: OpeningDeltaSource,
+    reconciliationToken?: string,
+  ) => void;
+  clearBoundaryOpeningDelta: (
+    sessionId: string,
+    reconciliationToken?: string,
   ) => void;
   /** Mark (or unmark, with null) the session the player is leaving, so a delta
    *  reconciling during the /start round-trip is queued rather than committed to
@@ -347,37 +364,99 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   setScoreChanges: (u) =>
     set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
   setTerminalOpeningDelta: (sessionId, items) =>
-    set(() => ({
-      openingScoreDelta: { sessionId, items, freshness: "pending" as const },
-    })),
+    set(() => {
+      openingDeltaReconciliationNonce += 1;
+      return {
+        openingScoreDelta: {
+          sessionId,
+          items,
+          freshness: "pending" as const,
+          source: "terminal" as const,
+          reconciliationToken: `terminal:${openingDeltaReconciliationNonce}`,
+        },
+      };
+    }),
 
-  applyPolledOpeningDelta: (sessionId, items, pollToken) =>
+  setBoundaryOpeningDeltaPending: (sessionId, reconciliationToken) =>
+    set((s) => {
+      if (s.sessionId !== sessionId || !s.isGameActive) return {};
+      if (s.openingScoreDelta?.source === "terminal") return {};
+      if (
+        s.openingScoreDelta?.source === "opening_boundary" &&
+        s.openingScoreDelta.reconciliationToken === reconciliationToken
+      ) {
+        return {};
+      }
+      return {
+        openingScoreDelta: {
+          sessionId,
+          items: null,
+          freshness: "pending" as const,
+          source: "opening_boundary" as const,
+          reconciliationToken,
+        },
+      };
+    }),
+
+  applyPolledOpeningDelta: (
+    sessionId,
+    items,
+    pollToken,
+    requestedSource,
+    requestedToken,
+  ) =>
     set((s) => {
       // Superseded by a deliberate abandonment while this request was in flight.
       if (pollToken !== s.openingDeltaPollToken) return {};
+      const source = requestedSource ?? s.openingScoreDelta?.source ?? "terminal";
+      const reconciliationToken =
+        requestedToken ??
+        s.openingScoreDelta?.reconciliationToken ??
+        `terminal:legacy:${pollToken}`;
       const delta: SessionOpeningDelta & { freshness: "fresh" } = {
         sessionId,
         items,
         freshness: "fresh",
+        source,
+        reconciliationToken,
       };
       // Still the current drill AND its end screen is still up: reconcile the
       // warm value in place, where it renders as inline badges.
       if (s.sessionId === sessionId && s.departingSessionId !== sessionId) {
+        const owner = s.openingScoreDelta;
+        if (
+          owner &&
+          (owner.source !== source ||
+            owner.reconciliationToken !== reconciliationToken)
+        ) {
+          return {};
+        }
         return { openingScoreDelta: delta };
       }
+      // Provisional live values never outlive their active session.
+      if (source === "opening_boundary") return {};
       // The player moved on. Surface it as a last-drill notification rather than
       // dropping it — but only if it would actually render something.
       if (!hasRenderableBadge(items)) return {};
       return { lateOpeningDeltas: enqueueLate(s.lateOpeningDeltas, delta) };
     }),
 
-  markOpeningDeltaUnavailable: (sessionId, pollToken) =>
+  markOpeningDeltaUnavailable: (
+    sessionId,
+    pollToken,
+    requestedSource,
+    requestedToken,
+  ) =>
     set((s) => {
       if (pollToken !== s.openingDeltaPollToken) return {};
       if (s.sessionId !== sessionId) return {};
       if (
         s.openingScoreDelta?.sessionId !== sessionId ||
-        s.openingScoreDelta.freshness !== "pending"
+        s.openingScoreDelta.freshness !== "pending" ||
+        (requestedSource !== undefined &&
+          s.openingScoreDelta.source !== requestedSource) ||
+        (requestedToken !== undefined &&
+          s.openingScoreDelta.reconciliationToken !== requestedToken)
       ) {
         return {};
       }
@@ -387,6 +466,20 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
           freshness: "unavailable" as const,
         },
       };
+    }),
+
+  clearBoundaryOpeningDelta: (sessionId, reconciliationToken) =>
+    set((s) => {
+      const current = s.openingScoreDelta;
+      if (
+        current?.sessionId !== sessionId ||
+        current.source !== "opening_boundary" ||
+        (reconciliationToken !== undefined &&
+          current.reconciliationToken !== reconciliationToken)
+      ) {
+        return {};
+      }
+      return { openingScoreDelta: null };
     }),
 
   setDepartingSession: (sessionId) =>

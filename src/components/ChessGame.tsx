@@ -20,6 +20,7 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useBoardNotice } from "../hooks/useBoardNotice";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { useSessionUploadCommitRevision } from "../hooks/useSessionUploadCommitRevision";
+import { useOpeningBoundaryDelta } from "../hooks/useOpeningBoundaryDelta";
 import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
@@ -378,6 +379,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       openingScoreDelta?.sessionId === sessionId ? openingScoreDelta.items : null,
     [openingScoreDelta, sessionId],
   );
+  const openingDeltaRefetchClaimRef = useRef<{
+    sessionId: string | null;
+    claimed: boolean;
+  }>({ sessionId: null, claimed: false });
+  if (openingDeltaRefetchClaimRef.current.sessionId !== sessionId) {
+    openingDeltaRefetchClaimRef.current = {
+      sessionId,
+      claimed: false,
+    };
+  }
+  if (openingScoreChanges) {
+    openingDeltaRefetchClaimRef.current.claimed = true;
+  }
   const ratingChange = useGameStore((s) => s.ratingChange);
   // A previous drill's diff that reconciled after the player moved on (g-f3m4).
   const { toast: lastDrillDeltaToast, dismiss: dismissLastDrillDelta } =
@@ -546,9 +560,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     coordinator,
     sessionId,
   );
+  useOpeningBoundaryDelta(coordinator, sessionId, isDrillMode);
   const openingLineageRefetchKey = JSON.stringify([
     moveHistory.length,
-    Boolean(openingScoreChanges),
+    openingDeltaRefetchClaimRef.current.claimed,
     uploadCommitRevision,
   ]);
   const {
@@ -2588,6 +2603,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     scoreChanges={openingScoreChanges}
                     scoreStatus={openingScoreStatus}
                     pendingScoreIndices={openingLineagePendingScoreIndices}
+                    revealIdentity={sessionId ?? "no-session"}
                     // Keep the expanded card in sync with the board (g-m1xc).
                     // displayedIndex — not viewIndex — is the board's move
                     // cursor: it normalizes "live/latest" to the last ply and

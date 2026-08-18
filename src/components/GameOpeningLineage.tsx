@@ -24,9 +24,9 @@ interface GameOpeningLineageProps {
   /** Ply of each item's `moves[0]` (1 = White's move 1); anchors move-list
    *  numbering on the cards. From the session-openings response. */
   startPly: number;
-  /** Post-game/drill opening-score changes (g-xanz), keyed by opening_key. When
-   *  provided, a changed opening reveals its new score and an inline diff badge
-   *  inside its card. Null during live play -> no score-change treatment. */
+  /** Fresh live-boundary or terminal opening-score changes, keyed by opening_key.
+   *  When provided, a changed opening reveals its new score and an inline diff
+   *  badge inside its existing card. */
   scoreChanges?: OpeningScoreDeltaItem[] | null;
   /** When provided, tapping a chip selects that opening's root on the
    *  board/MoveList/graph (history parity). Omit for the live game panel, where
@@ -50,6 +50,9 @@ interface GameOpeningLineageProps {
    *  variation), which collapses every card. Omit entirely to opt out of
    *  synchronization and keep the fully manual expand/collapse behavior. */
   activeMoveIndex?: number | null;
+  /** Stable session/reveal identity. Numeric reconciliation updates keep this
+   *  value and therefore never replay the first-value reveal. */
+  revealIdentity?: string;
 }
 
 /**
@@ -127,11 +130,8 @@ function toNodeView(
 
 type ScoreChangePhase = "reveal" | "animate" | "settled";
 
-function scoreChangeKey(
-  cardKey: string,
-  badge: NonNullable<ReturnType<typeof badgeFor>>,
-) {
-  return `${cardKey}:${badge.before}:${badge.after}:${badge.diff}`;
+function scoreChangeKey(revealIdentity: string, cardKey: string) {
+  return `${revealIdentity}:${cardKey}`;
 }
 
 /**
@@ -159,6 +159,7 @@ function GameOpeningLineage({
   scoreStatus = "ready",
   pendingScoreIndices,
   activeMoveIndex,
+  revealIdentity = "static",
 }: GameOpeningLineageProps) {
   // A manual expand/collapse, stamped with the synchronization state it was made
   // against (see `syncToken`). Cards are addressed by a per-occurrence key
@@ -185,9 +186,11 @@ function GameOpeningLineage({
     () =>
       lineage.flatMap((item, index) => {
         const badge = badgeFor(changeByKey.get(item.opening_key));
-        return badge ? [scoreChangeKey(`${item.opening_key}:${index}`, badge)] : [];
+        return badge
+          ? [scoreChangeKey(revealIdentity, `${item.opening_key}:${index}`)]
+          : [];
       }),
-    [lineage, changeByKey],
+    [lineage, changeByKey, revealIdentity],
   );
 
   useEffect(() => {
@@ -272,7 +275,9 @@ function GameOpeningLineage({
           })}`;
           const change = changeByKey.get(item.opening_key);
           const badge = badgeFor(change);
-          const changeKey = badge ? scoreChangeKey(cardKey, badge) : null;
+          const changeKey = badge
+            ? scoreChangeKey(revealIdentity, cardKey)
+            : null;
           const scoreChangePhase = changeKey
             ? scoreChangePhases[changeKey] ?? "reveal"
             : "settled";

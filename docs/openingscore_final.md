@@ -174,62 +174,90 @@ Consequences:
 - `DIVIDER_VERSION` is part of the score fingerprint, so a divider change
   invalidates cached snapshots.
 
-### 4.1 Active boundary observation (current rollout stage)
-
-The active-session path is currently **shadow-only**. It measures whether an
-early opening-score delta would be viable without changing evidence, caches, or
-the player-facing cards.
+### 4.1 Active boundary publication
 
 The browser sends an explicit closed protocol version on session-move uploads.
 For an active versioned session, the backend examines only that request's raw
 postmove FENs and may retain one qualifying ply as a scheduling hint. The hint is
-not assumed monotone and is never treated as the boundary. Ordinary move uploads
-do not reconstruct the session, advance the opening-evidence cursor, or enqueue
-score work because of it.
+not assumed monotone and is never treated as the boundary. Ordinary uploads do
+not reconstruct the whole session or advance the opening-evidence cursor because
+of the hint.
 
 The analysis coordinator waits until every move index in the hinted prefix is in
-its server-acknowledged set. It then makes one bounded, revision-fenced proof
-request. Under the session row lock, the backend requires canonical rows at every
-ply from the standard start, proves SAN/FEN adjacency with the shared complete-line
-proof, and runs the unchanged Lichess divider over the proven premove boards plus
-the final postmove board. This lets the last uploaded move prove the crossing it
-just made while retaining an absolute opening horizon. Gaps, discontinuities,
-nonstandard starts, cap refusals, and simultaneous middle/end boundaries fail
-closed with typed observation verdicts.
+its server-acknowledged set on the same `UploadState`, client line epoch, and
+server `move_line_revision`. It then makes one bounded proof request. Under the
+session row lock, the backend requires canonical rows at every ply from the
+standard start, proves SAN/FEN adjacency with the shared complete-line proof, and
+runs the unchanged Lichess divider over the proven premove boards plus the final
+postmove board. Gaps, discontinuities, nonstandard starts, cap refusals, and
+simultaneous middle/end boundaries fail closed with typed verdicts.
 
-An exact candidate becomes shadow-ready only after the before-session opening
-score baseline is durable. Candidate, probe, and readiness writes do not advance
-opening evidence. The public active-prefix marker remains null, `raw-v8` remains
-the live evidence-input version, and no early recompute, poll, or UI write occurs.
-Baseline-before-marker is therefore structural: this stage has no code path that
-can publish a marker at all.
+An exact candidate is publishable only after the before-session score baseline
+is durable. One canonical database-state helper is used by boundary proof,
+baseline workers, push-fill, and move-upload recovery. It derives readiness from
+current locked columns with conditional SQL rather than trusting a previously
+loaded ORM object; this closes both baseline-first and candidate-first orderings.
+The transaction order is candidate/baseline write, locked readiness/marker
+decision, commit, then best-effort scoped enqueue. Candidate, readiness, and
+marker writes never advance global opening evidence.
 
-Boundary state is scoped to the acknowledged move-line revision. A local takeback
-immediately cancels and fences the browser proof; the accepted server truncation
-clears the raw hint, proof verdict, exact candidate, readiness timestamp, and any
-future public marker in the same transaction that advances the line revision. A
-replacement branch may qualify again after its own contiguous acknowledgements.
-An ambiguous takeback outcome remains fail-closed under the move-line protocol,
-and terminalization never waits for boundary proof.
+`OPENING_BOUNDARY_PUBLICATION_ENABLED` is read once at backend startup, defaults
+to false, and accepts only an explicit true/false allowlist; invalid values fail
+closed. When enabled, the locked helper may copy the exact candidate to
+`opening_middle_ply` only while the session is active, the baseline exists, and
+the revision is not exhausted. Disabling the switch requires a restart and stops
+new markers. It does not revoke an already-published marker, which remains
+readable until takeback or terminalization.
 
-At the first delta-bearing game end, accuracy failure, or natural drill end, the
-backend claims a durable once-per-session timestamp in the terminal transaction
-and emits one `opening_boundary_shadow_terminal` event for versioned clients.
-Its properties are closed, aggregate-only gates: session mode and terminal trigger,
-raw-candidate presence, proof verdict, baseline readiness, would-publish result,
-revision-zero cohort, mutually exclusive refusal reason, and ready-to-terminal
-lead time. It contains no session identifier, FEN, move, opening key, score, or
-grade. Capture completeness must be reconciled against the existing terminal
-events; a missing analytics event is not evidence that the session was ineligible.
+The marker schedules the existing immediate scoped-delta lane, but the live
+calculation does **not** admit an active session to durable whole-repertoire
+evidence. Each active request gets a private overlay:
 
-Promotion remains disabled until an observation-window report establishes viable
-yield and lead time and receives explicit review. If promotion is approved later,
-the active-prefix evidence projection, replay payload basis, a new evidence-input
-version and its global invalidation,
-scoped recompute lane, fresh-only polling, and stable live-card reconciliation are
-separate rollout work. Existing published markers, once that stage exists, must be
-honored even when the startup-read promotion switch is disabled; the switch gates
-new marker creation only.
+- the current durable historical evidence for the user and color; plus
+- exactly this active session's proven move rows through `opening_middle_ply`.
+
+The active prefix is not written to the shared evidence graph, replay cache,
+phase-sample/calibration basis, or whole-graph score batch. Historical ghost and
+review evidence is collected after the ephemeral prefix has introduced its
+reachable off-book nodes, matching terminal collection order; ghost targets from
+the still-active session and post-boundary moves remain excluded. Terminal
+reconciliation is the full-line, target-aware authority. No evidence-input
+version, replay-payload migration, or global invalidation is required.
+
+The provisional publication and opaque client token bind the user/color/session,
+active status, exact marker, move-line revision, digest of every prefix field
+consumed by scoring, before-session baseline, registry fingerprint, durable
+evidence cursor, cache epoch, and shared-scope digest. Those facts are re-read
+before serving. Marker/revision/status/prefix/token drift rejects the result;
+evidence or shared-cache drift rejects or safely re-arms it only after the scoped
+digest still matches. Missing roots, missing player evaluation, or any failed
+proof stays pending and falls back to terminal behavior instead of exposing a
+partial number. A process-local cache miss may re-enqueue the durable marker, so
+a restart loses latency rather than correctness. Exact-token pending/in-flight
+work coalesces, and completed misses are cooldown-limited so an unpublishable
+prefix cannot drive one full overlay rebuild per browser poll.
+
+The frontend polls only after receiving a marker and reconciliation token. A
+newer boundary token replaces an older boundary loop, while any terminal trigger
+preempts boundary ownership. Source/token checks guard every fulfilled
+continuation and cleanup, so stale boundary work cannot overwrite or clear a
+terminal value. The existing `GameOpeningLineage` cards render the first fresh
+live result with no new panel or layout. Boundary-to-terminal numeric changes
+settle in place under one per-session/card reveal identity, and only the first
+truthy delta triggers the existing lineage refetch.
+
+Boundary state remains scoped to the acknowledged move-line revision. An accepted
+takeback clears the hint, proof, candidate, readiness, marker, poll, and
+boundary-owned UI while advancing the revision; a replacement branch must prove
+itself again. An unknown takeback result disables live publication for that
+mounted session, and terminalization never waits for boundary work.
+
+The existing once-per-session `opening_boundary_shadow_terminal` event remains
+aggregate-only and content-free. A diagnostic checkpoint after at least 400
+protocol-v1 delta-bearing terminal sessions across 14 days should report proof,
+readiness, would/did-publish, fresh-result, fallback, latency, takeback, load, and
+terminal-takeover rates. This observation window diagnoses rollout quality; it is
+not a go/no-go gate for the product requirement.
 
 ## Core Metrics
 

@@ -80,6 +80,8 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       sessionId: "s1",
       items: changes,
       freshness: "pending",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
   });
 
@@ -94,6 +96,8 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       sessionId: "s1",
       items: fresh,
       freshness: "fresh",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
@@ -108,6 +112,8 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       sessionId: "s1",
       items,
       freshness: "fresh",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
   });
 
@@ -128,6 +134,8 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       sessionId: "s1",
       items: warm,
       freshness: "unavailable",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
@@ -140,6 +148,47 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     useGameStore.getState().markOpeningDeltaUnavailable("s1", token);
 
     expect(useGameStore.getState().openingScoreDelta?.freshness).toBe("fresh");
+  });
+
+  it("fences provisional boundary writes behind source and reconciliation token", () => {
+    useGameStore.setState({ sessionId: "s1", isGameActive: true });
+    const pollToken = useGameStore.getState().openingDeltaPollToken;
+    useGameStore
+      .getState()
+      .setBoundaryOpeningDeltaPending("s1", "boundary-a");
+    useGameStore
+      .getState()
+      .applyPolledOpeningDelta(
+        "s1",
+        [item("k1", 41, 45)],
+        pollToken,
+        "opening_boundary",
+        "boundary-a",
+      );
+    expect(useGameStore.getState().openingScoreDelta).toMatchObject({
+      sessionId: "s1",
+      freshness: "fresh",
+      source: "opening_boundary",
+      reconciliationToken: "boundary-a",
+    });
+
+    useGameStore
+      .getState()
+      .setTerminalOpeningDelta("s1", [item("k1", 41, 46)]);
+    const terminal = useGameStore.getState().openingScoreDelta;
+    useGameStore
+      .getState()
+      .applyPolledOpeningDelta(
+        "s1",
+        [item("k1", 41, 99)],
+        pollToken,
+        "opening_boundary",
+        "boundary-a",
+      );
+    useGameStore
+      .getState()
+      .clearBoundaryOpeningDelta("s1", "boundary-a");
+    expect(useGameStore.getState().openingScoreDelta).toEqual(terminal);
   });
 
   it("queues a superseded session's delta instead of dropping it", () => {

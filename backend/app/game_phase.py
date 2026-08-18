@@ -52,9 +52,14 @@ from app.ply_coordinates import ply_after
 # (thresholds, mixedness, control flow) changes so opening-score fingerprints
 # invalidate stale cached batches computed under the old divider.
 DIVIDER_VERSION = "divider-1"
+# Closed browser/server contract for the active boundary proof. This lives with
+# the shared phase authority so proof, publication, and scorer validation cannot
+# silently drift onto different protocol versions.
+OPENING_PHASE_PROTOCOL_VERSION = 1
 
 __all__ = [
     "DIVIDER_VERSION",
+    "OPENING_PHASE_PROTOCOL_VERSION",
     "Division",
     "majors_and_minors",
     "backrank_sparse",

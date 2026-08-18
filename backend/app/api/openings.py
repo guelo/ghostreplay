@@ -1517,7 +1517,7 @@ def get_opening_tree_status(
 
 
 class OpeningScoreDeltaPollResponse(BaseModel):
-    """Non-blocking poll payload for the end-of-session opening-score banner.
+    """Non-blocking terminal or live-boundary score reconciliation payload.
 
     ``is_fresh`` is the poll-stop signal: True once the cached delta is provably
     current (or no opening was crossed), False while a cold/stale cache is still
@@ -1532,25 +1532,28 @@ class OpeningScoreDeltaPollResponse(BaseModel):
 @router.get("/score-delta/{session_id}", response_model=OpeningScoreDeltaPollResponse)
 def get_opening_score_delta(
     session_id: uuid.UUID,
+    boundary_token: str | None = Query(None, min_length=64, max_length=64),
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> OpeningScoreDeltaPollResponse:
-    """Reconcile-poll for the end-of-session opening-score delta (g-fix-end-latency).
+    """Reconcile a terminal delta or one token-bound active publication.
 
-    The terminal endpoints (game end, drill fail/natural-end) now serve a warm,
-    possibly-stale delta immediately and enqueue a background recompute instead of
-    blocking up to ~10s on the scheduler. The frontend polls this GET until
-    ``is_fresh`` and overwrites the banner in place with the provably-fresh value.
-    One endpoint serves both game and drill sessions (both are ``GameSession`` with
-    the same ``player_color`` / ``opening_score_baseline``). Non-blocking: never
-    touches the scheduler (see ``read_opening_score_delta``).
+    Terminal callers may converge from a warm batch or freshness-bound scoped
+    result. Active callers must supply the durable marker's opaque token and are
+    served only the matching private-prefix publication. A scoped miss may
+    best-effort re-enqueue that exact token, but the request never waits for or
+    invokes the whole-graph scheduler.
     """
     session = db.query(GameSession).filter(GameSession.id == session_id).first()
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
-    items, is_fresh = read_opening_score_delta(db, session)
+    items, is_fresh = read_opening_score_delta(
+        db,
+        session,
+        reconciliation_token=boundary_token,
+    )
     return OpeningScoreDeltaPollResponse(
         opening_score_changes=items or None, is_fresh=is_fresh
     )

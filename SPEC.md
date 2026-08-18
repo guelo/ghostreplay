@@ -172,12 +172,20 @@ Boundary-capable browsers also stamp an explicit phase-observation protocol on
 move uploads. A raw postmove FEN that satisfies the Lichess middlegame predicate
 is only a scheduling hint. After the coordinator has server acknowledgements
 for every move in that prefix, FastAPI replays the bounded canonical line and
-stores the exact opening/middlegame boundary for aggregate shadow measurement.
-This rollout is observation-only: it does not expose active-session moves to
-opening evidence, recompute a live score, poll a delta, or change the existing
-opening cards. Delta-bearing terminal transitions emit a content-free aggregate
-event so rollout yield and available lead time can be reviewed before any live
-publication is enabled.
+stores the exact opening/middlegame boundary. Once the before-session baseline is
+also durable, a startup-read switch may publish an opaque reconciliation token
+and schedule a private active-session score calculation. The switch defaults off
+and invalid values fail closed.
+
+The live calculation overlays exactly the proven opening prefix onto durable
+historical evidence without admitting the active session to the shared evidence
+graph, replay cache, or calibration inputs. Only a result still bound to the
+current marker, line revision, prefix digest, evidence/cache snapshot, and token
+may replace the existing opening-card score slot. A takeback retracts that
+ownership; terminalization always supersedes it with the ordinary full-line,
+target-aware reconciliation. Failures remain pending and fall back to terminal
+behavior without delaying play or completion. Existing aggregate boundary
+telemetry remains a diagnostic rollout signal rather than a publication gate.
 
 An active unrated takeback is available only while the coordinator owns a
 writable, synchronized upload epoch. Once accepted, it rewinds the board

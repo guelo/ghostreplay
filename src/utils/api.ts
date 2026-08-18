@@ -846,6 +846,7 @@ export interface SessionMovesResponse {
   opening_phase_probe_verdict?: OpeningBoundaryProofVerdict | null
   opening_middle_candidate_ply?: number | null
   opening_middle_ply?: number | null
+  opening_delta_token?: string | null
   opening_phase_exhausted?: boolean
 }
 
@@ -867,6 +868,7 @@ export interface OpeningBoundaryResponse {
   probe_ply?: number | null
   opening_middle_candidate_ply?: number | null
   opening_middle_ply?: number | null
+  opening_delta_token?: string | null
   exhausted: boolean
   state:
     | 'baseline_pending'
@@ -2151,18 +2153,20 @@ export interface OpeningScoreDeltaPollResponse {
 }
 
 /**
- * Reconcile-poll for the end-of-session opening-score delta (g-fix-end-latency).
- * The terminal endpoints now return a warm (possibly stale) delta immediately and
- * recompute in the background; this GET is polled until `is_fresh` so the banner
- * self-corrects in place. Shared by game and drill sessions. `options.signal`
- * threads a per-request timeout so a hung GET can't stall the poll loop.
+ * Reconcile-poll for terminal and proven live-boundary opening-score deltas.
+ * Terminal callers may receive a warm value while a boundary caller supplies
+ * its opaque token and accepts only that fresh scoped result. `options.signal`
+ * prevents a hung GET from stalling the poll loop.
  */
 export const getOpeningScoreDelta = async (
   sessionId: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; boundaryToken?: string },
 ): Promise<OpeningScoreDeltaPollResponse> => {
+  const boundaryQuery = options?.boundaryToken
+    ? `?${new URLSearchParams({ boundary_token: options.boundaryToken })}`
+    : ''
   return requestJson<OpeningScoreDeltaPollResponse>(
-    `${API_BASE_URL}/api/openings/score-delta/${sessionId}`,
+    `${API_BASE_URL}/api/openings/score-delta/${sessionId}${boundaryQuery}`,
     { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
     { fallbackMessage: 'Failed to load opening score delta' },
   )

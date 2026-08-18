@@ -23,6 +23,7 @@ from app.models import (
     AnalysisCache,
     AnalysisCacheSubmission,
     GameSession,
+    OpeningSessionReplayCache,
     OpeningScoreBatch,
     PositionAnalysisRow,
     SessionMove,
@@ -47,20 +48,30 @@ from app.opening_graph import (
     _fen_from_board,
     get_opening_graph,
 )
+from app.game_phase import Division, prove_complete_standard_line
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
 from app.opening_score_delta import (
     OPENING_BASELINE_SCHEMA_VERSION,
+    SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
     _current_scoped_delta,
+    active_prefix_snapshot,
     _parse_compatible_baseline,
     compute_opening_score_delta,
+    enqueue_opening_boundary_delta,
+    is_scoped_delta_request_current,
+    opening_boundary_reconciliation_token,
     publish_scoped_opening_score_deltas,
     read_opening_score_delta,
     reserve_scoped_delta_generation,
+    reset_scoped_delta_cache,
     run_baseline_snapshot_job,
     snapshot_opening_baseline,
 )
-from app.opening_score_delta_lane import OpeningScoreDeltaLane
+from app.opening_score_delta_lane import (
+    DeltaLaneEnqueueOutcome,
+    OpeningScoreDeltaLane,
+)
 from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 
 
@@ -1181,6 +1192,371 @@ def test_batch_cold_scoped_publication_returns_fresh_after_scores(db_session):
     assert by_key[RUY_KEY].after is not None
     assert by_key[MORPHY_KEY].after is not None
     assert all(item.is_new for item in items)
+
+
+def test_active_boundary_scoped_publication_uses_only_proven_prefix(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    session = db_session.get(GameSession, session.id, populate_existing=True)
+    session.opening_phase_protocol_version = 1
+    session.opening_middle_candidate_ply = 7
+    session.opening_middle_ready_at = datetime.now(timezone.utc)
+    session.opening_middle_ply = 7
+    db_session.commit()
+    evidence_seq_before = current_evidence_seq(db_session, 123, "white")
+    replay_rows_before = db_session.query(OpeningSessionReplayCache).count()
+
+    division = Division(middle=7, end=None, plies=8)
+    with (
+        _patched_delta_registry(graph, roots),
+        patch("app.opening_score_delta.divide", return_value=division),
+    ):
+        snapshot = active_prefix_snapshot(db_session, session)
+        assert snapshot is not None
+        request = reserve_scoped_delta_generation(
+            session.id,
+            source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+            reconciliation_token=snapshot.reconciliation_token,
+        )
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+        items, is_fresh = read_opening_score_delta(
+            db_session,
+            session,
+            reconciliation_token=snapshot.reconciliation_token,
+        )
+
+    assert is_fresh is True
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[KP_KEY].after is not None
+    assert by_key[RUY_KEY].after is not None
+    assert by_key[MORPHY_KEY].after is not None
+    assert all(item.is_new for item in items)
+    assert current_evidence_seq(db_session, 123, "white") == evidence_seq_before
+    assert db_session.query(OpeningSessionReplayCache).count() == replay_rows_before
+
+
+def test_active_boundary_prefix_token_ignores_later_rows_and_rejects_prefix_edits(
+    db_session,
+):
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    session = db_session.get(GameSession, session.id, populate_existing=True)
+    session.opening_phase_protocol_version = 1
+    session.opening_middle_candidate_ply = 7
+    session.opening_middle_ready_at = datetime.now(timezone.utc)
+    session.opening_middle_ply = 7
+    db_session.commit()
+
+    division = Division(middle=7, end=None, plies=8)
+    with (
+        patch(
+            "app.opening_score_delta.prove_complete_standard_line",
+            wraps=prove_complete_standard_line,
+        ) as prove,
+        patch(
+            "app.opening_score_delta.divide",
+            return_value=division,
+        ) as divider,
+    ):
+        first = active_prefix_snapshot(db_session, session)
+        assert first is not None
+        assert prove.call_count == 1
+        assert divider.call_count == 1
+        board = chess.Board()
+        for san in [*RUY_SANS, "Ba4"]:
+            board.push_san(san)
+        fen_before = board.fen()
+        board.push_san("Nf6")
+        db_session.add(
+            SessionMove(
+                session_id=session.id,
+                move_number=4,
+                color="black",
+                move_san="Nf6",
+                fen_before=fen_before,
+                fen_after=board.fen(),
+                segment="normal",
+            )
+        )
+        db_session.commit()
+        with patch(
+            "app.opening_score_delta._ordered_active_prefix_rows",
+            side_effect=AssertionError(
+                "later-only upload must reuse the validated token"
+            ),
+        ):
+            assert opening_boundary_reconciliation_token(
+                db_session,
+                session,
+                allow_cached=True,
+            ) == first.reconciliation_token
+        after_later_move = active_prefix_snapshot(db_session, session)
+        assert after_later_move is not None
+        assert after_later_move.reconciliation_token == first.reconciliation_token
+        assert prove.call_count == 1
+        assert divider.call_count == 1
+
+        reserve_scoped_delta_generation(
+            session.id,
+            source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+            reconciliation_token=first.reconciliation_token,
+        )
+        with patch(
+            "app.opening_score_delta_lane.enqueue_scoped_delta"
+        ) as lane_enqueue:
+            assert enqueue_opening_boundary_delta(
+                db_session, session
+            ) == first.reconciliation_token
+            lane_enqueue.assert_not_called()
+            assert enqueue_opening_boundary_delta(
+                db_session,
+                session,
+                force_reenqueue=True,
+            ) == first.reconciliation_token
+            lane_enqueue.assert_called_once()
+
+        prefix_row = (
+            db_session.query(SessionMove)
+            .filter(
+                SessionMove.session_id == session.id,
+                SessionMove.move_number == 1,
+                SessionMove.color == "white",
+            )
+            .one()
+        )
+        prefix_row.eval_delta = 80
+        db_session.commit()
+        after_prefix_edit = active_prefix_snapshot(db_session, session)
+        assert after_prefix_edit is not None
+        assert after_prefix_edit.reconciliation_token != first.reconciliation_token
+        assert prove.call_count == 2
+        assert divider.call_count == 2
+
+
+def test_boundary_recovery_reenqueue_is_token_throttled(db_session):
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    token = "a" * 64
+    now = [100.0]
+
+    with (
+        patch(
+            "app.opening_score_delta.opening_boundary_reconciliation_token",
+            return_value=token,
+        ),
+        patch(
+            "app.opening_score_delta_lane.is_scoped_delta_scheduled",
+            return_value=False,
+        ) as scheduled,
+        patch(
+            "app.opening_score_delta_lane.enqueue_scoped_delta",
+            return_value=DeltaLaneEnqueueOutcome.ENQUEUED,
+        ) as enqueue,
+        patch(
+            "app.opening_score_delta.time.monotonic",
+            side_effect=lambda: now[0],
+        ),
+    ):
+        assert enqueue_opening_boundary_delta(db_session, session) == token
+        now[0] = 101.0
+        assert (
+            enqueue_opening_boundary_delta(
+                db_session,
+                session,
+                force_reenqueue=True,
+            )
+            == token
+        )
+        assert enqueue.call_count == 1
+
+        now[0] = 111.0
+        assert (
+            enqueue_opening_boundary_delta(
+                db_session,
+                session,
+                force_reenqueue=True,
+            )
+            == token
+        )
+        assert enqueue.call_count == 2
+
+        scheduled.return_value = True
+        now[0] = 122.0
+        assert (
+            enqueue_opening_boundary_delta(
+                db_session,
+                session,
+                force_reenqueue=True,
+            )
+            == token
+        )
+        assert enqueue.call_count == 2
+
+
+def test_active_boundary_publication_fails_closed_without_player_evaluation(
+    db_session,
+):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    first_white = (
+        db_session.query(SessionMove)
+        .filter(
+            SessionMove.session_id == session.id,
+            SessionMove.move_number == 1,
+            SessionMove.color == "white",
+        )
+        .one()
+    )
+    first_white.eval_delta = None
+    session = db_session.get(GameSession, session.id, populate_existing=True)
+    session.opening_phase_protocol_version = 1
+    session.opening_middle_candidate_ply = 7
+    session.opening_middle_ready_at = datetime.now(timezone.utc)
+    session.opening_middle_ply = 7
+    db_session.commit()
+
+    with (
+        _patched_delta_registry(graph, roots),
+        patch(
+            "app.opening_score_delta.divide",
+            return_value=Division(middle=7, end=None, plies=8),
+        ),
+    ):
+        snapshot = active_prefix_snapshot(db_session, session)
+        assert snapshot is not None
+        request = reserve_scoped_delta_generation(
+            session.id,
+            source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+            reconciliation_token=snapshot.reconciliation_token,
+        )
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 0
+        assert _current_scoped_delta(session.id) is None
+
+
+def test_active_boundary_takeback_invalidates_old_token_and_publication(db_session):
+    graph = _ruy_graph()
+    roots = _ruy_roots()
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    session = db_session.get(GameSession, session.id, populate_existing=True)
+    session.opening_phase_protocol_version = 1
+    session.opening_middle_candidate_ply = 7
+    session.opening_middle_ready_at = datetime.now(timezone.utc)
+    session.opening_middle_ply = 7
+    db_session.commit()
+
+    with (
+        _patched_delta_registry(graph, roots),
+        patch(
+            "app.opening_score_delta.divide",
+            return_value=Division(middle=7, end=None, plies=8),
+        ),
+    ):
+        snapshot = active_prefix_snapshot(db_session, session)
+        assert snapshot is not None
+        request = reserve_scoped_delta_generation(
+            session.id,
+            source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+            reconciliation_token=snapshot.reconciliation_token,
+        )
+        assert publish_scoped_opening_score_deltas(
+            db_session, 123, "white", (request,)
+        ) == 1
+
+        session.move_line_revision += 1
+        session.opening_middle_candidate_ply = None
+        session.opening_middle_ready_at = None
+        session.opening_middle_ply = None
+        db_session.commit()
+        assert read_opening_score_delta(
+            db_session,
+            session,
+            reconciliation_token=snapshot.reconciliation_token,
+        ) == ([], False)
+
+
+def test_active_boundary_cache_loss_reenqueues_durable_marker(db_session):
+    session = _make_session(
+        db_session,
+        baseline=_baseline_json({}),
+        status="active",
+    )
+    _insert_scoped_evidence(db_session, session.id)
+    session = db_session.get(GameSession, session.id, populate_existing=True)
+    session.opening_phase_protocol_version = 1
+    session.opening_middle_candidate_ply = 7
+    session.opening_middle_ready_at = datetime.now(timezone.utc)
+    session.opening_middle_ply = 7
+    db_session.commit()
+
+    with patch(
+        "app.opening_score_delta.divide",
+        return_value=Division(middle=7, end=None, plies=8),
+    ):
+        snapshot = active_prefix_snapshot(db_session, session)
+        assert snapshot is not None
+        reset_scoped_delta_cache()
+        with patch(
+            "app.opening_score_delta.enqueue_opening_boundary_delta",
+            return_value=snapshot.reconciliation_token,
+        ) as enqueue:
+            assert read_opening_score_delta(
+                db_session,
+                session,
+                reconciliation_token=snapshot.reconciliation_token,
+            ) == ([], False)
+        enqueue.assert_called_once_with(
+            db_session,
+            session,
+            force_reenqueue=True,
+        )
+
+
+def test_terminal_generation_preempts_and_cannot_be_downgraded_by_boundary():
+    session_id = uuid.uuid4()
+    boundary = reserve_scoped_delta_generation(
+        session_id,
+        source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+        reconciliation_token="a" * 64,
+    )
+    terminal = reserve_scoped_delta_generation(session_id)
+    late_boundary = reserve_scoped_delta_generation(
+        session_id,
+        source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+        reconciliation_token="b" * 64,
+    )
+
+    assert terminal.generation > boundary.generation
+    assert is_scoped_delta_request_current(boundary) is False
+    assert late_boundary == terminal
+    assert is_scoped_delta_request_current(terminal) is True
 
 
 _REPLAY_CACHE_FIELDS = (

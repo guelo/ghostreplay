@@ -1,7 +1,7 @@
-"""Immediate in-process lane for terminal-session opening-score deltas.
+"""Immediate in-process lane for scoped opening-score deltas.
 
-Supported terminal game and drill handlers enqueue two independent background
-jobs:
+Supported live-boundary and terminal handlers enqueue two independent
+background jobs:
 
 * this lane publishes the freshness-bound played-opening result immediately;
 * ``opening_score_scheduler`` performs the ordinary debounced whole-graph
@@ -11,10 +11,11 @@ The split is load-bearing. This module never calls ``refresh_now``, never runs a
 whole-graph recompute, and has no dependency on the whole-graph scheduler's
 pending or in-flight state.
 
-The queue is keyed by ``(user_id, player_color)`` so terminal sessions for one
-opening overlay share a single Phase-2 publication call. A duplicate session
-keeps only its newest request generation. New work is due immediately; only a
-failed attempt is delayed by bounded retry backoff.
+The queue is keyed by ``(user_id, player_color)``. Terminal sessions for one
+opening overlay share a Phase-2 publication call; active sessions each receive
+a private exact-prefix overlay. A duplicate session keeps only its current
+ownership generation. New work is due immediately; only a failed attempt is
+delayed by bounded retry backoff.
 
 IMPORTANT — single-process assumption:
     The queue, request generations, and scoped publications all live in process
@@ -105,6 +106,10 @@ class OpeningScoreDeltaLane:
 
     _pending: dict[Key, _Entry] = field(default_factory=dict, init=False)
     _inflight: set[Key] = field(default_factory=set, init=False)
+    _inflight_requests: dict[Key, dict[str, ScopedDeltaRequest]] = field(
+        default_factory=dict,
+        init=False,
+    )
     _shutdown: bool = field(default=False, init=False)
     _cancel_pending: bool = field(default=False, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
@@ -124,8 +129,11 @@ class OpeningScoreDeltaLane:
         user_id: int,
         player_color: str,
         session_id,
+        *,
+        source: str = "terminal",
+        reconciliation_token: str | None = None,
     ) -> DeltaLaneEnqueueOutcome:
-        """Reserve and enqueue one terminal session without a quiet window.
+        """Reserve and enqueue one scoped session without a quiet window.
 
         Generation reservation and pending-entry replacement share ``_cond``.
         Capacity is checked before reservation, but a capacity-rejected enqueue
@@ -138,19 +146,39 @@ class OpeningScoreDeltaLane:
                 return DeltaLaneEnqueueOutcome.SHUTDOWN
 
             entry = self._pending.get(key)
-            session_key = str(session_id)
-            key_overflow = entry is None and len(self._pending) >= self.max_pending_keys
+
+            # Load-bearing ordering: reserve while the lane lock is held even when
+            # capacity will reject the request. The new generation invalidates any
+            # older in-flight publication through its compare-and-swap.
+            if source == "terminal" and reconciliation_token is None:
+                request = self.reserve(session_id)
+            else:
+                request = self.reserve(
+                    session_id,
+                    source=source,
+                    reconciliation_token=reconciliation_token,
+                )
+            session_key = str(request.session_id)
+
+            # A boundary recovery poll may arrive while this exact token is
+            # already executing. Its reservation deliberately coalesces to the
+            # same request generation, so do not manufacture a follow-up run.
+            # A newer token or terminal request has a new generation and still
+            # queues behind the current attempt.
+            inflight_request = self._inflight_requests.get(key, {}).get(
+                session_key
+            )
+            if inflight_request == request:
+                return DeltaLaneEnqueueOutcome.COALESCED
+
+            key_overflow = (
+                entry is None and len(self._pending) >= self.max_pending_keys
+            )
             session_overflow = (
                 entry is not None
                 and session_key not in entry.requests
                 and len(entry.requests) >= self.max_sessions_per_key
             )
-
-            # Load-bearing ordering: reserve while the lane lock is held even when
-            # capacity will reject the request. The new generation invalidates any
-            # older in-flight publication through its compare-and-swap.
-            request = self.reserve(session_id)
-            session_key = str(request.session_id)
 
             if key_overflow:
                 self._log_overflow(
@@ -225,6 +253,36 @@ class OpeningScoreDeltaLane:
         with self._lock:
             return key in self._inflight
 
+    def is_request_scheduled(
+        self,
+        user_id: int,
+        player_color: str,
+        session_id,
+        *,
+        source: str,
+        reconciliation_token: str | None,
+    ) -> bool:
+        """Whether this exact source/token is pending or currently executing."""
+
+        key: Key = (user_id, player_color)
+        session_key = str(session_id)
+        with self._lock:
+            queued = self._pending.get(key)
+            pending_request = (
+                queued.requests.get(session_key).request
+                if queued is not None and session_key in queued.requests
+                else None
+            )
+            inflight_request = self._inflight_requests.get(key, {}).get(
+                session_key
+            )
+            return any(
+                request is not None
+                and request.source == source
+                and request.reconciliation_token == reconciliation_token
+                for request in (pending_request, inflight_request)
+            )
+
     def run_due(self, now: float | None = None) -> None:
         """Run every due key on the caller's thread, one key at a time."""
         live_clock = now is None
@@ -257,6 +315,10 @@ class OpeningScoreDeltaLane:
                 )
                 entry = self._pending.pop(key)
                 self._inflight.add(key)
+                self._inflight_requests[key] = {
+                    session_key: item.request
+                    for session_key, item in entry.requests.items()
+                }
             self._run_one(key, entry)
 
     def flush_pending(self, timeout: float = 30.0) -> None:
@@ -451,6 +513,7 @@ class OpeningScoreDeltaLane:
                     )
             with self._cond:
                 self._inflight.discard(key)
+                self._inflight_requests.pop(key, None)
                 self._cond.notify_all()
 
         stage_ms = phase.get("stage_ms")
@@ -572,15 +635,51 @@ def enqueue_scoped_delta(
     user_id: int,
     player_color: str,
     session_id,
-) -> None:
-    """Best-effort terminal enqueue; never propagate into an HTTP handler."""
+    *,
+    source: str = "terminal",
+    reconciliation_token: str | None = None,
+) -> DeltaLaneEnqueueOutcome | None:
+    """Best-effort scoped enqueue; never propagate into an HTTP handler."""
     try:
-        _lane.enqueue(user_id, player_color, session_id)
+        return _lane.enqueue(
+            user_id,
+            player_color,
+            session_id,
+            source=source,
+            reconciliation_token=reconciliation_token,
+        )
     except Exception:
         logger.exception(
             "opening score delta lane enqueue failed",
             extra={"user_id": user_id, "player_color": player_color},
         )
+        return None
+
+
+def is_scoped_delta_scheduled(
+    user_id: int,
+    player_color: str,
+    session_id,
+    *,
+    source: str,
+    reconciliation_token: str | None,
+) -> bool:
+    """Best-effort exact-request probe for boundary recovery backpressure."""
+
+    try:
+        return _lane.is_request_scheduled(
+            user_id,
+            player_color,
+            session_id,
+            source=source,
+            reconciliation_token=reconciliation_token,
+        )
+    except Exception:
+        logger.exception(
+            "opening score delta lane scheduled-request probe failed",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+        return False
 
 
 def is_delta_lane_inflight(user_id: int, player_color: str) -> bool:

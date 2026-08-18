@@ -1812,6 +1812,17 @@ def _collect_session_moves(
 ) -> None:
     moves = _build_move_rows(db, user_id, player_color, overlay)
 
+    _apply_session_move_rows(graph, overlay, moves, player_color)
+
+
+def _apply_session_move_rows(
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    moves: list[_MoveRow],
+    player_color: str,
+) -> None:
+    """Apply one already-validated set of opening move rows to ``overlay``."""
+
     # Index opening moves by their normalized pre-move FEN for extension BFS.
     move_chains: dict[str, list[_MoveRow]] = defaultdict(list)
     for mr in moves:
@@ -1858,6 +1869,100 @@ def _collect_session_moves(
             if mr.norm_after not in visited:
                 visited.add(mr.norm_after)
                 frontier.append(mr.norm_after)
+
+
+def add_active_prefix_evidence(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    rows: list,
+    *,
+    through_ply: int,
+    session_ts: datetime | str | None,
+) -> bool:
+    """Add one proven active-session opening prefix without persisting it.
+
+    The ordinary overlay above remains terminal-only.  This helper consumes a
+    caller-frozen row list for exactly plies ``1..through_ply``, repeats the
+    complete-standard-line proof, and applies all of those moves as opening
+    premoves.  The boundary proof established that the first retained middle
+    board is the post-position at ``through_ply``, so those are precisely the
+    moves the terminal divider would retain.
+
+    No phase sample or replay-cache entry is produced: active prefixes are an
+    ephemeral score overlay, not governed calibration evidence.
+    """
+
+    proof = prove_complete_standard_line(rows, through_ply)
+    if proof.verdict.value != "passed":
+        return False
+
+    opening_moves: list[_MoveRow] = []
+    cache_candidates: list[tuple[int, str, str, str]] = []
+    for index, (row, board) in enumerate(zip(rows, proof.premove_boards, strict=True)):
+        if row.fen_before is None:
+            return False
+        try:
+            uci = board.parse_san(row.move_san).uci()
+            norm_before = normalize_fen(row.fen_before)
+            norm_after = normalize_fen(row.fen_after)
+        except (TypeError, ValueError):
+            return False
+        quality, source = move_quality(
+            eval_cp=row.eval_cp,
+            best_move_eval_cp=row.best_move_eval_cp,
+            eval_delta=centipawn_loss(row.eval_delta),
+        )
+        move_row = _MoveRow(
+            session_id=str(row.session_id),
+            move_number=row.move_number,
+            color=row.color,
+            norm_before=norm_before,
+            norm_after=norm_after,
+            fen_before_raw=row.fen_before,
+            move_san=row.move_san,
+            uci=uci,
+            eval_delta=row.eval_delta,
+            quality=quality,
+            quality_source=source,
+            session_ts=session_ts,
+        )
+        if row.color == player_color and (
+            row.eval_cp is None or row.best_move_eval_cp is None
+        ):
+            stm = "w" if " w " in row.fen_before else "b"
+            cache_candidates.append((index, row.fen_before, uci, stm))
+        opening_moves.append(move_row)
+
+    active_scope = _apply_cache_fallbacks(
+        db, user_id, opening_moves, cache_candidates
+    )
+    if any(
+        move.color == player_color
+        and move.eval_delta is None
+        and move.quality is None
+        for move in opening_moves
+    ):
+        return False
+    historical_scope = overlay.shared_scope
+    overlay.shared_scope = OverlaySharedScope(
+        raw_fens=tuple(
+            sorted(set(historical_scope.raw_fens) | set(active_scope.raw_fens))
+        ),
+        norm_fens=tuple(
+            sorted(set(historical_scope.norm_fens) | set(active_scope.norm_fens))
+        ),
+        move_row_ids=tuple(
+            sorted(
+                set(historical_scope.move_row_ids)
+                | set(active_scope.move_row_ids)
+            )
+        ),
+    )
+    _apply_session_move_rows(graph, overlay, opening_moves, player_color)
+    return True
 
 
 def _collect_ghost_targets(
@@ -1948,6 +2053,45 @@ def overlay_evidence(
     """Build an evidence overlay for one (user, color) pair on the opening graph."""
     overlay = EvidenceOverlay(user_id=user_id, player_color=player_color)
     _collect_session_moves(db, user_id, player_color, graph, overlay)
+    _collect_ghost_targets(db, user_id, player_color, graph, overlay)
+    _collect_reviews(db, user_id, player_color, graph, overlay)
+    return overlay
+
+
+def overlay_evidence_with_active_prefix(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    graph: OpeningGraph,
+    rows: list,
+    *,
+    through_ply: int,
+    session_ts: datetime | str | None,
+) -> EvidenceOverlay | None:
+    """Build historical evidence plus one ephemeral active prefix.
+
+    Ordering is semantic: the prefix must create its reachable off-book nodes
+    before historical ghost targets and reviews are collected. Terminal builds
+    naturally have that ordering because the ended session participates in
+    ``_collect_session_moves``. Applying the live prefix after
+    :func:`overlay_evidence` would otherwise omit historical target/review facts
+    at a node reached only by this provisional line. Active-session ghost
+    targets remain excluded by their ordinary terminal-eligibility predicate.
+    """
+
+    overlay = EvidenceOverlay(user_id=user_id, player_color=player_color)
+    _collect_session_moves(db, user_id, player_color, graph, overlay)
+    if not add_active_prefix_evidence(
+        db,
+        user_id,
+        player_color,
+        graph,
+        overlay,
+        rows,
+        through_ply=through_ply,
+        session_ts=session_ts,
+    ):
+        return None
     _collect_ghost_targets(db, user_id, player_color, graph, overlay)
     _collect_reviews(db, user_id, player_color, graph, overlay)
     return overlay

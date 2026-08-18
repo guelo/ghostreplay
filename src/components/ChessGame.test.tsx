@@ -270,6 +270,9 @@ const mockCoordinator = {
     mockUploadCommitListeners.add(listener);
     return () => mockUploadCommitListeners.delete(listener);
   }),
+  getOpeningBoundaryRevision: vi.fn(() => 0),
+  getOpeningBoundarySnapshot: vi.fn(() => null),
+  addOpeningBoundaryListener: vi.fn(() => () => {}),
   getLineSyncDiagnostic: vi.fn(() => mockLineSyncDiagnostic),
   canTransitionMoveLine: vi.fn(() => mockCanTransitionMoveLine),
   addLineSyncDiagnosticListener: vi.fn((listener: () => void) => {
@@ -5155,6 +5158,79 @@ describe("ChessGame opening lineage", () => {
       start_ply: 1,
     };
   }
+
+  it("renders a fresh live-boundary delta on the existing lineage card", async () => {
+    const sessionId = "session-live-boundary-delta";
+    const boundaryToken = "a".repeat(64);
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          ...lineageCard("k1", "King's Pawn Game", ["e4"]),
+          score: 41,
+        },
+      ],
+      start_ply: 1,
+    });
+    useGameStore.setState({
+      sessionId,
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+      liveFen: LINEAGE_FEN_E4,
+      viewIndex: null,
+    });
+
+    render(<ChessGame />);
+    const region = await screen.findByRole("region", {
+      name: "Openings played",
+    });
+    const callsBeforeBoundary = fetchSessionOpeningsMock.mock.calls.length;
+    const item = {
+      opening_key: "k1",
+      opening_name: "King's Pawn Game",
+      opening_family: "King's Pawn Game",
+      eco: null,
+      depth: 0,
+      before: 41,
+      after: 44,
+      delta: 3,
+      is_new: false,
+    };
+
+    act(() => {
+      const state = useGameStore.getState();
+      state.setBoundaryOpeningDeltaPending(sessionId, boundaryToken);
+      state.applyPolledOpeningDelta(
+        sessionId,
+        [item],
+        state.openingDeltaPollToken,
+        "opening_boundary",
+        boundaryToken,
+      );
+    });
+
+    await within(region).findByRole("img", {
+      name: "Score increased by 3.0, now 44.0",
+    });
+    await waitFor(() =>
+      expect(fetchSessionOpeningsMock.mock.calls.length).toBeGreaterThan(
+        callsBeforeBoundary,
+      ),
+    );
+    const callsAfterFirstValue = fetchSessionOpeningsMock.mock.calls.length;
+
+    act(() => {
+      useGameStore.getState().setTerminalOpeningDelta(sessionId, [
+        { ...item, after: 46, delta: 5 },
+      ]);
+    });
+    await waitFor(() =>
+      expect(within(region).getByText("46.0")).toBeInTheDocument(),
+    );
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(callsAfterFirstValue);
+  });
 
   it("hydrates a locally visible card after the current session upload commits", async () => {
     const openingKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");

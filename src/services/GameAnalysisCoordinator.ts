@@ -234,6 +234,22 @@ export interface UploadCommitSource {
   addUploadCommitListener(listener: () => void): () => void
 }
 
+export type OpeningBoundarySnapshot = {
+  sessionId: string
+  openingMiddlePly: number
+  reconciliationToken: string
+  transitionRevision: number
+}
+
+/** Narrow external-store surface for the live opening-delta hook. */
+export interface OpeningBoundarySource {
+  getOpeningBoundaryRevision(sessionId: string | null): number
+  getOpeningBoundarySnapshot(
+    sessionId: string | null,
+  ): OpeningBoundarySnapshot | null
+  addOpeningBoundaryListener(listener: () => void): () => void
+}
+
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
 // Callers pass the MOVER's color (the side that played the analyzed move), so
@@ -375,6 +391,7 @@ type OpeningBoundaryState = {
   probePly: number
   transitionRevision: number
   openingMiddlePly: number | null
+  reconciliationToken: string | null
   exhausted: boolean
   settled: boolean
   inFlight: boolean
@@ -427,7 +444,7 @@ export class GameAnalysisCoordinator {
   private lineTransition: LineTransition | null = null
   private lineEpoch = 0
   private lineSyncDiagnostic: LineSyncDiagnostic | null = null
-  /** Observation-only boundary proof state. It is coordinator-owned so a React
+  /** Boundary proof/publication state. It is coordinator-owned so a React
    * remount cannot lose an echoed probe or let a stale response publish state. */
   private openingBoundaryState: OpeningBoundaryState | null = null
   private openingBoundaryTransitionRevision = 0
@@ -442,6 +459,7 @@ export class GameAnalysisCoordinator {
   private analysisOutcomeListeners = new Set<(o: AnalysisOutcome) => void>()
   private analysisResetListeners = new Set<(info: AnalysisResetInfo) => void>()
   private uploadCommitListeners = new Set<() => void>()
+  private openingBoundaryListeners = new Set<() => void>()
   private lineSyncDiagnosticListeners = new Set<() => void>()
   private outcomeSeq = 0
   /** Single source of `previousRequestId` for supersession/retry lineage (L3).
@@ -572,10 +590,48 @@ export class GameAnalysisCoordinator {
     }
   }
 
+  getOpeningBoundaryRevision(sessionId: string | null): number {
+    return sessionId === this.activeSessionId
+      ? this.openingBoundaryTransitionRevision
+      : 0
+  }
+
+  getOpeningBoundarySnapshot(
+    sessionId: string | null,
+  ): OpeningBoundarySnapshot | null {
+    const boundary = this.openingBoundaryState
+    if (
+      sessionId === null ||
+      sessionId !== this.activeSessionId ||
+      boundary?.sessionId !== sessionId ||
+      boundary.openingMiddlePly === null ||
+      boundary.reconciliationToken === null
+    ) {
+      return null
+    }
+    return {
+      sessionId,
+      openingMiddlePly: boundary.openingMiddlePly,
+      reconciliationToken: boundary.reconciliationToken,
+      transitionRevision: boundary.transitionRevision,
+    }
+  }
+
+  addOpeningBoundaryListener(listener: () => void): () => void {
+    this.openingBoundaryListeners.add(listener)
+    return () => {
+      this.openingBoundaryListeners.delete(listener)
+    }
+  }
+
   private emitUploadCommitChange() {
     for (const listener of this.uploadCommitListeners) {
       listener()
     }
+  }
+
+  private emitOpeningBoundaryChange(): void {
+    for (const listener of this.openingBoundaryListeners) listener()
   }
 
   private setLineSyncDiagnostic(diagnostic: LineSyncDiagnostic | null): void {
@@ -835,12 +891,13 @@ export class GameAnalysisCoordinator {
 
   private cancelOpeningBoundary(): void {
     const boundary = this.openingBoundaryState
+    if (!boundary) return
     this.openingBoundaryState = null
     this.openingBoundaryTransitionRevision += 1
-    if (!boundary) return
     boundary.controller?.abort()
     boundary.controller = null
     boundary.inFlight = false
+    this.emitOpeningBoundaryChange()
   }
 
   private observeOpeningBoundaryEcho(
@@ -858,8 +915,47 @@ export class GameAnalysisCoordinator {
     ) {
       return
     }
-    // The server already proved or exhausted this revision. Stage 0 has no UI
-    // consumer; retaining another local request would only duplicate work.
+    const echoedMarker = response.opening_middle_ply ?? null
+    const echoedToken = response.opening_delta_token ?? null
+    if (
+      echoedMarker !== null &&
+      Number.isInteger(echoedMarker) &&
+      echoedMarker > 0 &&
+      echoedToken !== null
+    ) {
+      const current = this.openingBoundaryState
+      if (
+        current?.sessionId === uploadState.sessionId &&
+        current.generation === uploadState.generation &&
+        current.lineEpoch === uploadState.lineEpoch &&
+        current.lineRevision === uploadState.lineRevision &&
+        current.openingMiddlePly === echoedMarker &&
+        current.reconciliationToken === echoedToken
+      ) {
+        return
+      }
+      this.cancelOpeningBoundary()
+      this.openingBoundaryState = {
+        sessionId: uploadState.sessionId,
+        generation: uploadState.generation,
+        lineEpoch: uploadState.lineEpoch,
+        lineRevision: uploadState.lineRevision,
+        probePly: response.opening_phase_probe_ply ?? echoedMarker,
+        transitionRevision: ++this.openingBoundaryTransitionRevision,
+        openingMiddlePly: echoedMarker,
+        reconciliationToken: echoedToken,
+        exhausted: false,
+        settled: true,
+        inFlight: false,
+        controller: null,
+      }
+      this.emitOpeningBoundaryChange()
+      return
+    }
+    // Candidate-only and exhausted echoes have no renderable live result. A
+    // marker without a token is also an explicit freshness failure: clear one
+    // current boundary owner rather than retaining a stale number. The
+    // conditional cancel makes repeated switch-off/null-token echoes inert.
     if (
       response.opening_middle_candidate_ply != null ||
       response.opening_phase_exhausted ||
@@ -889,6 +985,7 @@ export class GameAnalysisCoordinator {
         probePly,
         transitionRevision: ++this.openingBoundaryTransitionRevision,
         openingMiddlePly: null,
+        reconciliationToken: null,
         exhausted: false,
         settled: false,
         inFlight: false,
@@ -940,20 +1037,28 @@ export class GameAnalysisCoordinator {
           boundary.sessionId !== this.activeSessionId ||
           boundary.generation !== this.sessionGeneration ||
           boundary.lineEpoch !== this.lineEpoch ||
+          uploadState.lineSyncPaused ||
           response.line_revision !== boundary.lineRevision
         ) {
           return
         }
         boundary.inFlight = false
         if (boundary.controller === controller) boundary.controller = null
-        boundary.openingMiddlePly =
-          response.opening_middle_candidate_ply ?? response.opening_middle_ply ?? null
+        boundary.openingMiddlePly = response.opening_middle_ply ?? null
+        boundary.reconciliationToken = response.opening_delta_token ?? null
         boundary.exhausted = response.exhausted
         boundary.settled =
           response.state === 'baseline_pending' ||
           response.state === 'shadow_ready' ||
           response.state === 'exhausted' ||
           response.state === 'capped'
+        if (
+          boundary.openingMiddlePly !== null &&
+          boundary.reconciliationToken !== null
+        ) {
+          boundary.transitionRevision = ++this.openingBoundaryTransitionRevision
+          this.emitOpeningBoundaryChange()
+        }
       })
       .catch((error) => {
         if (

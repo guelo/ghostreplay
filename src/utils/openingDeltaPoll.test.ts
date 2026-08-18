@@ -18,7 +18,10 @@ import {
   __resetOpeningDeltaPolls,
 } from "./openingDeltaPoll";
 import { useGameStore } from "../stores/useGameStore";
-import type { OpeningScoreDeltaItem } from "./api";
+import type {
+  OpeningScoreDeltaItem,
+  OpeningScoreDeltaPollResponse,
+} from "./api";
 
 const makeItem = (key: string, after: number): OpeningScoreDeltaItem => ({
   opening_key: key,
@@ -135,6 +138,8 @@ describe("pollFreshOpeningDelta", () => {
       sessionId: "s1",
       items,
       freshness: "fresh",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
   });
 
@@ -175,6 +180,8 @@ describe("pollFreshOpeningDelta", () => {
       sessionId: "s1",
       items: fresh,
       freshness: "fresh",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
   });
 
@@ -277,6 +284,116 @@ describe("pollFreshOpeningDelta", () => {
     expect(captureEventMock).toHaveBeenCalledTimes(1);
   });
 
+  it("replaces an older boundary token and drops its fulfilled continuation", async () => {
+    useGameStore.setState({ isGameActive: true });
+    let resolveOld!: (value: {
+      opening_score_changes: OpeningScoreDeltaItem[];
+      is_fresh: boolean;
+    }) => void;
+    const oldResponse = new Promise<{
+      opening_score_changes: OpeningScoreDeltaItem[];
+      is_fresh: boolean;
+    }>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newer = [makeItem("k1", 52)];
+    getOpeningScoreDeltaMock
+      .mockReturnValueOnce(oldResponse)
+      .mockResolvedValueOnce({
+        opening_score_changes: newer,
+        is_fresh: true,
+      });
+
+    const oldPoll = pollFreshOpeningDelta(
+      "s1",
+      "game_opening_boundary",
+      { boundaryToken: "a".repeat(64) },
+    );
+    await settle();
+    const newPoll = pollFreshOpeningDelta(
+      "s1",
+      "game_opening_boundary",
+      { boundaryToken: "b".repeat(64) },
+    );
+    await settle();
+    await newPoll;
+
+    resolveOld({
+      opening_score_changes: [makeItem("k1", 99)],
+      is_fresh: true,
+    });
+    await settle();
+    expect((await oldPoll).outcome).toBe("abandoned");
+    expect(useGameStore.getState().openingScoreDelta).toMatchObject({
+      items: newer,
+      source: "opening_boundary",
+      reconciliationToken: "b".repeat(64),
+    });
+    expect(getOpeningScoreDeltaMock).toHaveBeenNthCalledWith(
+      2,
+      "s1",
+      expect.objectContaining({ boundaryToken: "b".repeat(64) }),
+    );
+  });
+
+  it("lets terminal ownership preempt a boundary loop", async () => {
+    useGameStore.setState({ isGameActive: true });
+    let resolveBoundary!: (value: OpeningScoreDeltaPollResponse) => void;
+    getOpeningScoreDeltaMock
+      .mockReturnValueOnce(
+        new Promise<OpeningScoreDeltaPollResponse>((resolve) => {
+          resolveBoundary = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        opening_score_changes: [makeItem("k1", 61)],
+        is_fresh: true,
+      });
+
+    const boundary = pollFreshOpeningDelta(
+      "s1",
+      "game_opening_boundary",
+      { boundaryToken: "c".repeat(64) },
+    );
+    await settle();
+    useGameStore
+      .getState()
+      .setTerminalOpeningDelta("s1", [makeItem("k1", 55)]);
+    const terminal = pollFreshOpeningDelta("s1", "game_end");
+    await settle();
+    await terminal;
+    resolveBoundary({
+      opening_score_changes: [makeItem("k1", 99)],
+      is_fresh: true,
+    });
+    await settle();
+    expect((await boundary).outcome).toBe("abandoned");
+    expect(useGameStore.getState().openingScoreDelta).toMatchObject({
+      items: [makeItem("k1", 61)],
+      source: "terminal",
+    });
+  });
+
+  it("does not start boundary work after terminal ownership has settled", async () => {
+    useGameStore.setState({ isGameActive: true });
+    useGameStore
+      .getState()
+      .setTerminalOpeningDelta("s1", [makeItem("k1", 61)]);
+
+    const result = await pollFreshOpeningDelta(
+      "s1",
+      "game_opening_boundary",
+      { boundaryToken: "d".repeat(64) },
+    );
+
+    expect(result).toMatchObject({ outcome: "abandoned", attemptCount: 0 });
+    expect(getOpeningScoreDeltaMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().openingScoreDelta).toMatchObject({
+      source: "terminal",
+      items: [makeItem("k1", 61)],
+    });
+  });
+
   it("exposes only active low-cardinality timing metadata in snapshots", async () => {
     getOpeningScoreDeltaMock.mockResolvedValue({
       opening_score_changes: null,
@@ -354,6 +471,8 @@ describe("pollFreshOpeningDelta", () => {
       sessionId: "s2",
       items: s2fresh,
       freshness: "fresh",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     expect(state.lateOpeningDeltas).toHaveLength(1);
     expect(state.lateOpeningDeltas[0].sessionId).toBe("s1");

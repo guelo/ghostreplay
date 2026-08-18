@@ -709,6 +709,78 @@ describe('GameAnalysisCoordinator', () => {
       )
     })
 
+    it('publishes only a marker-plus-token echo to boundary subscribers', async () => {
+      coordinator.startSession('session-boundary-live')
+      seedResolvedHistory(1)
+      const listener = vi.fn()
+      coordinator.addOpeningBoundaryListener(listener)
+      uploadSessionMovesMock.mockResolvedValueOnce({
+        moves_inserted: 1,
+        line_revision: 0,
+        opening_phase_protocol_version: 1,
+        opening_phase_probe_ply: 1,
+        opening_middle_candidate_ply: 1,
+        opening_middle_ply: 1,
+        opening_delta_token: 'a'.repeat(64),
+        opening_phase_exhausted: false,
+      })
+
+      await flushIndices(0)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.getOpeningBoundarySnapshot('session-boundary-live')).toEqual({
+        sessionId: 'session-boundary-live',
+        openingMiddlePly: 1,
+        reconciliationToken: 'a'.repeat(64),
+        transitionRevision: expect.any(Number),
+      })
+      expect(listener).toHaveBeenCalled()
+
+      coordinator.stopSessionUploads()
+      expect(coordinator.getOpeningBoundarySnapshot('session-boundary-live')).toBeNull()
+    })
+
+    it('notifies once when a switch-off candidate clears proof state, not on every echo', () => {
+      coordinator.startSession('session-boundary-shadow')
+      const uploadState = (coordinator as any).uploadState
+      ;(coordinator as any).openingBoundaryState = {
+        sessionId: 'session-boundary-shadow',
+        generation: uploadState.generation,
+        lineEpoch: uploadState.lineEpoch,
+        lineRevision: uploadState.lineRevision,
+        probePly: 17,
+        transitionRevision: 1,
+        openingMiddlePly: null,
+        reconciliationToken: null,
+        exhausted: false,
+        settled: true,
+        inFlight: false,
+        controller: null,
+      }
+      const listener = vi.fn()
+      coordinator.addOpeningBoundaryListener(listener)
+      const candidateEcho = {
+        moves_inserted: 1,
+        line_revision: 0,
+        opening_phase_protocol_version: 1,
+        opening_middle_candidate_ply: 17,
+        opening_phase_exhausted: false,
+      }
+
+      ;(coordinator as any).observeOpeningBoundaryEcho(
+        uploadState,
+        candidateEcho,
+      )
+      expect(listener).toHaveBeenCalledOnce()
+      expect((coordinator as any).openingBoundaryState).toBeNull()
+
+      ;(coordinator as any).observeOpeningBoundaryEcho(
+        uploadState,
+        candidateEcho,
+      )
+      expect(listener).toHaveBeenCalledOnce()
+    })
+
     it('aborts and fences an opening proof immediately on local takeback', async () => {
       coordinator.startSession('session-boundary-rewind')
       seedResolvedHistory(1)

@@ -195,6 +195,62 @@ def test_enqueue_during_inflight_invalidates_old_and_runs_one_followup():
     assert max_active == 1
 
 
+def test_same_boundary_token_coalesces_while_inflight_without_followup():
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[ScopedDeltaRequest, ...]] = []
+
+    def publish(db, user_id, player_color, requests, *, on_complete):
+        calls.append(requests)
+        entered.set()
+        assert release.wait(timeout=5.0)
+        on_complete(
+            {
+                "outcome": "published",
+                "published_count": len(requests),
+                "stage_ms": {},
+                "total_ms": 0.0,
+            }
+        )
+        return len(requests)
+
+    lane, _ = _make_lane(time.monotonic, publish)
+    session_id = uuid.uuid4()
+    token = "a" * 64
+    assert lane.enqueue(
+        123,
+        "white",
+        session_id,
+        source="opening_boundary",
+        reconciliation_token=token,
+    ) is DeltaLaneEnqueueOutcome.ENQUEUED
+    worker = threading.Thread(target=lane.run_due)
+    worker.start()
+    assert entered.wait(timeout=5.0)
+    assert lane.is_request_scheduled(
+        123,
+        "white",
+        session_id,
+        source="opening_boundary",
+        reconciliation_token=token,
+    ) is True
+
+    assert lane.enqueue(
+        123,
+        "white",
+        session_id,
+        source="opening_boundary",
+        reconciliation_token=token,
+    ) is DeltaLaneEnqueueOutcome.COALESCED
+    release.set()
+    worker.join(timeout=5.0)
+    lane.run_due()
+
+    assert worker.is_alive() is False
+    assert len(calls) == 1
+    assert lane._pending == {}
+
+
 def test_reservation_and_pending_replacement_are_atomic_across_enqueuers():
     first_inside_reserve = threading.Event()
     second_inside_reserve = threading.Event()

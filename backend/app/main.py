@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).exception("session evidence scheduler shutdown failed")
         # The priority lane is a leaf: it never enqueues a whole recompute. Drain it
         # before the ordinary opening scheduler and before disposing the engine so
-        # every accepted terminal publication gets its bounded completion chance.
+        # every accepted scoped publication gets its bounded completion chance.
         try:
             get_delta_lane().shutdown(drain=True)
         except Exception:

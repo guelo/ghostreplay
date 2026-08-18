@@ -3,6 +3,7 @@ import { useGameStore } from "../stores/useGameStore";
 import { hasRenderableBadge } from "./openingDeltaBadge";
 import { getOpeningScoreDelta } from "./api";
 import type { OpeningScoreDeltaPollResponse } from "./api";
+import type { OpeningDeltaSource } from "../stores/useGameStore";
 
 // Approximately the scheduler's quiet-window debounce, so retries land roughly
 // one recompute cycle apart.
@@ -24,7 +25,9 @@ export type OpeningDeltaPollTrigger =
   | "drill_natural_end"
   | "game_end"
   | "game_resign"
-  | "game_revert";
+  | "game_revert"
+  | "game_opening_boundary"
+  | "drill_opening_boundary";
 
 export type OpeningDeltaPollOutcome =
   | "fresh"
@@ -66,6 +69,8 @@ type ActivePoll = {
   attemptCount: number;
   requestErrorCount: number;
   visibilityAtStart: string;
+  source: OpeningDeltaSource;
+  reconciliationToken: string;
 };
 
 // Insertion-ordered by session. Aborted entries remain until their own single
@@ -80,6 +85,28 @@ export const getOpeningDeltaVisibility = (): string =>
 
 const pollMode = (trigger: OpeningDeltaPollTrigger): "drill" | "game" =>
   trigger.startsWith("drill_") ? "drill" : "game";
+
+const abandonedBeforeStart = (
+  sessionId: string,
+  trigger: OpeningDeltaPollTrigger,
+): Promise<OpeningDeltaPollResult> => {
+  const visibility = getOpeningDeltaVisibility();
+  return Promise.resolve({
+    trigger,
+    mode: pollMode(trigger),
+    outcome: "abandoned",
+    elapsedMs: 0,
+    attemptCount: 0,
+    requestErrorCount: 0,
+    freshOnFirstAttempt: false,
+    sessionReplacedBeforeCompletion:
+      useGameStore.getState().sessionId !== sessionId,
+    hasRenderableChange: false,
+    visibilityAtStart: visibility,
+    visibilityAtEnd: visibility,
+    visibilityChanged: false,
+  });
+};
 
 const activeLoopCount = (): number => {
   let count = 0;
@@ -97,21 +124,82 @@ const oldestLiveLoop = (): ActivePoll | null => {
 };
 
 /**
- * Reconcile the terminal endpoint's warm opening-score delta to a provably-fresh
- * value. Same-session callers join one loop and therefore share its clock,
- * counters, result, and completion event.
+ * Reconcile either a proven live boundary or terminal endpoint warm value to a
+ * provably-fresh score. Equivalent owners join one loop; terminal ownership
+ * always supersedes live-boundary ownership for the same session.
  */
 export function pollFreshOpeningDelta(
   sessionId: string,
   trigger: OpeningDeltaPollTrigger,
+  options?: { boundaryToken?: string },
 ): Promise<OpeningDeltaPollResult> {
+  const source: OpeningDeltaSource = trigger.endsWith("_opening_boundary")
+    ? "opening_boundary"
+    : "terminal";
+  const state = useGameStore.getState();
+  if (source === "opening_boundary") {
+    if (!options?.boundaryToken) {
+      throw new Error("Boundary delta polling requires a reconciliation token");
+    }
+    state.setBoundaryOpeningDeltaPending(sessionId, options.boundaryToken);
+  }
+  const owner = useGameStore.getState().openingScoreDelta;
+  const reconciliationToken =
+    source === "opening_boundary"
+      ? options!.boundaryToken!
+      : owner?.sessionId === sessionId && owner.source === "terminal"
+        ? owner.reconciliationToken
+        : `terminal:detached:${sessionId}`;
+
   const existing = runningLoops.get(sessionId);
+  if (
+    source === "opening_boundary" &&
+    (owner?.sessionId !== sessionId ||
+      owner.source !== source ||
+      owner.reconciliationToken !== reconciliationToken)
+  ) {
+    if (
+      existing &&
+      !existing.controller.signal.aborted &&
+      existing.source === "terminal" &&
+      existing.promise
+    ) {
+      return existing.promise;
+    }
+    if (existing && !existing.controller.signal.aborted) {
+      existing.abortReason = "abandoned";
+      existing.controller.abort("terminal_owner");
+    }
+    return abandonedBeforeStart(sessionId, trigger);
+  }
   if (
     existing &&
     !existing.controller.signal.aborted &&
     existing.promise
   ) {
-    return existing.promise;
+    if (
+      existing.source === source &&
+      (source === "terminal" ||
+        existing.reconciliationToken === reconciliationToken)
+    ) {
+      return existing.promise;
+    }
+    if (source === "opening_boundary" && existing.source === "terminal") {
+      return existing.promise;
+    }
+    existing.abortReason = "abandoned";
+    existing.controller.abort("superseded");
+  }
+
+  if (source === "opening_boundary") {
+    const currentOwner = useGameStore.getState().openingScoreDelta;
+    if (
+      currentOwner?.sessionId !== sessionId ||
+      currentOwner.source !== source ||
+      currentOwner.reconciliationToken !== reconciliationToken
+    ) {
+      return abandonedBeforeStart(sessionId, trigger);
+    }
   }
 
   // Eviction is asynchronous: abort now, but let the evicted loop's continuation
@@ -138,6 +226,8 @@ export function pollFreshOpeningDelta(
     attemptCount: 0,
     requestErrorCount: 0,
     visibilityAtStart: getOpeningDeltaVisibility(),
+    source,
+    reconciliationToken,
   };
   poll.promise = runDeltaPollLoop(poll);
   runningLoops.set(sessionId, poll);
@@ -191,7 +281,13 @@ async function runDeltaPollLoop(
         hasRenderableChange = hasRenderableBadge(items);
         useGameStore
           .getState()
-          .applyPolledOpeningDelta(poll.sessionId, items, pollToken);
+          .applyPolledOpeningDelta(
+            poll.sessionId,
+            items,
+            pollToken,
+            poll.source,
+            poll.reconciliationToken,
+          );
         break;
       }
     }
@@ -224,7 +320,12 @@ function finalizePoll(
   if (outcome === "attempts_exhausted" || outcome === "capacity_evicted") {
     useGameStore
       .getState()
-      .markOpeningDeltaUnavailable(poll.sessionId, pollToken);
+      .markOpeningDeltaUnavailable(
+        poll.sessionId,
+        pollToken,
+        poll.source,
+        poll.reconciliationToken,
+      );
   }
 
   const visibilityAtEnd = getOpeningDeltaVisibility();
@@ -274,6 +375,9 @@ async function requestDeltaWithTimeout(
   try {
     return await getOpeningScoreDelta(poll.sessionId, {
       signal: anySignal([poll.controller.signal, timeout.signal]),
+      ...(poll.source === "opening_boundary"
+        ? { boundaryToken: poll.reconciliationToken }
+        : {}),
     });
   } finally {
     clearTimeout(timeoutId);
@@ -307,6 +411,25 @@ export function abortOpeningDeltaPolls(): void {
     poll.abortReason = "abandoned";
     poll.controller.abort("abandoned");
   }
+}
+
+/** Cancel only a provisional boundary loop; terminal reconciliation survives. */
+export function abortOpeningBoundaryDeltaPoll(
+  sessionId: string,
+  reconciliationToken?: string,
+): void {
+  const poll = runningLoops.get(sessionId);
+  if (
+    !poll ||
+    poll.controller.signal.aborted ||
+    poll.source !== "opening_boundary" ||
+    (reconciliationToken !== undefined &&
+      poll.reconciliationToken !== reconciliationToken)
+  ) {
+    return;
+  }
+  poll.abortReason = "abandoned";
+  poll.controller.abort("abandoned");
 }
 
 /** Test seam: production-equivalent abandonment between cases. */

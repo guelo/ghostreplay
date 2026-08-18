@@ -19,13 +19,14 @@ import app.game_phase as game_phase
 import app.opening_evidence as opening_evidence
 from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import normalize_fen
-from app.models import AnalysisCache, PositionAnalysisRow
+from app.models import AnalysisCache, PositionAnalysisRow, SessionMove
 from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
     EdgeEvidence,
     EvidenceOverlay,
     observed_off_book_fens,
     overlay_evidence,
+    overlay_evidence_with_active_prefix,
     raw_evidence_inputs_digest,
     reset_session_evidence_cache,
     session_evidence_cache_eviction_count,
@@ -1637,6 +1638,131 @@ class TestReviews:
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         assert ov.nodes == {}
+
+    def test_active_prefix_admits_historical_off_book_target_and_review(
+        self, db_session, branching_graph
+    ):
+        """Live and terminal collection order agree at prefix-created nodes."""
+
+        _insert_user(db_session)
+        historical_sid = _insert_session(db_session)
+        active_sid = _insert_session(
+            db_session,
+            status="active",
+            ended_at=None,
+        )
+        raw_d3 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3")
+        raw_d3_nc6 = _raw_fen_after_moves(
+            "e2e4",
+            "e7e5",
+            "d2d3",
+            "b8c6",
+        )
+        raw_d3_nc6_nf3 = _raw_fen_after_moves(
+            "e2e4",
+            "e7e5",
+            "d2d3",
+            "b8c6",
+            "g1f3",
+        )
+        _insert_move(
+            db_session,
+            active_sid,
+            1,
+            "white",
+            "e4",
+            RAW_ROOT,
+            RAW_E4,
+            eval_delta=20,
+        )
+        _insert_move(
+            db_session,
+            active_sid,
+            1,
+            "black",
+            "e5",
+            RAW_E4,
+            RAW_E4E5,
+        )
+        _insert_move(
+            db_session,
+            active_sid,
+            2,
+            "white",
+            "d3",
+            RAW_E4E5,
+            raw_d3,
+            eval_delta=20,
+        )
+        _insert_move(
+            db_session,
+            active_sid,
+            2,
+            "black",
+            "Nc6",
+            raw_d3,
+            raw_d3_nc6,
+        )
+        _insert_move(
+            db_session,
+            active_sid,
+            3,
+            "white",
+            "Nf3",
+            raw_d3_nc6,
+            raw_d3_nc6_nf3,
+            eval_delta=20,
+        )
+        position_id = _insert_position(
+            db_session,
+            1,
+            raw_d3_nc6,
+            "active-prefix-off-book",
+            "white",
+        )
+        blunder_id = _insert_blunder(
+            db_session,
+            1,
+            position_id,
+            source_session_id=historical_sid,
+        )
+        _insert_review(
+            db_session,
+            blunder_id,
+            historical_sid,
+            passed=True,
+        )
+        rows = [
+            row
+            for row in db_session.query(SessionMove)
+            .order_by(SessionMove.id.asc())
+            .all()
+            if str(row.session_id) == active_sid
+        ]
+        assert game_phase.prove_complete_standard_line(rows, 5).verdict.value == (
+            "passed"
+        )
+        assert [row.eval_delta for row in rows if row.color == "white"] == [
+            20,
+            20,
+            20,
+        ]
+
+        overlay = overlay_evidence_with_active_prefix(
+            db_session,
+            1,
+            "white",
+            branching_graph,
+            rows,
+            through_ply=5,
+            session_ts=datetime(2026, 1, 11, tzinfo=timezone.utc),
+        )
+
+        assert overlay is not None
+        node = overlay.nodes[normalize_fen(raw_d3_nc6)]
+        assert node.is_ghost_target is True
+        assert node.review_attempts == 1
+        assert node.review_passes == 1
 
 
 # ---------------------------------------------------------------------------

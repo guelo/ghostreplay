@@ -12,6 +12,7 @@ import {
   uploadSessionMoves,
   truncateSessionMoves,
   proveOpeningBoundary,
+  getOpeningScoreDelta,
   recordBlunder,
   recordManualBlunder,
   fetchBlunders,
@@ -625,6 +626,23 @@ describe('proveOpeningBoundary', () => {
         body: JSON.stringify(body),
         signal: controller.signal,
       }),
+    )
+  })
+})
+
+describe('getOpeningScoreDelta', () => {
+  it('binds a live-boundary read to its opaque token', async () => {
+    mockResponse({ opening_score_changes: null, is_fresh: false })
+
+    await getOpeningScoreDelta('sess-1', {
+      boundaryToken: 'a'.repeat(64),
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `/api/openings/score-delta/sess-1?boundary_token=${'a'.repeat(64)}`,
+      ),
+      expect.objectContaining({ method: 'GET' }),
     )
   })
 })

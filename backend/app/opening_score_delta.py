@@ -1,4 +1,4 @@
-"""End-of-session opening-score deltas (g-xanz).
+"""Freshness-bound terminal and live-boundary opening-score deltas.
 
 A game or drill that ends reports how the *played* openings' scores changed,
 broadest -> deepest. The "before" side is the per-session baseline captured
@@ -19,16 +19,18 @@ proofs: the batch equals current relevant state, and current relevant state stil
 equals the session's start state. This recovers cold/stale starts without using a
 wall-clock ordering claim and keeps post-start evidence fail-closed.
 
-The terminal and poll helpers are best-effort and never raise: the delta is
-supplementary to the end-of-session response (rating change, drill contract), so
-a failure degrades to "no delta shown" rather than breaking the endpoint.
+The terminal and live-boundary helpers are best-effort and never raise. A live
+failure remains pending until terminal fallback; a terminal failure degrades to
+"no delta shown" rather than breaking the rating or drill contract.
 """
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -43,6 +45,11 @@ from sqlalchemy import case, func, literal, select, update
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.game_phase import (
+    OPENING_PHASE_PROTOCOL_VERSION,
+    divide,
+    prove_complete_standard_line,
+)
 from app.models import (
     EvidenceEpoch,
     GameSession,
@@ -64,8 +71,12 @@ from app.opening_cache import (
     opening_score_inputs_fingerprint,
 )
 from app.opening_evidence import (
+    EvidenceOverlay,
+    OverlaySharedScope,
     ReplayCacheStats,
+    SharedScopeSnapshot,
     overlay_evidence,
+    overlay_evidence_with_active_prefix,
     replay_cache_telemetry,
     session_is_evidence_eligible,
     shared_scope_digest,
@@ -81,10 +92,36 @@ from app.opening_rootcalc import (
 )
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.opening_transposition_artifact import load_strict_densified_edges
+from app.session_contracts import ply_after_expr
 
 logger = logging.getLogger(__name__)
 
 OPENING_BASELINE_SCHEMA_VERSION = 2
+OPENING_BOUNDARY_PUBLICATION_ENV = "OPENING_BOUNDARY_PUBLICATION_ENABLED"
+
+
+def _read_opening_boundary_publication_switch() -> bool:
+    """Read the emergency switch once at process import; invalid fails closed."""
+
+    raw = os.getenv(OPENING_BOUNDARY_PUBLICATION_ENV)
+    if raw is None:
+        return False
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.error(
+        "%s=%r is invalid; opening-boundary publication is disabled",
+        OPENING_BOUNDARY_PUBLICATION_ENV,
+        raw,
+    )
+    return False
+
+
+OPENING_BOUNDARY_PUBLICATION_ENABLED = (
+    _read_opening_boundary_publication_switch()
+)
 
 
 class BaselineSnapshotSource(str, Enum):
@@ -296,12 +333,370 @@ class OpeningScoreDeltaItem(BaseModel):
 
 SCOPED_DELTA_PUBLICATION_CAPACITY = 128
 SCOPED_DELTA_GENERATION_CAPACITY = 256
+SCOPED_DELTA_SOURCE_TERMINAL = "terminal"
+SCOPED_DELTA_SOURCE_OPENING_BOUNDARY = "opening_boundary"
+BOUNDARY_DELTA_RECOVERY_COOLDOWN_SECONDS = 10.0
+
+
+@dataclass(frozen=True, slots=True)
+class ActivePrefixSnapshot:
+    rows: tuple[SessionMove, ...]
+    prefix_digest: str
+    reconciliation_token: str
+
+
+def _drop_cached_active_prefix_token(session_id) -> None:
+    with _scoped_delta_lock:
+        _active_prefix_tokens_by_session.pop(str(session_id), None)
+
+
+def _ordered_active_prefix_rows(
+    db: Session,
+    session_id,
+    through_ply: int,
+) -> list[SessionMove]:
+    color_order = case((SessionMove.color == "white", 0), else_=1)
+    ply = ply_after_expr(SessionMove.move_number, SessionMove.color)
+    return (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session_id, ply <= through_ply)
+        .order_by(
+            SessionMove.move_number.asc(),
+            color_order.asc(),
+            SessionMove.id.asc(),
+        )
+        .populate_existing()
+        .all()
+    )
+
+
+def _active_prefix_digest(
+    session: GameSession,
+    rows: list[SessionMove],
+) -> str:
+    """Hash every field consumed while scoring the active prefix."""
+
+    payload = {
+        "started_at": session.started_at.isoformat(),
+        "rows": [
+            [
+                row.move_number,
+                row.color,
+                row.fen_before,
+                row.fen_after,
+                row.move_san,
+                row.eval_delta,
+                row.eval_cp,
+                row.best_move_eval_cp,
+            ]
+            for row in rows
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def active_prefix_snapshot(
+    db: Session,
+    session: GameSession,
+) -> ActivePrefixSnapshot | None:
+    """Return the current exact active-prefix proof and opaque client token."""
+
+    marker = session.opening_middle_ply
+    if (
+        session.status != "active"
+        or session.opening_phase_protocol_version
+        != OPENING_PHASE_PROTOCOL_VERSION
+        or session_is_evidence_eligible(session)
+        or marker is None
+        or marker < 1
+        or session.opening_middle_candidate_ply != marker
+        or session.opening_score_baseline is None
+        or session.opening_phase_exhausted
+    ):
+        _drop_cached_active_prefix_token(session.id)
+        return None
+    rows = _ordered_active_prefix_rows(db, session.id, marker)
+    prefix_digest = _active_prefix_digest(session, rows)
+    baseline_digest = hashlib.sha256(
+        session.opening_score_baseline.encode("utf-8")
+    ).hexdigest()
+    token_payload = "|".join(
+        (
+            str(session.id),
+            str(session.move_line_revision),
+            str(marker),
+            prefix_digest,
+            baseline_digest,
+        )
+    )
+    reconciliation_token = hashlib.sha256(
+        token_payload.encode("utf-8")
+    ).hexdigest()
+
+    # The row digest is cheaper than reparsing SAN and rerunning the divider.
+    # Ordinary post-boundary uploads still need to echo the opaque token, but a
+    # move beyond the marker leaves this digest unchanged and reuses the exact
+    # proof. Any scorer-consumed prefix edit changes the token and must re-prove.
+    with _scoped_delta_lock:
+        cached_proof = _active_prefix_proof_cache.get(reconciliation_token)
+        if cached_proof is not None:
+            _active_prefix_proof_cache.move_to_end(reconciliation_token)
+    if cached_proof is None:
+        proof = prove_complete_standard_line(rows, marker)
+        cached_proof = proof.verdict.value == "passed"
+        if cached_proof:
+            boards = [*proof.premove_boards]
+            if proof.final_board is not None:
+                boards.append(proof.final_board)
+            cached_proof = divide(boards).middle == marker
+        with _scoped_delta_lock:
+            _active_prefix_proof_cache[reconciliation_token] = cached_proof
+            _active_prefix_proof_cache.move_to_end(reconciliation_token)
+            while (
+                len(_active_prefix_proof_cache)
+                > SCOPED_DELTA_GENERATION_CAPACITY
+            ):
+                _active_prefix_proof_cache.popitem(last=False)
+    if not cached_proof:
+        _drop_cached_active_prefix_token(session.id)
+        return None
+    cache_identity = (
+        session.move_line_revision,
+        marker,
+        baseline_digest,
+    )
+    with _scoped_delta_lock:
+        session_key = str(session.id)
+        _active_prefix_tokens_by_session[session_key] = (
+            cache_identity,
+            reconciliation_token,
+        )
+        _active_prefix_tokens_by_session.move_to_end(session_key)
+        while (
+            len(_active_prefix_tokens_by_session)
+            > SCOPED_DELTA_GENERATION_CAPACITY
+        ):
+            _active_prefix_tokens_by_session.popitem(last=False)
+    return ActivePrefixSnapshot(
+        rows=tuple(rows),
+        prefix_digest=prefix_digest,
+        reconciliation_token=reconciliation_token,
+    )
+
+
+def opening_boundary_reconciliation_token(
+    db: Session,
+    session: GameSession,
+    *,
+    allow_cached: bool = False,
+) -> str | None:
+    marker = session.opening_middle_ply
+    if allow_cached and (
+        session.status == "active"
+        and session.opening_phase_protocol_version
+        == OPENING_PHASE_PROTOCOL_VERSION
+        and not session_is_evidence_eligible(session)
+        and marker is not None
+        and marker >= 1
+        and session.opening_middle_candidate_ply == marker
+        and session.opening_score_baseline is not None
+        and not session.opening_phase_exhausted
+    ):
+        identity = (
+            session.move_line_revision,
+            marker,
+            hashlib.sha256(
+                session.opening_score_baseline.encode("utf-8")
+            ).hexdigest(),
+        )
+        with _scoped_delta_lock:
+            session_key = str(session.id)
+            cached = _active_prefix_tokens_by_session.get(session_key)
+            if cached is not None and cached[0] == identity:
+                _active_prefix_tokens_by_session.move_to_end(session_key)
+                return cached[1]
+    snapshot = active_prefix_snapshot(db, session)
+    return snapshot.reconciliation_token if snapshot is not None else None
+
+
+def enqueue_opening_boundary_delta(
+    db: Session,
+    session: GameSession,
+    *,
+    force_reenqueue: bool = False,
+    allow_cached_token: bool = False,
+) -> str | None:
+    """Best-effort enqueue of one currently valid durable active marker."""
+
+    token = opening_boundary_reconciliation_token(
+        db,
+        session,
+        allow_cached=allow_cached_token,
+    )
+    if token is None:
+        return None
+    if not force_reenqueue:
+        with _scoped_delta_lock:
+            existing = _scoped_delta_requests.get(str(session.id))
+            if (
+                existing is not None
+                and existing.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY
+                and existing.reconciliation_token == token
+            ):
+                # Ordinary post-boundary uploads echo the same token but must not
+                # recompute the unchanged prefix. Poll misses and explicit proof
+                # retries opt into recovery re-enqueue below.
+                return token
+    try:
+        from app.opening_score_delta_lane import (
+            DeltaLaneEnqueueOutcome,
+            enqueue_scoped_delta,
+            is_scoped_delta_scheduled,
+        )
+
+        if force_reenqueue:
+            if is_scoped_delta_scheduled(
+                session.user_id,
+                session.player_color,
+                session.id,
+                source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+                reconciliation_token=token,
+            ):
+                return token
+            now = time.monotonic()
+            recovery_key = (str(session.id), token)
+            with _scoped_delta_lock:
+                last_enqueue = _boundary_delta_enqueue_times.get(recovery_key)
+                if (
+                    last_enqueue is not None
+                    and now - last_enqueue
+                    < BOUNDARY_DELTA_RECOVERY_COOLDOWN_SECONDS
+                ):
+                    _boundary_delta_enqueue_times.move_to_end(recovery_key)
+                    return token
+
+        outcome = enqueue_scoped_delta(
+            session.user_id,
+            session.player_color,
+            session.id,
+            source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+            reconciliation_token=token,
+        )
+        if outcome in {
+            DeltaLaneEnqueueOutcome.ENQUEUED,
+            DeltaLaneEnqueueOutcome.COALESCED,
+        }:
+            recovery_key = (str(session.id), token)
+            with _scoped_delta_lock:
+                _boundary_delta_enqueue_times[recovery_key] = time.monotonic()
+                _boundary_delta_enqueue_times.move_to_end(recovery_key)
+                while (
+                    len(_boundary_delta_enqueue_times)
+                    > SCOPED_DELTA_GENERATION_CAPACITY
+                ):
+                    _boundary_delta_enqueue_times.popitem(last=False)
+    except Exception:
+        logger.warning(
+            "opening boundary delta enqueue failed session_id=%s",
+            session.id,
+            exc_info=True,
+        )
+        # The durable marker/token remains valid. Returning it lets the response
+        # expose recovery ownership; the first poll can re-enqueue the same work.
+        return token
+    return token
+
+
+def refresh_opening_boundary_publication_state(
+    db: Session,
+    session: GameSession,
+    *,
+    now: datetime | None = None,
+    force_database_check: bool = False,
+) -> bool:
+    """Derive ready/marker state from locked database columns, never stale ORM.
+
+    Returns whether this call created the durable publication marker.  The
+    caller owns commit and must enqueue scoped work only after that commit.
+    """
+
+    # Request handlers hold a fresh session-row lock. Before a candidate exists,
+    # their ordinary uploads must preserve the one-lock/no-extra-read hot path.
+    # Baseline workers opt into the database check because their ORM identity may
+    # predate a concurrently committed candidate.
+    if not force_database_check and (
+        session.status != "active"
+        or session.opening_phase_protocol_version
+        != OPENING_PHASE_PROTOCOL_VERSION
+        or session.opening_middle_candidate_ply is None
+    ):
+        return False
+
+    ready_at = now or datetime.now(timezone.utc)
+    db.execute(
+        update(GameSession)
+        .where(
+            GameSession.id == session.id,
+            GameSession.status == "active",
+            GameSession.opening_phase_protocol_version
+            == OPENING_PHASE_PROTOCOL_VERSION,
+            GameSession.opening_score_baseline.is_not(None),
+            GameSession.opening_middle_candidate_ply.is_not(None),
+            GameSession.opening_middle_ready_at.is_(None),
+            GameSession.opening_phase_exhausted.is_(False),
+        )
+        .values(opening_middle_ready_at=ready_at)
+        .execution_options(synchronize_session=False)
+    )
+    marker_created = False
+    if OPENING_BOUNDARY_PUBLICATION_ENABLED:
+        marker_created = bool(
+            db.execute(
+                update(GameSession)
+                .where(
+                    GameSession.id == session.id,
+                    GameSession.status == "active",
+                    GameSession.opening_phase_protocol_version
+                    == OPENING_PHASE_PROTOCOL_VERSION,
+                    GameSession.opening_score_baseline.is_not(None),
+                    GameSession.opening_middle_candidate_ply.is_not(None),
+                    GameSession.opening_middle_ready_at.is_not(None),
+                    GameSession.opening_middle_ply.is_(None),
+                    GameSession.opening_phase_exhausted.is_(False),
+                )
+                .values(
+                    opening_middle_ply=GameSession.opening_middle_candidate_ply
+                )
+                .execution_options(synchronize_session=False)
+            ).rowcount
+        )
+    db.refresh(
+        session,
+        attribute_names=[
+            "status",
+            "move_line_revision",
+            "opening_phase_protocol_version",
+            "opening_score_baseline",
+            "opening_middle_candidate_ply",
+            "opening_middle_ready_at",
+            "opening_middle_ply",
+            "opening_phase_exhausted",
+        ],
+    )
+    return marker_created
 
 
 @dataclass(frozen=True, slots=True)
 class ScopedDeltaRequest:
     session_id: uuid.UUID
     generation: int
+    source: str = "terminal"
+    reconciliation_token: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,11 +710,26 @@ class _ScopedDeltaCandidate:
     drill_state: str | None
     drill_terminal_reason: str | None
     played_root_keys: tuple[str, ...]
+    source: str
+    line_revision: int | None = None
+    opening_middle_ply: int | None = None
+    prefix_digest: str | None = None
+    reconciliation_token: str | None = None
+    active_rows: tuple[SessionMove, ...] = ()
+    session_ts: datetime | str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedScopedGroup:
+    overlay: EvidenceOverlay
+    candidates: tuple[_ScopedDeltaCandidate, ...]
+    scope: OverlaySharedScope
+    shared_snapshot: SharedScopeSnapshot
 
 
 @dataclass(frozen=True, slots=True)
 class ScopedDeltaPublication:
-    """Process-local, freshness-bound score result for one terminal session."""
+    """Process-local, freshness-bound score result for one session."""
 
     session_id: str
     generation: int
@@ -330,6 +740,11 @@ class ScopedDeltaPublication:
     drill_state: str | None
     drill_terminal_reason: str | None
     played_root_keys: tuple[str, ...]
+    source: str
+    line_revision: int | None
+    opening_middle_ply: int | None
+    prefix_digest: str | None
+    reconciliation_token: str | None
     scored_roots: tuple[tuple[str, float], ...]
     registry_fingerprint: str
     evidence_seq: int
@@ -347,25 +762,55 @@ class ScopedDeltaPublication:
 _scoped_delta_lock = threading.Lock()
 _scoped_delta_publications: OrderedDict[str, ScopedDeltaPublication] = OrderedDict()
 _scoped_delta_generations: OrderedDict[str, int] = OrderedDict()
+_scoped_delta_requests: OrderedDict[str, ScopedDeltaRequest] = OrderedDict()
+_active_prefix_proof_cache: OrderedDict[str, bool] = OrderedDict()
+_active_prefix_tokens_by_session: OrderedDict[
+    str,
+    tuple[tuple[int, int, str], str],
+] = OrderedDict()
+_boundary_delta_enqueue_times: OrderedDict[tuple[str, str], float] = OrderedDict()
 _scoped_delta_generation_counter = itertools.count(1)
 
 
-def reserve_scoped_delta_generation(session_id) -> ScopedDeltaRequest:
-    """Assign the next monotonic generation before terminal work is enqueued."""
+def reserve_scoped_delta_generation(
+    session_id,
+    *,
+    source: str = "terminal",
+    reconciliation_token: str | None = None,
+) -> ScopedDeltaRequest:
+    """Assign the next monotonic generation before scoped work is enqueued."""
     parsed = (
         session_id
         if isinstance(session_id, uuid.UUID)
         else uuid.UUID(str(session_id))
     )
     key = str(parsed)
-    generation = next(_scoped_delta_generation_counter)
     with _scoped_delta_lock:
+        existing = _scoped_delta_requests.get(key)
+        if source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY and existing is not None:
+            if existing.source == SCOPED_DELTA_SOURCE_TERMINAL or (
+                existing.source == source
+                and existing.reconciliation_token == reconciliation_token
+            ):
+                _scoped_delta_generations.move_to_end(key)
+                _scoped_delta_requests.move_to_end(key)
+                return existing
+        generation = next(_scoped_delta_generation_counter)
+        request = ScopedDeltaRequest(
+            session_id=parsed,
+            generation=generation,
+            source=source,
+            reconciliation_token=reconciliation_token,
+        )
         _scoped_delta_generations[key] = generation
         _scoped_delta_generations.move_to_end(key)
+        _scoped_delta_requests[key] = request
+        _scoped_delta_requests.move_to_end(key)
         while len(_scoped_delta_generations) > SCOPED_DELTA_GENERATION_CAPACITY:
             evicted_key, _ = _scoped_delta_generations.popitem(last=False)
+            _scoped_delta_requests.pop(evicted_key, None)
             _scoped_delta_publications.pop(evicted_key, None)
-    return ScopedDeltaRequest(session_id=parsed, generation=generation)
+    return request
 
 
 def _publish_scoped_delta(publication: ScopedDeltaPublication) -> bool:
@@ -419,6 +864,10 @@ def reset_scoped_delta_cache() -> None:
     with _scoped_delta_lock:
         _scoped_delta_publications.clear()
         _scoped_delta_generations.clear()
+        _scoped_delta_requests.clear()
+        _active_prefix_proof_cache.clear()
+        _active_prefix_tokens_by_session.clear()
+        _boundary_delta_enqueue_times.clear()
 
 
 def _capture_baseline_json(
@@ -660,35 +1109,13 @@ def _conditional_store_baseline(
     )
     stored = db.execute(stmt).rowcount == 1
     if stored:
-        # The worker's ORM row was loaded before its potentially long baseline
-        # proof. A boundary request can commit an exact candidate during that
-        # computation, so readiness must be derived from current database columns,
-        # never the stale Python object. The baseline UPDATE above owns the row lock;
-        # this second UPDATE therefore observes either the boundary-before-worker
-        # candidate or no candidate, in which case boundary-after-worker stamps
-        # readiness itself. Both writes commit atomically.
-        ready_at = datetime.now(timezone.utc)
-        db.execute(
-            update(GameSession)
-            .where(
-                GameSession.id == session.id,
-                GameSession.status == "active",
-                GameSession.opening_score_baseline.is_not(None),
-                GameSession.opening_middle_candidate_ply.is_not(None),
-                GameSession.opening_middle_ready_at.is_(None),
-                GameSession.opening_phase_exhausted.is_(False),
-            )
-            .values(opening_middle_ready_at=ready_at)
-            .execution_options(synchronize_session=False)
-        )
-        # Preserve the helper's existing immediate-coherence contract for callers
-        # and tests without refreshing unrelated fields from a concurrent request.
-        db.refresh(
+        # The baseline UPDATE owns the row lock. Derive readiness/publication
+        # from current database columns so a candidate committed while the
+        # worker was computing cannot be hidden by this stale ORM identity.
+        refresh_opening_boundary_publication_state(
+            db,
             session,
-            attribute_names=[
-                "opening_score_baseline",
-                "opening_middle_ready_at",
-            ],
+            force_database_check=True,
         )
     return stored
 
@@ -777,6 +1204,8 @@ def run_baseline_snapshot_job(
         db.commit()
         if not persisted:
             source = BaselineSnapshotSource.RACED_EVIDENCE_OR_ALREADY_SET.value
+        elif session.opening_middle_ply is not None:
+            enqueue_opening_boundary_delta(db, session)
         return source
     except Exception:  # noqa: BLE001 - worker job must never crash the scheduler
         source = BaselineSnapshotSource.FAILED.value
@@ -863,6 +1292,7 @@ def fill_opening_baselines_for_batch(
             .all()
         )
         filled = 0
+        publishable_session_ids: list[uuid.UUID] = []
         for session in candidates:
             mismatch = _batch_start_mismatch(db, batch, session)
             if mismatch is not None:
@@ -873,7 +1303,13 @@ def fill_opening_baselines_for_batch(
                 continue
             if _conditional_store_baseline(db, session, baseline_json):
                 filled += 1
+                if session.opening_middle_ply is not None:
+                    publishable_session_ids.append(session.id)
         db.commit()
+        for session_id in publishable_session_ids:
+            session = db.get(GameSession, session_id, populate_existing=True)
+            if session is not None:
+                enqueue_opening_boundary_delta(db, session)
         return filled
     except Exception:  # noqa: BLE001 - optional scheduler side effect
         db.rollback()
@@ -920,13 +1356,12 @@ def publish_scoped_opening_score_deltas(
     *,
     on_complete: Callable[[dict[str, object]], None] | None = None,
 ) -> int:
-    """Build and publish coalesced terminal-session root scores without a batch.
+    """Build and publish terminal or active-boundary scoped root scores.
 
-    Runs on the dedicated immediate delta lane, independently of the debounced
-    whole-graph scheduler. The queued ``user_id``/``player_color`` are routing
-    hints only: every session row is reloaded and must agree. All valid sessions
-    share one overlay and one union-of-roots calculation, while each publication
-    retains its own authoritative state, played order, and request generation.
+    Terminal candidates continue sharing one historical overlay. Each active
+    candidate gets a private overlay consisting of that same durable historical
+    evidence plus exactly its proven opening prefix; it never enters the durable
+    evidence graph or replay cache.
 
     Returns the number of publications committed to the process-local cache.
     Unexpected failures propagate to the lane's best-effort retry boundary.
@@ -1006,9 +1441,23 @@ def publish_scoped_opening_score_deltas(
         if (session.user_id, session.player_color) != (user_id, player_color):
             logger.warning("scoped opening delta rejected mismatched session routing")
             continue
-        if not session_is_evidence_eligible(session):
+        active_snapshot: ActivePrefixSnapshot | None = None
+        if request.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY:
+            active_snapshot = active_prefix_snapshot(db, session)
+            if (
+                active_snapshot is None
+                or request.reconciliation_token
+                != active_snapshot.reconciliation_token
+            ):
+                continue
+            played_fens = [row.fen_after for row in active_snapshot.rows]
+        elif request.source == SCOPED_DELTA_SOURCE_TERMINAL:
+            if not session_is_evidence_eligible(session):
+                continue
+            played_fens = _session_played_fens(db, session.id)
+        else:
             continue
-        chain = tuple(played_opening_chain(_session_played_fens(db, session.id), roots))
+        chain = tuple(played_opening_chain(played_fens, roots))
         if not chain:
             continue
         sessions.append(
@@ -1022,6 +1471,31 @@ def publish_scoped_opening_score_deltas(
                 drill_state=session.drill_state,
                 drill_terminal_reason=session.drill_terminal_reason,
                 played_root_keys=tuple(root.opening_key for root in chain),
+                source=request.source,
+                line_revision=(
+                    session.move_line_revision
+                    if active_snapshot is not None
+                    else None
+                ),
+                opening_middle_ply=(
+                    session.opening_middle_ply
+                    if active_snapshot is not None
+                    else None
+                ),
+                prefix_digest=(
+                    active_snapshot.prefix_digest
+                    if active_snapshot is not None
+                    else None
+                ),
+                reconciliation_token=(
+                    active_snapshot.reconciliation_token
+                    if active_snapshot is not None
+                    else None
+                ),
+                active_rows=(
+                    active_snapshot.rows if active_snapshot is not None else ()
+                ),
+                session_ts=session.started_at,
             )
         )
     stage_ms["session_load"] = round(
@@ -1043,23 +1517,66 @@ def publish_scoped_opening_score_deltas(
     if cache_epoch is None:
         return finish("missing_epoch")
 
-    stage_started = time.perf_counter()
-    overlay = overlay_evidence(db, user_id, player_color, graph)
-    replay_cache_stats = overlay.replay_cache_stats
+    prepared: list[_PreparedScopedGroup] = []
+    terminal_candidates = tuple(
+        candidate
+        for candidate in sessions
+        if candidate.source == SCOPED_DELTA_SOURCE_TERMINAL
+    )
+    boundary_candidates = tuple(
+        candidate
+        for candidate in sessions
+        if candidate.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY
+    )
+
+    overlay_started = time.perf_counter()
+    overlay_inputs: list[tuple[EvidenceOverlay, tuple[_ScopedDeltaCandidate, ...]]] = []
+    if terminal_candidates:
+        overlay = overlay_evidence(db, user_id, player_color, graph)
+        replay_cache_stats = replay_cache_stats.merged(overlay.replay_cache_stats)
+        overlay_inputs.append((overlay, terminal_candidates))
+    for candidate in boundary_candidates:
+        overlay = overlay_evidence_with_active_prefix(
+            db,
+            user_id,
+            player_color,
+            graph,
+            list(candidate.active_rows),
+            through_ply=candidate.opening_middle_ply or 0,
+            session_ts=candidate.session_ts,
+        )
+        if overlay is None:
+            continue
+        replay_cache_stats = replay_cache_stats.merged(overlay.replay_cache_stats)
+        overlay_inputs.append((overlay, (candidate,)))
     stage_ms["overlay"] = round(
-        (time.perf_counter() - stage_started) * 1000.0, 3
+        (time.perf_counter() - overlay_started) * 1000.0, 3
     )
-    scope = overlay.shared_scope
-    stage_started = time.perf_counter()
-    shared_snapshot = shared_scope_snapshot(
-        db, scope.raw_fens, scope.norm_fens
-    )
+    if not overlay_inputs:
+        return finish("no_publishable_overlays")
+
+    digest_started = time.perf_counter()
+    for overlay, candidates in overlay_inputs:
+        scope = overlay.shared_scope
+        shared_snapshot = shared_scope_snapshot(
+            db, scope.raw_fens, scope.norm_fens
+        )
+        # Load-bearing row-identity equality: the move rows whose viewer
+        # associations influenced this overlay are exactly those hashed here.
+        if shared_snapshot.move_row_ids != scope.move_row_ids:
+            continue
+        prepared.append(
+            _PreparedScopedGroup(
+                overlay=overlay,
+                candidates=candidates,
+                scope=scope,
+                shared_snapshot=shared_snapshot,
+            )
+        )
     stage_ms["digest"] = round(
-        (time.perf_counter() - stage_started) * 1000.0, 3
+        (time.perf_counter() - digest_started) * 1000.0, 3
     )
-    # Load-bearing row-identity equality: the move rows whose viewer associations
-    # influenced the overlay must be exactly those hashed into its shared proof.
-    if shared_snapshot.move_row_ids != scope.move_row_ids:
+    if not prepared:
         return finish("scope_identity_drift")
 
     # A changed counter means the reads above may span incompatible snapshots.
@@ -1074,53 +1591,67 @@ def publish_scoped_opening_score_deltas(
     # below is immutable process memory, and the stamp remains the pre-read one.
     db.rollback()
     computed_at = datetime.now(timezone.utc)
-    requested_keys = [
-        opening_key
-        for candidate in sessions
-        for opening_key in candidate.played_root_keys
-    ]
     stage_started = time.perf_counter()
-    scores = compute_scoped_root_scores(
-        player_color,
-        graph,
-        overlay,
-        roots,
-        requested_keys,
-        RootCalcConfig(),
-        computed_at,
-        routing_snapshot=routing_snapshot,
-    )
+    scored_groups = []
+    for group in prepared:
+        requested_keys = [
+            opening_key
+            for candidate in group.candidates
+            for opening_key in candidate.played_root_keys
+        ]
+        scores = compute_scoped_root_scores(
+            player_color,
+            graph,
+            group.overlay,
+            roots,
+            requested_keys,
+            RootCalcConfig(),
+            computed_at,
+            routing_snapshot=routing_snapshot,
+        )
+        scored_groups.append((group, scores))
     stage_ms["score"] = round(
         (time.perf_counter() - stage_started) * 1000.0, 3
     )
 
     stage_started = time.perf_counter()
     published = 0
-    for candidate in sessions:
-        publication = ScopedDeltaPublication(
-            session_id=candidate.session_id,
-            generation=candidate.request.generation,
-            user_id=candidate.user_id,
-            player_color=candidate.player_color,
-            session_mode=candidate.session_mode,
-            status=candidate.status,
-            drill_state=candidate.drill_state,
-            drill_terminal_reason=candidate.drill_terminal_reason,
-            played_root_keys=candidate.played_root_keys,
-            scored_roots=tuple(
-                (opening_key, scores[opening_key].opening_score)
-                for opening_key in candidate.played_root_keys
-                if opening_key in scores
-            ),
-            registry_fingerprint=registry_fingerprint,
-            evidence_seq=evidence_seq,
-            cache_epoch=cache_epoch,
-            shared_raw_fens=scope.raw_fens,
-            shared_norm_fens=scope.norm_fens,
-            scoped_shared_digest=shared_snapshot.digest,
-            computed_at=computed_at,
-        )
-        published += int(_publish_scoped_delta(publication))
+    for group, scores in scored_groups:
+        for candidate in group.candidates:
+            if (
+                candidate.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY
+                and any(key not in scores for key in candidate.played_root_keys)
+            ):
+                continue
+            publication = ScopedDeltaPublication(
+                session_id=candidate.session_id,
+                generation=candidate.request.generation,
+                user_id=candidate.user_id,
+                player_color=candidate.player_color,
+                session_mode=candidate.session_mode,
+                status=candidate.status,
+                drill_state=candidate.drill_state,
+                drill_terminal_reason=candidate.drill_terminal_reason,
+                played_root_keys=candidate.played_root_keys,
+                source=candidate.source,
+                line_revision=candidate.line_revision,
+                opening_middle_ply=candidate.opening_middle_ply,
+                prefix_digest=candidate.prefix_digest,
+                reconciliation_token=candidate.reconciliation_token,
+                scored_roots=tuple(
+                    (opening_key, scores[opening_key].opening_score)
+                    for opening_key in candidate.played_root_keys
+                    if opening_key in scores
+                ),
+                registry_fingerprint=registry_fingerprint,
+                evidence_seq=evidence_seq,
+                cache_epoch=cache_epoch,
+                shared_raw_fens=group.scope.raw_fens,
+                shared_norm_fens=group.scope.norm_fens,
+                scoped_shared_digest=group.shared_snapshot.digest,
+                computed_at=computed_at,
+            )
+            published += int(_publish_scoped_delta(publication))
     stage_ms["publish"] = round(
         (time.perf_counter() - stage_started) * 1000.0, 3
     )
@@ -1131,21 +1662,43 @@ def _validated_scoped_score_map(
     db: Session,
     session: GameSession,
     played_root_keys: tuple[str, ...],
+    *,
+    expected_source: str,
+    expected_reconciliation_token: str | None = None,
 ) -> dict[str, float] | None:
     """Return a scoped score map only while every binding/proof still holds."""
     publication = _current_scoped_delta(session.id)
     if publication is None:
         return None
     if (
-        publication.user_id != session.user_id
+        publication.source != expected_source
+        or publication.reconciliation_token
+        != expected_reconciliation_token
+        or publication.user_id != session.user_id
         or publication.player_color != session.player_color
         or publication.session_mode != session.session_mode
         or publication.status != session.status
         or publication.drill_state != session.drill_state
         or publication.drill_terminal_reason != session.drill_terminal_reason
         or publication.played_root_keys != played_root_keys
-        or not session_is_evidence_eligible(session)
     ):
+        return None
+    if publication.source == SCOPED_DELTA_SOURCE_TERMINAL:
+        if not session_is_evidence_eligible(session):
+            return None
+    elif publication.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY:
+        snapshot = active_prefix_snapshot(db, session)
+        if (
+            snapshot is None
+            or publication.status != "active"
+            or publication.line_revision != session.move_line_revision
+            or publication.opening_middle_ply != session.opening_middle_ply
+            or publication.prefix_digest != snapshot.prefix_digest
+            or publication.reconciliation_token
+            != snapshot.reconciliation_token
+        ):
+            return None
+    else:
         return None
 
     graph = get_opening_graph()
@@ -1374,7 +1927,10 @@ def compute_opening_score_delta(
 
 
 def read_opening_score_delta(
-    db: Session, session: GameSession
+    db: Session,
+    session: GameSession,
+    *,
+    reconciliation_token: str | None = None,
 ) -> tuple[list[OpeningScoreDeltaItem], bool]:
     """Non-blocking poll reader for GET /api/openings/score-delta/{session_id}.
 
@@ -1387,19 +1943,49 @@ def read_opening_score_delta(
     Scheduler pending/in-flight state is deliberately absent from this decision:
     the evidence proof decides freshness, so a scoped result can become visible
     while the independent whole-graph worker remains blocked. The reader never
-    enqueues or waits. Best-effort: any failure degrades to ``([], False)``.
+    waits; an active scoped miss only re-enqueues the same token best-effort.
+    Any failure degrades to ``([], False)``.
     """
     try:
         authoritative = db.get(GameSession, session.id, populate_existing=True)
         if authoritative is None:
             return [], False
-        chain = played_opening_chain(
-            _session_played_fens(db, authoritative.id),
-            get_opening_roots(),
-        )
+        active_snapshot: ActivePrefixSnapshot | None = None
+        if reconciliation_token is not None:
+            active_snapshot = active_prefix_snapshot(db, authoritative)
+            if (
+                active_snapshot is None
+                or active_snapshot.reconciliation_token
+                != reconciliation_token
+            ):
+                return [], False
+            played_fens = [row.fen_after for row in active_snapshot.rows]
+        else:
+            played_fens = _session_played_fens(db, authoritative.id)
+        chain = played_opening_chain(played_fens, get_opening_roots())
         if not chain:
             return [], True
         played_root_keys = tuple(root.opening_key for root in chain)
+
+        if active_snapshot is not None:
+            scoped_scores = _validated_scoped_score_map(
+                db,
+                authoritative,
+                played_root_keys,
+                expected_source=SCOPED_DELTA_SOURCE_OPENING_BOUNDARY,
+                expected_reconciliation_token=reconciliation_token,
+            )
+            if scoped_scores is None:
+                enqueue_opening_boundary_delta(
+                    db,
+                    authoritative,
+                    force_reenqueue=True,
+                )
+                return [], False
+            items, _ = _delta_items_from_score_map(
+                authoritative, chain, scoped_scores
+            )
+            return items, True
 
         batch, rows = list_cached_opening_scores(
             db, authoritative.user_id, authoritative.player_color
@@ -1413,7 +1999,10 @@ def read_opening_score_delta(
             return items, True
 
         scoped_scores = _validated_scoped_score_map(
-            db, authoritative, played_root_keys
+            db,
+            authoritative,
+            played_root_keys,
+            expected_source=SCOPED_DELTA_SOURCE_TERMINAL,
         )
         if scoped_scores is not None:
             items, _ = _delta_items_from_score_map(

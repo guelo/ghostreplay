@@ -54,6 +54,7 @@ function renderLineage(
     scoreStatus?: OpeningScoreStatus;
     pendingScoreIndices?: ReadonlySet<number>;
     activeMoveIndex?: number | null;
+    revealIdentity?: string;
   } = {},
 ) {
   const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
@@ -68,6 +69,7 @@ function renderLineage(
         scoreStatus={handlers.scoreStatus}
         pendingScoreIndices={handlers.pendingScoreIndices}
         activeMoveIndex={handlers.activeMoveIndex}
+        revealIdentity={handlers.revealIdentity}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
       />
@@ -84,6 +86,7 @@ function renderLineage(
           scoreStatus={handlers.scoreStatus}
           pendingScoreIndices={handlers.pendingScoreIndices}
           activeMoveIndex={activeMoveIndex}
+          revealIdentity={handlers.revealIdentity}
           onSelectRoot={onSelectRoot}
           onStartDrill={onStartDrill}
         />
@@ -393,6 +396,62 @@ describe("GameOpeningLineage", () => {
             name: "Score decreased by 0.5, now 63.9",
           }),
         ).toHaveTextContent("▼ -0.5");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("updates boundary-to-terminal values in place for one reveal identity", () => {
+      vi.useFakeTimers();
+      try {
+        const lineage = [
+          makeItem({ opening_key: "k1", opening_name: "Italian Game" }),
+        ];
+        const { rerender } = renderLineage(lineage, {
+          revealIdentity: "session-1",
+          scoreChanges: [
+            makeChange({ opening_key: "k1", before: 41, after: 44 }),
+          ],
+        });
+        act(() => vi.advanceTimersByTime(750));
+
+        rerender(
+          <MemoryRouter>
+            <GameOpeningLineage
+              playerColor="white"
+              lineage={lineage}
+              startPly={1}
+              revealIdentity="session-1"
+              scoreChanges={[
+                makeChange({ opening_key: "k1", before: 41, after: 46 }),
+              ]}
+            />
+          </MemoryRouter>,
+        );
+        const sameSessionCard = screen.getByRole("button", {
+          name: /Italian Game/,
+        });
+        expect(within(sameSessionCard).getByText("46.0")).toBeInTheDocument();
+        expect(within(sameSessionCard).queryByText("41.0")).not.toBeInTheDocument();
+
+        rerender(
+          <MemoryRouter>
+            <GameOpeningLineage
+              playerColor="white"
+              lineage={lineage}
+              startPly={1}
+              revealIdentity="session-2"
+              scoreChanges={[
+                makeChange({ opening_key: "k1", before: 41, after: 46 }),
+              ]}
+            />
+          </MemoryRouter>,
+        );
+        expect(
+          within(
+            screen.getByRole("button", { name: /Italian Game/ }),
+          ).getByText("41.0"),
+        ).toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }

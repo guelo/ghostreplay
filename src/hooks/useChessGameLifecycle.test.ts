@@ -1864,6 +1864,8 @@ describe("useChessGameLifecycle", () => {
       sessionId: "session-123",
       items: OPENING_CHANGES,
       freshness: "pending",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
@@ -1908,6 +1910,8 @@ describe("useChessGameLifecycle", () => {
       sessionId: "session-123",
       items: OPENING_CHANGES,
       freshness: "pending",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
@@ -1957,6 +1961,8 @@ describe("useChessGameLifecycle", () => {
       sessionId: "drill-session-xanz",
       items: OPENING_CHANGES,
       freshness: "pending",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
     // The reconcile-poll fires for the finalizing drill session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
@@ -2009,6 +2015,8 @@ describe("useChessGameLifecycle", () => {
       sessionId: "session-123",
       items: OPENING_CHANGES,
       freshness: "pending",
+      source: "terminal",
+      reconciliationToken: expect.any(String),
     });
   });
 

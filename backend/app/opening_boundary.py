@@ -1,9 +1,9 @@
-"""Observation-only opening/middlegame boundary protocol.
+"""Opening/middlegame boundary proof protocol.
 
-The first rollout stage records whether an active session *could* publish an
-opening-score delta once its complete analyzed prefix reaches the Lichess
-middlegame boundary.  It deliberately does not expose the prefix to opening
-evidence, enqueue a recompute, poll a delta, or write ``opening_middle_ply``.
+The protocol records an exact Lichess middlegame candidate from a complete
+standard line. A separate startup-read kill switch controls whether a ready
+candidate is copied to the durable publication marker and used by the ephemeral
+active-prefix score lane.
 
 The raw FEN predicate is only a scheduling hint.  The authenticated proof route
 replays the complete standard line and is the sole writer of an exact candidate.
@@ -16,13 +16,15 @@ from enum import Enum
 from typing import Iterable, Protocol
 
 from app.fen import normalize_fen
-from app.game_phase import is_middlegame_position
+from app.game_phase import (
+    OPENING_PHASE_PROTOCOL_VERSION,
+    is_middlegame_position,
+)
 from app.models import GameSession
 from app.ply_coordinates import ply_after
 from app.posthog_client import capture
 
 
-OPENING_PHASE_PROTOCOL_VERSION = 1
 OPENING_BOUNDARY_MAX_PROBE_PLY = 80
 
 
@@ -57,7 +59,7 @@ def observe_raw_boundary_hint(
     """Stamp the explicit client protocol and a request-local raw FEN hint.
 
     Invalid FENs retain the upload endpoint's existing per-row behavior: they
-    cannot become a hint, but this observation-only path never rejects the batch.
+    cannot become a hint, but this advisory path never rejects the batch.
     Correctness does not depend on the hint being globally minimal; it only
     bounds when the browser asks the authoritative proof route to replay.
     """
@@ -96,22 +98,6 @@ def observe_raw_boundary_hint(
         or request_hint < session.opening_phase_probe_ply
     ):
         session.opening_phase_probe_ply = request_hint
-
-
-def stamp_shadow_ready(session: GameSession, *, now: datetime | None = None) -> bool:
-    """Stamp when an exact candidate and baseline first coexist while active."""
-
-    if (
-        session.status != "active"
-        or session.opening_phase_exhausted
-        or session.opening_middle_candidate_ply is None
-        or session.opening_score_baseline is None
-    ):
-        return False
-    if session.opening_middle_ready_at is None:
-        session.opening_middle_ready_at = now or datetime.now(timezone.utc)
-        return True
-    return False
 
 
 def clear_boundary_observation(session: GameSession) -> None:
@@ -194,6 +180,7 @@ def opening_boundary_shadow_properties(
         "proof_verdict": proof_verdict,
         "baseline_ready_at_transition": baseline_ready,
         "would_have_published": would_have_published,
+        "did_publish": session.opening_middle_ply is not None,
         "reason": reason,
         "line_revision_zero": session.move_line_revision == 0,
         "ready_to_terminal_lead_ms": lead_ms,

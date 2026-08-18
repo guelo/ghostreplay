@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import chess
+import pytest
 from sqlalchemy import update
 
 from app.models import GameSession
@@ -15,6 +16,10 @@ from app.opening_boundary import (
     opening_boundary_shadow_properties,
 )
 from app.opening_score_delta import _conditional_store_baseline
+from app.opening_score_delta import (
+    OPENING_BOUNDARY_PUBLICATION_ENV,
+    _read_opening_boundary_publication_switch,
+)
 
 
 BOUNDARY_SANS = [
@@ -60,6 +65,24 @@ def _line(*sans: str) -> list[dict]:
 
 def _session(db, session_id: str) -> GameSession:
     return db.get(GameSession, uuid.UUID(session_id))
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", " yes ", "on"])
+def test_opening_boundary_publication_switch_accepts_only_explicit_true_values(
+    monkeypatch, value
+):
+    monkeypatch.setenv(OPENING_BOUNDARY_PUBLICATION_ENV, value)
+    assert _read_opening_boundary_publication_switch() is True
+
+
+def test_opening_boundary_publication_switch_defaults_and_fails_closed(
+    monkeypatch, caplog
+):
+    monkeypatch.delenv(OPENING_BOUNDARY_PUBLICATION_ENV, raising=False)
+    assert _read_opening_boundary_publication_switch() is False
+    monkeypatch.setenv(OPENING_BOUNDARY_PUBLICATION_ENV, "maybe")
+    assert _read_opening_boundary_publication_switch() is False
+    assert "is invalid" in caplog.text
 
 
 def test_boundary_hint_and_exact_proof_stay_shadow_only(
@@ -131,6 +154,78 @@ def test_boundary_hint_and_exact_proof_stay_shadow_only(
     assert row.opening_middle_ready_at is not None
     assert row.opening_middle_ply is None
     assert current_evidence_seq(db_session, user_id, "white") == evidence_seq_before
+
+
+def test_enabled_boundary_publishes_marker_token_and_enqueues_after_commit(
+    client, auth_headers, create_game_session, db_session
+):
+    user_id = 8310
+    session_id = create_game_session(user_id=user_id)
+    row = _session(db_session, session_id)
+    row.opening_score_baseline = '{"schema_version":2,"scores":{}}'
+    db_session.commit()
+    headers = auth_headers(user_id=user_id)
+
+    uploaded = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": _line(*BOUNDARY_SANS),
+            "line_revision": 0,
+            "opening_phase_protocol_version": 1,
+        },
+        headers=headers,
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+    with (
+        patch(
+            "app.opening_score_delta.OPENING_BOUNDARY_PUBLICATION_ENABLED",
+            True,
+        ),
+        patch(
+            "app.api.session.enqueue_opening_boundary_delta",
+            return_value="a" * 64,
+        ) as enqueue,
+    ):
+        proven = client.post(
+            f"/api/session/{session_id}/opening-boundary",
+            json={"line_revision": 0, "probe_ply": 17},
+            headers=headers,
+        )
+
+    assert proven.status_code == 200, proven.text
+    body = proven.json()
+    assert body["opening_middle_candidate_ply"] == 17
+    assert body["opening_middle_ply"] == 17
+    assert len(body["opening_delta_token"]) == 64
+    db_session.expire_all()
+    row = _session(db_session, session_id)
+    assert row.opening_middle_ready_at is not None
+    assert row.opening_middle_ply == 17
+    enqueue.assert_called_once()
+
+    # A later-only upload may reuse the already-validated token instead of
+    # selecting and replaying the proven prefix on the request path.
+    later_line = _line(*BOUNDARY_SANS, "Kg6")
+    with patch(
+        "app.api.session.enqueue_opening_boundary_delta",
+        return_value="a" * 64,
+    ) as later_enqueue:
+        later = client.post(
+            f"/api/session/{session_id}/moves",
+            json={
+                "moves": [later_line[17]],
+                "line_revision": 0,
+                "opening_phase_protocol_version": 1,
+            },
+            headers=headers,
+        )
+    assert later.status_code == 200, later.text
+    later_enqueue.assert_called_once_with(
+        ANY,
+        ANY,
+        allow_cached_token=True,
+    )
 
 
 def test_takeback_clears_revision_observation_but_retains_protocol(
@@ -349,6 +444,39 @@ def test_baseline_linearization_reads_candidate_from_db_when_worker_row_is_stale
     assert properties["reason"] == "would_publish"
 
 
+def test_enabled_baseline_linearization_publishes_stale_orm_candidate(
+    create_game_session, db_session
+):
+    session_id = create_game_session(user_id=8311)
+    row = _session(db_session, session_id)
+    db_session.execute(
+        update(GameSession)
+        .where(GameSession.id == row.id)
+        .values(
+            opening_phase_protocol_version=1,
+            opening_phase_probe_ply=17,
+            opening_phase_probe_verdict="passed",
+            opening_middle_candidate_ply=17,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    assert row.opening_middle_candidate_ply is None
+
+    with patch(
+        "app.opening_score_delta.OPENING_BOUNDARY_PUBLICATION_ENABLED",
+        True,
+    ):
+        assert _conditional_store_baseline(
+            db_session,
+            row,
+            '{"schema_version":2,"scores":{}}',
+        ) is True
+
+    assert row.opening_middle_candidate_ply == 17
+    assert row.opening_middle_ready_at is not None
+    assert row.opening_middle_ply == 17
+
+
 def test_unknown_terminal_branch_discards_boundary_observation(
     client, auth_headers, create_game_session, db_session
 ):
@@ -420,11 +548,18 @@ def test_shadow_terminal_projection_is_closed_and_content_free():
         "proof_verdict": "passed",
         "baseline_ready_at_transition": True,
         "would_have_published": True,
+        "did_publish": False,
         "reason": "would_publish",
         "line_revision_zero": True,
         "ready_to_terminal_lead_ms": 12345,
     }
     assert not {"session_id", "user_id", "fen", "score", "grade"} & properties.keys()
+    session.opening_middle_ply = 17
+    assert opening_boundary_shadow_properties(
+        session,
+        terminal_trigger="game_end",
+        terminal_at=ready_at + timedelta(seconds=12.345),
+    )["did_publish"] is True
     assert claim_opening_boundary_shadow_terminal(
         session,
         terminal_at=ready_at + timedelta(seconds=12.345),
