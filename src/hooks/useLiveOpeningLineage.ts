@@ -1,43 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getOpeningRoots, type OpeningLineageItem } from "../utils/api";
+import type { OpeningLineageItem } from "../utils/api";
+import { loadOpeningRootIndex } from "../openings/openingRootsLoader";
 import {
-  buildRootIndex,
   deriveLiveOpeningLineage,
   mergeServerLineageState,
   type LiveOpeningRootIndex,
   type PendingScoreOccurrence,
 } from "../openings/deriveLiveLineage";
-
-/**
- * Session-lifetime cache of the opening root registry (g-a5v3).
- *
- * The registry is large, immutable for the life of the app, and needed on the
- * very first move of every game — so it is fetched once and shared by every
- * mount rather than re-fetched per game. The in-flight PROMISE is cached (not
- * just the result) so concurrent mounts share a single request.
- *
- * A failure is not cached: the next mount retries. A failed registry only means
- * the live cards fall back to the server lineage (the pre-g-a5v3 behavior), so
- * it must never become permanently stuck.
- */
-let rootIndexPromise: Promise<LiveOpeningRootIndex> | null = null;
-
-function loadRootIndex(): Promise<LiveOpeningRootIndex> {
-  if (!rootIndexPromise) {
-    rootIndexPromise = getOpeningRoots()
-      .then(buildRootIndex)
-      .catch((err) => {
-        rootIndexPromise = null; // allow a retry
-        throw err;
-      });
-  }
-  return rootIndexPromise;
-}
-
-/** Test seam: drop the cached registry so suites start from a clean slate. */
-export function __resetOpeningRootIndexCache() {
-  rootIndexPromise = null;
-}
 
 const EMPTY_INDEX: LiveOpeningRootIndex = new Map();
 const EMPTY_PENDING_SCORE_INDICES: ReadonlySet<number> = new Set();
@@ -197,7 +166,7 @@ export function useLiveOpeningLineage(
 
   useEffect(() => {
     let cancelled = false;
-    loadRootIndex()
+    loadOpeningRootIndex()
       .then((index) => {
         if (!cancelled) setRoots(index);
       })

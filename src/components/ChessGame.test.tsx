@@ -136,7 +136,7 @@ import type {
   LineSyncDiagnostic,
 } from "../services/GameAnalysisCoordinator";
 import { gradeDrillMove } from "../workers/analysisUtils";
-import { __resetOpeningRootIndexCache } from "../hooks/useLiveOpeningLineage";
+import { resetOpeningRootsCacheForTests } from "../openings/openingRootsLoader";
 
 // Fresh coordinator-lifetime DecisionOwner per test (g-2m0p). The controller
 // registers blunder-context/SRS on this owner; AnalysisEffects leases its UI
@@ -486,7 +486,7 @@ describe("ChessGame start flow", () => {
     // specific roots override it. The module-level registry cache is dropped
     // too, or the first test's roots would leak into every later test.
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     pollFreshOpeningDeltaMock.mockReset();
     getOpeningDeltaPollSnapshotMock.mockReset();
     getOpeningDeltaPollSnapshotMock.mockReturnValue(null);
@@ -607,7 +607,7 @@ describe("ChessGame characterization safeguards", () => {
     // specific roots override it. The module-level registry cache is dropped
     // too, or the first test's roots would leak into every later test.
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     recordBlunderMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -3009,7 +3009,7 @@ describe("ChessGame characterization safeguards", () => {
     localStorage.removeItem("ghostreplay_drill_prefs");
   });
 
-  it("clears the prior opening so a failed reload can't start a stale selection", async () => {
+  it("clears a failed registered selection and retries when setup reopens", async () => {
     const targetFamily = {
       families: [
         {
@@ -3026,13 +3026,15 @@ describe("ChessGame characterization safeguards", () => {
         },
       ],
     };
-    // Order-dependent: the live-lineage registry preload (g-a5v3) fires on
-    // mount and consumes the FIRST call, before the overlay opens at all.
-    // Then: first overlay open succeeds; the reopen's fetch fails.
+    let rejectInitialRoots!: (reason: unknown) => void;
     getOpeningRootsMock
-      .mockResolvedValueOnce({ families: [] }) // registry preload (on mount)
-      .mockResolvedValueOnce(targetFamily) // first overlay open
-      .mockRejectedValueOnce(new Error("boom")); // reopen
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectInitialRoots = reject;
+          }),
+      )
+      .mockResolvedValueOnce(targetFamily);
 
     await driveOffRouteFail();
     useGameStore.setState({ playerColor: "white", drillStrictnessCp: 20 });
@@ -3044,18 +3046,21 @@ describe("ChessGame characterization safeguards", () => {
       fireEvent.click(gear);
     });
 
-    // Opening resolves; Start Drill stays gated until a strictness tier is
-    // picked (g-09mu force-always), then enables.
+    await act(async () => {
+      rejectInitialRoots(new Error("boom"));
+      await Promise.resolve();
+    });
+
+    // The shared request failure surfaces on the trigger and clears the seeded
+    // registered opening, so Start cannot launch a stale selection.
     await waitFor(() => {
-      expect(screen.getByRole("combobox")).toHaveTextContent("Target");
+      expect(screen.getByRole("combobox")).toHaveTextContent(
+        /failed to load openings/i,
+      );
     });
     expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
-    expect(
-      screen.getByRole("button", { name: /start drill/i }),
-    ).not.toBeDisabled();
 
-    // Close the overlay, then reopen with a failing fetch.
+    // Reopening retries because the rejected cache entry was evicted.
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
     });
@@ -3065,14 +3070,57 @@ describe("ChessGame characterization safeguards", () => {
       );
     });
 
-    // Failure surfaces on the trigger and the stale selection is cleared, so
-    // Start Drill cannot relaunch the previous opening.
     await waitFor(() => {
-      expect(screen.getByRole("combobox")).toHaveTextContent(
-        /failed to load openings/i,
-      );
+      expect(screen.getByRole("combobox")).toHaveTextContent("Target");
     });
-    expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a pending shared roots load across drill setup close and reopen", async () => {
+    const targetFamily = {
+      families: [
+        {
+          family_name: "Target",
+          roots: [
+            {
+              opening_key: "target-fen",
+              opening_name: "Target Opening",
+              opening_family: "Target",
+              eco: null,
+              depth: 1,
+            },
+          ],
+        },
+      ],
+    };
+    let resolveRoots!: (value: typeof targetFamily) => void;
+    getOpeningRootsMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRoots = resolve;
+        }),
+    );
+
+    await driveOffRouteFail();
+    fireEvent.click(
+      await screen.findByRole("button", { name: /change drill settings/i }),
+    );
+    await screen.findByRole("button", { name: /^close$/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /change drill settings/i }),
+    );
+
+    await act(async () => {
+      resolveRoots(targetFamily);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent("Target");
+    });
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
   });
 
   it("ad-hoc card drill survives a getOpeningRoots() failure and sends its line", async () => {
@@ -3557,7 +3605,7 @@ describe("ChessGame clipboard copy", () => {
     lookupOpeningByFenMock.mockReset();
     getOpeningRootsMock.mockReset();
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     gameAnalysisStore.getState().clearAll();
     capturedPieceDrop = null;
 
@@ -4949,7 +4997,7 @@ describe("ChessGame opening lineage", () => {
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
 
     getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
@@ -5126,7 +5174,7 @@ describe("ChessGame opening lineage", () => {
         },
       ],
     });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     fetchSessionOpeningsMock
       .mockResolvedValueOnce({
         player_color: "white",
@@ -5257,7 +5305,7 @@ describe("ChessGame opening lineage", () => {
         },
       ],
     });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     fetchSessionOpeningsMock.mockResolvedValue(
       lineageResponse(targetOpeningKey),
     );
@@ -5345,7 +5393,7 @@ describe("ChessGame opening lineage", () => {
     );
   });
 
-  it("blocks a retained same-mount ad-hoc selection until the lineage target resolves", async () => {
+  it("replaces a retained same-mount ad-hoc selection from the cached registry", async () => {
     const targetOpeningKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
     const rootsResponse = {
       families: [
@@ -5365,7 +5413,7 @@ describe("ChessGame opening lineage", () => {
     };
     getOpeningRootsMock.mockReset();
     getOpeningRootsMock.mockResolvedValue(rootsResponse);
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     fetchSessionOpeningsMock.mockResolvedValue(
       lineageResponse(targetOpeningKey),
     );
@@ -5430,14 +5478,8 @@ describe("ChessGame opening lineage", () => {
     await screen.findByRole("button", {
       name: /Collapse King's Pawn Game details/,
     });
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
 
-    let resolveReplacementRoots!: (value: typeof rootsResponse) => void;
-    getOpeningRootsMock.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          resolveReplacementRoots = resolve;
-        }),
-    );
     fireEvent.click(
       await screen.findByRole("button", { name: /start drill/i }),
     );
@@ -5446,30 +5488,15 @@ describe("ChessGame opening lineage", () => {
     const overlay = close.closest<HTMLElement>(".chessboard-overlay");
     expect(overlay).not.toBeNull();
     const setup = within(overlay!);
-    fireEvent.click(setup.getByRole("button", { name: /^standard$/i }));
-
-    // The old synthetic selection/line is gone before roots resolve. Choosing
-    // strictness cannot enable or submit the stale ad-hoc draft during the gap.
     const start = setup.getByRole("button", { name: /^start drill$/i });
     expect(start).toBeDisabled();
-    fireEvent.click(start);
-    expect(startDrillMock).toHaveBeenCalledTimes(1);
-    expect(abandonDrillMock).not.toHaveBeenCalled();
 
-    await act(async () => {
-      resolveReplacementRoots({
-        families: rootsResponse.families.map((family) => ({
-          ...family,
-          roots: [...family.roots],
-        })),
-      });
-      await Promise.resolve();
-    });
     await waitFor(() =>
       expect(setup.getByRole("combobox")).toHaveTextContent(
         "King's Pawn Game",
       ),
     );
+    fireEvent.click(setup.getByRole("button", { name: /^standard$/i }));
     expect(start).toBeEnabled();
     await act(async () => {
       fireEvent.click(start);
@@ -5486,37 +5513,73 @@ describe("ChessGame opening lineage", () => {
         line: undefined,
       }),
     );
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("post-game lineage offers Start Drill that opens the drill setup (route-state intercept)", async () => {
-    getOpeningRootsMock.mockResolvedValue({ families: [] });
-    fetchSessionOpeningsMock.mockResolvedValue(lineageResponse("k1"));
-    useGameStore.setState({
-      sessionId: "session-postgame-drill",
-      isGameActive: false,
-      playerColor: "white",
-      boardOrientation: "white",
-      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
-      gameResult: { type: "resign", message: "Resigned." },
-      liveFen: LINEAGE_FEN_E4,
+  it("shares one roots request and preserves Black side from post-game lineage", async () => {
+    const openingKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
+    getOpeningRootsMock.mockResolvedValue({
+      families: [
+        {
+          family_name: "King's Pawn",
+          roots: [
+            {
+              opening_key: openingKey,
+              opening_name: "King's Pawn Game",
+              opening_family: "King's Pawn",
+              eco: "C20",
+              depth: 0,
+            },
+          ],
+        },
+      ],
     });
+    fetchSessionOpeningsMock.mockResolvedValue(lineageResponse(openingKey));
     render(<ChessGame />);
+
+    // Warm the component's family view, not only the module cache. Reopening a
+    // lineage drill after this point takes the synchronous cached-family path.
+    fireEvent.click(screen.getByRole("button", { name: /^drill$/i }));
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent("Select opening");
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+
+    act(() => {
+      useGameStore.setState({
+        sessionId: "session-postgame-drill",
+        isGameActive: false,
+        playerColor: "black",
+        boardOrientation: "black",
+        moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+        gameResult: { type: "resign", message: "Resigned." },
+        liveFen: LINEAGE_FEN_E4,
+      });
+    });
 
     // The board sits on the crossing move, so the card is already expanded
     // (g-m1xc) and offers Start Drill (onStartDrill wired once gameResult !== null).
     await screen.findByRole("button", {
       name: /Collapse King's Pawn Game details/,
     });
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
 
     const drill = await screen.findByRole("button", { name: /start drill/i });
-    // Opening the drill setup fetches the opening roots (overlay opened in drill
-    // mode) — mirroring the /openings route-state intercept flow, not a direct
-    // openingFamilies resolution (which is null post-game until the overlay).
-    // Clear first: this describe doesn't reset the mock between tests, so assert
-    // the Start Drill CLICK specifically is what triggers the roots fetch.
-    getOpeningRootsMock.mockClear();
     fireEvent.click(drill);
-    await waitFor(() => expect(getOpeningRootsMock).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent(
+        "King's Pawn Game",
+      );
+    });
+    expect(screen.getByRole("button", { name: /^black$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
   });
 
   it("post-game lineage select jumps the board to the opening's position", async () => {
@@ -5563,7 +5626,7 @@ describe("ChessGame opening lineage", () => {
     const FEN_NF6 =
       "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3";
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     fetchSessionOpeningsMock.mockResolvedValue({
       player_color: "white",
       lineage: [
@@ -5709,7 +5772,7 @@ describe("ChessGame opening lineage", () => {
   it("updates a same-session card to the reconciled after-score when no baseline exists", async () => {
     const sessionId = "session-reconciled-no-baseline";
     getOpeningRootsMock.mockResolvedValue({ families: [] });
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     // Keep every lineage response deliberately stale. The final score must come
     // from the reconciled store envelope, not a navigation or lineage refetch.
     fetchSessionOpeningsMock.mockResolvedValue({

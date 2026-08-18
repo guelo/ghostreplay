@@ -3,9 +3,9 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 import {
   useLiveOpeningLineage,
   deriveStartPly,
-  __resetOpeningRootIndexCache,
   LOCAL_SCORE_PENDING_TIMEOUT_MS,
 } from "./useLiveOpeningLineage";
+import { resetOpeningRootsCacheForTests } from "../openings/openingRootsLoader";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
 import fixture from "../openings/__fixtures__/openingChainParity.json";
 
@@ -56,7 +56,7 @@ function serverItem(
 
 describe("useLiveOpeningLineage", () => {
   beforeEach(() => {
-    __resetOpeningRootIndexCache();
+    resetOpeningRootsCacheForTests();
     getOpeningRootsMock.mockReset();
     getOpeningRootsMock.mockResolvedValue(ROOTS_RESPONSE);
   });
@@ -239,6 +239,7 @@ describe("useLiveOpeningLineage", () => {
   it("fetches the root registry once and shares it across mounts", async () => {
     const first = renderHook(() => useLiveOpeningLineage(moveHistory, []));
     await waitFor(() => expect(first.result.current.lineage.length).toBeGreaterThan(0));
+    first.unmount();
 
     const second = renderHook(() => useLiveOpeningLineage(moveHistory, []));
     await waitFor(() => expect(second.result.current.lineage.length).toBeGreaterThan(0));

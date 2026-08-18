@@ -32,7 +32,8 @@ import {
 import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
-import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
+import { checkDrillRoute, failDrill } from "../utils/api";
+import { loadOpeningRootFamilies } from "../openings/openingRootsLoader";
 import {
   gameAnalysisStore,
   AnalysisStoreProvider,
@@ -1464,10 +1465,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (!showStartOverlay || !isDrillMode) return;
     let cancelled = false;
     setIsLoadingOpenings(true);
-    getOpeningRoots()
-      .then((data) => {
+    loadOpeningRootFamilies()
+      .then((families) => {
         if (cancelled) return;
-        setOpeningFamilies(data.families);
+        setOpeningFamilies(families);
       })
       .catch(() => {
         if (cancelled) return;
@@ -1568,13 +1569,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [moveHistory, handleNavigate],
   );
 
-  // Start Drill: mirror the /openings route-state intercept flow rather than
-  // resolving openingFamilies directly — that list can be null until the
-  // overlay opens it (the fetch effect runs only when showStartOverlay &&
-  // isDrillMode). Seeding the pending setup + opening the overlay triggers the
-  // load; the roots-match effect then resolves pendingDrillSetupRef ->
-  // setSelectedDrillOpening. Not handleStartDrill (needs a full draft) or
-  // handleShowStartOverlay alone (doesn't set drill mode / seed the ref).
+  // Start Drill mirrors the /openings route-state intercept flow. Reuse the
+  // canonical family view immediately when it is already loaded; setting that
+  // same array again would not rerun the roots-match effect. On a cold load,
+  // seed the pending setup and let the overlay's loader resolve it. This is not
+  // handleStartDrill (which needs a full draft) or handleShowStartOverlay alone
+  // (which does not set drill mode or seed the requested root).
   const handleLineageStartDrill = useCallback(
     (item: OpeningLineageItem) => {
       setIsDrillMode(true);
@@ -1582,15 +1582,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // retained after a successful start, so leaving it intact would let the
       // newly-mounted panel submit a prior registered/ad-hoc opening before the
       // async roots fetch installs this card's selection.
-      setSelectedDrillOpening(null);
       adHocLineRef.current = null;
-      pendingDrillSetupRef.current = {
-        openingKey: item.opening_key,
-        playerColor,
-      };
+      const cachedOpening = openingFamilies
+        ?.flatMap((family) => family.roots)
+        .find((root) => root.opening_key === item.opening_key);
+      if (cachedOpening) {
+        // The warm-cache path bypasses the roots-match effect, so it must also
+        // apply the side that effect normally seeds for the requested drill.
+        setDrillPlayerColor(playerColor === "black" ? "black" : "white");
+      }
+      setSelectedDrillOpening(cachedOpening ?? null);
+      pendingDrillSetupRef.current = cachedOpening
+        ? null
+        : {
+            openingKey: item.opening_key,
+            playerColor,
+          };
       setShowStartOverlay(true);
     },
-    [playerColor],
+    [openingFamilies, playerColor],
   );
 
   const isPostRootMoveStillCurrent = useCallback(
