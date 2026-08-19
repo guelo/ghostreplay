@@ -161,9 +161,12 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
   await page.locator(".h-move-list__strip .h-move").first().click();
   const returnToLive = page.locator("button.board-return-live");
   await expect(returnToLive).toBeVisible();
-  await expect(returnToLive).toHaveClass(/board-return-live--tucked/, {
-    timeout: 3_000,
-  });
+  // ReturnToLiveButton tucks TUCK_DELAY_MS (2s) after it classifies the board
+  // as compact, and that classification lands a few hundred ms after mount on a
+  // loaded machine: measured settle across full-suite runs is 2.0-3.0s, so a 3s
+  // cap failed whenever the run drifted to the top of that range. The assertion
+  // is that it tucks at all, not how fast, so use the config-wide 15s budget.
+  await expect(returnToLive).toHaveClass(/board-return-live--tucked/);
 
   const compactBox = await returnToLive.boundingBox();
   const narrowBoardBox = await page.locator(".chessboard-square-measure").boundingBox();
