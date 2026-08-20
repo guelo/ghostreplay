@@ -12,10 +12,12 @@ Two layers:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -24,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 
 import app.opening_baseline_scheduler as baseline_mod
 import app.opening_evidence as opening_evidence
+import app.opening_score_delta as score_delta_mod
 from conftest import TestingSessionLocal
 from app.fen import normalize_fen
 from app.models import (
@@ -56,7 +59,9 @@ from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.opening_score_delta import (
     BASELINE_RETRYABLE_SOURCES,
     BASELINE_TERMINAL_SOURCES,
+    BaselineWatermarkMismatch,
     BaselineSnapshotSource,
+    _baseline_terminal_classification,
     capture_baseline_watermark,
     fill_opening_baselines_for_batch,
     run_baseline_snapshot_job,
@@ -345,10 +350,111 @@ def test_missing_session_returns_missing(db_session):
     assert source == "missing_session"
 
 
-def test_not_active_session_skipped(db_session):
+def test_not_active_session_skipped(db_session, caplog):
     sid = _make_session(db_session, status="ended")
-    source = run_baseline_snapshot_job(db_session, sid, 123, "white")
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta"):
+        source = run_baseline_snapshot_job(db_session, sid, 123, "white")
     assert source == "not_active"
+    completion = next(
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("opening_baseline_job ")
+    )
+    assert "terminal_session_classification=supported_game_end" in completion
+
+
+def test_failed_job_does_not_read_expired_session_for_completion_log(
+    monkeypatch, caplog
+):
+    class RollbackAwareDb:
+        rolled_back = False
+
+        def get(self, model, session_id):
+            return session
+
+        def rollback(self):
+            self.rolled_back = True
+
+    class RollbackAwareSession:
+        opening_score_baseline = None
+        baseline_watermark_seq = 1
+        baseline_watermark_epoch = 2
+        baseline_watermark_fingerprint = "fp"
+        user_id = 123
+        player_color = "white"
+        session_mode = "normal"
+        drill_terminal_reason = None
+
+        def _loaded(self, value):
+            if db.rolled_back:
+                raise RuntimeError("expired ORM state read after rollback")
+            return value
+
+        @property
+        def result(self):
+            return self._loaded(None)
+
+        @property
+        def drill_state(self):
+            return self._loaded(None)
+
+        @property
+        def status(self):
+            return self._loaded("active")
+
+    db = RollbackAwareDb()
+    session = RollbackAwareSession()
+
+    def fail_cached_scores(*args, **kwargs):
+        raise RuntimeError("database failed")
+
+    monkeypatch.setattr(
+        score_delta_mod,
+        "list_cached_opening_scores",
+        fail_cached_scores,
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta"):
+        source = run_baseline_snapshot_job(db, uuid.uuid4(), 123, "white")
+
+    assert source == "failed"
+    assert db.rolled_back is True
+    completion = next(
+        record.getMessage()
+        for record in caplog.records
+        if "terminal_session_classification=" in record.getMessage()
+    )
+    assert "terminal_session_classification=active" in completion
+
+
+def test_failed_classification_is_closed_and_cannot_escape_job(monkeypatch, caplog):
+    class FakeDb:
+        def get(self, model, session_id):
+            return SimpleNamespace(
+                opening_score_baseline=None,
+                status="ended",
+                user_id=123,
+                player_color="white",
+            )
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr(
+        score_delta_mod,
+        "_baseline_terminal_classification",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("classification failed")),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta"):
+        source = run_baseline_snapshot_job(FakeDb(), uuid.uuid4(), 123, "white")
+
+    assert source == "not_active"
+    completion = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("opening_baseline_job ")
+    )
+    assert "terminal_session_classification=classification_failed" in completion
 
 
 def test_untrusted_queued_identity_captures_from_the_row(db_session):
@@ -715,6 +821,183 @@ def test_duplicate_enqueues_for_same_session_coalesce():
     assert len(job.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("attempts", "expected_bucket"),
+    [(0, "0"), (1, "1"), (2, "2_3"), (3, "2_3"), (4, "4_7"), (7, "4_7"), (8, "8_plus")],
+)
+def test_probe_snapshots_pending_attempts_without_mutating_queue(
+    attempts, expected_bucket
+):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock=clock)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    sched._pending[sid].attempts = attempts
+    before = vars(sched._pending[sid]).copy()
+
+    probe = sched.probe(sid)
+
+    assert probe.state is baseline_mod.BaselineSchedulerState.PENDING
+    assert probe.attempts_bucket == expected_bucket
+    assert vars(sched._pending[sid]) == before
+    assert sched._thread is None
+
+
+def test_probe_reports_inflight_without_waking_or_requeueing():
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job(db, **kwargs):
+        started.set()
+        assert release.wait(timeout=5.0)
+        return "already_set"
+
+    sched, _ = _make_scheduler(run_job=blocking_job)
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+    runner = threading.Thread(target=sched.run_due)
+    runner.start()
+    assert started.wait(timeout=5.0)
+    try:
+        probe = sched.probe(sid)
+        assert probe.state is baseline_mod.BaselineSchedulerState.INFLIGHT
+        assert probe.attempts_bucket == "1"
+        assert sid not in sched._pending
+    finally:
+        release.set()
+        runner.join(timeout=5.0)
+
+
+def test_terminal_observation_is_closed_and_registers_only_eligible_miss(monkeypatch):
+    from app.opening_score_scheduler import ScoreSchedulerState, TerminalRecomputeProbe
+
+    session = SimpleNamespace(
+        id=uuid.uuid4(), user_id=7, player_color="white",
+        started_at=datetime.now(timezone.utc) - timedelta(seconds=90),
+        opening_score_baseline=None, baseline_watermark_seq=1,
+        baseline_watermark_epoch=2, baseline_watermark_fingerprint="fp",
+    )
+    monkeypatch.setattr(
+        baseline_mod,
+        "probe_baseline_snapshot",
+        lambda session_id: baseline_mod.BaselineSchedulerProbe(
+            baseline_mod.BaselineSchedulerState.PENDING, "2_3"
+        ),
+    )
+    registered = []
+
+    def score_probe(user_id, player_color, *, register_convergence):
+        registered.append((user_id, player_color, register_convergence))
+        return TerminalRecomputeProbe(
+            ScoreSchedulerState.PENDING,
+            "opaque-probe" if register_convergence else None,
+        )
+
+    monkeypatch.setattr("app.opening_score_scheduler.probe_terminal_recompute", score_probe)
+    properties = baseline_mod.terminal_baseline_observation(
+        session, baseline_mod.TerminalKind.GAME_END
+    )
+
+    assert properties == {
+        "opening_baseline_state": "missing_with_watermark",
+        "opening_baseline_scheduler_state": "pending",
+        "opening_baseline_attempts_bucket": "2_3",
+        "opening_recompute_state": "pending",
+        "terminal_kind": "game_end",
+        "session_age_bucket": "1m_5m",
+        "barrier_cohort": "disabled",
+        "barrier_outcome": "disabled",
+        "barrier_wait_budget_ms": 0,
+        "barrier_wait_ms": 0,
+        "convergence_probe_id": "opaque-probe",
+    }
+    assert registered == [(7, "white", True)]
+
+    session.opening_score_baseline = "{}"
+    properties = baseline_mod.terminal_baseline_observation(
+        session, baseline_mod.TerminalKind.GAME_END
+    )
+    assert properties["opening_baseline_state"] == "present"
+    assert "convergence_probe_id" not in properties
+    assert registered[-1] == (7, "white", False)
+
+
+def test_terminal_observation_marks_unmeasured_baseline_state(monkeypatch):
+    class BrokenSession:
+        @property
+        def opening_score_baseline(self):
+            raise RuntimeError("expired session")
+
+    properties = baseline_mod.terminal_baseline_observation(
+        BrokenSession(), baseline_mod.TerminalKind.GAME_END
+    )
+
+    assert properties["opening_baseline_state"] == "observation_failed"
+    assert properties["opening_baseline_scheduler_state"] == "probe_failed"
+    assert properties["opening_recompute_state"] == "probe_failed"
+    assert "convergence_probe_id" not in properties
+
+
+def test_terminal_observation_retains_registered_probe_on_later_failure(monkeypatch):
+    from app.opening_score_scheduler import ScoreSchedulerState, TerminalRecomputeProbe
+
+    class AgeFailureSession:
+        id = uuid.uuid4()
+        user_id = 7
+        player_color = "white"
+        opening_score_baseline = None
+        baseline_watermark_seq = 1
+        baseline_watermark_epoch = 2
+        baseline_watermark_fingerprint = "fp"
+
+        @property
+        def started_at(self):
+            raise RuntimeError("age unavailable")
+
+    monkeypatch.setattr(
+        baseline_mod,
+        "probe_baseline_snapshot",
+        lambda session_id: baseline_mod.BaselineSchedulerProbe(
+            baseline_mod.BaselineSchedulerState.PENDING, "1"
+        ),
+    )
+    monkeypatch.setattr(
+        "app.opening_score_scheduler.probe_terminal_recompute",
+        lambda *args, **kwargs: TerminalRecomputeProbe(
+            ScoreSchedulerState.PENDING, "opaque-probe"
+        ),
+    )
+
+    properties = baseline_mod.terminal_baseline_observation(
+        AgeFailureSession(), baseline_mod.TerminalKind.GAME_END
+    )
+
+    assert properties["opening_baseline_state"] == "missing_with_watermark"
+    assert properties["opening_baseline_scheduler_state"] == "probe_failed"
+    assert properties["opening_recompute_state"] == "probe_failed"
+    assert properties["convergence_probe_id"] == "opaque-probe"
+
+
+@pytest.mark.parametrize(
+    ("session", "mismatch", "expected"),
+    [
+        (None, None, "missing_session"),
+        (SimpleNamespace(result="abandon", drill_state=None, session_mode="normal",
+                         drill_terminal_reason=None, status="ended"), None, "abandon"),
+        (SimpleNamespace(result=None, drill_state="failed", session_mode="drill",
+                         drill_terminal_reason="accuracy", status="active"),
+         BaselineWatermarkMismatch.SEQ, "supported_drill_accuracy_fail"),
+        (SimpleNamespace(result=None, drill_state=None, session_mode="normal",
+                         drill_terminal_reason=None, status="active"),
+         BaselineWatermarkMismatch.SEQ, "unrelated_evidence_drift"),
+    ],
+)
+def test_baseline_completion_terminal_classification_is_closed(
+    session, mismatch, expected
+):
+    assert _baseline_terminal_classification(session, mismatch) == expected
+
+
 def test_distinct_sessions_each_run_with_own_session():
     job = _RecordingJob()
     sched, sessions = _make_scheduler(run_job=job)
@@ -827,6 +1110,34 @@ def test_retry_budget_stops_at_eight_attempts():
 
     assert calls == 8
     assert sid not in sched._pending
+
+
+def test_attempt_log_reports_age_requeue_and_budget_exhaustion(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        run_job=lambda db, **kwargs: "raced_evidence_or_already_set",
+        clock=clock,
+    )
+    sid = uuid.uuid4()
+    sched.enqueue(sid, 7, "white")
+
+    with caplog.at_level(logging.INFO, logger="app.opening_baseline_scheduler"):
+        for delay in (0, 1, 2, 4, 8, 16, 30, 30):
+            clock.advance(delay)
+            sched.run_due()
+
+    records = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("opening_baseline_scheduler_attempt ")
+    ]
+    assert len(records) == 8
+    assert "attempt=1" in records[0]
+    assert "enqueue_age_ms=0.0" in records[0]
+    assert "requeued=True" in records[0]
+    assert "retry_budget_exhausted=False" in records[0]
+    assert "attempt=8" in records[-1]
+    assert "requeued=False" in records[-1]
+    assert "retry_budget_exhausted=True" in records[-1]
 
 
 def test_elapsed_budget_can_stop_before_second_attempt():

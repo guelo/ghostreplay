@@ -1017,6 +1017,61 @@ def _baseline_watermark(session: GameSession) -> tuple[int, int, str] | None:
     return int(values[0]), int(values[1]), str(values[2])
 
 
+def _baseline_terminal_classification(
+    session: GameSession | None,
+    mismatch_reason: BaselineWatermarkMismatch | None,
+) -> str:
+    """Closed operational classification for terminal baseline misses."""
+
+    if session is None:
+        return "missing_session"
+    if session.result == "abandon" or session.drill_state == "abandoned":
+        return "abandon"
+    if (
+        session.session_mode == "drill"
+        and session.drill_state == "failed"
+        and session.drill_terminal_reason == "off_route"
+    ):
+        return "off_route"
+    if (
+        session.session_mode == "drill"
+        and session.drill_state == "failed"
+        and session.drill_terminal_reason == "accuracy"
+    ):
+        return "supported_drill_accuracy_fail"
+    if (
+        session.session_mode == "drill"
+        and session.drill_state == "failed"
+        and session.drill_terminal_reason == "natural_end"
+    ):
+        return "supported_drill_natural_end"
+    if (
+        session.session_mode == "drill"
+        and session.drill_state == "converted"
+        and session.status == "ended"
+    ):
+        return "supported_converted_drill_end"
+    if session.session_mode == "normal" and session.status == "ended":
+        return "supported_game_end"
+    if mismatch_reason is BaselineWatermarkMismatch.SEQ:
+        return "unrelated_evidence_drift"
+    if session.status == "active":
+        return "active"
+    return "other_terminal"
+
+
+def _safe_baseline_terminal_classification(
+    session: GameSession | None,
+    mismatch_reason: BaselineWatermarkMismatch | None,
+) -> str:
+    """Classify only loaded state; telemetry failure must not escape the job."""
+
+    try:
+        return _baseline_terminal_classification(session, mismatch_reason)
+    except Exception:  # noqa: BLE001 - completion telemetry must never break the worker
+        return "classification_failed"
+
+
 def _batch_start_mismatch(
     db: Session,
     batch: OpeningScoreBatch,
@@ -1148,11 +1203,21 @@ def run_baseline_snapshot_job(
     t0 = time.perf_counter()
     source = BaselineSnapshotSource.FAILED.value
     mismatch_reason: BaselineWatermarkMismatch | None = None
+    session: GameSession | None = None
+    terminal_session_classification = "classification_failed"
     try:
         session = db.get(GameSession, session_id)
         if session is None:
+            terminal_session_classification = "missing_session"
             source = BaselineSnapshotSource.MISSING_SESSION.value
             return source
+        # Snapshot primitive telemetry while the successfully loaded ORM state is
+        # usable. A later rollback expires the instance and must not make the
+        # completion log issue another SELECT (or violate this job's never-raise
+        # contract when the database is unhealthy).
+        terminal_session_classification = _safe_baseline_terminal_classification(
+            session, mismatch_reason
+        )
         if session.opening_score_baseline is not None:
             source = BaselineSnapshotSource.ALREADY_SET.value
             return source
@@ -1171,6 +1236,9 @@ def run_baseline_snapshot_job(
         )
         if batch is None:
             mismatch_reason = _empty_start_mismatch(db, session)
+            terminal_session_classification = _safe_baseline_terminal_classification(
+                session, mismatch_reason
+            )
             if mismatch_reason is not None:
                 source = BaselineSnapshotSource.WATERMARK_MISMATCH.value
                 return source
@@ -1186,6 +1254,9 @@ def run_baseline_snapshot_job(
                 source = BaselineSnapshotSource.SKIPPED_STALE.value
                 return source
             mismatch_reason = _batch_start_mismatch(db, batch, session)
+            terminal_session_classification = _safe_baseline_terminal_classification(
+                session, mismatch_reason
+            )
             if mismatch_reason is not None:
                 source = BaselineSnapshotSource.WATERMARK_MISMATCH.value
                 return source
@@ -1224,12 +1295,13 @@ def run_baseline_snapshot_job(
     finally:
         logger.info(
             "opening_baseline_job session_id=%s user_id=%s color=%s source=%s "
-            "mismatch_reason=%s snapshot_ms=%.2f",
+            "mismatch_reason=%s terminal_session_classification=%s snapshot_ms=%.2f",
             session_id,
             user_id,
             player_color,
             source,
             mismatch_reason.value if mismatch_reason is not None else None,
+            terminal_session_classification,
             (time.perf_counter() - t0) * 1000.0,
         )
 

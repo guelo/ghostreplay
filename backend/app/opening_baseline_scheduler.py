@@ -2,12 +2,13 @@
 
 ``POST /api/game/start`` and ``POST /api/drills/start`` durably INSERT the
 ``GameSession`` and return. Capturing the opening-score baseline
-(``GameSession.opening_score_baseline``) used to run inline on that request path,
-but proving the cached batch fresh costs an O(all-evidence) digest (~1.3s best
-case, up to ~9.6s GIL-serialized behind a running recompute). This scheduler
-moves that capture OFF the request thread: the start handler enqueues a
-best-effort job and returns 201 immediately; a background worker fills the
-baseline shortly after.
+(``GameSession.opening_score_baseline``) used to run inline on that request path.
+The current cached-batch proof is O(1) while the per-user sequence and shared
+epoch match; after shared-epoch drift it hashes only the stored scope of that
+batch. The historical full raw-evidence digest is no longer part of this path.
+This scheduler keeps all baseline proof and persistence work OFF the request
+thread: the start handler enqueues a best-effort job and returns 201 immediately;
+a background worker fills the baseline shortly after.
 
 Correctness: the worker persists a baseline only when a current-state batch proof
 and the session's durable start-watermark proof both hold. Retryable cold/stale
@@ -37,6 +38,8 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
 from typing import Callable
 
 from app.db import SessionLocal
@@ -49,6 +52,61 @@ from app.opening_score_delta import (
 logger = logging.getLogger(__name__)
 
 Key = uuid.UUID
+
+
+class BaselineSchedulerState(str, Enum):
+    """Closed terminal-telemetry vocabulary for baseline queue state."""
+
+    PENDING = "pending"
+    INFLIGHT = "inflight"
+    ABSENT = "absent"
+    PROBE_FAILED = "probe_failed"
+
+
+class TerminalKind(str, Enum):
+    """Included terminal routes that own an opening-score delta."""
+
+    GAME_END = "game_end"
+    CONVERTED_DRILL_END = "converted_drill_end"
+    DRILL_ACCURACY_FAIL = "drill_accuracy_fail"
+    DRILL_NATURAL_END = "drill_natural_end"
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineSchedulerProbe:
+    state: BaselineSchedulerState
+    attempts_bucket: str
+
+
+def _attempts_bucket(attempts: int) -> str:
+    if attempts <= 0:
+        return "0"
+    if attempts == 1:
+        return "1"
+    if attempts <= 3:
+        return "2_3"
+    if attempts <= 7:
+        return "4_7"
+    return "8_plus"
+
+
+def _session_age_bucket(started_at: object) -> str:
+    """Coarse, closed age bucket without publishing a session timestamp."""
+
+    if not isinstance(started_at, datetime):
+        return "unknown"
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    age_s = max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+    if age_s < 60:
+        return "under_1m"
+    if age_s < 5 * 60:
+        return "1m_5m"
+    if age_s < 30 * 60:
+        return "5m_30m"
+    if age_s < 2 * 60 * 60:
+        return "30m_2h"
+    return "2h_plus"
 
 
 @dataclass
@@ -123,6 +181,24 @@ class OpeningBaselineScheduler:
                 logger.exception(
                     "opening baseline scheduler start failed; baseline will not be captured"
                 )
+
+    def probe(self, session_id: Key) -> BaselineSchedulerProbe:
+        """Snapshot queue state without creating, waking, or changing an entry."""
+
+        with self._lock:
+            entry = self._active_entries.get(session_id)
+            if entry is not None:
+                return BaselineSchedulerProbe(
+                    BaselineSchedulerState.INFLIGHT,
+                    _attempts_bucket(entry.attempts),
+                )
+            entry = self._pending.get(session_id)
+            if entry is not None:
+                return BaselineSchedulerProbe(
+                    BaselineSchedulerState.PENDING,
+                    _attempts_bucket(entry.attempts),
+                )
+            return BaselineSchedulerProbe(BaselineSchedulerState.ABSENT, "0")
 
     # ------------------------------------------------------------------
     # Synchronous test surface
@@ -235,6 +311,8 @@ class OpeningBaselineScheduler:
     def _run_one(self, session_id: Key, entry: _Entry) -> None:
         db = None
         raw_source: object = BaselineSnapshotSource.FAILED.value
+        requeue = False
+        retry_budget_exhausted = False
         try:
             db = self.session_factory()
             raw_source = self.run_job(
@@ -301,7 +379,6 @@ class OpeningBaselineScheduler:
                             "opening baseline recovery recompute request failed"
                         )
 
-            requeue = False
             if should_requeue:
                 now = self.clock()
                 delay = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)[
@@ -315,15 +392,35 @@ class OpeningBaselineScheduler:
                     and entry.attempts < 8
                     and next_not_before - entry.first_enqueued_at <= 120.0
                 )
+                retry_budget_exhausted = not shutting_down and not requeue
                 if requeue:
                     entry.not_before = next_not_before
 
             with self._cond:
                 self._inflight.discard(session_id)
                 self._active_entries.pop(session_id, None)
+                attempt = entry.attempts
+                enqueue_age_ms = round(
+                    max(0.0, self.clock() - entry.first_enqueued_at) * 1000.0,
+                    3,
+                )
                 if requeue:
                     self._pending[session_id] = entry
                 self._cond.notify_all()
+            try:
+                logger.info(
+                    "opening_baseline_scheduler_attempt session_id=%s source=%s "
+                    "attempt=%s enqueue_age_ms=%s requeued=%s "
+                    "retry_budget_exhausted=%s",
+                    session_id,
+                    source.value if source is not None else "unknown",
+                    attempt,
+                    enqueue_age_ms,
+                    requeue,
+                    retry_budget_exhausted,
+                )
+            except Exception:
+                logger.exception("opening baseline scheduler attempt log failed")
 
 
 # Module-level singleton + thin facade -------------------------------------
@@ -345,6 +442,104 @@ _scheduler = OpeningBaselineScheduler()
 
 def get_baseline_scheduler() -> OpeningBaselineScheduler:
     return _scheduler
+
+
+def probe_baseline_snapshot(session_id: Key) -> BaselineSchedulerProbe:
+    """Best-effort, non-mutating baseline-scheduler probe for terminal telemetry."""
+
+    try:
+        return _scheduler.probe(session_id)
+    except Exception:
+        logger.exception(
+            "opening baseline scheduler probe failed",
+            extra={"session_id": str(session_id)},
+        )
+        return BaselineSchedulerProbe(BaselineSchedulerState.PROBE_FAILED, "0")
+
+
+def terminal_baseline_observation(
+    session: object,
+    terminal_kind: TerminalKind | str,
+) -> dict[str, object]:
+    """Build the no-read, no-wait terminal analytics payload.
+
+    The caller snapshots this while its already-loaded ``GameSession`` is still in
+    the admitted pre-terminal state, then attaches the returned properties only to
+    the successful post-commit event. Instrumentation failures never alter the
+    route. Scheduler failures use ``probe_failed``; an unreadable baseline state
+    uses the closed ``observation_failed`` sentinel.
+    """
+
+    try:
+        kind = TerminalKind(terminal_kind)
+    except (TypeError, ValueError):
+        logger.error("terminal baseline observation dropped: unknown terminal kind")
+        return {}
+
+    baseline_state = "observation_failed"
+    convergence_probe_id: str | None = None
+    try:
+        baseline_present = getattr(session, "opening_score_baseline", None) is not None
+        watermark_complete = all(
+            getattr(session, field_name, None) is not None
+            for field_name in (
+                "baseline_watermark_seq",
+                "baseline_watermark_epoch",
+                "baseline_watermark_fingerprint",
+            )
+        )
+        if baseline_present:
+            baseline_state = "present"
+        elif not watermark_complete:
+            baseline_state = "missing_watermark"
+        else:
+            baseline_state = "missing_with_watermark"
+
+        baseline_probe = probe_baseline_snapshot(getattr(session, "id"))
+
+        # Lazy import avoids the existing baseline/score-scheduler cycle.
+        from app.opening_score_scheduler import probe_terminal_recompute
+
+        recompute_probe = probe_terminal_recompute(
+            int(getattr(session, "user_id")),
+            str(getattr(session, "player_color")),
+            register_convergence=baseline_state == "missing_with_watermark",
+        )
+        convergence_probe_id = recompute_probe.convergence_probe_id
+        properties: dict[str, object] = {
+            "opening_baseline_state": baseline_state,
+            "opening_baseline_scheduler_state": baseline_probe.state.value,
+            "opening_baseline_attempts_bucket": baseline_probe.attempts_bucket,
+            "opening_recompute_state": recompute_probe.state.value,
+            "terminal_kind": kind.value,
+            "session_age_bucket": _session_age_bucket(
+                getattr(session, "started_at", None)
+            ),
+            "barrier_cohort": "disabled",
+            "barrier_outcome": "disabled",
+            "barrier_wait_budget_ms": 0,
+            "barrier_wait_ms": 0,
+        }
+        if convergence_probe_id is not None:
+            properties["convergence_probe_id"] = convergence_probe_id
+        return properties
+    except Exception:
+        logger.exception("terminal baseline observation failed")
+        properties = {
+            "opening_baseline_state": baseline_state,
+            "opening_baseline_scheduler_state": "probe_failed",
+            "opening_baseline_attempts_bucket": "0",
+            "opening_recompute_state": "probe_failed",
+            "terminal_kind": kind.value,
+            "session_age_bucket": "unknown",
+            "barrier_cohort": "disabled",
+            "barrier_outcome": "disabled",
+            "barrier_wait_budget_ms": 0,
+            "barrier_wait_ms": 0,
+        }
+        if convergence_probe_id is not None:
+            properties["convergence_probe_id"] = convergence_probe_id
+        return properties
 
 
 def enqueue_baseline_snapshot(

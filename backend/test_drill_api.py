@@ -707,8 +707,17 @@ def test_converted_drill_game_end_submits_delta_after_durable_transition(
             )
         return []
 
-    with patch(
-        "app.api.game.compute_opening_score_delta", side_effect=observe_delta
+    terminal_kinds = []
+
+    def observe_terminal(session, terminal_kind):
+        assert session.status == "active"
+        assert session.drill_state == "converted"
+        terminal_kinds.append(terminal_kind.value)
+        return {"terminal_kind": terminal_kind.value}
+
+    with (
+        patch("app.api.game.compute_opening_score_delta", side_effect=observe_delta),
+        patch("app.api.game.terminal_baseline_observation", side_effect=observe_terminal),
     ):
         ended = client.post(
             "/api/game/end",
@@ -723,6 +732,7 @@ def test_converted_drill_game_end_submits_delta_after_durable_transition(
 
     assert ended.status_code == 200, ended.text
     assert observed == [("drill", "converted", "ended", "draw")]
+    assert terminal_kinds == ["converted_drill_end"]
 
 
 def test_natural_end_marks_session_failed(client, auth_headers, db_session):
@@ -770,6 +780,51 @@ def test_natural_end_marks_session_failed(client, auth_headers, db_session):
     assert session.is_rated is False
     assert db_session.query(RatingHistory).filter(RatingHistory.game_session_id == session.id).count() == 0
     assert observed == [("ended", "failed", "natural_end")]
+
+
+def test_drill_terminal_events_attach_observation_from_preterminal_state(
+    client, auth_headers, db_session
+):
+    fail_id = _start_drill(client, auth_headers).json()["session_id"]
+    fail_session = db_session.get(GameSession, uuid.UUID(fail_id))
+    fail_session.drill_state = "root_reached"
+    db_session.commit()
+    natural_id = _start_drill(client, auth_headers).json()["session_id"]
+    observed = []
+    captured = []
+
+    def observe_terminal(session, terminal_kind):
+        observed.append((session.status, session.drill_state, terminal_kind.value))
+        return {"opening_baseline_state": "missing_with_watermark",
+                "terminal_kind": terminal_kind.value}
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots()),
+        patch("app.api.drills.compute_opening_score_delta", return_value=[]),
+        patch("app.api.drills.terminal_baseline_observation", side_effect=observe_terminal),
+        patch("app.api.drills.capture", side_effect=lambda *args: captured.append(args)),
+    ):
+        failed = client.post(
+            f"/api/drills/{fail_id}/fail", json={"terminal_reason": "accuracy"},
+            headers=auth_headers(),
+        )
+        natural = client.post(
+            f"/api/drills/{natural_id}/natural-end",
+            json={"result": "draw", "pgn": "1. e4 e5"}, headers=auth_headers(),
+        )
+
+    assert failed.status_code == 200, failed.text
+    assert natural.status_code == 200, natural.text
+    assert observed == [
+        ("active", "root_reached", "drill_accuracy_fail"),
+        ("active", "active", "drill_natural_end"),
+    ]
+    events = {event_name: properties for _, event_name, properties in captured
+              if event_name in {"drill_failed", "drill_natural_end"}}
+    assert events["drill_failed"]["terminal_kind"] == "drill_accuracy_fail"
+    assert events["drill_natural_end"]["terminal_kind"] == "drill_natural_end"
+    assert all(event["opening_baseline_state"] == "missing_with_watermark"
+               for event in events.values())
 
 
 def test_natural_end_reconciles_a_lost_final_upload_before_evidence(
@@ -1473,11 +1528,14 @@ def test_route_check_preroot_accuracy_does_not_populate_failure(client, auth_hea
 
 def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers, db_session):
     graph = _steering_graph()
+    captured = []
 
     with (
         patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
         patch("app.api.drills.get_opening_graph", return_value=graph),
         patch("app.api.drills.compute_opening_score_delta") as delta,
+        patch("app.api.drills.terminal_baseline_observation") as terminal_observation,
+        patch("app.api.drills.capture", side_effect=lambda *args: captured.append(args)),
     ):
         start = _start_drill_cp(client, auth_headers, strictness_cp=50, root_fen=E4_E5_FEN)
         session_id = start.json()["session_id"]
@@ -1499,6 +1557,10 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_terminal_reason == "off_route"
     delta.assert_not_called()
+    terminal_observation.assert_not_called()
+    failed_event = next(event for event in captured if event[1] == "drill_failed")
+    assert "opening_baseline_state" not in failed_event[2]
+    assert "terminal_kind" not in failed_event[2]
 
 
 def test_unconverted_drill_records_automatic_blunder(client, auth_headers, db_session):

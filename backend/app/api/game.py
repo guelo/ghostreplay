@@ -35,7 +35,11 @@ from app.models import (
     User,
     decode_uci_line,
 )
-from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_baseline_scheduler import (
+    TerminalKind,
+    enqueue_baseline_snapshot,
+    terminal_baseline_observation,
+)
 from app.opening_boundary import (
     claim_opening_boundary_shadow_terminal,
     emit_opening_boundary_shadow_terminal,
@@ -835,6 +839,15 @@ def end_game(
             detail="Use the drill abandon or continue endpoint before ending this drill",
         )
 
+    baseline_observation = None
+    if request.result != GameResult.ABANDON:
+        baseline_observation = terminal_baseline_observation(
+            session,
+            TerminalKind.CONVERTED_DRILL_END
+            if session.session_mode == DRILL_SESSION_MODE
+            else TerminalKind.GAME_END,
+        )
+
     # Update session. The opening-evidence counter bumps ONLY when this write
     # flips SESSION_EVIDENCE_ELIGIBLE_SQL's truth value (g-jact): ending a session
     # makes its already-uploaded moves digest-visible in one transition.
@@ -1006,30 +1019,29 @@ def end_game(
         else compute_opening_score_delta(db, session) or None
     )
 
-    capture(
-        str(user.user_id),
-        "game_ended",
-        {
-            "result": session.result,
-            "is_rated": effective_is_rated,
-            "rating_before": rating_change.rating_before if rating_change else None,
-            "rating_after": rating_change.rating_after if rating_change else None,
-            "rating_delta": (
-                rating_change.rating_after - rating_change.rating_before
-                if rating_change
-                else None
-            ),
-            # The reconcile's parse of the same PGN — no reparse here, and None
-            # when the size ceiling refused to parse at all.
-            "ply_count": row_reconcile.expected_plies,
-            # g-short-move-rows: the reconcile verdict. Best-effort only —
-            # capture() may drop; the durable recurrence record is the
-            # game_sessions.derived_tail_rows column stamped above.
-            "row_reconcile_outcome": row_reconcile.outcome,
-            "stored_move_rows": row_reconcile.stored_rows,
-            "derived_tail_rows": row_reconcile.derived_rows,
-        },
-    )
+    game_ended_properties = {
+        "result": session.result,
+        "is_rated": effective_is_rated,
+        "rating_before": rating_change.rating_before if rating_change else None,
+        "rating_after": rating_change.rating_after if rating_change else None,
+        "rating_delta": (
+            rating_change.rating_after - rating_change.rating_before
+            if rating_change
+            else None
+        ),
+        # The reconcile's parse of the same PGN — no reparse here, and None
+        # when the size ceiling refused to parse at all.
+        "ply_count": row_reconcile.expected_plies,
+        # g-short-move-rows: the reconcile verdict. Best-effort only —
+        # capture() may drop; the durable recurrence record is the
+        # game_sessions.derived_tail_rows column stamped above.
+        "row_reconcile_outcome": row_reconcile.outcome,
+        "stored_move_rows": row_reconcile.stored_rows,
+        "derived_tail_rows": row_reconcile.derived_rows,
+    }
+    if baseline_observation is not None:
+        game_ended_properties.update(baseline_observation)
+    capture(str(user.user_id), "game_ended", game_ended_properties)
     if shadow_terminal_claimed and session.ended_at is not None:
         emit_opening_boundary_shadow_terminal(
             session,

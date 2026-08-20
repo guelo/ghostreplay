@@ -97,6 +97,9 @@ logger = logging.getLogger(__name__)
 
 Key = tuple[int, str]
 
+TERMINAL_CONVERGENCE_PROBE_CAPACITY = 512
+TERMINAL_CONVERGENCE_PROBE_TTL_S = 5 * 60.0
+
 # Timing-contract version stamped on every scheduler-timed analytics event. Bump
 # when the meaning of a timing field changes so a report can exclude older shapes.
 SCHEDULER_TIMING_VERSION = 1
@@ -123,6 +126,37 @@ class OpeningScoreTrigger(str, Enum):
     SESSION_EVIDENCE = "session_evidence"
     SRS_REVIEW = "srs_review"
     BASELINE_RECOVERY = "baseline_recovery"
+
+
+class ScoreSchedulerState(str, Enum):
+    """Closed terminal-telemetry vocabulary for whole-score queue state."""
+
+    PENDING = "pending"
+    INFLIGHT = "inflight"
+    ABSENT = "absent"
+    PROBE_FAILED = "probe_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalRecomputeProbe:
+    state: ScoreSchedulerState
+    convergence_probe_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveRun:
+    target_seq: int
+    forced_dispatch: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ConvergenceObserver:
+    probe_id: str
+    state_at_terminal: ScoreSchedulerState
+    target_seq: int
+    observed_at: float
+    original_deadline_remaining_ms: float | None
+    forced_dispatch_at_terminal: bool
 
 
 class UnknownOpeningScoreTrigger(ValueError):
@@ -262,6 +296,8 @@ class OpeningScoreScheduler:
     quiet_window: float = 1.5
     max_wait: float = 10.0
     auto_start: bool = True
+    convergence_probe_capacity: int = TERMINAL_CONVERGENCE_PROBE_CAPACITY
+    convergence_probe_ttl_s: float = TERMINAL_CONVERGENCE_PROBE_TTL_S
 
     _pending: dict[Key, _Entry] = field(default_factory=dict, init=False)
     _inflight: set[Key] = field(default_factory=set, init=False)
@@ -271,6 +307,12 @@ class OpeningScoreScheduler:
     # (ran_through_seq, ok). Both guarded by ``_cond``.
     _seq_counter: dict[Key, int] = field(default_factory=dict, init=False)
     _last_result: dict[Key, tuple[int, bool]] = field(default_factory=dict, init=False)
+    _active_runs: dict[Key, _ActiveRun] = field(default_factory=dict, init=False)
+    _convergence_observers: dict[Key, dict[str, _ConvergenceObserver]] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _convergence_observer_count: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -449,6 +491,182 @@ class OpeningScoreScheduler:
         with self._lock:
             return key in self._inflight
 
+    def _take_expired_observers_locked(
+        self,
+        now: float,
+        *,
+        limit: int | None = None,
+    ) -> list[_ConvergenceObserver]:
+        """Remove expired observers. Caller holds the scheduler lock."""
+
+        expired: list[_ConvergenceObserver] = []
+        for key, observers in list(self._convergence_observers.items()):
+            for probe_id, observer in list(observers.items()):
+                if now - observer.observed_at < self.convergence_probe_ttl_s:
+                    continue
+                expired.append(observers.pop(probe_id))
+                self._convergence_observer_count -= 1
+                if limit is not None and len(expired) >= limit:
+                    if not observers:
+                        self._convergence_observers.pop(key, None)
+                    return expired
+            if not observers:
+                self._convergence_observers.pop(key, None)
+        return expired
+
+    def _take_covering_observers_locked(
+        self,
+        key: Key,
+        ran_seq: int,
+    ) -> list[_ConvergenceObserver]:
+        """Remove observers covered by this exact run sequence."""
+
+        observers = self._convergence_observers.get(key)
+        if not observers:
+            return []
+        covering = [
+            observer
+            for observer in observers.values()
+            if observer.target_seq <= ran_seq
+        ]
+        for observer in covering:
+            observers.pop(observer.probe_id, None)
+            self._convergence_observer_count -= 1
+        if not observers:
+            self._convergence_observers.pop(key, None)
+        return covering
+
+    def _take_all_observers_locked(self) -> list[_ConvergenceObserver]:
+        observers = [
+            observer
+            for per_key in self._convergence_observers.values()
+            for observer in per_key.values()
+        ]
+        self._convergence_observers.clear()
+        self._convergence_observer_count = 0
+        return observers
+
+    def _log_terminal_convergence(
+        self,
+        observer: _ConvergenceObserver,
+        *,
+        disposition: str,
+        completion_lag_ms: float | None,
+        worker_run_ms: float | None,
+        forced_dispatch: bool,
+    ) -> None:
+        """Emit one identity-free operational record for a terminal probe."""
+
+        optimistic_lower_bound_ms = None
+        if (
+            observer.state_at_terminal is ScoreSchedulerState.PENDING
+            and observer.original_deadline_remaining_ms is not None
+            and worker_run_ms is not None
+            and not forced_dispatch
+            and disposition in {"rebuilt", "cached"}
+        ):
+            optimistic_lower_bound_ms = (
+                observer.original_deadline_remaining_ms + worker_run_ms
+            )
+        try:
+            logger.info(
+                "opening_score_terminal_convergence convergence_probe_id=%s "
+                "state_at_terminal=%s completion_lag_ms=%s "
+                "original_deadline_remaining_ms=%s worker_run_ms=%s "
+                "optimistic_lower_bound_ms=%s disposition=%s forced_dispatch=%s",
+                observer.probe_id,
+                observer.state_at_terminal.value,
+                None if completion_lag_ms is None else round(completion_lag_ms, 3),
+                None
+                if observer.original_deadline_remaining_ms is None
+                else round(observer.original_deadline_remaining_ms, 3),
+                None if worker_run_ms is None else round(worker_run_ms, 3),
+                None
+                if optimistic_lower_bound_ms is None
+                else round(optimistic_lower_bound_ms, 3),
+                disposition,
+                forced_dispatch,
+            )
+        except Exception:
+            logger.exception("opening score terminal convergence log failed")
+
+    def probe_terminal_recompute(
+        self,
+        user_id: int,
+        player_color: str,
+        *,
+        register_convergence: bool,
+    ) -> TerminalRecomputeProbe:
+        """Atomically snapshot queue state and optionally register an observer.
+
+        Registration changes only bounded telemetry state. It never enqueues,
+        starts a worker, pulls a deadline forward, or changes a queued entry.
+        """
+
+        key: Key = (user_id, player_color)
+        capacity_observer: _ConvergenceObserver | None = None
+        with self._lock:
+            now = self.clock()
+            # Bound synchronous logging on the terminal request thread. Further
+            # expired entries remain eligible for the worker's unrestricted sweep
+            # or one-at-a-time eviction by later probes.
+            expired = self._take_expired_observers_locked(now, limit=1)
+            active_run = self._active_runs.get(key)
+            pending = self._pending.get(key)
+            if active_run is not None:
+                state = ScoreSchedulerState.INFLIGHT
+                target_seq = active_run.target_seq
+                deadline_remaining_ms = None
+                forced_dispatch = active_run.forced_dispatch
+            elif pending is not None:
+                state = ScoreSchedulerState.PENDING
+                target_seq = pending.max_seq
+                deadline_remaining_ms = max(0.0, pending.deadline - now) * 1000.0
+                forced_dispatch = pending.forced_dispatch
+            else:
+                state = ScoreSchedulerState.ABSENT
+                target_seq = 0
+                deadline_remaining_ms = None
+                forced_dispatch = False
+
+            probe_id = None
+            if register_convergence and state in {
+                ScoreSchedulerState.PENDING,
+                ScoreSchedulerState.INFLIGHT,
+            }:
+                probe_id = uuid.uuid4().hex
+                observer = _ConvergenceObserver(
+                    probe_id=probe_id,
+                    state_at_terminal=state,
+                    target_seq=target_seq,
+                    observed_at=now,
+                    original_deadline_remaining_ms=deadline_remaining_ms,
+                    forced_dispatch_at_terminal=forced_dispatch,
+                )
+                if self._convergence_observer_count >= self.convergence_probe_capacity:
+                    capacity_observer = observer
+                else:
+                    self._convergence_observers.setdefault(key, {})[probe_id] = observer
+                    self._convergence_observer_count += 1
+
+        for observer in expired:
+            self._log_terminal_convergence(
+                observer,
+                disposition="timeout",
+                completion_lag_ms=None,
+                worker_run_ms=None,
+                forced_dispatch=observer.forced_dispatch_at_terminal,
+            )
+        if capacity_observer is not None:
+            self._log_terminal_convergence(
+                capacity_observer,
+                disposition="capacity",
+                completion_lag_ms=None,
+                worker_run_ms=None,
+                forced_dispatch=capacity_observer.forced_dispatch_at_terminal,
+            )
+        return TerminalRecomputeProbe(state, probe_id)
+
     # ------------------------------------------------------------------
     # Synchronous test surface
     # ------------------------------------------------------------------
@@ -484,6 +702,10 @@ class OpeningScoreScheduler:
                 for key in due:
                     entry = self._pending.pop(key)
                     self._inflight.add(key)
+                    self._active_runs[key] = _ActiveRun(
+                        target_seq=entry.max_seq,
+                        forced_dispatch=entry.forced_dispatch,
+                    )
                     runs.append((key, entry))
             for key, entry in runs:
                 self._run_one(key, entry)
@@ -571,6 +793,15 @@ class OpeningScoreScheduler:
         with self._lock:
             if self._thread is thread:
                 self._thread = None
+            shutdown_observers = self._take_all_observers_locked()
+        for observer in shutdown_observers:
+            self._log_terminal_convergence(
+                observer,
+                disposition="shutdown",
+                completion_lag_ms=None,
+                worker_run_ms=None,
+                forced_dispatch=observer.forced_dispatch_at_terminal,
+            )
 
     def _worker_loop(self) -> None:
         while True:
@@ -717,6 +948,7 @@ class OpeningScoreScheduler:
         generation: int | None = None
         worker_run_ms: float | None = None
         push_fill_batch_id: int | None = None
+        push_fill_failed = False
         row_isolation: RowIsolationSummary | None = None
         token = None
         try:
@@ -763,6 +995,7 @@ class OpeningScoreScheduler:
                     assert self.fill_baselines is not None
                     self.fill_baselines(push_fill_batch_id)
                 except Exception:
+                    push_fill_failed = True
                     logger.exception(
                         "opening baseline push-fill failed after durable recompute",
                         extra={"batch_id": push_fill_batch_id},
@@ -783,8 +1016,12 @@ class OpeningScoreScheduler:
                     db.close()
                 except Exception:
                     logger.exception("opening score scheduler failed to close session")
+            completed_at = self.clock()
             with self._cond:
+                expired_observers = self._take_expired_observers_locked(completed_at)
+                covering_observers = self._take_covering_observers_locked(key, ran_seq)
                 self._inflight.discard(key)
+                self._active_runs.pop(key, None)
                 # Record the highest sequence this key has run through and whether
                 # that run succeeded. Per-key runs are serialized (single worker,
                 # one in-flight per key), so ran_seq is monotonic for the key.
@@ -792,6 +1029,34 @@ class OpeningScoreScheduler:
                 if prev is None or ran_seq >= prev[0]:
                     self._last_result[key] = (ran_seq, ok)
                 self._cond.notify_all()
+            for observer in expired_observers:
+                self._log_terminal_convergence(
+                    observer,
+                    disposition="timeout",
+                    completion_lag_ms=None,
+                    worker_run_ms=None,
+                    forced_dispatch=observer.forced_dispatch_at_terminal,
+                )
+            convergence_disposition = (
+                "push_fill_failed" if push_fill_failed else run_outcome
+            )
+            reached_push_fill = (
+                push_fill_batch_id is not None
+                and not push_fill_failed
+                and run_outcome in {"rebuilt", "cached"}
+            )
+            for observer in covering_observers:
+                self._log_terminal_convergence(
+                    observer,
+                    disposition=convergence_disposition,
+                    completion_lag_ms=(
+                        (completed_at - observer.observed_at) * 1000.0
+                        if reached_push_fill
+                        else None
+                    ),
+                    worker_run_ms=worker_run_ms,
+                    forced_dispatch=entry.forced_dispatch,
+                )
         self._log_run_completion(
             context,
             run_outcome=run_outcome,
@@ -822,6 +1087,28 @@ _scheduler = OpeningScoreScheduler()
 
 def get_scheduler() -> OpeningScoreScheduler:
     return _scheduler
+
+
+def probe_terminal_recompute(
+    user_id: int,
+    player_color: str,
+    *,
+    register_convergence: bool,
+) -> TerminalRecomputeProbe:
+    """Best-effort terminal queue probe with optional bounded observation."""
+
+    try:
+        return _scheduler.probe_terminal_recompute(
+            user_id,
+            player_color,
+            register_convergence=register_convergence,
+        )
+    except Exception:
+        logger.exception(
+            "opening score terminal probe failed",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+        return TerminalRecomputeProbe(ScoreSchedulerState.PROBE_FAILED)
 
 
 def request_recompute(

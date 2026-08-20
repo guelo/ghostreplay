@@ -146,6 +146,13 @@ def _rendered_completion(caplog) -> str:
     return SimpleFormatter("%(asctime)s %(levelname)s %(message)s").format(records[0])
 
 
+def _convergence_records(caplog) -> list[str]:
+    return [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("opening_score_terminal_convergence ")
+    ]
+
+
 class _FakeSession:
     def __init__(self) -> None:
         self.closed = False
@@ -1435,3 +1442,247 @@ def test_exactly_one_completion_record_per_executed_run(caplog):
         if token.startswith("run_id=")
     }
     assert len(run_ids) == 2  # each run is independently identifiable
+
+
+# Phase-0 terminal convergence probes (g-baseline-barrier) -----------------
+def test_pending_terminal_probe_is_non_mutating_and_resolves_after_push_fill(caplog):
+    clock = _FakeClock()
+    fill_finished = []
+
+    def recompute(db, user_id, player_color):
+        clock.advance(0.040)
+        return _rebuilt(batch_id=17)
+
+    def fill(batch_id):
+        assert batch_id == 17
+        clock.advance(0.010)
+        fill_finished.append(True)
+
+    sched, _ = _make_scheduler(clock, recompute, fill_baselines=fill)
+    sched.request_recompute(41, "black", source=_TRIGGER)
+    entry = sched._pending[(41, "black")]
+    before = vars(entry).copy()
+
+    probe = sched.probe_terminal_recompute(41, "black", register_convergence=True)
+
+    assert probe.state.value == "pending"
+    assert probe.convergence_probe_id is not None
+    assert vars(entry) == before
+    assert sched._thread is None
+    clock.advance(1.5)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    assert fill_finished == [True]
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    rendered = records[0]
+    assert f"convergence_probe_id={probe.convergence_probe_id}" in rendered
+    assert "state_at_terminal=pending" in rendered
+    assert "completion_lag_ms=1550.0" in rendered
+    assert "original_deadline_remaining_ms=1500.0" in rendered
+    assert "worker_run_ms=40.0" in rendered
+    assert "optimistic_lower_bound_ms=1540.0" in rendered
+    assert "disposition=rebuilt" in rendered
+    assert "forced_dispatch=False" in rendered
+    assert sched._convergence_observer_count == 0
+
+
+def test_inflight_probe_binds_to_active_run_not_later_terminal_enqueue(caplog):
+    clock = _FakeClock()
+    observed = []
+    calls = 0
+
+    def recompute(db, user_id, player_color):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            probe = sched.probe_terminal_recompute(
+                user_id, player_color, register_convergence=True
+            )
+            observer = sched._convergence_observers[(user_id, player_color)][
+                probe.convergence_probe_id
+            ]
+            observed.append((probe, observer.target_seq))
+            sched.request_recompute(user_id, player_color, source=_TRIGGER)
+            assert observer.target_seq == 1
+            assert sched._pending[(user_id, player_color)].max_seq == 2
+        clock.advance(0.020)
+        return _rebuilt(batch_id=17)
+
+    sched, _ = _make_scheduler(
+        clock, recompute, quiet_window=0.0, fill_baselines=lambda batch_id: None
+    )
+    sched.request_recompute(7, "white", source=_TRIGGER)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    probe, target_seq = observed[0]
+    assert probe.state.value == "inflight"
+    assert target_seq == 1
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert f"convergence_probe_id={probe.convergence_probe_id}" in records[0]
+    assert "state_at_terminal=inflight" in records[0]
+    assert calls == 2
+
+
+def test_unrelated_run_does_not_resolve_terminal_probe(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, _RecordingRecompute())
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.request_recompute(2, "black", source=_TRIGGER)
+    probe = sched.probe_terminal_recompute(1, "white", register_convergence=True)
+    sched._pending[(1, "white")].deadline = clock.now + 10.0
+    sched._pending[(2, "black")].deadline = clock.now
+
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    assert _convergence_records(caplog) == []
+    assert probe.convergence_probe_id in sched._convergence_observers[(1, "white")]
+    clock.advance(10.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert f"convergence_probe_id={probe.convergence_probe_id}" in records[0]
+
+
+def test_terminal_probe_capacity_and_ttl_are_censored_and_bounded(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        clock, _RecordingRecompute(),
+        convergence_probe_capacity=1, convergence_probe_ttl_s=5.0,
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        first = sched.probe_terminal_recompute(1, "white", register_convergence=True)
+        second = sched.probe_terminal_recompute(1, "white", register_convergence=True)
+
+    assert sched._convergence_observer_count == 1
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert f"convergence_probe_id={second.convergence_probe_id}" in records[0]
+    assert "disposition=capacity" in records[0]
+    assert "completion_lag_ms=None" in records[0]
+
+    clock.advance(5.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.probe_terminal_recompute(9, "black", register_convergence=False)
+    records = _convergence_records(caplog)
+    assert len(records) == 2
+    assert f"convergence_probe_id={first.convergence_probe_id}" in records[1]
+    assert "disposition=timeout" in records[1]
+    assert sched._convergence_observer_count == 0
+
+
+def test_terminal_probe_logs_at_most_one_expired_observer_per_request(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(
+        clock,
+        _RecordingRecompute(),
+        convergence_probe_capacity=3,
+        convergence_probe_ttl_s=5.0,
+    )
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    for _ in range(3):
+        sched.probe_terminal_recompute(1, "white", register_convergence=True)
+    assert sched._convergence_observer_count == 3
+
+    clock.advance(5.0)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.probe_terminal_recompute(9, "black", register_convergence=False)
+
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert "disposition=timeout" in records[0]
+    assert sched._convergence_observer_count == 2
+
+
+@pytest.mark.parametrize(
+    ("run_outcome", "expected_disposition"),
+    [
+        ("failed", "failed"),
+        ("no_evidence", "no_evidence"),
+        ("no_push_fill", "rebuilt"),
+    ],
+)
+def test_nonconverging_run_has_no_finite_completion_lag(
+    run_outcome, expected_disposition, caplog
+):
+    clock = _FakeClock()
+
+    def recompute(*args):
+        clock.advance(0.020)
+        if run_outcome == "failed":
+            raise RuntimeError("recompute failed")
+        if run_outcome == "no_evidence":
+            return _no_evidence()
+        return _rebuilt(batch_id=None)
+
+    sched, _ = _make_scheduler(clock, recompute)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.probe_terminal_recompute(1, "white", register_convergence=True)
+    clock.advance(1.5)
+
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    record = _convergence_records(caplog)[0]
+    assert f"disposition={expected_disposition}" in record
+    assert "completion_lag_ms=None" in record
+    assert sched._convergence_observer_count == 0
+
+
+def test_terminal_probe_records_push_fill_failure_without_identity(caplog):
+    clock = _FakeClock()
+
+    def fail_fill(batch_id):
+        raise RuntimeError("optional fill failed")
+
+    sched, _ = _make_scheduler(
+        clock, lambda *args: _rebuilt(batch_id=17), fill_baselines=fail_fill
+    )
+    sched.request_recompute(987654, "white", source=_TRIGGER)
+    probe = sched.probe_terminal_recompute(
+        987654, "white", register_convergence=True
+    )
+    clock.advance(2.0)
+
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+
+    record = _convergence_records(caplog)[0]
+    assert f"convergence_probe_id={probe.convergence_probe_id}" in record
+    assert "disposition=push_fill_failed" in record
+    assert "completion_lag_ms=None" in record
+    assert "987654" not in record
+    assert "user_id" not in record
+    assert "player_color" not in record
+    assert "session" not in record
+
+
+def test_shutdown_censors_pending_probe_and_forced_run_has_no_optimistic_bound(caplog):
+    clock = _FakeClock()
+    sched, _ = _make_scheduler(clock, _RecordingRecompute())
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    pending = sched.probe_terminal_recompute(1, "white", register_convergence=True)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.shutdown(drain=False)
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert f"convergence_probe_id={pending.convergence_probe_id}" in records[0]
+    assert "disposition=shutdown" in records[0]
+
+    caplog.clear()
+    sched, _ = _make_scheduler(clock, _RecordingRecompute())
+    sched.request_recompute(2, "black", source=_TRIGGER)
+    forced = sched.probe_terminal_recompute(2, "black", register_convergence=True)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due(now=float("inf"))
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert f"convergence_probe_id={forced.convergence_probe_id}" in records[0]
+    assert "forced_dispatch=True" in records[0]
+    assert "optimistic_lower_bound_ms=None" in records[0]

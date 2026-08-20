@@ -41,6 +41,29 @@ def _one(calls: list[tuple], event: str) -> tuple:
     return matches[0]
 
 
+def _assert_terminal_baseline_properties(props: dict, terminal_kind: str) -> None:
+    assert props["opening_baseline_state"] in {
+        "present", "missing_watermark", "missing_with_watermark", "observation_failed"
+    }
+    assert props["opening_baseline_scheduler_state"] in {
+        "pending", "inflight", "absent", "probe_failed"
+    }
+    assert props["opening_baseline_attempts_bucket"] in {
+        "0", "1", "2_3", "4_7", "8_plus"
+    }
+    assert props["opening_recompute_state"] in {
+        "pending", "inflight", "absent", "probe_failed"
+    }
+    assert props["terminal_kind"] == terminal_kind
+    assert props["session_age_bucket"] in {
+        "under_1m", "1m_5m", "5m_30m", "30m_2h", "2h_plus", "unknown"
+    }
+    assert props["barrier_cohort"] == "disabled"
+    assert props["barrier_outcome"] == "disabled"
+    assert props["barrier_wait_budget_ms"] == 0
+    assert props["barrier_wait_ms"] == 0
+
+
 def _drill_roots() -> OpeningRoots:
     root = OpeningRoot(
         opening_key=KINGS_PAWN_FEN,
@@ -150,6 +173,7 @@ def test_end_game_emits_game_ended(client, auth_headers, captured):
     assert props["rating_before"] is not None
     assert props["rating_after"] is not None
     assert props["rating_delta"] == props["rating_after"] - props["rating_before"]
+    _assert_terminal_baseline_properties(props, "game_end")
 
 
 def test_opponent_move_served_engine_fallback(client, auth_headers, captured):
@@ -272,7 +296,9 @@ def test_abandon_after_failure_emits_both_events_once(client, auth_headers, capt
     assert failed.status_code == 200
     assert abandoned.status_code == 200
 
-    assert _one(captured, "drill_failed")[2] == {"reason": "accuracy"}
+    failed_props = _one(captured, "drill_failed")[2]
+    assert failed_props["reason"] == "accuracy"
+    _assert_terminal_baseline_properties(failed_props, "drill_accuracy_fail")
     assert _one(captured, "drill_abandoned")[2] == {"terminal_reason": "accuracy"}
 
 
@@ -310,7 +336,8 @@ def test_fail_drill_emits_drill_failed_accuracy(client, auth_headers, captured, 
     assert r.status_code == 200
     did, _event, props = _one(captured, "drill_failed")
     assert did == "55"
-    assert props == {"reason": "accuracy"}
+    assert props["reason"] == "accuracy"
+    _assert_terminal_baseline_properties(props, "drill_accuracy_fail")
 
 
 def test_route_check_off_route_emits_drill_failed(client, auth_headers, captured):
@@ -359,11 +386,10 @@ def test_natural_end_emits_drill_natural_end(client, auth_headers, captured):
     assert r.status_code == 200
     did, _event, props = _one(captured, "drill_natural_end")
     assert did == "55"
-    assert props == {
-        "result": "checkmate_win",
-        "row_reconcile_outcome": "pgn_unknown",
-        "derived_tail_rows": 0,
-    }
+    assert props["result"] == "checkmate_win"
+    assert props["row_reconcile_outcome"] == "pgn_unknown"
+    assert props["derived_tail_rows"] == 0
+    _assert_terminal_baseline_properties(props, "drill_natural_end")
 
 
 def test_continue_emits_drill_continued_once(client, auth_headers, captured, db_session):

@@ -358,6 +358,46 @@ def test_end_game_all_result_types(client, auth_headers):
     ]
 
 
+def test_game_end_attaches_preterminal_observation_only_for_included_results(
+    client, auth_headers
+):
+    observed = []
+    captured = []
+
+    def observe_terminal(session, terminal_kind):
+        assert session.status == "active"
+        assert session.result is None
+        observed.append(terminal_kind.value)
+        return {
+            "opening_baseline_state": "missing_with_watermark",
+            "terminal_kind": terminal_kind.value,
+        }
+
+    with (
+        patch("app.api.game.terminal_baseline_observation", side_effect=observe_terminal),
+        patch("app.api.game.compute_opening_score_delta", return_value=[]),
+        patch("app.api.game.capture", side_effect=lambda *args: captured.append(args)),
+    ):
+        for result in ("draw", "abandon"):
+            start = client.post(
+                "/api/game/start", json={"engine_elo": 1500}, headers=auth_headers()
+            )
+            response = client.post(
+                "/api/game/end",
+                json={"session_id": start.json()["session_id"], "result": result,
+                      "pgn": "1. e4 e5"},
+                headers=auth_headers(),
+            )
+            assert response.status_code == 200, response.text
+
+    assert observed == ["game_end"]
+    events = [event for event in captured if event[1] == "game_ended"]
+    assert events[0][2]["opening_baseline_state"] == "missing_with_watermark"
+    assert events[0][2]["terminal_kind"] == "game_end"
+    assert "opening_baseline_state" not in events[1][2]
+    assert "terminal_kind" not in events[1][2]
+
+
 def test_end_game_not_found(client, auth_headers):
     """Test ending a non-existent game."""
     fake_uuid = "00000000-0000-0000-0000-000000000000"

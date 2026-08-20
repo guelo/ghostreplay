@@ -26,7 +26,11 @@ from app.drill_steering import (
 )
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import GameSession, OpponentDecision, decode_uci_line, encode_uci_line
-from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_baseline_scheduler import (
+    TerminalKind,
+    enqueue_baseline_snapshot,
+    terminal_baseline_observation,
+)
 from app.opening_boundary import (
     claim_opening_boundary_shadow_terminal,
     emit_opening_boundary_shadow_terminal,
@@ -659,6 +663,10 @@ def fail_drill(
         raise HTTPException(status_code=422, detail="terminal_reason must be accuracy")
     if session.status != "active" or session.drill_state != "root_reached":
         raise HTTPException(status_code=400, detail="Drill cannot be failed from its current state")
+    baseline_observation = terminal_baseline_observation(
+        session,
+        TerminalKind.DRILL_ACCURACY_FAIL,
+    )
     # Accuracy-fail flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true without any
     # timestamp write, so the opening-evidence counter carries the change (g-jact).
     was_evidence_eligible = session_is_evidence_eligible(session)
@@ -682,7 +690,9 @@ def fail_drill(
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
-    capture(str(user.user_id), "drill_failed", {"reason": session.drill_terminal_reason})
+    fail_properties = {"reason": session.drill_terminal_reason}
+    fail_properties.update(baseline_observation)
+    capture(str(user.user_id), "drill_failed", fail_properties)
     if shadow_terminal_claimed:
         emit_opening_boundary_shadow_terminal(
             session,
@@ -911,6 +921,10 @@ def natural_end_drill(
         raise HTTPException(status_code=400, detail="Drill cannot end naturally from its current state")
     if request.result not in ("checkmate_win", "checkmate_loss", "draw"):
         raise HTTPException(status_code=400, detail="Invalid natural-end result")
+    baseline_observation = terminal_baseline_observation(
+        session,
+        TerminalKind.DRILL_NATURAL_END,
+    )
     # status->'ended' flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true (g-jact).
     was_evidence_eligible = session_is_evidence_eligible(session)
     line_fence = suppress_unacknowledged_move_line(
@@ -959,15 +973,13 @@ def natural_end_drill(
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
-    capture(
-        str(user.user_id),
-        "drill_natural_end",
-        {
-            "result": request.result,
-            "row_reconcile_outcome": reconcile_result.outcome,
-            "derived_tail_rows": reconcile_result.derived_rows,
-        },
-    )
+    natural_end_properties = {
+        "result": request.result,
+        "row_reconcile_outcome": reconcile_result.outcome,
+        "derived_tail_rows": reconcile_result.derived_rows,
+    }
+    natural_end_properties.update(baseline_observation)
+    capture(str(user.user_id), "drill_natural_end", natural_end_properties)
     if shadow_terminal_claimed and session.ended_at is not None:
         emit_opening_boundary_shadow_terminal(
             session,
