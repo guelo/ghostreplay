@@ -26,6 +26,7 @@ const reviewSrsBlunderMock = vi.fn();
 const fetchCurrentRatingMock = vi.fn();
 const getStatsAchievementsMock = vi.fn();
 const fetchSessionOpeningsMock = vi.fn();
+const fetchAnalysisMock = vi.fn();
 const pollFreshOpeningDeltaMock = vi.fn();
 const getOpeningDeltaPollSnapshotMock = vi.fn();
 const audioPlayMock = vi.fn();
@@ -64,6 +65,8 @@ vi.mock("../utils/api", async (importOriginal) => {
     // override it would fall through to the real network helper in every test.
     fetchSessionOpenings: (...args: unknown[]) =>
       fetchSessionOpeningsMock(...args),
+    // The post-game accuracy row (useSessionAccuracy) polls this at game end.
+    fetchAnalysis: (...args: unknown[]) => fetchAnalysisMock(...args),
   };
 });
 
@@ -395,6 +398,24 @@ vi.mock("react-chessboard", () => ({
 
 const initialGameStoreState = useGameStore.getInitialState();
 
+const makeAnalysisPayload = (accuracy: number | null, isComplete: boolean) => ({
+  session_id: "s",
+  pgn: null,
+  result: "1-0",
+  moves: [],
+  summary: {
+    blunders: 0,
+    mistakes: 0,
+    inaccuracies: 0,
+    average_centipawn_loss: 12,
+    accuracy,
+  },
+  expected_total_moves: 2,
+  analyzed_moves: isComplete ? 2 : 1,
+  is_complete: isComplete,
+  player_color: "white",
+});
+
 beforeEach(() => {
   stockfishStatus = "ready";
   naturalEndDrillMock.mockReset();
@@ -451,6 +472,10 @@ beforeEach(() => {
     lineage: [],
     start_ply: 1,
   });
+  fetchAnalysisMock.mockReset();
+  // Completed-but-unmeasurable is the quiet default: one request, no poll, and
+  // no accuracy row, so tests that predate g-frlfp see exactly what they did.
+  fetchAnalysisMock.mockResolvedValue(makeAnalysisPayload(null, true));
   captureEventMock.mockReset();
   getOpeningDeltaPollSnapshotMock.mockReset();
   getOpeningDeltaPollSnapshotMock.mockReturnValue(null);
@@ -5843,6 +5868,145 @@ describe("ChessGame opening lineage", () => {
     await within(region).findByRole("img", {
       name: "Score increased by 3.0, now 44.0",
     });
+  });
+
+  // g-frlfp: the post-game banner gathers the end-of-game numbers in one place.
+  it("shows the ended session's accuracy in the banner, requested once", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-accuracy",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    endGameMock.mockResolvedValue({});
+    fetchAnalysisMock.mockResolvedValue(makeAnalysisPayload(87, true));
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(fetchSessionOpeningsMock).toHaveBeenCalled();
+    });
+    // Nothing is requested while the game is live.
+    expect(fetchAnalysisMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+
+    const banner = await screen.findByRole("region", {
+      name: "Post-game options",
+    });
+    await within(banner).findByText("87%");
+    // A complete payload ends the poll, so the count must not climb; a second
+    // call here would mean the effect re-armed for the same ended session.
+    expect(fetchAnalysisMock).toHaveBeenCalledTimes(1);
+    expect(fetchAnalysisMock).toHaveBeenCalledWith("session-accuracy");
+  });
+
+  it("does not carry one game's accuracy into the next session", async () => {
+    startGameMock
+      .mockResolvedValueOnce({
+        session_id: "session-accuracy-1",
+        engine_elo: 1500,
+        player_color: "white",
+      })
+      .mockResolvedValueOnce({
+        session_id: "session-accuracy-2",
+        engine_elo: 1500,
+        player_color: "white",
+      });
+    endGameMock.mockResolvedValue({});
+    fetchAnalysisMock.mockResolvedValue(makeAnalysisPayload(87, true));
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+    await waitFor(() => {
+      expect(fetchSessionOpeningsMock).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+
+    const banner = await screen.findByRole("region", {
+      name: "Post-game options",
+    });
+    await within(banner).findByText("87%");
+
+    // The next game's analysis never answers, so a leaked value would be the
+    // only way 87% could still be on screen.
+    fetchAnalysisMock.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("87%")).not.toBeInTheDocument();
+    });
+  });
+
+  it("lists only the changed openings in the banner, without touching the lineage badges", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-banner-openings",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    endGameMock.mockResolvedValue({
+      opening_score_changes: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          before: 41,
+          after: 44,
+          delta: 3,
+          is_new: false,
+        },
+        // Played but unmoved: a lineage badge still describes it, the banner
+        // deliberately does not.
+        {
+          opening_key: "k2",
+          opening_name: "Flat Defence",
+          opening_family: "King's Pawn",
+          eco: "C21",
+          depth: 1,
+          before: 30,
+          after: 30,
+          delta: 0,
+          is_new: false,
+        },
+      ],
+    });
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+    await waitFor(() => {
+      expect(fetchSessionOpeningsMock).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+
+    const banner = await screen.findByRole("region", {
+      name: "Post-game options",
+    });
+    await within(banner).findByText("King's Pawn Game:");
+    expect(within(banner).getByText("+3.0")).toBeInTheDocument();
+    expect(within(banner).getByText("-> 44.0")).toBeInTheDocument();
+    expect(
+      within(banner).queryByText("Flat Defence:"),
+    ).not.toBeInTheDocument();
   });
 
   it("updates a same-session card to the reconciled after-score when no baseline exists", async () => {

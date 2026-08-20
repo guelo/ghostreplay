@@ -215,6 +215,14 @@ selecting an item opens the same review journey. A rated terminal outcome also
 persists an Elo result and returns its change for the post-game experience;
 unrated and abandoned games have no rating result.
 
+When a regular game ends, the play surface itself summarizes the outcome before
+the player leaves it: the banner gathers that rating change, the session
+accuracy once it resolves, and one line per opening whose score moved, above the
+post-game actions. It reports only what is measurable — an unresolved accuracy
+or an opening whose score did not move is omitted rather than shown as zero —
+and it repeats the same opening numbers the lineage badges carry rather than
+replacing them. Drills keep their own end-of-drill actions and no such summary.
+
 Session accuracy is a cached terminal result with a versioned population
 contract. Its detailed release and operational mechanics live in
 [Session-accuracy versioning](docs/session-accuracy-versioning.md) and the

@@ -82,6 +82,8 @@ import type { StartDrillDraft } from "./chess-game/ui/StartPanel";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import GameOpeningLineage from "./GameOpeningLineage";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
+import { shouldRenderPostGameBanner } from "./chess-game/ui/PostGameBanner.helpers";
+import { useSessionAccuracy } from "../hooks/useSessionAccuracy";
 import DrillStopActions from "./chess-game/ui/DrillStopActions";
 import {
   buildDrillAnalysisSnapshot,
@@ -561,6 +563,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     sessionId,
   );
   useOpeningBoundaryDelta(coordinator, sessionId, isDrillMode);
+
+  // Post-game accuracy for the banner (g-frlfp). Regular games only: drills take
+  // an earlier banner branch and get no stat stack, so there is nothing to fetch
+  // for them. Bounded polling lives in the hook; this only says WHEN it applies.
+  const { accuracy: postGameAccuracy, status: postGameAccuracyStatus } =
+    useSessionAccuracy(
+      sessionId,
+      showPostGamePrompt && gameResult !== null && !drillOpeningKey,
+    );
   const openingLineageRefetchKey = JSON.stringify([
     moveHistory.length,
     openingDeltaRefetchClaimRef.current.claimed,
@@ -2522,6 +2533,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     canDragLiveMove || (isReviewingPast && !isRevertPending);
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
   const hasBelowBoardContent = moveHistory.length > 0 || !isGameActive;
+  // The banner only earns a grid row when it actually renders (g-frlfp); an
+  // always-mounted empty area would cost a --game-layout-gap above the move list
+  // for the whole game. Derived from the banner's own branch predicate so the
+  // two cannot drift.
+  const hasPostGameBanner = shouldRenderPostGameBanner({
+    isGameActive,
+    showPostGamePrompt,
+    gameResult,
+    isReviewedDrillReturn,
+  });
 
   // Drop the fanfare nonce whenever the terminal display state ends (g-8079).
   // Required for correctness on top of the render gate below: unmounting the
@@ -2565,7 +2586,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   return (
     <AnalysisStoreProvider value={analysisStore}>
       <section className="chess-section" ref={sectionRef}>
-        <div className={`chess-layout ${hasBelowBoardContent ? 'has-graph' : ''}`}>
+        <div
+          className={`chess-layout${hasBelowBoardContent ? ' has-graph' : ''}${hasPostGameBanner ? ' has-banner' : ''}`}
+        >
           <GameInfoPanel
             statusText={statusText}
             gameStatusBadge={gameStatusBadge}
@@ -2696,8 +2719,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               />
             </div>
           </div>
-          {hasBelowBoardContent && (
-            <div className="chess-graph-area">
+          {hasPostGameBanner && (
+            <div className="chess-banner-area">
               <PostGameBanner
                 isGameActive={isGameActive}
                 isPracticeContinuation={isPracticeContinuation}
@@ -2712,9 +2735,24 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 drillAgainPending={isDrillDeltaPending}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
+                accuracy={postGameAccuracy}
+                accuracyStatus={postGameAccuracyStatus}
+                // The SAME session-stamped items the lineage cards badge — the
+                // banner rows are an addition, not a replacement, so a stale
+                // delta still falls through to the last-drill toast unchanged.
+                openingScoreChanges={openingScoreChanges}
+                openingDeltaFreshness={
+                  openingScoreDelta?.sessionId === sessionId
+                    ? openingScoreDelta.freshness
+                    : null
+                }
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
               />
+            </div>
+          )}
+          {hasBelowBoardContent && (
+            <div className="chess-graph-area">
               <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
             </div>
           )}

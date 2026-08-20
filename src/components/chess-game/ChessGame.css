@@ -51,6 +51,25 @@
         "panel graph moves";
 }
 
+/*
+ * Banner rows. Declared after .has-graph (equal specificity, source order wins)
+ * and before the combined rule, which is more specific than both. Desktop
+ * ordering is unchanged from when the banner lived inside .chess-graph-area:
+ * board, then banner, then graph.
+ */
+.chess-layout.has-banner {
+    grid-template-areas:
+        "panel board moves"
+        "panel banner moves";
+}
+
+.chess-layout.has-graph.has-banner {
+    grid-template-areas:
+        "panel board moves"
+        "panel banner moves"
+        "panel graph moves";
+}
+
 .chess-graph-area {
     grid-area: graph;
     width: 100%;
@@ -60,8 +79,19 @@
     gap: 1rem;
 }
 
+/*
+ * The post-game banner owns a grid area SEPARATE from the graph (g-frlfp) so the
+ * narrow layout can place it above the move list while the graph stays pinned
+ * last. Its row exists only under .has-banner — an always-present empty row would
+ * cost a dead --game-layout-gap above the move list for the whole game.
+ */
+.chess-banner-area {
+    grid-area: banner;
+    width: 100%;
+}
+
 .chess-graph-area .analysis-graph,
-.chess-graph-area .game-end-banner {
+.chess-banner-area .game-end-banner {
     margin-top: 0;
 }
 
@@ -1470,25 +1500,84 @@
     color: var(--text-primary);
 }
 
-.rating-delta {
-    margin: 0.25rem 0 0;
+/*
+ * Post-game stat stack (g-frlfp): message, then one labelled row per number, then
+ * the action row pinned last. Only the shared post-game branch stacks — the
+ * stopped-drill and idle branches keep the horizontal row they have always had.
+ */
+.game-end-banner--stacked {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0.75rem;
+}
+
+/* Left-aligned with the stat labels above them, rather than centered in the
+ * full-width column the stacked banner gives them. */
+.game-end-banner--stacked .chess-post-game-actions {
+    justify-content: flex-start;
+}
+
+.game-end-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+}
+
+/*
+ * One row per number. This generalizes the old .rating-delta — same entrance
+ * animation and same sign colours, now shared by the Elo, accuracy, and opening
+ * rows instead of duplicated per row type.
+ */
+.game-end-stat {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    margin: 0;
+    min-width: 0;
     font-size: 1.05rem;
     font-weight: 700;
     animation: rating-delta-in 0.4s ease-out;
 }
 
-.rating-delta--up {
-    color: #4caf50;
+/* Opening names are arbitrarily long; the row must never wrap or push the
+ * numbers off the banner. Full text stays available via the title attribute. */
+.game-end-stat__label {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text-secondary);
 }
 
-.rating-delta--down {
-    color: #ef5350;
+.game-end-stat__delta {
+    flex: 0 0 auto;
 }
 
-.rating-delta__value {
+.game-end-stat__value {
+    flex: 0 0 auto;
     font-weight: 400;
     font-size: 0.85rem;
     opacity: 0.8;
+}
+
+.game-end-stat--up {
+    color: #4caf50;
+}
+
+.game-end-stat--down {
+    color: #ef5350;
+}
+
+/* Not-yet-resolved rows (accuracy still analyzing, opening scores reconciling).
+ * Subdued so a placeholder never reads as a result. */
+.game-end-stat--muted {
+    color: var(--text-secondary);
+    font-weight: 500;
 }
 
 @keyframes rating-delta-in {
@@ -1632,6 +1721,21 @@
             "graph panel";
     }
 
+    /* Banner stays in the LEFT (board) column here rather than following the
+     * graph into the bottom-left cell; panel spans the rows beside it. */
+    .chess-layout.has-banner {
+        grid-template-areas:
+            "board  moves"
+            "banner panel";
+    }
+
+    .chess-layout.has-graph.has-banner {
+        grid-template-areas:
+            "board  moves"
+            "banner panel"
+            "graph  panel";
+    }
+
     /* Panel stays a vertical column (like desktop) in its narrow cell. */
     .chess-panel {
         align-self: start;
@@ -1684,6 +1788,7 @@
 
     .game-page .chess-panel,
     .game-page .chessboard-wrapper,
+    .game-page .chess-banner-area,
     .game-page .chess-graph-area,
     .game-page .moves-column {
         min-width: 0;
@@ -1865,10 +1970,14 @@
         padding: 0.5rem 0.75rem;
     }
 
+    .game-page .chess-banner-area,
     .game-page .chess-graph-area {
-        gap: 0.35rem;
         padding: 0 0.5rem;
         box-sizing: border-box;
+    }
+
+    .game-page .chess-graph-area {
+        gap: 0.35rem;
     }
 
     .game-page .chess-graph-area .analysis-graph > svg {
@@ -1954,6 +2063,28 @@
         grid-template-areas:
             "panel"
             "board"
+            "moves"
+            "graph";
+    }
+
+    /*
+     * The end-of-game numbers are the reason the player is looking at this screen,
+     * so on a phone the banner sits directly under the board — above the move list
+     * and the controls row inside it — instead of below the fold (g-frlfp).
+     */
+    .chess-layout.has-banner {
+        grid-template-areas:
+            "panel"
+            "board"
+            "banner"
+            "moves";
+    }
+
+    .chess-layout.has-graph.has-banner {
+        grid-template-areas:
+            "panel"
+            "board"
+            "banner"
             "moves"
             "graph";
     }
