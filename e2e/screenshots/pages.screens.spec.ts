@@ -617,6 +617,83 @@ const startGameAsWhite = async (page: Page): Promise<void> => {
 };
 
 /**
+ * Start a real drill on the B20 Sicilian Defense root through the setup panel.
+ *
+ * Nothing here is mocked: /api/drills/start, the steered opponent reply and
+ * /route-check all run against the backend. Two properties of this particular
+ * root are what the drill-ending captures rest on:
+ *
+ * - It is depth 2 with WHITE to move (1.e4 c5), so the OPPONENT's steered reply
+ *   is what reaches it. "Opening root reached. Drill is live." is written by the
+ *   root confirmation and cleared by the next applied opponent move, so a root
+ *   the player moves into holds it only until the reply lands — far too short
+ *   for six sequential viewport captures. Reached by the opponent, it survives
+ *   for as long as the player sits on their turn.
+ * - The only route to it is 1.e4 c5, which makes 1.a3 unambiguously off-route.
+ *
+ * The list is filtered by ECO ("B20" narrows ~11k roots to 48 rows) rather than
+ * by name, and "B20 — Sicilian Defense" is the unique exact label among them.
+ */
+const startSicilianDrillAsWhite = async (
+  page: Page,
+  tier: "Strict" | "Standard" | "Lenient",
+): Promise<void> => {
+  // The drill panel has no difficulty control, but the sampled bot IS rendered
+  // on the live info panel ("vs Gigglegeist 1200"). The Play panel is where that
+  // label lives, so wait out the current-rating request there before switching:
+  // starting during it makes the opponent depend on backend timing.
+  await expect(page.locator(".chess-start-panel .chess-elo-label")).toHaveText(
+    "Gigglegeist 1200",
+    { timeout: 15_000 },
+  );
+
+  await page.getByRole("button", { name: "Drill" }).click();
+  const trigger = page.locator(".opening-picker__trigger");
+  // The openings graph is a process-wide singleton; first cold load is slow.
+  await expect(trigger).toHaveText(/Select opening/, { timeout: 180_000 });
+
+  await trigger.click();
+  await page.locator(".opening-picker__search").fill("B20");
+  await page
+    .getByRole("option", { name: "B20 — Sicilian Defense", exact: true })
+    .click();
+  await expect(trigger).toContainText("Sicilian Defense");
+
+  // Side is sticky in localStorage, so set it rather than trusting the default:
+  // the whole route below is White's.
+  await page
+    .locator(".drill-field")
+    .getByRole("button", { name: "White" })
+    .click();
+  await page
+    .locator(".strictness-tier-grid")
+    .getByRole("button", { name: tier })
+    .click();
+  await page.getByRole("button", { name: "Start Drill" }).click();
+  await expect(page.locator(".chess-status--drill")).toContainText(
+    "Sicilian Defense",
+    { timeout: 30_000 },
+  );
+};
+
+/** The live drill-stopped panel (off-route correction and accuracy grade alike). */
+const drillStopActions = (page: Page) =>
+  page.getByRole("region", { name: "Drill stopped — choose next action" });
+
+/**
+ * Settle the two things that keep mutating under a stopped/rooted drill: the
+ * board notice (rehook, on its own 3s timer) and the live opening-lineage
+ * scores. Both would otherwise be free to change between viewport captures.
+ */
+const settleDrillSurroundings = async (page: Page): Promise<void> => {
+  await page.clock.runFor(3500);
+  await expect(page.locator(".board-notice:visible")).toHaveCount(0);
+  await expect(page.locator(".tree-node-card__score-loading")).toHaveCount(0, {
+    timeout: 30_000,
+  });
+};
+
+/**
  * Script the seeded Giuoco Piano review line used by the gallery's transient
  * review states.
  *
@@ -1128,5 +1205,88 @@ test.describe("play", () => {
       waitFor: (p) => p.locator(".promotion-picker-square").first(),
     });
     await page.unrouteAll();
+  });
+
+  // --- Drill endings (real drill session, no mocks) ---------------------
+  // Last in the file on purpose: a real drill writes opening evidence for the
+  // shared seeded account, which moves the live opening-lineage scores every
+  // later /play capture renders. Kept here, nothing downstream sees it.
+  //
+  // Two of the three endings come out of one Sicilian drill: the opponent's
+  // steered 1...c5 REACHES the root — the drill's goal, and the end of its
+  // routed phase — and a non-best second move then STOPS the drill on accuracy.
+  // Strict (0cp) is deliberate: at that tier the grade is "was this the engine's
+  // best move?", so 2.a3 fails without the local worker having to land inside a
+  // centipawn threshold.
+  test("drill root reached + accuracy stop", async ({ page, loginAs }) => {
+    test.setTimeout(300_000);
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await page.goto("/play");
+    await startSicilianDrillAsWhite(page, "Strict");
+
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    await expect(page.locator(".chess-start-error")).toContainText(
+      "Opening root reached. Drill is live.",
+      { timeout: 60_000 },
+    );
+    await waitForLiveMoveAnalysis(page);
+    await settleDrillSurroundings(page);
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "drill-root-reached",
+      waitFor: (p) => p.locator(".chess-start-error"),
+    });
+
+    // 2.a3 — legal, and on nobody's shortlist. The route check is done once the
+    // root is reached, so this fails on the strictness grade instead: the board
+    // rewinds to the position before the move (with the correction arrows) and
+    // the message box is replaced by the drill-stopped actions.
+    await playMove(page, "a2", "a3");
+    await expect(drillStopActions(page)).toBeVisible({ timeout: 60_000 });
+    await expect(drillStopActions(page)).toContainText("Bad move");
+    await waitForLiveMoveAnalysis(page);
+    // Unlike the off-route stop, the accuracy path carries an opening-score
+    // delta, and the restart button reads "Updating score…" until the fresh
+    // value lands. Capturing through that flip would hand the six viewports two
+    // different buttons.
+    await expect(
+      drillStopActions(page).getByRole("button", { name: "Again", exact: true }),
+    ).toBeVisible({ timeout: 60_000 });
+    await settleDrillSurroundings(page);
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "drill-stopped-accuracy",
+      waitFor: drillStopActions,
+    });
+  });
+
+  // The other stop: 1.a3 leaves the drill's only route (1.e4 c5) on the very
+  // first move, so route-check answers `failed`/off_route before any grading is
+  // involved. Different subtitle, different board (rewound to the start
+  // position) and no opening-score delta — off-route never reached the target.
+  test("drill stopped (off route)", async ({ page, loginAs }) => {
+    test.setTimeout(300_000);
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await page.goto("/play");
+    await startSicilianDrillAsWhite(page, "Standard");
+
+    await playMove(page, "a2", "a3");
+    await expect(drillStopActions(page)).toBeVisible({ timeout: 60_000 });
+    await expect(drillStopActions(page)).toContainText(
+      "That's not how you get to the opening",
+    );
+    await waitForLiveMoveAnalysis(page);
+    await settleDrillSurroundings(page);
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "drill-stopped-off-route",
+      waitFor: drillStopActions,
+    });
   });
 });

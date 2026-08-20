@@ -114,6 +114,14 @@ pixel-diff suite** — there are no `toHaveScreenshot()` assertions this pass.
   arbitrary intermediate engine state. Timed review-warning captures advance
   their paused clock in small steps during that wait, bounded below the notice's
   dismissal timer, so late cache debounce work cannot be stranded.
+- Drill endings come from a REAL drill on the B20 Sicilian Defense root —
+  `/api/drills/start`, the steered opponent reply and `/route-check` are all
+  unmocked. That root (1.e4 c5) is reached by the OPPONENT's move, which is what
+  makes "Opening root reached" hold still long enough to shoot at six viewports;
+  the two stops are the Strict-tier accuracy grade on 2.a3 and the off-route
+  answer to 1.a3. These tests run last in the file: a drill writes opening
+  evidence for the shared seeded account, and that moves the opening-lineage
+  scores every later /play capture renders.
 - Analysis-board captures wait for piece transforms to reconcile and place the
   selected move at a deterministic scroll offset after responsive layout swaps.
 
