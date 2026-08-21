@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { useEffect } from "react";
 import { Chess } from "chess.js";
 import { cleanup } from "@testing-library/react";
 import { render, screen, fireEvent, waitFor, act, within } from "../test/utils";
@@ -375,6 +376,7 @@ let capturedPieceDrop:
   | ((args: { sourceSquare: string; targetSquare: string }) => boolean)
   | null = null;
 let capturedSquareClick: ((args: { square: string }) => void) | null = null;
+let chessboardMountCount = 0;
 
 vi.mock("react-chessboard", () => ({
   defaultPieces: {
@@ -382,6 +384,9 @@ vi.mock("react-chessboard", () => ({
     bK: () => <svg data-testid="piece-bK" />,
   },
   Chessboard: ({ options }: { options: Record<string, unknown> }) => {
+    useEffect(() => {
+      chessboardMountCount += 1;
+    }, []);
     capturedPieceDrop = options.onPieceDrop as typeof capturedPieceDrop;
     capturedSquareClick = options.onSquareClick as typeof capturedSquareClick;
     return (
@@ -391,6 +396,7 @@ vi.mock("react-chessboard", () => ({
         data-position={options.position as string}
         data-allow-dragging={String(options.allowDragging)}
         data-arrow-count={String(((options.arrows as unknown[] | undefined) ?? []).length)}
+        data-arrows={JSON.stringify(options.arrows ?? [])}
       />
     );
   },
@@ -417,6 +423,7 @@ const makeAnalysisPayload = (accuracy: number | null, isComplete: boolean) => ({
 });
 
 beforeEach(() => {
+  chessboardMountCount = 0;
   stockfishStatus = "ready";
   naturalEndDrillMock.mockReset();
   mockLocation = { state: null, pathname: "/play" };
@@ -1552,6 +1559,52 @@ describe("ChessGame characterization safeguards", () => {
     );
   });
 
+  it("keeps a terminal post-root accuracy failure on the live board", async () => {
+    const stalemateSourceFen = "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1";
+    const terminalBoard = new Chess(stalemateSourceFen);
+    terminalBoard.move("Qe6");
+    const stalemateFen = terminalBoard.fen();
+
+    useGameStore.setState({
+      sessionId: "session-terminal-accuracy",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+      liveFen: stalemateSourceFen,
+      moveHistory: [],
+    });
+    mockCoordinator.waitForDrillGrade.mockResolvedValueOnce({
+      grade: "fail",
+      bestMove: "f7f8",
+      source: "position",
+    });
+
+    render(<ChessGame />);
+    const mountCountBeforeMove = chessboardMountCount;
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "f7", targetSquare: "e6" });
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+    expect(new Chess(useGameStore.getState().liveFen).isStalemate()).toBe(true);
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      stalemateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+    expect(chessboardMountCount).toBe(mountCountBeforeMove);
+    expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
+  });
+
   it("disables takeback when an active unrated drill stops after accuracy failure", async () => {
     const board = new Chess();
     const move = board.move("e4");
@@ -1910,6 +1963,174 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillState).toBe("failed");
     });
   };
+
+  it("replaces drill correction arrows when navigating to an analyzed blunder", async () => {
+    await driveOffRouteFail();
+    expect(JSON.parse(screen.getByTestId("chessboard").dataset.arrows ?? "[]"))
+      .toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ startSquare: "d2", endSquare: "d4" }),
+        ]),
+      );
+
+    const continuedLine = new Chess();
+    continuedLine.move("e4");
+    continuedLine.move("e5");
+    act(() => {
+      useGameStore.setState((state) => ({
+        liveFen: continuedLine.fen(),
+        moveHistory: [
+          ...state.moveHistory,
+          { san: "e5", fen: continuedLine.fen(), uci: "e7e5" },
+        ],
+      }));
+    });
+
+    await act(async () => {
+      gameAnalysisStore.getState().resolveAnalysis(0, {
+        id: "analysis-0-e2e4",
+        move: "e2e4",
+        bestMove: "g1f3",
+        bestEval: 80,
+        playedEval: -120,
+        currentPositionEval: -120,
+        playedEvalMate: null,
+        currentPositionEvalMate: null,
+        moveIndex: 0,
+        delta: 200,
+        classification: "blunder",
+        blunder: true,
+        recordable: true,
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("e4").closest("button") as HTMLElement);
+      await Promise.resolve();
+    });
+
+    expect(JSON.parse(screen.getByTestId("chessboard").dataset.arrows ?? "[]"))
+      .toEqual([
+        expect.objectContaining({ startSquare: "e2", endSquare: "e4" }),
+        expect.objectContaining({ startSquare: "g1", endSquare: "f3" }),
+      ]);
+  });
+
+  it("keeps a terminal drill move live while preserving the off-route failure", async () => {
+    const mateSourceFen = "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1";
+    const mate = new Chess(mateSourceFen);
+    mate.move("Qe8#");
+    const mateFen = mate.fen();
+
+    useGameStore.setState({
+      sessionId: "session-terminal-drill",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: mateSourceFen,
+      moveHistory: [],
+      drillOpeningKey: "unreached-target",
+      drillState: "active",
+    });
+    checkDrillRouteMock.mockResolvedValueOnce({
+      status: "failed",
+      current_fen: mateFen,
+      target_fen: "unreached-target",
+      suggestions: [{ uci: "f7f8" }],
+      failure: {
+        reason: "off_route",
+        played_move_uci: "f7e8",
+        correction_fen: mateSourceFen,
+      },
+    });
+
+    render(<ChessGame />);
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "f7", targetSquare: "e8" });
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+
+    expect(new Chess(useGameStore.getState().liveFen).isCheckmate()).toBe(true);
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      mateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+    expect(
+      screen.getByText("That's not how you get to the opening"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a stalemate visible when automatic blunder analysis lands late", async () => {
+    const stalemateSourceFen = "7k/5Q2/6K1/8/8/8/8/8 w - - 0 1";
+    const stalemate = new Chess(stalemateSourceFen);
+    stalemate.move("Qe6");
+    const stalemateFen = stalemate.fen();
+
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    useGameStore.setState({
+      sessionId: "session-stalemate",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      liveFen: stalemateSourceFen,
+      moveHistory: [],
+    });
+    render(<ChessGame />);
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "f7", targetSquare: "e6" });
+    });
+    expect(new Chess(useGameStore.getState().liveFen).isStalemate()).toBe(true);
+
+    const result: AnalysisResult = {
+      id: "analysis-0-f7e6",
+      move: "f7e6",
+      bestMove: "f7f8",
+      bestLine: null,
+      bestEval: 500,
+      playedEval: 0,
+      currentPositionEval: 0,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 500,
+      classification: "blunder",
+      blunder: true,
+      recordable: true,
+    };
+    await act(async () => {
+      gameAnalysisStore.getState().resolveAnalysis(0, result);
+      bridgeEmittedIndices.add(0);
+      capturedOutcomeListener?.({
+        seq: 0,
+        generation: 0,
+        sessionId: null,
+        moveIndex: 0,
+        requestId: result.id,
+        status: "resolved",
+        result,
+      });
+      await Promise.resolve();
+    });
+
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      stalemateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+  });
 
   it("Analyze awaits the pending failed-move analysis, then abandons and snapshots the drill", async () => {
     // Off-route failures do not pre-resolve the failed move's analysis, so the
@@ -6390,15 +6611,17 @@ describe("ChessGame blunder board rewind", () => {
     };
   };
 
-  const resolveMoveTwoAsBlunder = async ({
+  const resolveMoveAsBlunder = async ({
     move = "g1f3",
     bestMove = "d2d4",
+    moveIndex = 2,
   }: {
     move?: string;
     bestMove?: string;
+    moveIndex?: number;
   } = {}) => {
     const result = {
-      id: `analysis-2-${move}`,
+      id: `analysis-${moveIndex}-${move}`,
       move,
       bestMove,
       bestEval: 50,
@@ -6406,7 +6629,7 @@ describe("ChessGame blunder board rewind", () => {
       currentPositionEval: -150,
       playedEvalMate: null,
       currentPositionEvalMate: null,
-      moveIndex: 2,
+      moveIndex,
       delta: 200,
       classification: "blunder" as const,
       blunder: true,
@@ -6416,11 +6639,11 @@ describe("ChessGame blunder board rewind", () => {
     // consumer's coalescing microtask so the board-wash fires before assertions.
     // Dedup so the deferred bridge does not re-fire index 2.
     await act(async () => {
-      gameAnalysisStore.getState().resolveAnalysis(2, result);
-      bridgeEmittedIndices.add(2);
+      gameAnalysisStore.getState().resolveAnalysis(moveIndex, result);
+      bridgeEmittedIndices.add(moveIndex);
       capturedOutcomeListener?.({
         seq: 0, generation: 0, sessionId: null,
-        moveIndex: 2, requestId: result.id, status: "resolved", result,
+        moveIndex, requestId: result.id, status: "resolved", result,
       });
       await Promise.resolve();
     });
@@ -6443,7 +6666,13 @@ describe("ChessGame blunder board rewind", () => {
     };
   };
 
-  const startFoolsMate = async ({ deferMate }: { deferMate: boolean }) => {
+  const startFoolsMate = async ({
+    deferMate,
+    targetReview = false,
+  }: {
+    deferMate: boolean;
+    targetReview?: boolean;
+  }) => {
     const fens = foolsMateFens();
 
     startGameMock.mockResolvedValueOnce({
@@ -6454,12 +6683,22 @@ describe("ChessGame blunder board rewind", () => {
     getNextOpponentMoveMock.mockReset();
 
     let resolveMateReply: (() => void) | null = null;
-    getNextOpponentMoveMock.mockResolvedValueOnce({
-      mode: "engine",
-      move: { uci: "e7e5", san: "e5" },
-      target_blunder_id: null,
-      decision_source: "backend_engine",
-    });
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      targetReview
+        ? {
+            mode: "ghost",
+            move: { uci: "e7e5", san: "e5" },
+            target_blunder_id: 99,
+            target_fen: fens.sourceFenBeforeBlunder,
+            decision_source: "ghost_path",
+          }
+        : {
+            mode: "engine",
+            move: { uci: "e7e5", san: "e5" },
+            target_blunder_id: null,
+            decision_source: "backend_engine",
+          },
+    );
     if (deferMate) {
       getNextOpponentMoveMock.mockReturnValueOnce(
         new Promise((resolve) => {
@@ -6515,6 +6754,38 @@ describe("ChessGame blunder board rewind", () => {
     };
   };
 
+  const resolveMoveTwoAsSrsFail = async () => {
+    const result = {
+      id: "analysis-2-g2g4",
+      move: "g2g4",
+      bestMove: "e2e4",
+      bestEval: 40,
+      playedEval: -10,
+      currentPositionEval: -10,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 2,
+      delta: 50,
+      classification: "good" as const,
+      blunder: false,
+      recordable: false,
+    };
+    await act(async () => {
+      gameAnalysisStore.getState().resolveAnalysis(2, result);
+      bridgeEmittedIndices.add(2);
+      capturedOutcomeListener?.({
+        seq: 0,
+        generation: 0,
+        sessionId: null,
+        moveIndex: 2,
+        requestId: result.id,
+        status: "resolved",
+        result,
+      });
+      await Promise.resolve();
+    });
+  };
+
   beforeEach(() => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     startGameMock.mockReset();
@@ -6533,6 +6804,12 @@ describe("ChessGame blunder board rewind", () => {
 
     endGameMock.mockResolvedValue({});
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+    reviewSrsBlunderMock.mockResolvedValue({
+      blunder_id: 99,
+      pass_streak: 0,
+      priority: 1,
+      next_expected_review: "2026-08-22T00:00:00Z",
+    });
     lookupOpeningByFenMock.mockResolvedValue(null);
   });
 
@@ -6546,7 +6823,7 @@ describe("ChessGame blunder board rewind", () => {
       await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     expect(useGameStore.getState().viewIndex).toBe(3);
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
@@ -6604,7 +6881,7 @@ describe("ChessGame blunder board rewind", () => {
     expect(liveFenAfterReply).not.toBe(sourceFenBeforeBlunder);
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);
@@ -6621,7 +6898,7 @@ describe("ChessGame blunder board rewind", () => {
     const { sourceFenBeforeBlunder } = await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);
@@ -6656,7 +6933,7 @@ describe("ChessGame blunder board rewind", () => {
     await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     fireEvent.click(screen.getByRole("button", { name: /reset game/i }));
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
@@ -6679,7 +6956,7 @@ describe("ChessGame blunder board rewind", () => {
       await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);
@@ -6735,9 +7012,10 @@ describe("ChessGame blunder board rewind", () => {
     });
     expect(new Chess(useGameStore.getState().liveFen).isCheckmate()).toBe(true);
     expect(useGameStore.getState().isGameActive).toBe(true);
+    const mountCountAtMate = chessboardMountCount;
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder({ move: "g2g4", bestMove: "e2e4" });
+    await resolveMoveAsBlunder({ move: "g2g4", bestMove: "e2e4" });
 
     act(() => {
       vi.advanceTimersByTime(10000);
@@ -6758,6 +7036,7 @@ describe("ChessGame blunder board rewind", () => {
       "data-arrow-count",
       "0",
     );
+    expect(chessboardMountCount).toBe(mountCountAtMate);
 
     await act(async () => {
       resolveEndGame();
@@ -6800,7 +7079,7 @@ describe("ChessGame blunder board rewind", () => {
     expect(screen.queryByRole("button", { name: /qh4/i })).not.toBeInTheDocument();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder({ move: "g2g4", bestMove: "e2e4" });
+    await resolveMoveAsBlunder({ move: "g2g4", bestMove: "e2e4" });
     act(() => {
       vi.advanceTimersByTime(365);
     });
@@ -6840,6 +7119,147 @@ describe("ChessGame blunder board rewind", () => {
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
       "data-position",
       checkmateFen,
+    );
+  });
+
+  it("keeps checkmate visible when late analysis reviews an older player move", async () => {
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    const { checkmateFen } = await startFoolsMate({ deferMate: false });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /qh4/i })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    await resolveMoveAsBlunder({
+      move: "f2f3",
+      bestMove: "e2e4",
+      moveIndex: 0,
+    });
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+  });
+
+  it("suppresses a late automatic SRS reveal on checkmate but preserves manual reveal", async () => {
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    const { sourceFenBeforeBlunder, checkmateFen } = await startFoolsMate({
+      deferMate: false,
+      targetReview: true,
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /qh4/i })).toBeInTheDocument();
+    });
+
+    await resolveMoveTwoAsSrsFail();
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalled();
+    });
+
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+    expect(document.querySelector(".srs-fail-scrim")).toBeNull();
+    expect(document.querySelector(".move-bubble--srs-fail")).not.toBeNull();
+
+    fireEvent.click(
+      screen.getByTitle("Click to see what you should have played"),
+    );
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "2",
+    );
+  });
+
+  it("restores checkmate for automatic SRS ownership after the spotlight expires", async () => {
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    const { sourceFenBeforeBlunder, checkmateFen, resolveMateReply } =
+      await startFoolsMate({ deferMate: true, targetReview: true });
+
+    vi.useFakeTimers();
+    await resolveMoveTwoAsSrsFail();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+    expect(document.querySelector(".srs-fail-scrim")).not.toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(4510);
+    });
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+    expect(document.querySelector(".srs-fail-scrim")).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "2",
+    );
+
+    await act(async () => {
+      resolveMateReply();
+    });
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      checkmateFen,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+    expect(useGameStore.getState().viewIndex).toBeNull();
+  });
+
+  it("preserves explicit history navigation made during an SRS spotlight", async () => {
+    endGameMock.mockReturnValueOnce(new Promise(() => undefined));
+    const { sourceFenBeforeBlunder, resolveMateReply } = await startFoolsMate({
+      deferMate: true,
+      targetReview: true,
+    });
+
+    await resolveMoveTwoAsSrsFail();
+    expect(document.querySelector(".srs-fail-scrim")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /e5/i }));
+    expect(document.querySelector(".srs-fail-scrim")).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+
+    await act(async () => {
+      resolveMateReply();
+    });
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
     );
   });
 
@@ -6929,7 +7349,7 @@ describe("ChessGame blunder board rewind", () => {
       await reachDelayedPlayerBlunderDeferredReply();
 
     vi.useFakeTimers();
-    await resolveMoveTwoAsBlunder();
+    await resolveMoveAsBlunder();
 
     // Rewind settles on the pre-blunder position (one ply before Nf3).
     act(() => {

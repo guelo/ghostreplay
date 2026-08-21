@@ -49,6 +49,7 @@ import {
   buildBlunderAlert,
   deriveBlunderArrows,
   deriveLastMoveSquares,
+  shouldRestoreLiveTerminalBoard,
   type BlunderAlert,
   type DrillFailInfo,
   type ReviewFailInfo,
@@ -660,6 +661,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
       setViewIndex(index);
       setReviewFailModal(null);
+      setSrsFailTrigger(null);
+      setDrillFailInfo(null);
       if (pendingPromotion) {
         setPendingPromotion(null);
         clearMoveHighlights();
@@ -693,7 +696,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Clear blunder alert when navigating to a non-blunder move
       clearBlunderBoardOverride();
       setBlunderAlert(null);
-      setDrillFailInfo(null);
     },
     [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion, setViewIndex],
   );
@@ -1128,17 +1130,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           // previous drill is owned by that drill and must survive (g-f3m4).
           useGameStore.getState().clearOpeningDelta();
           drillFailedMoveIndexRef.current = result.moveIndex;
+          setEngineMessage(
+            route.failure?.reason === "accuracy"
+              ? "Bad move"
+              : "That's not how you get to the opening.",
+          );
+          // Preserve the durable drill failure, but do not briefly replace an
+          // already-terminal board with its automatic correction presentation.
+          if (chess.isGameOver()) {
+            return false;
+          }
           setDrillFailInfo({
             playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
             suggestionUcis: route.suggestions.map((suggestion) => suggestion.uci),
             correctionFen: route.failure?.correction_fen ?? result.fenBefore,
             moveIndex: result.moveIndex,
           });
-          setEngineMessage(
-            route.failure?.reason === "accuracy"
-              ? "Bad move"
-              : "That's not how you get to the opening.",
-          );
           setViewIndex(result.moveIndex - 1);
           return false;
         }
@@ -1177,7 +1184,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false;
       }
     },
-    [setEngineMessage, setViewIndex],
+    [chess, setEngineMessage, setViewIndex],
   );
 
   const {
@@ -1684,6 +1691,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // recompute lands (g-fix-end-latency).
       void pollFreshOpeningDelta(sessionId, "drill_accuracy_fail");
       drillFailedMoveIndexRef.current = result.moveIndex;
+      setEngineMessage("That move exceeds the allowed centipawn loss.");
+      setDrillRecovery(null);
+      // Preserve the durable accuracy failure without briefly replacing an
+      // already-terminal board with its automatic correction presentation.
+      if (chess.isGameOver()) {
+        return;
+      }
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
         // Trusted position best move (or honest worker best move) — never the
@@ -1692,11 +1706,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         correctionFen: result.fenBefore,
         moveIndex: result.moveIndex,
       });
-      setEngineMessage("That move exceeds the allowed centipawn loss.");
       setViewIndex(result.moveIndex - 1);
-      setDrillRecovery(null);
     },
     [
+      chess,
       isPostRootMoveStillCurrent,
       uploadFullMoveHistoryBeforeEnd,
       setEngineMessage,
@@ -2016,6 +2029,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
+    // Terminal-before-review results are cleared by the arbiter below. Do not
+    // remount or schedule a rewind while that cleanup is pending.
+    if (chess.isGameOver()) {
+      clearBlunderBoardOverride();
+      return;
+    }
+
     clearMoveHighlights();
     for (const timer of blunderBoardTimerRefs.current) {
       clearTimeout(timer);
@@ -2049,38 +2069,49 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     };
   }, [
     blunderAlert,
+    chess,
     clearBlunderBoardOverride,
     clearMoveHighlights,
     setViewIndex,
   ]);
 
   useEffect(() => {
-    if (!blunderAlert?.shouldRewind) {
-      return;
-    }
-    // `fen` intentionally signals mutations of the stable `chess` object. The
-    // inclusive index guard tolerates a render torn between the separate live
-    // FEN and move-history writes.
-    if (blunderAlert.moveIndex < moveHistory.length - 2) {
-      return;
-    }
-    if (!chess.isCheckmate()) {
+    if (
+      !shouldRestoreLiveTerminalBoard(
+        chess,
+        blunderAlert,
+        reviewFailModal,
+        drillFailInfo,
+      )
+    ) {
       return;
     }
 
-    // The mating reply is the position the player needs to see. This effect is
-    // intentionally separate from the rewind scheduler: it handles both a late
-    // alert after mate and a mating reply that lands during an active rewind.
+    // The completed live position wins over every automatic review presentation.
+    // `fen` signals mutations of the stable Chess instance, while the owner
+    // states cover automatic results that arrive after the terminal move.
     clearBlunderBoardOverride();
-    setBoardInstanceKey((current) => current + 1);
+    if (useGameStore.getState().viewIndex !== null) {
+      setBoardInstanceKey((current) => current + 1);
+    }
     setViewIndex(null);
-    setBlunderAlert(null);
+    if (blunderAlert?.shouldRewind) {
+      setBlunderAlert(null);
+    }
+    if (reviewFailModal?.auto) {
+      setReviewFailModal(null);
+      setSrsFailTrigger(null);
+    }
+    if (drillFailInfo) {
+      setDrillFailInfo(null);
+    }
   }, [
     blunderAlert,
     chess,
     clearBlunderBoardOverride,
+    drillFailInfo,
     fen,
-    moveHistory.length,
+    reviewFailModal,
     setViewIndex,
   ]);
 
@@ -2197,7 +2228,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [clearMoveHighlights]);
 
   const handleRevealSrsFail = useCallback(
-    (detail: SrsFailDetail, moveIndex: number) => {
+    (detail: SrsFailDetail, moveIndex: number, auto = false) => {
       if (isRevertPendingRef.current) {
         return;
       }
@@ -2210,6 +2241,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         bestMoveUci: detail.bestMoveUci,
         evalLoss: 0,
         moveIndex,
+        auto,
       });
       setViewIndex(moveIndex - 1);
     },
@@ -2221,11 +2253,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // (re)starts cleanly even for back-to-back fails.
   const triggerSrsFailSpotlight = useCallback(
     (detail: SrsFailDetail, moveIndex: number) => {
-      handleRevealSrsFail(detail, moveIndex);
+      // The persisted repeated-mistake result still renders in the move list;
+      // only its automatic historical board presentation is suppressed.
+      if (chess.isGameOver()) {
+        return;
+      }
+      handleRevealSrsFail(detail, moveIndex, true);
       srsFailNonceRef.current += 1;
       setSrsFailTrigger({ id: srsFailNonceRef.current, moveIndex });
     },
-    [handleRevealSrsFail],
+    [chess, handleRevealSrsFail],
   );
 
   const handleSrsFailDone = useCallback((id: number) => {

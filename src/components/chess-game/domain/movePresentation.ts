@@ -30,6 +30,7 @@ export type ReviewFailInfo = {
   bestMoveUci: string;
   evalLoss: number;
   moveIndex: number;
+  auto: boolean;
 };
 
 export type DrillFailInfo = {
@@ -44,6 +45,17 @@ export type MoveArrow = {
   endSquare: string;
   color: string;
 };
+
+export const shouldRestoreLiveTerminalBoard = (
+  chess: Pick<Chess, "isGameOver">,
+  blunderAlert: BlunderAlert | null,
+  reviewFailModal: ReviewFailInfo | null,
+  drillFailInfo: DrillFailInfo | null,
+): boolean =>
+  chess.isGameOver() &&
+  (blunderAlert?.shouldRewind === true ||
+    reviewFailModal?.auto === true ||
+    drillFailInfo !== null);
 
 export const fenBeforeMove = (
   moveHistory: MoveRecord[],

@@ -1,3 +1,4 @@
+import { Chess } from "chess.js";
 import { describe, expect, it } from "vitest";
 import {
   buildBlunderAlert,
@@ -5,7 +6,9 @@ import {
   deriveBlunderArrows,
   deriveLastMoveSquares,
   fenBeforeMove,
+  shouldRestoreLiveTerminalBoard,
   type BlunderAlert,
+  type DrillFailInfo,
   type MoveRecord,
   type ReviewFailInfo,
 } from "./movePresentation";
@@ -199,6 +202,7 @@ describe("chess-game domain helpers", () => {
       bestMoveUci: "b1c3",
       evalLoss: 50,
       moveIndex: 2,
+      auto: false,
     };
     const blunderAlert: BlunderAlert = {
       moveSan: "e4",
@@ -393,5 +397,104 @@ describe("chess-game domain helpers", () => {
         provenance: null,
       },
     ]);
+  });
+
+  describe("terminal review presentation policy", () => {
+    const manualBlunder: BlunderAlert = {
+      moveSan: "e4",
+      moveUci: "e2e4",
+      bestMoveUci: "d2d4",
+      bestMoveSan: "d4",
+      delta: 120,
+      moveIndex: 0,
+      sourceFen: "source-fen",
+      shouldRewind: false,
+    };
+    const reviewFail: ReviewFailInfo = {
+      userMoveSan: "Nf3",
+      bestMoveSan: "Nc3",
+      userMoveUci: "g1f3",
+      bestMoveUci: "b1c3",
+      evalLoss: 50,
+      moveIndex: 2,
+      auto: false,
+    };
+    const drillFail: DrillFailInfo = {
+      playedMoveUci: "e2e4",
+      suggestionUcis: ["d2d4"],
+      correctionFen: "source-fen",
+      moveIndex: 0,
+    };
+    const checkmate = new Chess(
+      "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+    );
+
+    it.each([
+      ["automatic blunder", { ...manualBlunder, shouldRewind: true }, null, null],
+      ["automatic SRS fail", null, { ...reviewFail, auto: true }, null],
+      ["drill fail", null, null, drillFail],
+    ])("restores live for %s on a terminal board", (_name, blunder, review, drill) => {
+      expect(
+        shouldRestoreLiveTerminalBoard(checkmate, blunder, review, drill),
+      ).toBe(true);
+    });
+
+    it.each([
+      ["manual blunder", manualBlunder, null],
+      ["manual SRS fail", null, reviewFail],
+    ])("preserves %s navigation", (_name, blunder, review) => {
+      expect(
+        shouldRestoreLiveTerminalBoard(checkmate, blunder, review, null),
+      ).toBe(false);
+    });
+
+    it.each([
+      ["checkmate", checkmate],
+      ["stalemate", new Chess("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1")],
+      ["insufficient material", new Chess("8/8/8/8/8/4k3/8/6K1 w - - 0 1")],
+      [
+        "fifty-move rule",
+        new Chess("8/8/8/8/8/4k3/6R1/6K1 w - - 100 76"),
+      ],
+      [
+        "threefold repetition",
+        (() => {
+          const repeated = new Chess();
+          for (const move of [
+            "Nf3",
+            "Nf6",
+            "Ng1",
+            "Ng8",
+            "Nf3",
+            "Nf6",
+            "Ng1",
+            "Ng8",
+          ]) {
+            repeated.move(move);
+          }
+          return repeated;
+        })(),
+      ],
+    ])("recognizes %s as terminal", (_name, terminalChess) => {
+      expect(
+        shouldRestoreLiveTerminalBoard(
+          terminalChess,
+          { ...manualBlunder, shouldRewind: true },
+          null,
+          null,
+        ),
+      ).toBe(true);
+    });
+
+    it("does not restore live on a non-terminal board", () => {
+      expect(
+        shouldRestoreLiveTerminalBoard(
+          new Chess(),
+          { ...manualBlunder, shouldRewind: true },
+          { ...reviewFail, auto: true },
+          drillFail,
+        ),
+      ).toBe(false);
+    });
   });
 });

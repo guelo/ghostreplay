@@ -77,4 +77,45 @@ describe("SrsFailSpotlight", () => {
     );
     expect(document.querySelector(".srs-fail-scrim")).toBeNull();
   });
+
+  it("cancels a live spotlight without firing stale completion and can restart", () => {
+    const onDone = vi.fn();
+    const targetRef = makeTargetRef();
+    const { rerender } = render(
+      <SrsFailSpotlight
+        trigger={{ id: 1, moveIndex: 3 }}
+        targetRef={targetRef}
+        onDone={onDone}
+      />,
+    );
+
+    rerender(
+      <SrsFailSpotlight trigger={null} targetRef={targetRef} onDone={onDone} />,
+    );
+    expect(document.querySelector(".srs-fail-scrim")).toBeNull();
+    expect(document.querySelector(".srs-fail-content")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(SRS_FAIL_HOLD_MS + SRS_FAIL_SHRINK_MS + 100);
+    });
+    expect(onDone).not.toHaveBeenCalled();
+
+    rerender(
+      <SrsFailSpotlight
+        trigger={{ id: 2, moveIndex: 5 }}
+        targetRef={targetRef}
+        onDone={onDone}
+      />,
+    );
+    expect(document.querySelector(".srs-fail-scrim")).not.toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(SRS_FAIL_HOLD_MS + 10);
+    });
+    act(() => {
+      vi.advanceTimersByTime(SRS_FAIL_SHRINK_MS + 100);
+    });
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledWith(2);
+  });
 });

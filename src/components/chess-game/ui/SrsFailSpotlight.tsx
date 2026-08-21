@@ -47,25 +47,27 @@ const SrsFailSpotlight = ({ trigger, targetRef, onDone }: SrsFailSpotlightProps)
 
   // Start / restart on a new trigger id: measure the board, re-measure on
   // resize + scroll (throttled via rAF), and schedule the hold -> shrink hop.
+  // Cleanup owns every timer from the preceding trigger.
   useEffect(() => {
     if (triggerId === null) {
+      // These synchronous resets intentionally mirror an external trigger.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPhase("hidden");
+      setRect(null);
       return;
     }
 
-    // Reset to the hold phase and measure the board for a fresh trigger. These
-    // sync setStates are intentional — the spotlight syncs to an external DOM
-    // measurement, not to React-derived state.
-    /* eslint-disable react-hooks/set-state-in-effect */
+    // Reset to the hold phase for a fresh external trigger.
     setPhase("show");
 
     const measure = () => {
       const el = targetRef.current;
       if (el) {
+        // This measurement synchronizes state with the external board DOM.
         setRect(el.getBoundingClientRect());
       }
     };
     measure();
-    /* eslint-enable react-hooks/set-state-in-effect */
 
     let raf = 0;
     const onMove = () => {
@@ -98,7 +100,12 @@ const SrsFailSpotlight = ({ trigger, targetRef, onDone }: SrsFailSpotlightProps)
     return () => window.clearTimeout(killTimer);
   }, [phase, triggerId]);
 
-  if (phase === "hidden" || !rect || typeof document === "undefined") {
+  if (
+    triggerId === null ||
+    phase === "hidden" ||
+    !rect ||
+    typeof document === "undefined"
+  ) {
     return null;
   }
 

@@ -69,6 +69,11 @@ the account has no game-session rows; once that anonymous or claimed account
 owns any game or drill session, the root shows its Stats dashboard instead.
 `/stats` remains directly available regardless of account activity.
 
+Automatic blunder, repeated-mistake, and drill-failure presentations yield to
+a completed board position (checkmate or draw), so the terminal board remains
+visible. Explicit post-game history navigation can still show an earlier
+position and its saved annotations.
+
 Across live play, drills, and saved-game review, the evaluation graph marks the
 Lichess opening/middlegame boundary with a labeled opening band when the browser
 can derive that boundary from a complete standard-start FEN sequence. The
