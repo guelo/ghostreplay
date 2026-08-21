@@ -92,10 +92,11 @@ ConnectedEvalBar.displayName = "ConnectedEvalBar";
 
 type ConnectedAnalysisGraphProps = {
   onSelectMove: (index: number | null) => void;
+  openingPlyCount: number | null;
 };
 
 export const ConnectedAnalysisGraph = memo(
-  ({ onSelectMove }: ConnectedAnalysisGraphProps) => {
+  ({ onSelectMove, openingPlyCount }: ConnectedAnalysisGraphProps) => {
     const analysisMap = useAnalysisStore((s) => s.analysisMap);
     const streamingEval = useAnalysisStore((s) => s.streamingEval);
     const moveHistory = useGameStore((s) => s.moveHistory);
@@ -188,6 +189,7 @@ export const ConnectedAnalysisGraph = memo(
         isCheckmate={isCheckmate}
         streamingEval={graphStreamingEval}
         pendingIndices={pendingIndices}
+        openingPlyCount={openingPlyCount}
       />
     );
   },

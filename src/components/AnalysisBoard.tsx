@@ -17,6 +17,7 @@ import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
 import { isTrustedExactBestHit, mateToCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
 import { isCheckmateFen, whiteCpForMove } from "../utils/moveGraphEval";
+import { openingPlyCount } from "../utils/gamePhase";
 import { projectExactBest } from "../utils/projectExactBest";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
@@ -503,6 +504,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
       whiteCpForMove(m.eval_cp, m.eval_mate, i, i === lastIdx ? m.fen_after : null),
     );
   }, [effectiveMoves]);
+
+  const openingPlies = useMemo(() => {
+    if (startingFen !== STARTING_FEN) return null;
+    if (moves[0]?.move_number !== 1 || moves[0]?.color !== "white") return null;
+    return openingPlyCount(moves.map((move) => move.fen_after));
+  }, [moves, startingFen]);
 
   // FEN at the position before the current move (needed for arrow SAN→UCI)
   const fenBeforeCurrentMove = useMemo(() => {
@@ -1814,6 +1821,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               (isInVariation && selectedVariationEval.mate === 0)
             }
             variationLine={variationLine}
+            openingPlyCount={openingPlies}
           />
           {footer && (
             <div className="analysis-board__graph-footer">{footer}</div>

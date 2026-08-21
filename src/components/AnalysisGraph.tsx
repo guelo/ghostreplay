@@ -18,6 +18,7 @@ type AnalysisGraphProps = {
   pendingIndices?: number[];
   highlightedMoves?: HighlightedMoves | null;
   variationLine?: VariationLine | null;
+  openingPlyCount?: number | null;
 };
 
 type VariationLine = {
@@ -32,6 +33,7 @@ const PAD_X = 8;
 const PAD_X_RIGHT = 0;
 const PAD_Y = 4;
 const WINNING_CHANCES_RANGE = 1.05;
+const OPENING_LABEL_HELP_GUARD_FRACTION = 0.94;
 
 const EVAL_COLOR_LOSING: [number, number, number] = [255, 59, 48]; // #FF3B30
 const EVAL_COLOR_EQUAL: [number, number, number] = [158, 158, 158]; // #9E9E9E
@@ -73,6 +75,7 @@ const AnalysisGraph = ({
   pendingIndices,
   highlightedMoves,
   variationLine,
+  openingPlyCount,
 }: AnalysisGraphProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = useId();
@@ -101,6 +104,19 @@ const AnalysisGraph = ({
   const midY = PAD_Y + chartH / 2;
 
   const stepX = totalMoves > 1 ? chartW / (totalMoves - 1) : 0;
+
+  const openingBoundaryX = useMemo(() => {
+    if (
+      openingPlyCount == null ||
+      openingPlyCount < 1 ||
+      openingPlyCount > totalMoves ||
+      stepX <= 0
+    ) {
+      return null;
+    }
+    const rawX = PAD_X + (openingPlyCount - 0.5) * stepX;
+    return Math.max(PAD_X, Math.min(PAD_X + chartW, rawX));
+  }, [openingPlyCount, totalMoves, stepX, chartW]);
 
   const cpToY = useCallback(
     (cp: number) => {
@@ -352,6 +368,16 @@ const AnalysisGraph = ({
           </clipPath>
         </defs>
 
+        {openingBoundaryX != null && (
+          <rect
+            className="analysis-graph__opening-band"
+            x={0}
+            y={0}
+            width={openingBoundaryX}
+            height={SVG_HEIGHT}
+          />
+        )}
+
         {/* Zero line */}
         <line
           x1={PAD_X}
@@ -374,6 +400,16 @@ const AnalysisGraph = ({
           clipPath={`url(#${clipId}-neg)`}
           className="analysis-graph__area-black"
         />
+
+        {openingBoundaryX != null && (
+          <line
+            className="analysis-graph__opening-boundary"
+            x1={openingBoundaryX}
+            x2={openingBoundaryX}
+            y1={0}
+            y2={SVG_HEIGHT}
+          />
+        )}
 
         {/* Eval curve line */}
         <path d={linePath} className="analysis-graph__line" />
@@ -488,6 +524,24 @@ const AnalysisGraph = ({
           />
         )}
       </svg>
+      {openingBoundaryX != null && (
+        <div
+          className={`analysis-graph__opening-label${
+            openingBoundaryX / SVG_WIDTH < 0.14
+              ? " analysis-graph__opening-label--after"
+              : ""
+          }${
+            openingBoundaryX / SVG_WIDTH > OPENING_LABEL_HELP_GUARD_FRACTION
+              ? " analysis-graph__opening-label--before-help"
+              : ""
+          }`}
+          style={{
+            left: `calc((100% - var(--graph-axis-width)) * ${openingBoundaryX / SVG_WIDTH})`,
+          }}
+        >
+          opening
+        </div>
+      )}
       {playerColor && (
         <div className="analysis-graph__y-axis">
           <div className="analysis-graph__y-label">
@@ -560,6 +614,10 @@ const AnalysisGraph = ({
         <p>
           Click the graph to jump to a move — the red line marks the current
           one.
+        </p>
+        <p>
+          The shaded opening ends where the Lichess phase divider marks the
+          start of the middlegame.
         </p>
       </InfoHelpButton>
     </div>

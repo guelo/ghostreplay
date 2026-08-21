@@ -655,6 +655,118 @@ describe('AnalysisGraph — classification highlight dots', () => {
   })
 })
 
+describe('AnalysisGraph — opening boundary', () => {
+  it('places the shaded band and boundary between opening and middlegame plies', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 20, 40, 10, -10, 5]}
+        currentIndex={5}
+        onSelectMove={onSelectMove}
+        openingPlyCount={3}
+      />,
+    )
+
+    const band = container.querySelector('.analysis-graph__opening-band')
+    const boundary = container.querySelector('.analysis-graph__opening-boundary')
+    const expectedX = 8 + (3 - 0.5) * (592 / 5)
+    expect(Number(band?.getAttribute('width'))).toBeCloseTo(expectedX)
+    expect(Number(boundary?.getAttribute('x1'))).toBeCloseTo(expectedX)
+    expect(boundary?.getAttribute('x1')).toBe(boundary?.getAttribute('x2'))
+  })
+
+  it('keeps the band behind the areas and the full-height boundary above them', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 20, 40, 10, -10, 5]}
+        currentIndex={5}
+        onSelectMove={onSelectMove}
+        openingPlyCount={3}
+      />,
+    )
+
+    const svg = container.querySelector('.analysis-graph > svg')!
+    const children = Array.from(svg.children)
+    const indexOf = (selector: string) =>
+      children.indexOf(svg.querySelector(selector) as Element)
+    const bandIndex = indexOf('.analysis-graph__opening-band')
+    const whiteAreaIndex = indexOf('.analysis-graph__area-white')
+    const blackAreaIndex = indexOf('.analysis-graph__area-black')
+    const boundaryIndex = indexOf('.analysis-graph__opening-boundary')
+    const curveIndex = indexOf('.analysis-graph__line')
+    const indicatorIndex = indexOf('.analysis-graph__indicator')
+
+    expect(bandIndex).toBeLessThan(whiteAreaIndex)
+    expect(bandIndex).toBeLessThan(blackAreaIndex)
+    expect(boundaryIndex).toBeGreaterThan(whiteAreaIndex)
+    expect(boundaryIndex).toBeGreaterThan(blackAreaIndex)
+    expect(boundaryIndex).toBeLessThan(curveIndex)
+    expect(indicatorIndex).toBe(children.length - 1)
+  })
+
+  it.each([undefined, null, 0, 5])(
+    'renders no opening decoration for an unavailable or out-of-domain boundary (%s)',
+    (openingPlies) => {
+      const { container } = render(
+        <AnalysisGraph
+          evals={[0, 20, 40, 10]}
+          currentIndex={3}
+          onSelectMove={onSelectMove}
+          openingPlyCount={openingPlies}
+        />,
+      )
+
+      expect(container.querySelector('.analysis-graph__opening-band')).toBeNull()
+      expect(container.querySelector('.analysis-graph__opening-boundary')).toBeNull()
+      expect(container.querySelector('.analysis-graph__opening-label')).toBeNull()
+    },
+  )
+
+  it('renders an undistorted overlay label and flips it after an early boundary', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={Array(20).fill(0)}
+        currentIndex={19}
+        onSelectMove={onSelectMove}
+        openingPlyCount={1}
+      />,
+    )
+
+    const label = screen.getByText('opening')
+    expect(label).toHaveClass('analysis-graph__opening-label--after')
+    expect(label).not.toBe(container.querySelector('svg text'))
+  })
+
+  it('shifts the label clear of the help button at the right-edge clamp', () => {
+    render(
+      <AnalysisGraph
+        evals={Array(17).fill(0)}
+        currentIndex={16}
+        onSelectMove={onSelectMove}
+        openingPlyCount={17}
+      />,
+    )
+
+    expect(screen.getByText('opening')).toHaveClass(
+      'analysis-graph__opening-label--before-help',
+    )
+  })
+
+  it('keeps the label attached to the boundary before the help-button guard', () => {
+    render(
+      <AnalysisGraph
+        evals={Array(20).fill(0)}
+        currentIndex={19}
+        onSelectMove={onSelectMove}
+        openingPlyCount={18}
+      />,
+    )
+
+    expect(screen.getByText('opening')).not.toHaveClass(
+      'analysis-graph__opening-label--before-help',
+    )
+  })
+})
+
 describe('AnalysisGraph — info button', () => {
   it('toggles an explanatory popup when the info button is clicked', async () => {
     const user = userEvent.setup()
@@ -678,6 +790,7 @@ describe('AnalysisGraph — info button', () => {
     expect(tooltip).toHaveTextContent(/position evaluation after each move/i)
     expect(tooltip).toHaveTextContent(/jump to a move/i)
     expect(tooltip).toHaveTextContent(/red line marks the current/i)
+    expect(tooltip).toHaveTextContent(/shaded opening ends where the lichess phase divider/i)
 
     // Clicking the info button must not navigate the graph.
     expect(onSelectMove).not.toHaveBeenCalled()

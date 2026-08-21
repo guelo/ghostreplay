@@ -1676,6 +1676,72 @@ describe('AnalysisBoard — AnalysisGraph props', () => {
     expect(capturedGraphProps.evalCp).toBe(120)
   })
 
+  const openingCrossingMoves = (sans: string[]): AnalysisMove[] => {
+    const chess = new Chess()
+    return sans.map((san, index) => {
+      chess.move(san)
+      return {
+        move_number: Math.floor(index / 2) + 1,
+        color: index % 2 === 0 ? 'white' : 'black',
+        move_san: san,
+        fen_after: chess.fen(),
+        eval_cp: 0,
+        eval_mate: null,
+        best_move_san: san,
+        best_move_eval_cp: 0,
+        eval_delta: 0,
+        classification: 'best',
+      }
+    })
+  }
+
+  const developmentLine = [
+    'Nf3', 'Nf6', 'g3', 'g6', 'Bg2', 'Bg7', 'd3', 'd6', 'Nbd2',
+    'Nbd7', 'b3', 'b6', 'Bb2', 'Bb7', 'e3', 'e6', 'Qe2', 'Qe7',
+  ]
+
+  it('forwards the computed opening boundary for a complete standard game', () => {
+    render(
+      <AnalysisBoard
+        moves={openingCrossingMoves(developmentLine)}
+        boardOrientation="white"
+      />,
+    )
+
+    expect(capturedGraphProps.openingPlyCount).toBe(17)
+  })
+
+  it('forwards the boundary when the crossing is the terminal plotted ply', () => {
+    render(
+      <AnalysisBoard
+        moves={openingCrossingMoves(developmentLine.slice(0, 17))}
+        boardOrientation="white"
+      />,
+    )
+
+    expect(capturedGraphProps.openingPlyCount).toBe(17)
+  })
+
+  it('fails closed for a nonstandard start or a line missing ply 1 white', () => {
+    const standardMoves = openingCrossingMoves(developmentLine)
+    const { rerender } = render(
+      <AnalysisBoard
+        moves={standardMoves}
+        boardOrientation="white"
+        startingFen="8/8/8/8/8/8/8/8 w - - 0 1"
+      />,
+    )
+    expect(capturedGraphProps.openingPlyCount).toBeNull()
+
+    rerender(
+      <AnalysisBoard
+        moves={[{ ...standardMoves[0], move_number: 2 }, ...standardMoves.slice(1)]}
+        boardOrientation="white"
+      />,
+    )
+    expect(capturedGraphProps.openingPlyCount).toBeNull()
+  })
+
   it('forwards evalCp in latest-view when currentIndex is null', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="white" />)
 

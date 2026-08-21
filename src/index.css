@@ -111,6 +111,7 @@
     /* Graph & Analysis */
     --graph-line: #e9ac77;
     --graph-bg: #f4f0e9;
+    --graph-opening-bg: color-mix(in srgb, var(--text-primary) 7%, var(--graph-bg));
     --graph-area-dark: #faf9f8;
     --graph-area-light: #bebcba;
     --scrim-ended: color-mix(in srgb, var(--text-primary) 8%, transparent);

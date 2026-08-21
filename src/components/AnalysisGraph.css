@@ -9,6 +9,7 @@
 .analysis-graph__highlight-dot--inaccuracy { fill: var(--eval-inaccuracy); }
 /* Analysis evaluation graph */
 .analysis-graph {
+    --graph-axis-width: 0rem;
     position: relative;
     cursor: crosshair;
     border-radius: 0.5rem;
@@ -42,6 +43,34 @@
 .analysis-graph__zero-line {
     stroke: var(--graph-line);
     stroke-width: 1.5;
+}
+.analysis-graph__opening-band {
+    fill: var(--graph-opening-bg);
+}
+.analysis-graph__opening-boundary {
+    stroke: var(--text-tertiary);
+    stroke-width: 1;
+    opacity: 0.55;
+}
+.analysis-graph__opening-label {
+    position: absolute;
+    top: 0.15rem;
+    transform: translateX(-100%);
+    padding-right: 0.25rem;
+    font-size: 0.55rem;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+    pointer-events: none;
+    white-space: nowrap;
+}
+.analysis-graph__opening-label--after {
+    transform: none;
+    padding: 0 0 0 0.25rem;
+}
+.analysis-graph__opening-label--before-help {
+    transform: translateX(calc(-100% - 1.75rem));
 }
 .analysis-graph__area-white {
     fill: var(--graph-area-dark);

@@ -69,6 +69,12 @@ the account has no game-session rows; once that anonymous or claimed account
 owns any game or drill session, the root shows its Stats dashboard instead.
 `/stats` remains directly available regardless of account activity.
 
+Across live play, drills, and saved-game review, the evaluation graph marks the
+Lichess opening/middlegame boundary with a labeled opening band when the browser
+can derive that boundary from a complete standard-start FEN sequence. The
+decoration is read-only and does not replace the server's authoritative opening
+evidence or score-boundary protocol.
+
 ### Openings and drills
 
 The openings area separates White and Black repertoires, lets a player explore

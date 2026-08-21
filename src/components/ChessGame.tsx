@@ -30,6 +30,7 @@ import {
   getOpeningDeltaVisibility,
   pollFreshOpeningDelta,
 } from "../utils/openingDeltaPoll";
+import { openingPlyCount } from "../utils/gamePhase";
 import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
@@ -230,6 +231,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const engineElo = useGameStore((s) => s.engineElo);
   const setEngineElo = useGameStore((s) => s.setEngineElo);
   const moveHistory = useGameStore((s) => s.moveHistory);
+  const liveOpeningPlyCount = useMemo(
+    () => openingPlyCount(moveHistory.map((move) => move.fen)),
+    [moveHistory],
+  );
   const viewIndex = useGameStore((s) => s.viewIndex); // null = viewing live position
   const setViewIndex = useGameStore((s) => s.setViewIndex);
   const {
@@ -562,7 +567,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     coordinator,
     sessionId,
   );
-  useOpeningBoundaryDelta(coordinator, sessionId, isDrillMode);
+  useOpeningBoundaryDelta(
+    coordinator,
+    sessionId,
+    isDrillMode,
+    liveOpeningPlyCount,
+  );
 
   // Post-game accuracy for the banner (g-frlfp). Regular games only: drills take
   // an earlier banner branch and get no stat stack, so there is nothing to fetch
@@ -2753,7 +2763,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           )}
           {hasBelowBoardContent && (
             <div className="chess-graph-area">
-              <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
+              <ConnectedAnalysisGraph
+                onSelectMove={handleNavigate}
+                openingPlyCount={liveOpeningPlyCount}
+              />
             </div>
           )}
 

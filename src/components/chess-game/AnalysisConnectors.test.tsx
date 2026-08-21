@@ -66,10 +66,13 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
     store = createAnalysisStore();
   });
 
-  function renderConnected() {
+  function renderConnected(openingPlyCount: number | null = null) {
     return render(
       <AnalysisStoreProvider value={store}>
-        <ConnectedAnalysisGraph onSelectMove={vi.fn()} />
+        <ConnectedAnalysisGraph
+          onSelectMove={vi.fn()}
+          openingPlyCount={openingPlyCount}
+        />
       </AnalysisStoreProvider>,
     );
   }
@@ -141,6 +144,18 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
 
     expect(capturedProps.isCheckmate).toBe(false);
   });
+
+  it("forwards the caller's browser boundary unchanged", () => {
+    useGameStore.setState({
+      moveHistory: [makeMoveRecord(NORMAL_FEN)],
+      viewIndex: null,
+      playerColor: "white",
+    });
+
+    renderConnected(23);
+
+    expect(capturedProps.openingPlyCount).toBe(23);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -159,7 +174,10 @@ describe("ConnectedAnalysisGraph — terminal checkmate synthesis", () => {
   function renderConnected() {
     return render(
       <AnalysisStoreProvider value={store}>
-        <ConnectedAnalysisGraph onSelectMove={vi.fn()} />
+        <ConnectedAnalysisGraph
+          onSelectMove={vi.fn()}
+          openingPlyCount={null}
+        />
       </AnalysisStoreProvider>,
     );
   }
@@ -327,7 +345,10 @@ describe("ConnectedAnalysisGraph — latest-move normalization", () => {
   function renderConnected(onSelectMove: (index: number | null) => void) {
     return render(
       <AnalysisStoreProvider value={store}>
-        <ConnectedAnalysisGraph onSelectMove={onSelectMove} />
+        <ConnectedAnalysisGraph
+          onSelectMove={onSelectMove}
+          openingPlyCount={null}
+        />
       </AnalysisStoreProvider>,
     );
   }

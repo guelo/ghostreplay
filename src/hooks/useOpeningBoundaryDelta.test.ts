@@ -11,6 +11,7 @@ const pollMock = vi.fn(
     Promise.resolve(),
 );
 const abortMock = vi.fn((_sessionId: string, _token: string) => undefined);
+const captureMock = vi.fn();
 vi.mock("../utils/openingDeltaPoll", () => ({
   pollFreshOpeningDelta: (
     sessionId: string,
@@ -19,6 +20,10 @@ vi.mock("../utils/openingDeltaPoll", () => ({
   ) => pollMock(sessionId, trigger, options),
   abortOpeningBoundaryDeltaPoll: (sessionId: string, token: string) =>
     abortMock(sessionId, token),
+}));
+vi.mock("../analytics/posthog", () => ({
+  captureEvent: (event: string, properties?: Record<string, unknown>) =>
+    captureMock(event, properties),
 }));
 
 import { useOpeningBoundaryDelta } from "./useOpeningBoundaryDelta";
@@ -37,6 +42,7 @@ describe("useOpeningBoundaryDelta", () => {
     listeners = new Set();
     pollMock.mockClear();
     abortMock.mockClear();
+    captureMock.mockClear();
     source = {
       getOpeningBoundaryRevision: () => revision,
       getOpeningBoundarySnapshot: (sessionId) =>
@@ -169,5 +175,64 @@ describe("useOpeningBoundaryDelta", () => {
       "game_opening_boundary",
       { boundaryToken: "e".repeat(64) },
     );
+  });
+
+  it.each([18, null])(
+    "captures one content-free diagnostic for browser boundary %s against server boundary 17",
+    (browserOpeningMiddlePly) => {
+      snapshot = {
+        sessionId: "session-1",
+        openingMiddlePly: 17,
+        reconciliationToken: "f".repeat(64),
+        transitionRevision: 3,
+      };
+      revision = 3;
+      renderHook(() =>
+        useOpeningBoundaryDelta(
+          source,
+          "session-1",
+          false,
+          browserOpeningMiddlePly,
+        ),
+      );
+
+      expect(captureMock).toHaveBeenCalledOnce();
+      expect(captureMock).toHaveBeenCalledWith(
+        "opening_boundary_client_mismatch",
+        {
+          browser_opening_ply: browserOpeningMiddlePly,
+          server_opening_ply: 17,
+          boundary_transition_revision: 3,
+          is_drill_mode: false,
+        },
+      );
+
+      snapshot = {
+        ...snapshot!,
+        reconciliationToken: "g".repeat(64),
+        transitionRevision: 4,
+      };
+      revision = 4;
+      act(() => {
+        for (const listener of listeners) listener();
+      });
+      expect(captureMock).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("does not report a matching browser and server boundary", () => {
+    snapshot = {
+      sessionId: "session-1",
+      openingMiddlePly: 17,
+      reconciliationToken: "f".repeat(64),
+      transitionRevision: 3,
+    };
+    revision = 3;
+
+    renderHook(() =>
+      useOpeningBoundaryDelta(source, "session-1", false, 17),
+    );
+
+    expect(captureMock).not.toHaveBeenCalled();
   });
 });
