@@ -45,6 +45,22 @@ seed rather than a reach. A drill without a confirmed boundary contributes no br
 evidence. Conversion supplies its own normal-play boundary. Historical repair is
 operational maintenance, not a runtime fallback.
 
+For a registered target, opponent guidance continues after the root while the live position
+has a score-relevant opening continuation. Base reference moves take priority and follow the
+quality scorer's child-only opening boundary. When no eligible base reference move remains,
+the routing-only transposition overlay may supply a continuation using Coverage's stricter
+parent-and-child opening boundary. This keeps practice evidence inside a subtree that can
+affect the selected opening's score without changing scorer weights or evidence rules.
+
+A due Ghost target whose first move parses to an allowed continuation keeps ordinary Ghost
+priority and metadata. If none is due, the server chooses a stable structural move for that
+session and position. Off-graph positions, exhausted opening topology, ad-hoc exact-line
+targets after their root, and converted drills use the ordinary unconstrained Ghost-then-Maia
+pipeline. Structural guidance uses the existing Ghost response mode, so the board displays
+**Replay Ghost** during that phase and returns to Maia presentation at the boundary. A later
+transposition back into structural topology can therefore produce the existing “The haunting
+resumes” presentation.
+
 ## Strictness, terminal outcomes, and conversion
 
 Before the root, leaving the accepted route fails the drill. After the root, strictness

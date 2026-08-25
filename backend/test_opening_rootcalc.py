@@ -6,7 +6,9 @@ from pathlib import Path
 import chess
 import pytest
 
+from app.drill_steering import post_root_structural_moves
 from app.fen import active_color, normalize_fen
+from app.opening_densify import RoutingView
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_rootcalc import (
@@ -125,6 +127,73 @@ def _graph(paths: list[list[str]]) -> OpeningGraph:
             nodes[child].parents.add((parent, uci))
             parent = child
     return OpeningGraph(nodes, root_fen)
+
+
+def test_post_root_steering_matches_real_scorer_structural_sets():
+    parent = _positions(["g1f3", "d7d5"])[2]
+    reference_child = _positions(["g1f3", "d7d5", "c2c4"])[3]
+    overlay_child = _positions(["g1f3", "d7d5", "d2d4"])[3]
+    assert overlay_child == _positions(["d2d4", "d7d5", "g1f3"])[3]
+    graph = _graph(
+        [
+            ["g1f3", "d7d5", "c2c4"],
+            ["d2d4", "d7d5", "g1f3"],
+        ]
+    )
+    routing_snapshot = DensifiedEdges(((parent, "d2d4", overlay_child),))
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        EvidenceOverlay(1, "white"),
+        _roots(_root(parent)),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[parent],
+        routing_snapshot=routing_snapshot,
+    )
+
+    served = post_root_structural_moves(
+        RoutingView(graph, routing_snapshot),
+        parent,
+    )
+
+    assert reference_child in calculator._reference_children(parent)
+    assert {move.resulting_fen for move in served} == set(
+        calculator._reference_children(parent)
+    )
+    assert overlay_child in calculator._coverage_structural_children(parent)
+    assert overlay_child not in {move.resulting_fen for move in served}
+
+
+def test_post_root_overlay_fallback_is_in_real_scorer_coverage_set():
+    parent = _positions(["g1f3", "d7d5"])[2]
+    overlay_child = _positions(["g1f3", "d7d5", "d2d4"])[3]
+    assert overlay_child == _positions(["d2d4", "d7d5", "g1f3"])[3]
+    graph = _graph(
+        [
+            ["g1f3", "d7d5"],
+            ["d2d4", "d7d5", "g1f3"],
+        ]
+    )
+    routing_snapshot = DensifiedEdges(((parent, "d2d4", overlay_child),))
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        EvidenceOverlay(1, "white"),
+        _roots(_root(parent)),
+        RootCalcConfig(),
+        FOLD_NOW,
+        seeds=[parent],
+        routing_snapshot=routing_snapshot,
+    )
+
+    served = post_root_structural_moves(
+        RoutingView(graph, routing_snapshot),
+        parent,
+    )
+
+    assert [move.resulting_fen for move in served] == [overlay_child]
+    assert overlay_child in calculator._coverage_structural_children(parent)
 
 
 def _root(

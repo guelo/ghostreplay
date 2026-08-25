@@ -12,11 +12,13 @@ from conftest import TestingSessionLocal
 
 import app.opening_evidence as opening_evidence
 import app.opening_cache as oc
+from app.fen import normalize_fen
 from app.models import (
     AnalysisCache,
     Blunder,
     GameSession,
     OpeningScoreBatch,
+    OpponentDecision,
     RatingHistory,
     SessionMove,
     UserOpeningScore,
@@ -61,6 +63,30 @@ def _steering_graph() -> OpeningGraph:
     graph = OpeningGraph(nodes, start)
     graph.freeze()
     return graph
+
+
+def _post_root_steering_graph() -> tuple[OpeningGraph, list[str]]:
+    line = ["e2e4", "e7e5", "g1f3", "b8c6"]
+    board = chess.Board()
+    positions = [normalize_fen(board.fen())]
+    nodes = {
+        positions[0]: OpeningGraphNode(positions[0], "white"),
+    }
+    parent = positions[0]
+    for uci in line:
+        board.push_uci(uci)
+        child = normalize_fen(board.fen())
+        positions.append(child)
+        nodes.setdefault(
+            child,
+            OpeningGraphNode(child, "white" if board.turn else "black"),
+        )
+        nodes[parent].children[uci] = child
+        nodes[child].parents.add((parent, uci))
+        parent = child
+    graph = OpeningGraph(nodes, positions[0])
+    graph.freeze()
+    return graph, positions
 
 
 def _roots() -> OpeningRoots:
@@ -270,6 +296,205 @@ def test_next_opponent_move_steers_active_drill_without_transitioning(
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_state == "active"
     assert session.drill_root_reached_ply is None
+
+
+def test_next_opponent_move_steers_post_root_then_falls_back_at_boundary(
+    client,
+    auth_headers,
+    db_session,
+):
+    """Registered root-reached drills steer every live opponent node and replay durably."""
+    from app.opponent_move_controller import ControllerMove
+
+    graph, positions = _post_root_steering_graph()
+    with patch("app.api.drills.get_opening_roots", return_value=_roots_for(ROOT_FEN)):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+    assert start.status_code == 201
+    session_id = uuid.UUID(start.json()["session_id"])
+    session = db_session.get(GameSession, session_id)
+    session.drill_state = "root_reached"
+    session.drill_root_reached_ply = 1
+    db_session.commit()
+
+    first_payload = {
+        "session_id": str(session_id),
+        "fen": positions[1],
+        "moves": ["e2e4"],
+    }
+    with (
+        patch("app.api.game.get_opening_graph", return_value=graph),
+        patch("app.opponent_move_controller.choose_move") as mock_maia,
+    ):
+        first = client.post(
+            "/api/game/next-opponent-move",
+            json=first_payload,
+            headers=auth_headers(),
+        )
+        replay = client.post(
+            "/api/game/next-opponent-move",
+            json=first_payload,
+            headers=auth_headers(),
+        )
+        later = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": str(session_id),
+                "fen": positions[3],
+                "moves": ["e2e4", "e7e5", "g1f3"],
+            },
+            headers=auth_headers(),
+        )
+        mock_maia.assert_not_called()
+
+    assert first.status_code == 200
+    first_body = first.json()
+    assert first_body["mode"] == "ghost"
+    assert first_body["decision_source"] == "ghost_path"
+    assert first_body["move"] == {"uci": "e7e5", "san": "e5"}
+    assert first_body["target_blunder_id"] is None
+    assert first_body["target_blunder_srs"] is None
+    assert first_body["target_fen"] is None
+    assert first_body["drill_route"] is None
+    assert first_body["decision_id"] is not None
+    assert replay.json() == first_body
+
+    assert later.status_code == 200
+    assert later.json()["move"] == {"uci": "b8c6", "san": "Nc6"}
+
+    decisions = (
+        db_session.query(OpponentDecision)
+        .filter(OpponentDecision.session_id == session_id)
+        .order_by(OpponentDecision.ply_before)
+        .all()
+    )
+    assert len(decisions) == 2
+    assert decisions[0].resulting_fen == positions[2]
+    assert decisions[1].resulting_fen == positions[4]
+
+    boundary_board = chess.Board(f"{positions[4]} 0 1")
+    boundary_board.push_uci("f1b5")
+    boundary_fen = normalize_fen(boundary_board.fen())
+    fallback = ControllerMove(uci="a7a6", san="a6", method="maia3_api")
+    with (
+        patch("app.api.game.get_opening_graph", return_value=graph),
+        patch("app.opponent_move_controller.choose_move", return_value=fallback) as mock_maia,
+    ):
+        outside = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": str(session_id),
+                "fen": boundary_fen,
+                "moves": ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5"],
+            },
+            headers=auth_headers(),
+        )
+
+    assert outside.status_code == 200
+    assert outside.json()["mode"] == "engine"
+    assert outside.json()["move"] == {"uci": "a7a6", "san": "a6"}
+    mock_maia.assert_called_once()
+
+
+def test_post_root_steering_preserves_compatible_ghost_metadata(
+    client,
+    auth_headers,
+    db_session,
+):
+    """A lower-priority compatible Ghost wins over a higher-priority off-tier path."""
+    from app.fen import fen_hash
+    from app.models import Move, Position
+
+    user_id = 123
+    graph, positions = _post_root_steering_graph()
+    with patch("app.api.drills.get_opening_roots", return_value=_roots_for(ROOT_FEN)):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+    session_id = uuid.UUID(start.json()["session_id"])
+    session = db_session.get(GameSession, session_id)
+    session.drill_state = "root_reached"
+    session.drill_root_reached_ply = 1
+
+    parent = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(positions[1]),
+        fen_raw=positions[1],
+        active_color="black",
+    )
+    db_session.add(parent)
+    db_session.flush()
+    now = datetime.now(timezone.utc)
+    seeded: dict[str, Blunder] = {}
+    for move_san, uci, loss in (
+        ("e7-e5", "e7e5", 100),
+        ("c5", "c7c5", 900),
+    ):
+        board = chess.Board(f"{positions[1]} 0 1")
+        board.push_uci(uci)
+        child_fen = normalize_fen(board.fen())
+        child = Position(
+            user_id=user_id,
+            fen_hash=fen_hash(child_fen),
+            fen_raw=child_fen,
+            active_color="white",
+        )
+        db_session.add(child)
+        db_session.flush()
+        db_session.add(
+            Move(
+                from_position_id=parent.id,
+                move_san=move_san,
+                to_position_id=child.id,
+            )
+        )
+        blunder = Blunder(
+            user_id=user_id,
+            position_id=child.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=loss,
+            created_at=now - timedelta(hours=8),
+        )
+        db_session.add(blunder)
+        seeded[move_san] = blunder
+    db_session.commit()
+
+    with (
+        patch("app.api.game.get_opening_graph", return_value=graph),
+        patch("app.opponent_move_controller.choose_move") as mock_maia,
+    ):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": str(session_id),
+                "fen": positions[1],
+                "moves": ["e2e4"],
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["move"] == {"uci": "e7e5", "san": "e7-e5"}
+    assert body["target_blunder_id"] == seeded["e7-e5"].id
+    assert body["target_blunder_srs"] is not None
+    mock_maia.assert_not_called()
 
 
 def test_continue_drill_sets_boundary_and_resegments(client, auth_headers, db_session):
@@ -2345,6 +2570,8 @@ def test_adhoc_offbook_offline_move_fails_with_line_suggestion(client, auth_head
 
 
 def test_next_opponent_move_steers_offbook_drill_by_line(client, auth_headers, db_session):
+    from app.opponent_move_controller import ControllerMove
+
     graph = _steering_graph()
     line = ["e2e4", "e7e5", "g1f3"]  # off-book target
     target = _replay_norm(line)
@@ -2386,11 +2613,36 @@ def test_next_opponent_move_steers_offbook_drill_by_line(client, auth_headers, d
             headers=auth_headers(),
         )
 
+        # Once the ad-hoc target is reached, its key is still off graph, so the
+        # ordinary Ghost/Maia pipeline resumes instead of structural steering.
+        session = db_session.get(GameSession, uuid.UUID(session_id))
+        session.drill_state = "root_reached"
+        session.drill_root_reached_ply = 3
+        db_session.commit()
+        fallback = ControllerMove(uci="f1b5", san="Bb5", method="test")
+        with patch(
+            "app.opponent_move_controller.choose_move",
+            return_value=fallback,
+        ) as mock_maia:
+            post_root = client.post(
+                "/api/game/next-opponent-move",
+                json={
+                    "session_id": session_id,
+                    "fen": _replay_norm(["e2e4", "e7e5", "g1f3", "g8f6"]),
+                    "moves": ["e2e4", "e7e5", "g1f3", "g8f6"],
+                },
+                headers=auth_headers(),
+            )
+
     assert r2.status_code == 200
     assert r2.json()["move"] == {"uci": "g1f3", "san": "Nf3"}
     assert r2.json()["drill_route"]["status"] == "root_pending"
+    assert post_root.status_code == 200
+    assert post_root.json()["mode"] == "engine"
+    assert post_root.json()["move"] == {"uci": "f1b5", "san": "Bb5"}
+    mock_maia.assert_called_once()
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_state == "active"
+    assert session.drill_state == "root_reached"
 
 
 def _adhoc_start(client, auth_headers, *, opening_key, line=None):

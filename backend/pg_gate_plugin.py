@@ -185,7 +185,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     # dialect — it is the one check a float() regression cannot pass.
     "test_centipawn_loss.py::test_pg_cpl_aggregates_reach_helper_as_decimal",
     # branch-scoped route / next-opponent stale-write locks (g-branch-locks)
-    "test_branch_locks.py::test_next_opponent_releases_lock_before_engine_so_moves_commits",
+    "test_branch_locks.py::test_next_opponent_releases_lock_before_post_root_steering_so_moves_commits",
     "test_branch_locks.py::test_next_opponent_stale_converted_falls_through",
     "test_branch_locks.py::test_next_opponent_stale_failed_returns_400",
     "test_branch_locks.py::test_route_check_off_route_yields_to_concurrent_root_reached",

@@ -1673,6 +1673,78 @@ def test_find_ghost_move_topk_samples_from_candidates(db_session):
     assert target_blunder_id is not None
 
 
+def test_find_ghost_move_filters_first_moves_by_parsed_uci(db_session):
+    """A structural allowlist accepts SAN variants and drops off-tier/malformed paths."""
+    import chess
+
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    board = chess.Board()
+    board.push_uci("e2e4")
+    fen_start = board.fen()
+
+    start = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_start),
+        fen_raw=fen_start,
+        active_color="black",
+    )
+    db_session.add(start)
+    db_session.flush()
+
+    blunders: dict[str, Blunder] = {}
+    for move_san, uci, loss in (
+        ("e7-e5", "e7e5", 900),  # valid but outside the structural tier
+        ("c7-c5", "c7c5", 100),  # accepted variant; canonical SAN is "c5"
+        ("not-san", "e7e6", 500),  # malformed SAN is discarded
+    ):
+        child_board = board.copy(stack=False)
+        child_board.push_uci(uci)
+        child_fen = child_board.fen()
+        child = Position(
+            user_id=user_id,
+            fen_hash=fen_hash(child_fen),
+            fen_raw=child_fen,
+            active_color="white",
+        )
+        db_session.add(child)
+        db_session.flush()
+        db_session.add(
+            Move(
+                from_position_id=start.id,
+                move_san=move_san,
+                to_position_id=child.id,
+            )
+        )
+        blunder = Blunder(
+            user_id=user_id,
+            position_id=child.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=loss,
+            created_at=now - timedelta(hours=8),
+        )
+        db_session.add(blunder)
+        blunders[move_san] = blunder
+    db_session.commit()
+
+    selection = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_start,
+        player_color="white",
+        allowed_first_move_ucis=frozenset({"c7c5"}),
+        _rng_seed=0,
+    )
+
+    assert selection.move_san == "c7-c5"
+    assert selection.blunder_id == blunders["c7-c5"].id
+
+
 def test_find_ghost_move_deterministic_with_same_seed(db_session):
     """Same _rng_seed produces the same result."""
     from app.api.game import find_ghost_move

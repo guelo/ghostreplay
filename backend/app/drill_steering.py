@@ -5,7 +5,9 @@ from dataclasses import dataclass
 import chess
 
 from app.fen import normalize_fen
+from app.game_phase import is_middlegame_position
 from app.opening_densify import RoutingView
+from app.opening_transposition_artifact import coverage_structural_edge_is_eligible
 
 
 @dataclass(frozen=True)
@@ -14,6 +16,15 @@ class DrillRouteMove:
     san: str
     resulting_fen: str
     plies_to_target: int
+
+
+@dataclass(frozen=True)
+class DrillStructuralMove:
+    """A score-relevant opponent continuation after the drill root."""
+
+    uci: str
+    san: str
+    resulting_fen: str
 
 
 @dataclass(frozen=True)
@@ -201,6 +212,51 @@ def route_preserving_moves(
         )
 
     return sorted(moves, key=lambda move: (move.plies_to_target, move.uci))
+
+
+def post_root_structural_moves(
+    routing: RoutingView,
+    fen: str,
+) -> list[DrillStructuralMove]:
+    """Return the preferred score-relevant opponent tier at ``fen``.
+
+    Base reference children have priority and use the quality scorer's exact
+    child-only middlegame boundary. Routing-overlay-only children are the fallback
+    tier and use Coverage's stricter parent-and-child boundary. Only routing edges
+    are considered; malformed, illegal, or topology-inconsistent edges are skipped.
+    """
+
+    normalized_fen = normalize_fen(fen)
+    node = routing.get_node(normalized_fen)
+    if node is None:
+        return []
+
+    reference_moves: list[DrillStructuralMove] = []
+    overlay_moves: list[DrillStructuralMove] = []
+    for uci, child_fen in sorted(routing.routing_children(normalized_fen).items()):
+        try:
+            resulting_fen = _resulting_fen(normalized_fen, uci)
+            if resulting_fen != normalize_fen(child_fen):
+                continue
+            san = _san_for_uci(normalized_fen, uci)
+            move = DrillStructuralMove(
+                uci=uci,
+                san=san,
+                resulting_fen=resulting_fen,
+            )
+            if uci in node.children:
+                if not is_middlegame_position(resulting_fen):
+                    reference_moves.append(move)
+            elif coverage_structural_edge_is_eligible(
+                normalized_fen,
+                resulting_fen,
+                is_middlegame=is_middlegame_position,
+            ):
+                overlay_moves.append(move)
+        except (IndexError, ValueError):
+            continue
+
+    return reference_moves or overlay_moves
 
 
 def route_move_for_uci(

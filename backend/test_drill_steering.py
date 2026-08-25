@@ -4,10 +4,13 @@ import chess
 
 from app.drill_steering import (
     build_line_route_map,
+    post_root_structural_moves,
     route_move_for_uci,
     route_preserving_moves,
 )
 from app.fen import normalize_fen
+from app.opening_densify import DensifiedEdges, RoutingView
+from app.opening_graph import OpeningGraph, OpeningGraphNode
 
 
 def _positions(line: list[str]) -> list[str]:
@@ -18,6 +21,31 @@ def _positions(line: list[str]) -> list[str]:
         board.push(chess.Move.from_uci(uci))
         out.append(normalize_fen(board.fen()))
     return out
+
+
+def _routing_view(
+    base_lines: list[list[str]],
+    *,
+    overlay: tuple[tuple[str, str, str], ...] = (),
+) -> RoutingView:
+    nodes: dict[str, OpeningGraphNode] = {}
+    for line in base_lines:
+        board = chess.Board()
+        parent = normalize_fen(board.fen())
+        nodes.setdefault(parent, OpeningGraphNode(parent, "white"))
+        for uci in line:
+            board.push_uci(uci)
+            child = normalize_fen(board.fen())
+            nodes.setdefault(
+                child,
+                OpeningGraphNode(child, "white" if board.turn else "black"),
+            )
+            nodes[parent].children[uci] = child
+            nodes[child].parents.add((parent, uci))
+            parent = child
+    graph = OpeningGraph(nodes, normalize_fen(chess.Board().fen()))
+    graph.freeze()
+    return RoutingView(graph, DensifiedEdges(overlay))
 
 
 def test_build_line_route_map_distances_and_target():
@@ -85,3 +113,75 @@ def test_build_line_route_map_duplicate_position_keeps_first_occurrence():
     assert rmap.plies_by_fen[positions[2]] == len(line) - 2
     assert rmap.forward_moves[positions[2]][0].uci == "g1f3"
     assert route_preserving_moves(None, rmap, positions[2])[0].uci == "g1f3"
+
+
+def test_post_root_structural_moves_prefer_base_reference_tier():
+    positions = _positions(["e2e4", "e7e6"])
+    parent, overlay_child = positions[1:]
+    routing = _routing_view(
+        [
+            ["e2e4", "e7e5"],
+            ["e2e4", "c7c5"],
+        ],
+        overlay=((parent, "e7e6", overlay_child),),
+    )
+
+    moves = post_root_structural_moves(routing, parent)
+
+    assert [move.uci for move in moves] == ["c7c5", "e7e5"]
+    assert all(move.uci != "e7e6" for move in moves)
+
+
+def test_post_root_structural_moves_fall_back_to_eligible_overlay(monkeypatch):
+    base_positions = _positions(["e2e4", "e7e5"])
+    overlay_positions = _positions(["e2e4", "e7e6"])
+    parent = base_positions[1]
+    base_child = base_positions[2]
+    overlay_child = overlay_positions[2]
+    routing = _routing_view(
+        [["e2e4", "e7e5"]],
+        overlay=(
+            (parent, "a1a8", overlay_child),  # illegal edge is ignored
+            (parent, "e7e6", overlay_child),
+        ),
+    )
+    middlegame = {base_child}
+    monkeypatch.setattr(
+        "app.drill_steering.is_middlegame_position",
+        lambda fen: fen in middlegame,
+    )
+
+    moves = post_root_structural_moves(routing, parent)
+
+    assert [(move.uci, move.san, move.resulting_fen) for move in moves] == [
+        ("e7e6", "e6", overlay_child)
+    ]
+
+
+def test_post_root_reference_uses_child_only_middlegame_boundary(monkeypatch):
+    positions = _positions(["e2e4", "e7e5"])
+    parent, child = positions[1:]
+    routing = _routing_view([["e2e4", "e7e5"]])
+    monkeypatch.setattr(
+        "app.drill_steering.is_middlegame_position",
+        lambda fen: fen == parent,
+    )
+
+    moves = post_root_structural_moves(routing, parent)
+
+    assert [(move.uci, move.resulting_fen) for move in moves] == [("e7e5", child)]
+
+
+def test_post_root_overlay_uses_parent_and_child_boundary(monkeypatch):
+    positions = _positions(["e2e4", "e7e6"])
+    parent, child = positions[1:]
+    routing = _routing_view(
+        [["e2e4"]],
+        overlay=((parent, "e7e6", child),),
+    )
+    monkeypatch.setattr(
+        "app.drill_steering.is_middlegame_position",
+        lambda fen: fen == parent,
+    )
+
+    assert post_root_structural_moves(routing, parent) == []

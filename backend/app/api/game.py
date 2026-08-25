@@ -5,6 +5,7 @@ import math
 import random
 import time
 import uuid
+from collections.abc import Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -22,6 +23,7 @@ from app.accuracy import recompute_session_accuracy
 from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.drill_steering import (
+    post_root_structural_moves,
     replay_history_fen,
     route_map_for_target,
     route_preserving_moves,
@@ -318,6 +320,7 @@ def find_ghost_move(
     player_color: str,
     *,
     session_id: uuid.UUID | None = None,
+    allowed_first_move_ucis: Set[str] | None = None,
     _rng_seed: int | None = None,
 ) -> GhostSelection:
     """
@@ -331,6 +334,7 @@ def find_ghost_move(
         user_id: User ID to scope blunder lookup
         fen: Current board position FEN
         player_color: Player color from game session ('white' or 'black')
+        allowed_first_move_ucis: Optional UCI allowlist for the first path move
 
     Returns:
         A GhostSelection. All fields are None when no ghost path exists.
@@ -449,6 +453,39 @@ def find_ghost_move(
     if not candidate_rows:
         _log_slow("no_candidates", position_id=current_position.id)
         return NO_GHOST
+
+    if allowed_first_move_ucis is not None:
+        import chess
+
+        try:
+            board = (
+                chess.Board(f"{fen} 0 1")
+                if len(fen.split()) == 4
+                else chess.Board(fen)
+            )
+        except ValueError:
+            _log_slow(
+                "invalid_filter_fen",
+                position_id=current_position.id,
+                candidate_count=len(candidate_rows),
+            )
+            return NO_GHOST
+
+        parsed_ucis: dict[str, str | None] = {}
+
+        def _allowed(row) -> bool:
+            first_move = row[0]
+            if first_move not in parsed_ucis:
+                try:
+                    parsed_ucis[first_move] = board.parse_san(first_move).uci()
+                except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError):
+                    parsed_ucis[first_move] = None
+            return parsed_ucis[first_move] in allowed_first_move_ucis
+
+        candidate_rows = [row for row in candidate_rows if _allowed(row)]
+        if not candidate_rows:
+            _log_slow("no_allowed_candidates", position_id=current_position.id)
+            return NO_GHOST
 
     now = datetime.now(timezone.utc)
     if any(row[7] for row in candidate_rows):
@@ -1279,9 +1316,11 @@ def get_next_opponent_move(
 
     Flow:
     1. Validate session ownership and FEN input
-    2. Attempt ghost-path traversal (look for due blunders within steering radius)
-    3. If ghost path exists, return ghost move
-    4. Otherwise, fall back to backend engine inference (Maia)
+    2. For a registered root-reached drill, identify the preferred score-relevant
+       opening tier at the live position
+    3. Attempt ghost-path traversal, constrained to that tier when it exists
+    4. Return a compatible Ghost, otherwise a stable structural drill move
+    5. Outside structural drill topology, fall back to backend engine inference
     """
     request_started = time.perf_counter()
     ghost_search_ms = 0.0
@@ -1351,6 +1390,11 @@ def get_next_opponent_move(
     is_active_preroot_drill = (
         session.session_mode == DRILL_SESSION_MODE and session.drill_state == "active"
     )
+    should_steer_post_root = (
+        session.session_mode == DRILL_SESSION_MODE
+        and session.drill_state == "root_reached"
+    )
+    drill_opening_key = session.drill_opening_key
     if (
         session.session_mode == DRILL_SESSION_MODE
         and session.drill_state != VISIBLE_DRILL_STATE
@@ -1406,10 +1450,15 @@ def get_next_opponent_move(
             raise HTTPException(status_code=400, detail="Opponent moves are unavailable for this drill state")
 
         if session.drill_state != "active":
-            # converted or root_reached: the normal ghost/engine path applies. Its
-            # required immutable values (player_color, engine_elo) were copied at
-            # entry, so release the lock here and fall through WITHOUT returning —
-            # no row lock may survive into ghost or engine computation.
+            # Converted sessions resume the normal path; root-reached sessions may
+            # use structural steering. Their required immutable values were copied
+            # at entry/refreshed here, so release the lock before either path — no
+            # row lock may survive into Ghost, structural, or engine computation.
+            should_steer_post_root = (
+                session.session_mode == DRILL_SESSION_MODE
+                and session.drill_state == "root_reached"
+            )
+            drill_opening_key = session.drill_opening_key
             db.rollback()
         else:
             if not session.drill_opening_key:
@@ -1503,7 +1552,18 @@ def get_next_opponent_move(
             )
             return _serve(served, was_replayed)
 
-    # Step 1: Ghost-first path traversal
+    structural_moves = []
+    if should_steer_post_root and drill_opening_key:
+        routing = routing_view(get_opening_graph())
+        # A strict-line/off-book drill has no in-graph opening root and resumes the
+        # generic pipeline after reaching its target. In-graph drills keep opponent
+        # play on score-relevant topology for as long as a tier exists.
+        if routing.has_position(drill_opening_key):
+            structural_moves = post_root_structural_moves(routing, request.fen)
+
+    # Step 1: Ghost-first path traversal. Post-root drills constrain the first
+    # move by UCI so a compatible due Ghost keeps priority without an off-tier
+    # Ghost pulling the opening away from score-relevant topology.
     # Use shared ghost path traversal logic to find moves toward due blunders
     ghost_search_started = time.perf_counter()
     (
@@ -1518,6 +1578,11 @@ def get_next_opponent_move(
         fen=request.fen,
         player_color=player_color,
         session_id=request.session_id,
+        allowed_first_move_ucis=(
+            frozenset(move.uci for move in structural_moves)
+            if structural_moves
+            else None
+        ),
     )
     ghost_search_ms = _elapsed_ms(ghost_search_started)
 
@@ -1609,6 +1674,32 @@ def get_next_opponent_move(
             ply_before=len(request.moves),
             response=ghost_response,
             resulting_fen=ghost_resulting_fen,
+        )
+        return _serve(served, was_replayed)
+
+    if structural_moves:
+        rng = random.Random(_stable_seed(user.user_id, request.fen, request.session_id))
+        structural_move = structural_moves[rng.randrange(len(structural_moves))]
+        served, was_replayed = _record_decision(
+            db,
+            session_id=request.session_id,
+            request_fingerprint=request_fingerprint,
+            request_fen_hash=fen_hash(request.fen),
+            uci_history=_encode_uci_history(request.moves),
+            ply_before=len(request.moves),
+            response=NextOpponentMoveResponse(
+                mode=OpponentMoveMode.GHOST,
+                move=MoveDetails(
+                    uci=structural_move.uci,
+                    san=structural_move.san,
+                ),
+                target_blunder_id=None,
+                target_blunder_srs=None,
+                target_fen=None,
+                decision_source=DecisionSource.GHOST_PATH,
+                drill_route=None,
+            ),
+            resulting_fen=structural_move.resulting_fen,
         )
         return _serve(served, was_replayed)
 

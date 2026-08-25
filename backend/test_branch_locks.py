@@ -7,10 +7,10 @@ handlers refresh and lock only their mutating branches:
   responses unlocked (pure snapshots that write nothing); only the target-reached
   and off-route branches acquire the session NKU lock, refresh, and re-derive
   before writing;
-* ``/next-opponent-move`` keeps the ghost/engine path unlocked; only the active
+* ``/next-opponent-move`` keeps post-root steering and the ghost/engine path unlocked; only the active
   pre-root drill branch locks and refreshes, then routes: failed/abandoned -> the
-  existing 400, converted/root-reached -> release the lock and fall through, still
-  active -> compute/write route state under the lock and return the route
+  existing 400, converted/root-reached -> release the lock and dispatch from the
+  refreshed state, still active -> compute/write route state under the lock and return the route
   response.
 
 The SQLite tests (statement capture) run everywhere; the row-lock interleaving
@@ -556,31 +556,35 @@ def test_next_opponent_stale_converted_falls_through(pg_client, pg_session_facto
 
 
 @pg_required
-def test_next_opponent_releases_lock_before_engine_so_moves_commits(
+def test_next_opponent_releases_lock_before_post_root_steering_so_moves_commits(
     pg_client, pg_session_factory, auth_headers
 ):
     """Lock-release barrier. The active pre-root branch acquires the NKU lock, sees a
-    concurrently committed root_reached, rolls back to release it, and falls through.
-    While the follower is paused INSIDE engine work, a concurrent ``/moves`` upload —
+    concurrently committed root_reached, re-derives post-root steering, and rolls back.
+    While the follower is paused INSIDE Ghost search, a concurrent ``/moves`` upload —
     which takes its own session NKU lock — completes: proof no row lock survives into
-    ghost/engine computation."""
+    post-root Ghost/structural computation."""
     user_id = 7301
     _seed_pg_user(pg_session_factory, user_id)
     session_id = _seed_pg_drill(
         pg_session_factory, user_id=user_id, drill_state="active", player_color="black"
     )
     locked = threading.Event()
-    engine_paused = threading.Event()
-    engine_release = threading.Event()
+    ghost_paused = threading.Event()
+    ghost_release = threading.Event()
     result: dict = {}
+    graph = _steering_graph()
 
-    def _paused_engine(*args, **kwargs):
-        engine_paused.set()
-        engine_release.wait(timeout=10)
-        return ControllerMove(uci="e2e4", san="e4", method="test")
+    def _paused_ghost(*args, **kwargs):
+        ghost_paused.set()
+        ghost_release.wait(timeout=10)
+        return (None, None, None, None, None)
 
     def _follower() -> None:
-        with patch("app.opponent_move_controller.choose_move", _paused_engine):
+        with (
+            patch("app.api.game.get_opening_graph", return_value=graph),
+            patch("app.api.game.find_ghost_move", _paused_ghost),
+        ):
             result["opp"] = pg_client.post(
                 "/api/game/next-opponent-move",
                 json={"session_id": str(session_id), "fen": START_FEN, "moves": []},
@@ -607,17 +611,18 @@ def test_next_opponent_releases_lock_before_engine_so_moves_commits(
         follower_future = pool.submit(_follower)
         try:
             # The follower blocks on the leader's lock, refreshes to root_reached,
-            # rolls back, then stalls inside engine work holding no row lock.
-            assert engine_paused.wait(timeout=10), "next-opponent never reached engine work"
+            # rolls back, then stalls inside Ghost work holding no row lock.
+            assert ghost_paused.wait(timeout=10), "next-opponent never reached Ghost work"
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as probe_pool:
                 moves_resp = probe_pool.submit(_moves_probe).result(timeout=8)
         finally:
-            engine_release.set()
+            ghost_release.set()
         leader_future.result(timeout=10)
         follower_future.result(timeout=10)
 
     assert moves_resp.status_code == 200, moves_resp.text  # /moves committed while opp was paused
     assert moves_resp.json()["moves_inserted"] == 1
     assert result["opp"].status_code == 200, result["opp"].text
-    assert result["opp"].json()["mode"] == "engine"
+    assert result["opp"].json()["mode"] == "ghost"
+    assert result["opp"].json()["move"] == {"uci": "e2e4", "san": "e4"}
     assert _drill_state(pg_session_factory, session_id) == "root_reached"
