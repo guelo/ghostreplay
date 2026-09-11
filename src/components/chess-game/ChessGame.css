@@ -1478,6 +1478,16 @@
     color: var(--text-secondary);
 }
 
+.ghost-info-box__unavailable {
+    max-width: 200px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.ghost-info-box__unavailable + .ghost-info-box__unavailable {
+    margin-top: 0.3rem;
+}
+
 /* Game End Banner */
 
 .game-end-banner {

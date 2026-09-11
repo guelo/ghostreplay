@@ -143,7 +143,7 @@ const setup = ({
   }
 
   const clearMoveHighlights = vi.fn();
-  const resetMode = vi.fn();
+  const resetOpponentPresentation = vi.fn();
   const resetEngine = vi.fn();
   const onOpenHistory = vi.fn();
   const setEngineMessage = vi.fn();
@@ -176,7 +176,7 @@ const setup = ({
       chess,
       coordinator,
       clearMoveHighlights,
-      resetMode,
+      resetOpponentPresentation,
       resetEngine,
       onOpenHistory,
       setEngineMessage,
@@ -206,6 +206,7 @@ const setup = ({
 
   return {
     result,
+    resetOpponentPresentation,
     onOpenHistory,
     setIsRevertPending,
     setRevertError,
@@ -290,7 +291,12 @@ describe("useChessGameLifecycle", () => {
       { san: moveTwo.san, fen: fenAfterMoveTwo, uci: "e7e5" },
     ];
 
-    const { result, setIsRevertPending, setShowRevertWarning } = setup({
+    const {
+      result,
+      resetOpponentPresentation,
+      setIsRevertPending,
+      setShowRevertWarning,
+    } = setup({
       chess,
       moveHistory,
       isGameActive: true,
@@ -347,6 +353,7 @@ describe("useChessGameLifecycle", () => {
     expect(setIsRevertPending).toHaveBeenNthCalledWith(1, true);
     expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
     expect(setShowRevertWarning).toHaveBeenLastCalledWith(false);
+    expect(resetOpponentPresentation).toHaveBeenCalledTimes(1);
     // Reconcile-poll fires for the resigned session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith(
       "session-123",
@@ -475,6 +482,7 @@ describe("useChessGameLifecycle", () => {
       setIsRevertPending,
       setRevertError,
       getResolvedReview,
+      resetOpponentPresentation,
     } = setup({
       chess,
       moveHistory,
@@ -495,6 +503,7 @@ describe("useChessGameLifecycle", () => {
     expect(getResolvedReview()).toEqual(resolvedReview);
     expect(setIsRevertPending).not.toHaveBeenCalled();
     expect(setRevertError).not.toHaveBeenCalled();
+    expect(resetOpponentPresentation).not.toHaveBeenCalled();
   });
 
   it("does not invent revision zero for a rated revert with unknown line state", async () => {
@@ -631,7 +640,13 @@ describe("useChessGameLifecycle", () => {
       { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
     ];
 
-    const { result, coordinator, getResolvedReview, setRevertError } =
+    const {
+      result,
+      coordinator,
+      getResolvedReview,
+      resetOpponentPresentation,
+      setRevertError,
+    } =
       setup({
         chess,
         moveHistory,
@@ -671,6 +686,7 @@ describe("useChessGameLifecycle", () => {
     expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
     expect(getResolvedReview()).toBeNull();
     expect(setRevertError).toHaveBeenCalledWith("upload failed");
+    expect(resetOpponentPresentation).not.toHaveBeenCalled();
   });
 
   it("does not apply stale revert side effects after reset cancels a pending revert", async () => {

@@ -36,6 +36,8 @@ type SetupOptions = {
   moveHistory?: MoveRecord[];
   sessionId?: string | null;
   isGameActive?: boolean;
+  drillOpeningKey?: string | null;
+  drillState?: "active" | "root_reached" | null;
   decisionOwner?: DecisionOwnerSpy;
   /** What the injected root confirmation resolves to. */
   confirmDrillRootResult?: boolean;
@@ -53,6 +55,8 @@ const createSetup = ({
   moveHistory = [],
   sessionId = "session-1",
   isGameActive = true,
+  drillOpeningKey = null,
+  drillState = null,
   decisionOwner = createDecisionOwnerSpy(),
   confirmDrillRootResult = true,
   isDrillRootConfirmPending: rootConfirmPending = false,
@@ -63,6 +67,8 @@ const createSetup = ({
     playerColor,
     sessionId,
     isGameActive,
+    drillOpeningKey,
+    drillState,
     liveFen: chess.fen(),
     moveHistory: [...moveHistory],
   });
@@ -407,9 +413,11 @@ describe("useChessGameController", () => {
     });
 
     evaluatePosition.mockResolvedValueOnce({ move: "d7d5", raw: "bestmove d7d5" });
+    const onCommitted = vi.fn();
+    let outcome;
 
     await act(async () => {
-      await result.current.applyEngineMove();
+      outcome = await result.current.applyEngineMove(onCommitted);
     });
 
     expect(evaluatePosition).toHaveBeenCalledWith(fenBeforeEngineMove);
@@ -427,6 +435,8 @@ describe("useChessGameController", () => {
     );
     expect(setEngineMessage).toHaveBeenCalledWith(null);
     expect(handleGameEnd).not.toHaveBeenCalled();
+    expect(onCommitted).toHaveBeenCalledWith({ drill: null });
+    expect(outcome).toEqual({ committed: true });
   });
 
   it("drops an engine result if the session changes during search", async () => {
@@ -451,9 +461,11 @@ describe("useChessGameController", () => {
         resolveSearch = resolve;
       }),
     );
+    const onCommitted = vi.fn();
+    let outcome;
 
     const pending = act(async () => {
-      await result.current.applyEngineMove();
+      outcome = await result.current.applyEngineMove(onCommitted);
     });
 
     useGameStore.getState().setSessionId("session-2");
@@ -463,6 +475,38 @@ describe("useChessGameController", () => {
     const store = useGameStore.getState();
     expect(store.moveHistory.length).toBe(1);
     expect(analyzeMove).not.toHaveBeenCalled();
+    expect(onCommitted).not.toHaveBeenCalled();
+    expect(outcome).toEqual({ committed: false, reason: "stale" });
+  });
+
+  it("does not signal a commit when the local engine has no move or fails", async () => {
+    const noMove = createSetup();
+    const noMoveCommitted = vi.fn();
+    let noMoveOutcome;
+    await act(async () => {
+      noMoveOutcome = await noMove.result.current.applyEngineMove(
+        noMoveCommitted,
+      );
+    });
+
+    expect(noMoveCommitted).not.toHaveBeenCalled();
+    expect(noMoveOutcome).toEqual({ committed: false, reason: "no_move" });
+
+    const failed = createSetup();
+    failed.evaluatePosition.mockRejectedValueOnce(new Error("worker failed"));
+    const failedCommitted = vi.fn();
+    let failedOutcome;
+    await act(async () => {
+      failedOutcome = await failed.result.current.applyEngineMove(
+        failedCommitted,
+      );
+    });
+
+    expect(failedCommitted).not.toHaveBeenCalled();
+    expect(failedOutcome).toEqual({
+      committed: false,
+      reason: "application_error",
+    });
   });
 
   it("applies a ghost move and toggles review targeting state", async () => {
@@ -497,8 +541,19 @@ describe("useChessGameController", () => {
       moveHistory: [previousMove],
     });
 
+    const onCommitted = vi.fn();
+    let outcome;
     await act(async () => {
-      await result.current.applyGhostMove("e5", "ghost_path", 77, targetSrs, "target-fen");
+      outcome = await result.current.applyGhostMove(
+        "e5",
+        "ghost_path",
+        77,
+        targetSrs,
+        "target-fen",
+        null,
+        null,
+        onCommitted,
+      );
     });
 
     expect(analyzeMove).toHaveBeenCalledWith(
@@ -513,6 +568,31 @@ describe("useChessGameController", () => {
     expect(setBlunderTargetFen).toHaveBeenCalledWith("target-fen");
     expect(setResolvedReview).toHaveBeenCalledWith(null);
     expect(setShowGhostInfo).not.toHaveBeenCalled();
+    expect(onCommitted).toHaveBeenCalledWith({ drill: null });
+    expect(outcome).toEqual({ committed: true });
+  });
+
+  it("does not signal a commit for an illegal Ghost move", async () => {
+    const { result } = createSetup();
+    const onCommitted = vi.fn();
+    let outcome;
+
+    await act(async () => {
+      outcome = await result.current.applyGhostMove(
+        "e5",
+        "ghost_path",
+        42,
+        null,
+        null,
+        null,
+        null,
+        onCommitted,
+      );
+    });
+
+    expect(outcome).toEqual({ committed: false, reason: "illegal_move" });
+    expect(onCommitted).not.toHaveBeenCalled();
+    expect(useGameStore.getState().moveHistory).toHaveLength(0);
   });
 
   it("normal pawn move (e2→e4) returns applied: true without requiresPromotion", () => {
@@ -610,7 +690,7 @@ describe("useChessGameController", () => {
     vi.mocked(playMoveSound).mockReset();
 
     await act(async () => {
-      await result.current.applyEngineMove();
+      await result.current.applyEngineMove(vi.fn());
     });
 
     expect(playMoveSound).toHaveBeenCalledTimes(1);
@@ -652,6 +732,47 @@ describe("useChessGameController", () => {
       plies_to_target: 0,
       reaches_root: true,
     };
+
+    it("signals the board commit before root confirmation settles", async () => {
+      const { result, confirmDrillRoot } = createSetup({
+        playerColor: "black",
+        drillOpeningKey: "root-fen",
+        drillState: "active",
+      });
+      let resolveConfirmation!: (confirmed: boolean) => void;
+      confirmDrillRoot.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+      );
+      const onCommitted = vi.fn();
+      let pending!: Promise<unknown>;
+
+      await act(async () => {
+        pending = result.current.applyGhostMove(
+          "e4",
+          "ghost_path",
+          null,
+          null,
+          "target-fen",
+          rootReachingRoute,
+          "decision-1",
+          onCommitted,
+        );
+        await Promise.resolve();
+      });
+
+      expect(onCommitted).toHaveBeenCalledWith({
+        drill: { openingKey: "root-fen", state: "active" },
+      });
+      expect(confirmDrillRoot).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        resolveConfirmation(false);
+        await pending;
+      });
+      expect(onCommitted).toHaveBeenCalledTimes(1);
+    });
 
     it("confirms the applied position instead of transitioning on the serve", async () => {
       const { result, confirmDrillRoot } = createSetup({ playerColor: "black" });

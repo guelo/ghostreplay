@@ -1,13 +1,13 @@
 import { memo, type ReactNode, type RefObject } from "react";
 import StaticMiniBoard from "./StaticMiniBoard";
 import SoundToggleButton from "./SoundToggleButton";
-import type { RatingScores, TargetBlunderSrs } from "../../../utils/api";
+import type { RatingScores } from "../../../utils/api";
 import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
+import type { OpponentPresentation } from "../domain/opponentPresentation";
 import OpponentAvatar from "./OpponentAvatar";
 import MaterialDisplay from "../../MaterialDisplay";
 
 type BoardOrientation = "white" | "black";
-type OpponentMode = "ghost" | "engine";
 
 type GameInfoPanelProps = {
   statusText: string;
@@ -23,18 +23,15 @@ type GameInfoPanelProps = {
   playerRating: number;
   isProvisional: boolean;
   ratingScores?: RatingScores;
-  opponentMode: OpponentMode;
+  opponentPresentation: OpponentPresentation;
   opponentName: string;
   engineElo: number;
   gameResult: GameResult | null;
-  blunderReviewId: number | null;
   showGhostInfo: boolean;
   onToggleGhostInfo: () => void;
   onCloseGhostInfo: () => void;
   ghostInfoAnchorRef: RefObject<HTMLSpanElement | null>;
-  blunderTargetFen: string | null;
   boardOrientation: BoardOrientation;
-  blunderReviewSrs: TargetBlunderSrs | null;
   /** Live opening-lineage hierarchy (broadest -> deepest), rendered in place of
    *  the old single-line "Opening: …". Owned by ChessGame; null/undefined when
    *  there is nothing to show (e.g. before the first boundary, or inactive). */
@@ -135,18 +132,15 @@ const GameInfoPanel = ({
   playerRating,
   isProvisional,
   ratingScores,
-  opponentMode,
+  opponentPresentation,
   opponentName,
   engineElo,
   gameResult,
-  blunderReviewId,
   showGhostInfo,
   onToggleGhostInfo,
   onCloseGhostInfo,
   ghostInfoAnchorRef,
-  blunderTargetFen,
   boardOrientation,
-  blunderReviewSrs,
   openingLineageSlot,
   perfectStreak,
   materialFen,
@@ -209,20 +203,22 @@ const GameInfoPanel = ({
         {(isGameActive || gameResult !== null) && (
           <div
             className={`chess-meta chess-panel__opponent${
-              opponentMode === "ghost"
+              opponentPresentation.kind !== "engine"
                 ? " chess-meta--ghost"
                 : " chess-meta--engine"
             }`}
           >
             <span className="chess-panel__desktop-label">Opponent: </span>
             <span className="chess-panel__mobile-versus">vs</span>
-            {opponentMode === "ghost" ? (
+            {opponentPresentation.kind !== "engine" ? (
               <>
                 <OpponentAvatar mode="ghost" engineElo={engineElo} size={70} />{" "}
                 <span className="chess-meta-strong ghost-mode-label">
-                  Replay Ghost
+                  {opponentPresentation.kind === "targeted_ghost"
+                    ? "Replay Ghost"
+                    : "Opening Guide"}
                 </span>
-                {blunderReviewId !== null && (
+                {opponentPresentation.kind === "targeted_ghost" && (
                   <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
                     <button
                       className="ghost-info-btn"
@@ -254,31 +250,44 @@ const GameInfoPanel = ({
                             &times;
                           </button>
                         </div>
-                        {blunderTargetFen && (
+                        {opponentPresentation.targetFen ? (
                           <div className="ghost-info-box__board">
                             <StaticMiniBoard
-                              fen={blunderTargetFen}
+                              fen={opponentPresentation.targetFen}
                               orientation={boardOrientation}
                             />
                           </div>
+                        ) : (
+                          <div className="ghost-info-box__unavailable">
+                            Target position preview unavailable.
+                          </div>
                         )}
-                        {blunderReviewSrs && (
+                        {opponentPresentation.targetBlunderSrs ? (
                           <div className="ghost-info-box__srs">
                             <span>
                               Last seen:{" "}
-                              {blunderReviewSrs.last_reviewed_at
+                              {opponentPresentation.targetBlunderSrs.last_reviewed_at
                                 ? formatLastSeen(
-                                    blunderReviewSrs.last_reviewed_at,
+                                    opponentPresentation.targetBlunderSrs
+                                      .last_reviewed_at,
                                   )
-                                : blunderReviewSrs.created_at
-                                  ? formatLastSeen(blunderReviewSrs.created_at)
+                                : opponentPresentation.targetBlunderSrs.created_at
+                                  ? formatLastSeen(
+                                      opponentPresentation.targetBlunderSrs.created_at,
+                                    )
                                   : "never"}
                             </span>
                             <span>
-                              Pass/Fail: {blunderReviewSrs.pass_count}/
-                              {blunderReviewSrs.fail_count}
+                              Pass/Fail: {opponentPresentation.targetBlunderSrs.pass_count}/
+                              {opponentPresentation.targetBlunderSrs.fail_count}
                             </span>
-                            <span>Streak: {blunderReviewSrs.pass_streak}</span>
+                            <span>
+                              Streak: {opponentPresentation.targetBlunderSrs.pass_streak}
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="ghost-info-box__unavailable">
+                            Review history unavailable.
                           </div>
                         )}
                       </div>

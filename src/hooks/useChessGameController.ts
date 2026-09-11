@@ -4,6 +4,11 @@ import type { Square } from "chess.js";
 import type { Dispatch, SetStateAction } from "react";
 import type { DrillRouteMetadata, SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
+import type {
+  ApplyOpponentMoveOutcome,
+  OpponentMoveCommitContext,
+  OpponentMoveCommittedObserver,
+} from "../components/chess-game/domain/opponentPresentation";
 import {
   canArmReviewTarget,
   hasReviewTargetAtFen,
@@ -123,6 +128,22 @@ export const useChessGameController = ({
     setBlunderReviewSrs(null);
     setBlunderTargetFen(null);
   }, [setBlunderReviewId, setBlunderReviewSrs, setBlunderTargetFen]);
+
+  const captureOpponentMoveCommitContext = useCallback(
+    (): OpponentMoveCommitContext => {
+      const store = useGameStore.getState();
+      const drill =
+        store.drillOpeningKey !== null &&
+        (store.drillState === "active" || store.drillState === "root_reached")
+          ? {
+              openingKey: store.drillOpeningKey,
+              state: store.drillState,
+            }
+          : null;
+      return { drill };
+    },
+    [],
+  );
 
   const commitAppliedMove = useCallback(
     (
@@ -353,7 +374,10 @@ export const useChessGameController = ({
     [applyPlayerMove, chess],
   );
 
-  const applyEngineMove = useCallback(async () => {
+  const applyEngineMove = useCallback(async (
+    onCommitted: OpponentMoveCommittedObserver,
+  ): Promise<ApplyOpponentMoveOutcome> => {
+    let didCommit = false;
     try {
       const fenBeforeMove = chess.fen();
       const legalMoveCount = chess.moves().length;
@@ -367,21 +391,32 @@ export const useChessGameController = ({
         chess.fen() !== fenBeforeMove ||
         !storeAfterSearch.isGameActive
       ) {
-        return;
+        return { committed: false, reason: "stale" };
       }
 
       if (result.move === "(none)") {
         setEngineMessage("Stockfish has no legal moves.");
-        return;
+        return { committed: false, reason: "no_move" };
       }
 
       const from = result.move.slice(0, 2);
       const to = result.move.slice(2, 4);
       const promotion = result.move.slice(4) || undefined;
-      const appliedMove = chess.move({ from, to, promotion });
+      let appliedMove: AppliedMove | null;
+      try {
+        appliedMove = chess.move({ from, to, promotion });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : `Engine returned illegal move: ${result.move}`;
+        setEngineMessage(message);
+        return { committed: false, reason: "illegal_move" };
+      }
 
       if (!appliedMove) {
-        throw new Error(`Engine returned illegal move: ${result.move}`);
+        setEngineMessage(`Engine returned illegal move: ${result.move}`);
+        return { committed: false, reason: "illegal_move" };
       }
 
       const opponentColor =
@@ -393,19 +428,26 @@ export const useChessGameController = ({
         opponentColor,
         { decisionSource: "local_fallback" },
       );
+      didCommit = true;
+      onCommitted(captureOpponentMoveCommitContext());
       setEngineMessage(null);
 
       if (chess.isGameOver()) {
         await handleGameEnd();
       }
+      return { committed: true };
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
           : "Unable to apply Stockfish move.";
       setEngineMessage(message);
+      return didCommit
+        ? { committed: true }
+        : { committed: false, reason: "application_error" };
     }
   }, [
+    captureOpponentMoveCommitContext,
     chess,
     commitAppliedMove,
     evaluatePosition,
@@ -422,14 +464,27 @@ export const useChessGameController = ({
       targetFen: string | null,
       drillRoute?: DrillRouteMetadata | null,
       decisionId?: string | null,
-    ) => {
+      onCommitted?: OpponentMoveCommittedObserver,
+    ): Promise<ApplyOpponentMoveOutcome> => {
+      let didCommit = false;
       try {
         const fenBeforeMove = chess.fen();
         const legalMoveCount = chess.moves().length;
-        const appliedMove = chess.move(sanMove);
+        let appliedMove: AppliedMove | null;
+        try {
+          appliedMove = chess.move(sanMove);
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : `Ghost returned illegal move: ${sanMove}`;
+          setEngineMessage(message);
+          return { committed: false, reason: "illegal_move" };
+        }
 
         if (!appliedMove) {
-          throw new Error(`Ghost returned illegal move: ${sanMove}`);
+          setEngineMessage(`Ghost returned illegal move: ${sanMove}`);
+          return { committed: false, reason: "illegal_move" };
         }
 
         const playerColor = useGameStore.getState().playerColor;
@@ -442,6 +497,8 @@ export const useChessGameController = ({
           opponentColor,
           { decisionSource, targetBlunderId },
         );
+        didCommit = true;
+        onCommitted?.(captureOpponentMoveCommitContext());
         setEngineMessage(null);
 
         // Mark position as under review if ghost-move targets a blunder
@@ -485,15 +542,20 @@ export const useChessGameController = ({
         } else if (chess.isGameOver()) {
           await handleGameEnd();
         }
+        return { committed: true };
       } catch (error) {
         const message =
           error instanceof Error
             ? error.message
             : "Unable to apply ghost move.";
         setEngineMessage(message);
+        return didCommit
+          ? { committed: true }
+          : { committed: false, reason: "application_error" };
       }
     },
     [
+      captureOpponentMoveCommitContext,
       chess,
       clearReviewTarget,
       commitAppliedMove,

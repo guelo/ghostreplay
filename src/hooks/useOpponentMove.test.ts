@@ -4,8 +4,10 @@ import {
   determineOpponentMove,
   useOpponentMove,
 } from "./useOpponentMove";
+import type { OpponentMoveCommittedObserver } from "../components/chess-game/domain/opponentPresentation";
 
 const getNextOpponentMoveMock = vi.fn();
+const nonCommit = { committed: false, reason: "inactive" } as const;
 
 vi.mock("../utils/api", () => ({
   getNextOpponentMove: (...args: unknown[]) =>
@@ -94,7 +96,7 @@ describe("useOpponentMove", () => {
     getNextOpponentMoveMock.mockReset();
   });
 
-  it("initializes with engine mode", () => {
+  it("initializes with engine presentation", () => {
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
@@ -103,7 +105,7 @@ describe("useOpponentMove", () => {
       })
     );
 
-    expect(result.current.opponentMode).toBe("engine");
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
   });
 
   it("threads decision_id through to onApplyBackendMove", async () => {
@@ -121,7 +123,7 @@ describe("useOpponentMove", () => {
       },
     });
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -143,6 +145,7 @@ describe("useOpponentMove", () => {
       null,
       expect.objectContaining({ status: "root_pending", reaches_root: true }),
       "decision-abc",
+      expect.any(Function),
     );
   });
 
@@ -151,8 +154,12 @@ describe("useOpponentMove", () => {
       backendResponse("ghost", "Nf3", 42)
     );
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn(async (...args: unknown[]) => {
+      const onCommitted = args.at(-1) as OpponentMoveCommittedObserver;
+      onCommitted({ drill: null });
+      return { committed: true } as const;
+    });
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -166,7 +173,12 @@ describe("useOpponentMove", () => {
       await result.current.applyOpponentMove("test-fen");
     });
 
-    expect(result.current.opponentMode).toBe("ghost");
+    expect(result.current.opponentPresentation).toEqual({
+      kind: "targeted_ghost",
+      targetBlunderId: 42,
+      targetBlunderSrs: null,
+      targetFen: null,
+    });
     expect(onApplyBackendMove).toHaveBeenCalledWith(
       "Nf3",
       "ghost_path",
@@ -175,8 +187,142 @@ describe("useOpponentMove", () => {
       null,
       null,
       null,
+      expect.any(Function),
     );
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
+  });
+
+  it("publishes only when the move commits and stays published while application settles", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("ghost", "Nf3", 42),
+    );
+    let signalCommit!: OpponentMoveCommittedObserver;
+    let settleApplication!: () => void;
+    const committedOutcome = () => ({ committed: true }) as const;
+    const onApplyBackendMove = vi.fn(
+      (...args: unknown[]) => {
+        signalCommit = args.at(-1) as OpponentMoveCommittedObserver;
+        return new Promise<ReturnType<typeof committedOutcome>>((resolve) => {
+          settleApplication = () => resolve(committedOutcome());
+        });
+      },
+    );
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        onApplyBackendMove,
+        onApplyLocalFallback: vi.fn(),
+      }),
+    );
+
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = result.current.applyOpponentMove("test-fen");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onApplyBackendMove).toHaveBeenCalledTimes(1);
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
+
+    act(() => {
+      signalCommit({ drill: null });
+    });
+    expect(result.current.opponentPresentation.kind).toBe("targeted_ghost");
+
+    await act(async () => {
+      settleApplication();
+      await pending;
+    });
+    expect(result.current.opponentPresentation.kind).toBe("targeted_ghost");
+  });
+
+  it("stamps targetless Ghost moves committed during a drill as Opening Guide", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("ghost", "Nf3", null),
+    );
+    const onApplyBackendMove = vi.fn(async (...args: unknown[]) => {
+      const onCommitted = args.at(-1) as OpponentMoveCommittedObserver;
+      onCommitted({ drill: { openingKey: "sicilian", state: "active" } });
+      return { committed: true } as const;
+    });
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        onApplyBackendMove,
+        onApplyLocalFallback: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+
+    expect(result.current.opponentPresentation).toEqual({
+      kind: "opening_guide",
+    });
+  });
+
+  it("preserves the prior presentation when an application does not commit", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce(backendResponse("ghost", "Nf3", 42))
+      .mockResolvedValueOnce(backendResponse("engine", "e4"));
+    const onApplyBackendMove = vi
+      .fn()
+      .mockImplementationOnce(async (...args: unknown[]) => {
+        const onCommitted = args.at(-1) as OpponentMoveCommittedObserver;
+        onCommitted({ drill: null });
+        return { committed: true } as const;
+      })
+      .mockResolvedValueOnce({ committed: false, reason: "inactive" });
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        onApplyBackendMove,
+        onApplyLocalFallback: vi.fn(),
+      }),
+    );
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+      await result.current.applyOpponentMove("next-fen");
+    });
+
+    expect(result.current.opponentPresentation.kind).toBe("targeted_ghost");
+  });
+
+  it("publishes engine only after a successful local fallback commit", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce(backendResponse("ghost", "Nf3", 42))
+      .mockRejectedValueOnce(new Error("API error"));
+    const onApplyBackendMove = vi.fn(async (...args: unknown[]) => {
+      const onCommitted = args.at(-1) as OpponentMoveCommittedObserver;
+      onCommitted({ drill: null });
+      return { committed: true } as const;
+    });
+    const onApplyLocalFallback = vi.fn(
+      async (onCommitted: OpponentMoveCommittedObserver) => {
+        onCommitted({ drill: null });
+        return { committed: true } as const;
+      },
+    );
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        onApplyBackendMove,
+        onApplyLocalFallback,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+    expect(result.current.opponentPresentation.kind).toBe("targeted_ghost");
+
+    await act(async () => {
+      await result.current.applyOpponentMove("next-fen");
+    });
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
   });
 
   it("applies engine move from backend (no local fallback)", async () => {
@@ -184,8 +330,8 @@ describe("useOpponentMove", () => {
       backendResponse("engine", "e4")
     );
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -199,7 +345,7 @@ describe("useOpponentMove", () => {
       await result.current.applyOpponentMove("test-fen");
     });
 
-    expect(result.current.opponentMode).toBe("engine");
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
     expect(onApplyBackendMove).toHaveBeenCalledWith(
       "e4",
       "backend_engine",
@@ -208,6 +354,7 @@ describe("useOpponentMove", () => {
       null,
       null,
       null,
+      expect.any(Function),
     );
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
@@ -215,8 +362,8 @@ describe("useOpponentMove", () => {
   it("falls back to local engine on API error", async () => {
     getNextOpponentMoveMock.mockRejectedValueOnce(new Error("API error"));
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -230,14 +377,14 @@ describe("useOpponentMove", () => {
       await result.current.applyOpponentMove("test-fen");
     });
 
-    expect(result.current.opponentMode).toBe("engine");
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
     expect(onApplyBackendMove).not.toHaveBeenCalled();
     expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
   it("uses local engine when sessionId is null", async () => {
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -251,14 +398,14 @@ describe("useOpponentMove", () => {
       await result.current.applyOpponentMove("test-fen");
     });
 
-    expect(result.current.opponentMode).toBe("engine");
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
     expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
     expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
   it("does not use local engine for a null-session request when the stale guard rejects it", async () => {
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result } = renderHook(() =>
       useOpponentMove({
@@ -282,8 +429,8 @@ describe("useOpponentMove", () => {
       backendResponse("engine", "e4")
     );
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
 
     const { result, rerender } = renderHook(
       ({ sessionId }: { sessionId: string | null }) =>
@@ -311,7 +458,7 @@ describe("useOpponentMove", () => {
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
-  it("resets mode to engine", async () => {
+  it("resets the committed presentation to engine", async () => {
     getNextOpponentMoveMock.mockResolvedValueOnce(
       backendResponse("ghost", "e4", 42)
     );
@@ -319,8 +466,12 @@ describe("useOpponentMove", () => {
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyBackendMove: vi.fn().mockResolvedValue(undefined),
-        onApplyLocalFallback: vi.fn().mockResolvedValue(undefined),
+        onApplyBackendMove: vi.fn(async (...args: unknown[]) => {
+          const onCommitted = args.at(-1) as OpponentMoveCommittedObserver;
+          onCommitted({ drill: null });
+          return { committed: true } as const;
+        }),
+        onApplyLocalFallback: vi.fn().mockResolvedValue(nonCommit),
       })
     );
 
@@ -328,13 +479,13 @@ describe("useOpponentMove", () => {
       await result.current.applyOpponentMove("test-fen");
     });
 
-    expect(result.current.opponentMode).toBe("ghost");
+    expect(result.current.opponentPresentation.kind).toBe("targeted_ghost");
 
     act(() => {
-      result.current.resetMode();
+      result.current.resetPresentation();
     });
 
-    expect(result.current.opponentMode).toBe("engine");
+    expect(result.current.opponentPresentation).toEqual({ kind: "engine" });
   });
 
   it("drops an in-flight backend reply when canApplyResult turns false before resolution", async () => {
@@ -345,8 +496,8 @@ describe("useOpponentMove", () => {
       }),
     );
 
-    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(nonCommit);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
     let shouldApply = true;
 
     const { result } = renderHook(() =>

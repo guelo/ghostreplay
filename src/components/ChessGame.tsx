@@ -61,6 +61,7 @@ import {
   type PerfectStreakEvent,
 } from "./chess-game/domain/perfectStreak";
 import { hasReviewTargetAtFen } from "./chess-game/domain/reviewState";
+import type { OpponentPresentation } from "./chess-game/domain/opponentPresentation";
 import {
   deriveGameStatusBadge,
   deriveStatusText,
@@ -494,7 +495,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // DecisionOwner (g-2m0p), not on React refs.
   const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
-  const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
+  const previousOpponentPresentationKindRef =
+    useRef<OpponentPresentation["kind"] | null>(null);
   // Guards the opening opponent-move effect against re-entrancy: the effect is
   // async (backend round-trip) and its guard conditions stay true during the
   // await, so volatile deps re-running it would fire a second concurrent
@@ -974,7 +976,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       isDrillRootConfirmPending,
     });
 
-  const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
+  const {
+    opponentPresentation,
+    applyOpponentMove,
+    resetPresentation: resetOpponentPresentation,
+  } = useOpponentMove({
     sessionId,
     canApplyResult: (requestSessionId) => {
       const store = useGameStore.getState();
@@ -989,14 +995,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       );
     },
     onApplyBackendMove: async (...args) => {
-      if (useGameStore.getState().isGameActive && !isRevertPendingRef.current) {
-        await applyGhostMove(...args);
+      if (!useGameStore.getState().isGameActive) {
+        return { committed: false, reason: "inactive" };
       }
+      if (isRevertPendingRef.current) {
+        return { committed: false, reason: "revert_pending" };
+      }
+      return applyGhostMove(...args);
     },
-    onApplyLocalFallback: async () => {
-      if (useGameStore.getState().isGameActive && !isRevertPendingRef.current) {
-        await applyEngineMove();
+    onApplyLocalFallback: async (onCommitted) => {
+      if (!useGameStore.getState().isGameActive) {
+        return { committed: false, reason: "inactive" };
       }
+      if (isRevertPendingRef.current) {
+        return { committed: false, reason: "revert_pending" };
+      }
+      return applyEngineMove(onCommitted);
     },
     shouldUseLocalFallback: () => {
       const store = useGameStore.getState();
@@ -1017,10 +1031,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
   });
 
+  useEffect(() => {
+    setShowGhostInfo(false);
+  }, [opponentPresentation]);
+
   // The rehook signal is pre-gated here so useBoardNotice only sees a rising
   // edge it should surface (mirrors the old warning-stack guard).
   const showRehookNotice =
-    isGameActive && opponentMode === "ghost" && showRehookToast;
+    isGameActive &&
+    opponentPresentation.kind === "targeted_ghost" &&
+    showRehookToast;
   const boardNotice = useBoardNotice({
     isReviewMomentActive,
     resolvedReview,
@@ -1206,7 +1226,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     chess,
     coordinator,
     clearMoveHighlights,
-    resetMode,
+    resetOpponentPresentation,
     resetEngine,
     onOpenHistory,
     setEngineMessage,
@@ -1875,17 +1895,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   useEffect(() => {
     if (!isGameActive) {
-      previousOpponentModeRef.current = null;
+      previousOpponentPresentationKindRef.current = null;
       setShowRehookToast(false);
       return;
     }
 
-    const previousMode = previousOpponentModeRef.current;
-    if (previousMode === "engine" && opponentMode === "ghost") {
+    const previousKind = previousOpponentPresentationKindRef.current;
+    if (
+      previousKind !== null &&
+      previousKind !== "targeted_ghost" &&
+      opponentPresentation.kind === "targeted_ghost"
+    ) {
       setShowRehookToast(true);
     }
-    previousOpponentModeRef.current = opponentMode;
-  }, [isGameActive, opponentMode]);
+    previousOpponentPresentationKindRef.current = opponentPresentation.kind;
+  }, [isGameActive, opponentPresentation.kind]);
 
   const handleSquareClick = useCallback(
     ({ square }: { square: string }) => {
@@ -2650,18 +2674,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             playerRating={playerRating}
             isProvisional={isProvisional}
             ratingScores={ratingScores}
-            opponentMode={opponentMode}
+            opponentPresentation={opponentPresentation}
             opponentName={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
             engineElo={engineElo}
             gameResult={gameResult}
-            blunderReviewId={blunderReviewId}
             showGhostInfo={showGhostInfo}
             onToggleGhostInfo={handleToggleGhostInfo}
             onCloseGhostInfo={handleCloseGhostInfo}
             ghostInfoAnchorRef={ghostInfoAnchorRef}
-            blunderTargetFen={blunderTargetFen}
             boardOrientation={boardOrientation}
-            blunderReviewSrs={blunderReviewSrs}
             openingLineageSlot={
               (isGameActive || gameResult !== null) &&
               openingLineage.length > 0 ? (

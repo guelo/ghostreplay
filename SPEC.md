@@ -47,6 +47,12 @@ target exists, the Ghost can steer its side of the game toward it; otherwise
 the backend serves an engine move. Reaching a stored position through a
 transposition can make its downstream target reachable again.
 
+The opponent panel follows the last move that was actually committed to the
+board. A move tied to a concrete personal target is labeled **Replay Ghost**
+and always offers that target's information control. Targetless structural
+guidance committed during an opening drill is labeled **Opening Guide**;
+ordinary engine and fallback moves keep the configured engine identity.
+
 A browser-resident Stockfish worker analyzes player moves during play. Automatic
 target capture records a player move that loses at least 50 centipawns, only in
 the first 10 full moves and only once per session. Players can also add a

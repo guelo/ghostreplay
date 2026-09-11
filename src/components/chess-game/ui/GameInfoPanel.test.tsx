@@ -19,18 +19,15 @@ const makeProps = () => {
     playerColor: "white" as const,
     playerRating: 1234,
     isProvisional: false,
-    opponentMode: "engine" as const,
+    opponentPresentation: { kind: "engine" as const },
     opponentName: "Ghost Master 2000",
     engineElo: 2000,
     gameResult: null,
-    blunderReviewId: null,
     showGhostInfo: false,
     onToggleGhostInfo,
     onCloseGhostInfo,
     ghostInfoAnchorRef: createRef<HTMLSpanElement>(),
-    blunderTargetFen: null,
     boardOrientation: "white" as const,
-    blunderReviewSrs: null as TargetBlunderSrs | null,
     openingLineageSlot: (
       <div className="chess-panel__openings">Opening lineage</div>
     ),
@@ -216,12 +213,14 @@ describe("GameInfoPanel", () => {
     const { container } = render(
       <GameInfoPanel
         {...props}
-        opponentMode="ghost"
+        opponentPresentation={{
+          kind: "targeted_ghost",
+          targetBlunderId: 77,
+          targetFen: "8/8/8/8/8/8/8/8 w - - 0 1",
+          targetBlunderSrs: srs,
+        }}
         opponentName=""
-        blunderReviewId={77}
         showGhostInfo
-        blunderTargetFen="8/8/8/8/8/8/8/8 w - - 0 1"
-        blunderReviewSrs={srs}
       />,
     );
 
@@ -243,6 +242,83 @@ describe("GameInfoPanel", () => {
       "data-position",
       "8/8/8/8/8/8/8/8 w - - 0 1",
     );
+  });
+
+  it("always renders target info for Replay Ghost", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        opponentPresentation={{
+          kind: "targeted_ghost",
+          targetBlunderId: 42,
+          targetFen: null,
+          targetBlunderSrs: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Replay Ghost")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /toggle ghost info/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("retains Replay Ghost target info after ordinary game completion", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        isGameActive={false}
+        gameResult={{ type: "draw", message: "Draw." }}
+        opponentPresentation={{
+          kind: "targeted_ghost",
+          targetBlunderId: 42,
+          targetFen: null,
+          targetBlunderSrs: null,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Replay Ghost")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /toggle ghost info/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens usable fallback content when optional target details are absent", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        opponentPresentation={{
+          kind: "targeted_ghost",
+          targetBlunderId: 42,
+          targetFen: null,
+          targetBlunderSrs: null,
+        }}
+        showGhostInfo
+      />,
+    );
+
+    expect(screen.getByText(/target position preview unavailable/i)).toBeInTheDocument();
+    expect(screen.getByText(/review history unavailable/i)).toBeInTheDocument();
+  });
+
+  it("renders targetless drill guidance as Opening Guide without target info", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        opponentPresentation={{ kind: "opening_guide" }}
+      />,
+    );
+
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
+    expect(screen.queryByText("Replay Ghost")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /toggle ghost info/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders relocated material from materialFen + materialPerspective", () => {

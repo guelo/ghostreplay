@@ -135,7 +135,7 @@ type UseChessGameLifecycleArgs = {
   chess: Chess;
   coordinator: GameAnalysisCoordinator;
   clearMoveHighlights: () => void;
-  resetMode: () => void;
+  resetOpponentPresentation: () => void;
   resetEngine: () => void;
   onOpenHistory?: (options: OpenHistoryOptions) => void;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
@@ -181,7 +181,7 @@ export const useChessGameLifecycle = ({
   chess,
   coordinator,
   clearMoveHighlights,
-  resetMode,
+  resetOpponentPresentation,
   resetEngine,
   onOpenHistory,
   setEngineMessage,
@@ -725,6 +725,7 @@ export const useChessGameLifecycle = ({
     store.setMoveHistory(newHistory);
     store.setLiveFen(chess.fen());
     store.setViewIndex(null);
+    resetOpponentPresentation();
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
     setBlunderTargetFen(null);
@@ -741,6 +742,7 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     getRewindHistoryLength,
+    resetOpponentPresentation,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
@@ -995,7 +997,7 @@ export const useChessGameLifecycle = ({
         // DecisionOwner state (contextMap/pendingSrsMap/blunderReserved/frontier)
         // is cleared by its fullReset, driven by coordinator.startSession →
         // emitReset above. No React-ref decision state remains to clear here.
-        resetMode();
+        resetOpponentPresentation();
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to start new game.";
@@ -1012,7 +1014,7 @@ export const useChessGameLifecycle = ({
       coordinator,
       clearMoveHighlights,
       resetEngine,
-      resetMode,
+      resetOpponentPresentation,
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
@@ -1170,7 +1172,7 @@ export const useChessGameLifecycle = ({
         clearMoveHighlights();
         // DecisionOwner decision state is cleared by its fullReset, driven by
         // coordinator.clearSession/startSession → emitReset above.
-        resetMode();
+        resetOpponentPresentation();
 
         setIsStartingGame(false);
         setShowStartOverlay(false);
@@ -1216,7 +1218,7 @@ export const useChessGameLifecycle = ({
       clearMoveHighlights,
       finishLocalGame,
       resetEngine,
-      resetMode,
+      resetOpponentPresentation,
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
@@ -1451,13 +1453,13 @@ export const useChessGameLifecycle = ({
     clearMoveHighlights();
     // DecisionOwner decision state is cleared by its fullReset, driven by
     // coordinator.clearSession → emitReset above.
-    resetMode();
+    resetOpponentPresentation();
   }, [
     chess,
     coordinator,
     clearMoveHighlights,
     resetEngine,
-    resetMode,
+    resetOpponentPresentation,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,

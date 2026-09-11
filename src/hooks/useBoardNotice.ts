@@ -7,9 +7,8 @@ type UseBoardNoticeArgs = {
   /** Pending/pass/fail of the most recent review move, or null. */
   resolvedReview: ResolvedReview | null;
   /**
-   * Pre-gated rehook signal. The caller is responsible for AND-ing the raw
-   * `showRehookToast` with `isGameActive && opponentMode === "ghost"` so this
-   * hook only sees a rising edge it should actually surface.
+   * Pre-gated rehook signal. The caller emits it only for a committed
+   * transition into a concrete target-backed Ghost presentation.
    */
   showRehookNotice: boolean;
   /** False while scrubbing history; no notice should linger off-live. */

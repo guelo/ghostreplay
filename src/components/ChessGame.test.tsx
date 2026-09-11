@@ -843,6 +843,11 @@ describe("ChessGame characterization safeguards", () => {
     await waitFor(() => {
       expect(useGameStore.getState().drillState).toBe("root_reached");
     });
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
+    expect(screen.queryByText("Replay Ghost")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /toggle ghost info/i }),
+    ).not.toBeInTheDocument();
     expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
     expect(continueDrillMock).not.toHaveBeenCalled();
 
@@ -964,6 +969,11 @@ describe("ChessGame characterization safeguards", () => {
       // Unbounded, this POST would block the board indefinitely.
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
+    act(() => {
+      useGameStore.setState({ drillState: "converted" });
+    });
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
   });
 
   it("bars gameplay while the confirmation is in flight, offering only Abandon", async () => {
@@ -976,6 +986,11 @@ describe("ChessGame characterization safeguards", () => {
     // has happened to the drill.
     expect(useGameStore.getState().moveHistory).toHaveLength(1);
     expect(useGameStore.getState().drillState).toBe("active");
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /toggle ghost info/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("The haunting resumes")).not.toBeInTheDocument();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e7", targetSquare: "e5" });
@@ -1002,6 +1017,7 @@ describe("ChessGame characterization safeguards", () => {
     expect(useGameStore.getState().moveHistory).toHaveLength(1);
     expect(useGameStore.getState().moveHistory[0]?.uci).toBe("e2e4");
     expect(useGameStore.getState().drillState).toBe("active");
+    expect(screen.getByText("Opening Guide")).toBeInTheDocument();
     expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
 
     checkDrillRouteMock.mockResolvedValueOnce(rootReachedRouteResponse);
@@ -2651,6 +2667,37 @@ describe("ChessGame characterization safeguards", () => {
         screen.queryByText("Ghost Target Blunder Position"),
       ).not.toBeInTheDocument();
     });
+  });
+
+  it("keeps Replay Ghost target info while the reviewed move waits for its reply", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 42,
+        target_fen:
+          "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockReturnValueOnce(new Promise(() => undefined));
+
+    await startGameAsWhite();
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await screen.findByRole("button", { name: /toggle ghost info/i });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(screen.getByText("Replay Ghost")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /toggle ghost info/i }),
+    ).toBeInTheDocument();
   });
 
   it("routes post-game View Analysis action to history callback", async () => {

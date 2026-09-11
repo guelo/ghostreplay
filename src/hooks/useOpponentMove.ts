@@ -1,12 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  deriveOpponentPresentation,
+  type ApplyOpponentMoveOutcome,
+  type LastCommittedOpponentDecision,
+  type OpponentMode,
+  type OpponentMoveCommittedObserver,
+} from "../components/chess-game/domain/opponentPresentation";
 import {
   getNextOpponentMove,
   type DrillRouteMetadata,
   type SessionDecisionSource,
   type TargetBlunderSrs,
 } from "../utils/api";
-
-export type OpponentMode = "ghost" | "engine";
 
 export type OpponentMoveResult = {
   mode: OpponentMode;
@@ -59,8 +64,11 @@ type UseOpponentMoveOptions = {
     targetFen: string | null,
     drillRoute: DrillRouteMetadata | null,
     decisionId: string | null,
-  ) => Promise<void>;
-  onApplyLocalFallback: () => Promise<void>;
+    onCommitted: OpponentMoveCommittedObserver,
+  ) => Promise<ApplyOpponentMoveOutcome>;
+  onApplyLocalFallback: (
+    onCommitted: OpponentMoveCommittedObserver,
+  ) => Promise<ApplyOpponentMoveOutcome>;
   shouldUseLocalFallback?: () => boolean;
   onBackendFailure?: () => Promise<void>;
 };
@@ -77,7 +85,8 @@ export const useOpponentMove = ({
   shouldUseLocalFallback,
   onBackendFailure,
 }: UseOpponentMoveOptions) => {
-  const [opponentMode, setOpponentMode] = useState<OpponentMode>("engine");
+  const [lastCommittedDecision, setLastCommittedDecision] =
+    useState<LastCommittedOpponentDecision | null>(null);
   const canApplyResultRef = useRef(canApplyResult);
   const onApplyBackendMoveRef = useRef(onApplyBackendMove);
   const onApplyLocalFallbackRef = useRef(onApplyLocalFallback);
@@ -104,6 +113,20 @@ export const useOpponentMove = ({
     onBackendFailureRef.current = onBackendFailure;
   }, [onBackendFailure]);
 
+  const createCommitObserver = useCallback(
+    (
+      decision: Omit<LastCommittedOpponentDecision, "drill">,
+    ): OpponentMoveCommittedObserver => {
+      let published = false;
+      return (context) => {
+        if (published) return;
+        published = true;
+        setLastCommittedDecision({ ...decision, drill: context.drill });
+      };
+    },
+    [],
+  );
+
   const applyOpponentMove = useCallback(
     async (fen: string, moves: string[] = []) => {
       const requestSessionId = sessionId;
@@ -115,8 +138,17 @@ export const useOpponentMove = ({
         ) {
           return;
         }
-        setOpponentMode("engine");
-        await onApplyLocalFallbackRef.current();
+        await onApplyLocalFallbackRef.current(
+          createCommitObserver({
+            mode: "engine",
+            decisionSource: "local_fallback",
+            targetBlunderId: null,
+            targetBlunderSrs: null,
+            targetFen: null,
+            drillRoute: null,
+            decisionId: null,
+          }),
+        );
         return;
       }
 
@@ -130,7 +162,6 @@ export const useOpponentMove = ({
       }
 
       if (result) {
-        setOpponentMode(result.mode);
         console.log(
           `[OpponentMove] Applying ${result.mode} move:`,
           result.move
@@ -143,26 +174,49 @@ export const useOpponentMove = ({
           result.targetFen,
           result.drillRoute,
           result.decisionId,
+          createCommitObserver({
+            mode: result.mode,
+            decisionSource: result.decisionSource,
+            targetBlunderId: result.targetBlunderId,
+            targetBlunderSrs: result.targetBlunderSrs,
+            targetFen: result.targetFen,
+            drillRoute: result.drillRoute,
+            decisionId: result.decisionId,
+          }),
         );
       } else {
-        setOpponentMode("engine");
         if (shouldUseLocalFallbackRef.current?.() ?? true) {
-          await onApplyLocalFallbackRef.current();
+          await onApplyLocalFallbackRef.current(
+            createCommitObserver({
+              mode: "engine",
+              decisionSource: "local_fallback",
+              targetBlunderId: null,
+              targetBlunderSrs: null,
+              targetFen: null,
+              drillRoute: null,
+              decisionId: null,
+            }),
+          );
         } else {
           await onBackendFailureRef.current?.();
         }
       }
     },
-    [sessionId]
+    [createCommitObserver, sessionId],
   );
 
-  const resetMode = useCallback(() => {
-    setOpponentMode("engine");
+  const resetPresentation = useCallback(() => {
+    setLastCommittedDecision(null);
   }, []);
 
+  const opponentPresentation = useMemo(
+    () => deriveOpponentPresentation(lastCommittedDecision),
+    [lastCommittedDecision],
+  );
+
   return {
-    opponentMode,
+    opponentPresentation,
     applyOpponentMove,
-    resetMode,
+    resetPresentation,
   };
 };
