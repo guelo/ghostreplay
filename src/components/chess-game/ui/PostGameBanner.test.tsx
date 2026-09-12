@@ -378,9 +378,9 @@ describe("PostGameBanner", () => {
         />,
       );
 
-      expect(rowFor("Ruy Lopez:")).toHaveTextContent("+3.0");
-      expect(rowFor("Ruy Lopez:")).toHaveTextContent("-> 41.0");
-      expect(rowFor("Italian Game:")).toHaveTextContent("-2.0");
+      expect(rowFor("Ruy Lopez:")).toHaveTextContent("+3");
+      expect(rowFor("Ruy Lopez:")).toHaveTextContent("-> 41");
+      expect(rowFor("Italian Game:")).toHaveTextContent("-2");
       expect(screen.queryByText("Flat Line:")).not.toBeInTheDocument();
       expect(screen.queryByText("Unmeasured Line:")).not.toBeInTheDocument();
     });
@@ -406,7 +406,7 @@ describe("PostGameBanner", () => {
       );
 
       expect(rowFor("Scotch Game:")).toHaveTextContent("new");
-      expect(rowFor("Scotch Game:")).toHaveTextContent("-> 41.0");
+      expect(rowFor("Scotch Game:")).toHaveTextContent("-> 41");
     });
 
     // `is_new` with no resolved score is a supported shape. The lineage card
@@ -458,13 +458,13 @@ describe("PostGameBanner", () => {
       );
 
       expect(screen.getAllByText("King's Pawn Game:")).toHaveLength(1);
-      expect(rowFor("King's Pawn Game:")).toHaveTextContent("+3.0");
+      expect(rowFor("King's Pawn Game:")).toHaveTextContent("+3");
       expect(screen.getAllByText("Sicilian Defence:")).toHaveLength(1);
     });
 
     // Scores are floats. Subtracting them raw prints 0.20000000000000284, so the
     // rows quantize through the same badge helper the lineage cards use.
-    it("renders fractional score moves at one decimal place", () => {
+    it("rounds score endpoints before calculating whole-number changes", () => {
       const props = makeProps();
       render(
         <PostGameBanner
@@ -477,19 +477,18 @@ describe("PostGameBanner", () => {
               after: 41.6,
               delta: 41.6 - 41.4,
             }),
-            // Endpoints that resolve to the same visible tenth are not a change.
+            // Endpoints that resolve to the same visible whole number are not a change.
             makeOpening({
               opening_key: "Rounding Noise",
-              before: 30.02,
-              after: 30.04,
-              delta: 0.02,
+              before: 30.6,
+              after: 31.1,
+              delta: 0.5,
             }),
           ]}
         />,
       );
 
-      expect(rowFor("Ruy Lopez:")).toHaveTextContent("+0.2");
-      expect(rowFor("Ruy Lopez:")).toHaveTextContent("-> 41.6");
+      expect(rowFor("Ruy Lopez:")).toHaveTextContent("Ruy Lopez:+1-> 42");
       expect(screen.queryByText("Rounding Noise:")).not.toBeInTheDocument();
     });
 
@@ -549,7 +548,7 @@ describe("PostGameBanner", () => {
       );
 
       expect(screen.queryByText("Opening scores:")).not.toBeInTheDocument();
-      expect(rowFor("Ruy Lopez:")).toHaveTextContent("+3.0");
+      expect(rowFor("Ruy Lopez:")).toHaveTextContent("+3");
     });
 
     it("omits the opening section when nothing measurable ever arrived", () => {

@@ -221,7 +221,7 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     useGameStore.setState({ sessionId: "s2" });
 
     reconcile("s1", []);
-    reconcile("s1", [item("k1", 44, 44)]); // rounds to a zero diff -> no badge
+    reconcile("s1", [item("k1", 41.6, 42.1)]); // rounds to a zero diff -> no badge
 
     expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });

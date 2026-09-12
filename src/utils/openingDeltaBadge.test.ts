@@ -23,17 +23,17 @@ const item = (
 });
 
 describe("badgeFor", () => {
-  it("renders positive and negative changes from quantized tenths", () => {
-    expect(badgeFor(item({ before: 41.6, after: 42.1 }))).toEqual({
-      before: 41.6,
-      diff: 0.5,
-      after: 42.1,
+  it("renders positive and negative changes from rounded whole numbers", () => {
+    expect(badgeFor(item({ before: 41.4, after: 42.6 }))).toEqual({
+      before: 41,
+      diff: 2,
+      after: 43,
       dir: "up",
     });
-    expect(badgeFor(item({ before: 42.1, after: 41.6 }))).toEqual({
-      before: 42.1,
-      diff: -0.5,
-      after: 41.6,
+    expect(badgeFor(item({ before: 42.6, after: 41.4 }))).toEqual({
+      before: 43,
+      diff: -2,
+      after: 41,
       dir: "down",
     });
   });
@@ -41,8 +41,8 @@ describe("badgeFor", () => {
   it("quantifies a brand-new opening against zero", () => {
     expect(badgeFor(item({ is_new: true, before: null, after: 37.4 }))).toEqual({
       before: 0,
-      diff: 37.4,
-      after: 37.4,
+      diff: 37,
+      after: 37,
       dir: "up",
     });
   });
@@ -62,32 +62,42 @@ describe("badgeFor", () => {
     expect(badgeFor(item({ is_new: false, before: null }))).toBeNull();
   });
 
-  it("suppresses endpoints that quantize to the same tenth", () => {
-    expect(badgeFor(item({ before: 44.11, after: 44.14 }))).toBeNull();
+  it("suppresses endpoints that round to the same whole number", () => {
+    expect(badgeFor(item({ before: 41.6, after: 42.1 }))).toBeNull();
+    expect(badgeFor(item({ before: 42.1, after: 41.6 }))).toBeNull();
+    expect(badgeFor(item({ is_new: true, before: null, after: 0.49 }))).toBeNull();
     expect(badgeFor(item({ before: 44, after: 44 }))).toBeNull();
   });
 
-  it("derives the delta from integer tenths without floating-point drift", () => {
-    expect(badgeFor(item({ before: 41.4, after: 41.6 }))).toMatchObject({
-      before: 41.4,
-      diff: 0.2,
-      after: 41.6,
+  it("shows a whole-number change even when the raw delta rounds to zero", () => {
+    expect(badgeFor(item({ before: 41.49, after: 41.5, delta: 0.01 }))).toEqual({
+      before: 41,
+      diff: 1,
+      after: 42,
+      dir: "up",
+    });
+    expect(badgeFor(item({ before: 41.5, after: 41.49, delta: -0.01 }))).toEqual({
+      before: 42,
+      diff: -1,
+      after: 41,
+      dir: "down",
     });
   });
 });
 
 describe("terminal delta formatting", () => {
-  it("always renders scores, deltas, and descriptions to one decimal place", () => {
-    expect(formatOpeningDeltaValue(42)).toBe("42.0");
-    expect(formatOpeningDeltaValue(-0.5)).toBe("-0.5");
+  it("renders scores, deltas, and descriptions without decimals", () => {
+    expect(formatOpeningDeltaValue(42)).toBe("42");
+    expect(formatOpeningDeltaValue(41.5)).toBe("42");
+    expect(formatOpeningDeltaValue(-1)).toBe("-1");
     expect(
       describeOpeningDeltaBadge({
-        before: 41.6,
-        diff: 0.5,
-        after: 42.1,
+        before: 41,
+        diff: 1,
+        after: 42,
         dir: "up",
       }),
-    ).toBe("Score increased by 0.5, now 42.1");
+    ).toBe("Score increased by 1, now 42");
   });
 });
 
@@ -97,7 +107,7 @@ describe("hasRenderableBadge", () => {
     expect(hasRenderableBadge(undefined)).toBe(false);
     expect(hasRenderableBadge([])).toBe(false);
     expect(
-      hasRenderableBadge([item({ after: null }), item({ before: 44, after: 44 })]),
+      hasRenderableBadge([item({ after: null }), item({ before: 41.6, after: 42.1 })]),
     ).toBe(false);
   });
 

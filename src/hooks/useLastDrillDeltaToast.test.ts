@@ -43,7 +43,7 @@ describe("useLastDrillDeltaToast", () => {
 
   it("surfaces the queued drill's badges", () => {
     act(() => {
-      queueLate("s1", [item("Italian Game", 41, 47), item("Sicilian", 30, 30)]);
+      queueLate("s1", [item("Italian Game", 41.4, 46.6), item("Sicilian", 30.6, 31.1)]);
     });
     const { result } = renderHook(() => useLastDrillDeltaToast());
 

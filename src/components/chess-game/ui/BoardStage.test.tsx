@@ -307,7 +307,7 @@ describe("BoardStage", () => {
     expect(screen.getByText("⭐ Perfect streak")).toBeInTheDocument();
   });
 
-  it("renders last-drill score changes to one decimal place", () => {
+  it("renders last-drill score changes without decimals", () => {
     const props = makeProps();
     render(
       <BoardStage
@@ -317,9 +317,9 @@ describe("BoardStage", () => {
           badges: [
             {
               openingName: "Italian Game",
-              before: 41.6,
-              diff: 0.5,
-              after: 42.1,
+              before: 41,
+              diff: 1,
+              after: 42,
               dir: "up",
             },
           ],
@@ -328,7 +328,7 @@ describe("BoardStage", () => {
     );
 
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Italian Game+0.5 → 42.1",
+      "Italian Game+1 → 42",
     );
   });
 

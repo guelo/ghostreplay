@@ -17,13 +17,13 @@ export type BannerOpeningRow = {
  * inline lineage badges already use. That buys three things at once:
  *  - a row can never disagree with the badge beside it — "a delta that renders
  *    nothing inline must never be surfaced" elsewhere either;
- *  - endpoints are quantized to tenths before subtracting, so raw float scores
+ *  - endpoints are rounded to whole numbers before subtracting, so raw float scores
  *    cannot print as 0.20000000000000284;
  *  - an unscored opening (`after == null`, including the supported `is_new` with
  *    no resolved score) is dropped rather than rendered as a bare "new".
  *
  * `is_new` is still kept as a flag: it has no `before` to subtract from, so its
- * row reads "new -> 30.4" rather than claiming a numeric gain.
+ * row reads "new -> 30" rather than claiming a numeric gain.
  *
  * ONE row per opening, not one per crossing. The played chain deliberately keeps
  * a non-consecutively repeated root as a separate entry (opening_roots.py:492) so
