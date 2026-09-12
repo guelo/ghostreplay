@@ -13,6 +13,7 @@ import type { OpeningDeltaFreshness } from "../../../stores/useGameStore";
 import type { SessionAccuracyStatus } from "../../../hooks/useSessionAccuracy";
 import type { GameResult } from "../domain/status";
 import { formatOpeningDeltaValue } from "../../../utils/openingDeltaBadge";
+import { accuracyColor } from "../../../utils/statColor";
 import { bannerOpeningRows } from "./PostGameBanner.helpers";
 
 type PostGameBannerProps = {
@@ -165,10 +166,9 @@ const PostGameBanner = ({
       : bannerOpeningRows(openingScoreChanges);
 
     const showEloRow = showStats && Boolean(ratingChange) && !isPracticeContinuation;
+    const hasReadyAccuracy = accuracyStatus === "ready" && accuracy != null;
     const showAccuracyRow =
-      showStats &&
-      (accuracyStatus === "pending" ||
-        (accuracyStatus === "ready" && accuracy != null));
+      showStats && (accuracyStatus === "pending" || hasReadyAccuracy);
     const showOpeningRows =
       showStats && (openingsPending || changedOpenings.length > 0);
     // The list element itself is conditional so an all-flat game collapses cleanly
@@ -207,10 +207,15 @@ const PostGameBanner = ({
                 aria-busy={accuracyStatus === "pending" || undefined}
               >
                 <span className="game-end-stat__label">Accuracy:</span>
-                <span className="game-end-stat__delta">
-                  {accuracyStatus === "ready" && accuracy != null
-                    ? `${accuracy}%`
-                    : "—"}
+                <span
+                  className="game-end-stat__delta"
+                  style={
+                    hasReadyAccuracy
+                      ? { color: accuracyColor(accuracy) }
+                      : undefined
+                  }
+                >
+                  {hasReadyAccuracy ? `${accuracy}%` : "—"}
                 </span>
               </p>
             )}
