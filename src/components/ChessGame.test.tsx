@@ -1749,7 +1749,7 @@ describe("ChessGame characterization safeguards", () => {
       name: "Openings played",
     });
     await within(region).findByRole("img", {
-      name: "Score increased by 3.0, now 44.0",
+      name: "Score increased by 3, now 44",
     });
 
     // ...and NOT inside the (now delta-less) drill-stopped actions.
@@ -1758,7 +1758,7 @@ describe("ChessGame characterization safeguards", () => {
     });
     expect(
       within(drillRegion).queryByRole("img", {
-        name: "Score increased by 3.0, now 44.0",
+        name: "Score increased by 3, now 44",
       }),
     ).not.toBeInTheDocument();
   });
@@ -5505,7 +5505,7 @@ describe("ChessGame opening lineage", () => {
     });
 
     await within(region).findByRole("img", {
-      name: "Score increased by 3.0, now 44.0",
+      name: "Score increased by 3, now 44",
     });
     await waitFor(() =>
       expect(fetchSessionOpeningsMock.mock.calls.length).toBeGreaterThan(
@@ -5520,7 +5520,7 @@ describe("ChessGame opening lineage", () => {
       ]);
     });
     await waitFor(() =>
-      expect(within(region).getByText("46.0")).toBeInTheDocument(),
+      expect(within(region).getByText("46")).toBeInTheDocument(),
     );
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(callsAfterFirstValue);
   });
@@ -6134,7 +6134,7 @@ describe("ChessGame opening lineage", () => {
       callsBeforeResign,
     );
     await within(region).findByRole("img", {
-      name: "Score increased by 3.0, now 44.0",
+      name: "Score increased by 3, now 44",
     });
   });
 
@@ -6270,8 +6270,8 @@ describe("ChessGame opening lineage", () => {
       name: "Post-game options",
     });
     await within(banner).findByText("King's Pawn Game:");
-    expect(within(banner).getByText("+3.0")).toBeInTheDocument();
-    expect(within(banner).getByText("-> 44.0")).toBeInTheDocument();
+    expect(within(banner).getByText("+3")).toBeInTheDocument();
+    expect(within(banner).getByText("-> 44")).toBeInTheDocument();
     expect(
       within(banner).queryByText("Flat Defence:"),
     ).not.toBeInTheDocument();
