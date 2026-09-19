@@ -359,10 +359,16 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const hasAnySeriesChecked = SERIES.some((series) => visibleSeries[series.key]);
   const hasSelectedSeriesData = filteredRatings.length > 0;
   const showSlider = allChartData.length > 1;
+  const currentElo = data
+    ? (data.scores?.elo ?? {
+        rating: data.current_rating,
+        is_provisional: data.games_played < PROVISIONAL_THRESHOLD,
+      })
+    : null;
   const currentVisibleScores = useMemo(() => {
     if (!data?.scores) return [];
     return SERIES.flatMap((series) => {
-      if (!visibleSeries[series.key]) return [];
+      if (series.key === "elo" || !visibleSeries[series.key]) return [];
       const score = data.scores?.[series.key];
       return score ? [{ ...series, score }] : [];
     });
@@ -466,6 +472,15 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
 
   return (
     <section className="stats-section">
+      <div className="rating-graph__headline" aria-busy={loading}>
+        <p className="rating-graph__headline-label">Current Elo</p>
+        <p className="rating-graph__headline-value">
+          {currentElo?.rating ?? "—"}
+          {currentElo?.is_provisional && (
+            <span className="rating-graph__headline-status">Provisional</span>
+          )}
+        </p>
+      </div>
       <div className="rating-graph__header">
         <div className="rating-graph__header-left">
           <h2 className="stats-section__title">Rating</h2>
@@ -528,10 +543,9 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
           !error &&
           data &&
           data.ratings.length > 0 &&
-          data.games_played < PROVISIONAL_THRESHOLD && (
+          currentElo?.is_provisional && (
             <p className="rating-graph__provisional-note">
-              Provisional rating ({data.games_played}/{PROVISIONAL_THRESHOLD}{" "}
-              games). Your rating will stabilize as you play more.
+              Provisional rating. Your rating will stabilize as you play more.
             </p>
           )}
 

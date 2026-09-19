@@ -84,6 +84,81 @@ describe("RatingGraph", () => {
     vi.useRealTimers();
   });
 
+  describe("current Elo", () => {
+    it("keeps the current score visible independently of chart filters", async () => {
+      const user = userEvent.setup();
+      fetchRatingHistoryMock.mockResolvedValue({
+        ...makeResponse(5, 4),
+        scores: {
+          elo: { rating: 1542, is_provisional: false },
+          chesscom: { rating: 1420, is_provisional: false },
+          lichess: null,
+        },
+      });
+      const { rerender } = render(
+        <RatingGraph windowDays={30} presetKey={0} />,
+      );
+
+      expect(await screen.findByText("1542")).toBeInTheDocument();
+      expect(screen.queryByText("Provisional")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Your rating will stabilize/)).not.toBeInTheDocument();
+      await user.click(screen.getByLabelText("Elo"));
+      await user.click(screen.getByLabelText("Show provisional"));
+      await user.click(screen.getByLabelText("Chess.com"));
+      rerender(<RatingGraph windowDays={7} presetKey={1} />);
+
+      expect(screen.getAllByText("1542")).toHaveLength(1);
+      expect(screen.getByText("1420")).toBeInTheDocument();
+      expect(fetchRatingHistoryMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([0, 19, 20])(
+      "shows the legacy current rating with %i games even without chart history",
+      async (gamesPlayed) => {
+        fetchRatingHistoryMock.mockResolvedValue({
+          ratings: [],
+          current_rating: 1234,
+          games_played: gamesPlayed,
+        });
+        render(<RatingGraph windowDays={30} presetKey={0} />);
+
+        expect(await screen.findByText("1234")).toBeInTheDocument();
+        if (gamesPlayed < 20) {
+          expect(screen.getByText("Provisional")).toBeInTheDocument();
+        } else {
+          expect(screen.queryByText("Provisional")).not.toBeInTheDocument();
+        }
+        expect(screen.getByText(/No rated games yet/)).toBeInTheDocument();
+      },
+    );
+
+    it("uses the server's provisional status for both the headline and chart note", async () => {
+      fetchRatingHistoryMock.mockResolvedValue({
+        ...makeResponse(0, 25),
+        scores: {
+          elo: { rating: 1542, is_provisional: true },
+          chesscom: null,
+          lichess: null,
+        },
+      });
+      render(<RatingGraph windowDays={30} presetKey={0} />);
+
+      expect(await screen.findByText("1542")).toBeInTheDocument();
+      expect(screen.getByText("Provisional")).toBeInTheDocument();
+      expect(screen.getByText(/Your rating will stabilize/)).toBeInTheDocument();
+    });
+
+    it("does not invent a current rating while loading or after a fetch failure", async () => {
+      fetchRatingHistoryMock.mockRejectedValue(new Error("Rating unavailable"));
+      render(<RatingGraph windowDays={30} presetKey={0} />);
+
+      expect(screen.getByText("Loading rating...")).toBeInTheDocument();
+      expect(screen.getByText("—")).toBeInTheDocument();
+      expect(await screen.findByText("Rating unavailable")).toBeInTheDocument();
+      expect(screen.getByText("—")).toBeInTheDocument();
+    });
+  });
+
   describe("provisional defaults", () => {
     it("defaults showProvisional to OFF when >3 stable points", async () => {
       fetchRatingHistoryMock.mockResolvedValue(makeResponse(5, 4));

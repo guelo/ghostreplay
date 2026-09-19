@@ -1,4 +1,32 @@
 /* Rating Graph */
+.rating-graph__headline {
+    margin-bottom: 0.5rem;
+}
+.rating-graph__headline-label {
+    margin: 0 0 0.25rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+.rating-graph__headline-value {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem 0.75rem;
+    font-size: clamp(2.5rem, 6vw, 3.5rem);
+    line-height: 1.1;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+.rating-graph__headline-status {
+    font-size: 0.85rem;
+    font-weight: 400;
+    color: var(--text-tertiary);
+}
 .rating-graph__header {
     display: flex;
     align-items: center;
