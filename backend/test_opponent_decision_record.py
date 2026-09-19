@@ -387,6 +387,8 @@ def test_ghost_decision_records_target_and_resulting_fen(
     data = response.json()
     assert data["mode"] == "ghost"
     assert data["target_blunder_id"] == blunder_id
+    assert "opportunities_30d" not in data["target_blunder_srs"]
+    assert "reached_30d" not in data["target_blunder_srs"]
 
     rows = _decisions(db_session, session_id)
     assert len(rows) == 1
@@ -528,6 +530,61 @@ def test_ghost_retry_replays_the_srs_snapshot_verbatim(
     assert second.json() == first.json()
     assert second.json()["target_blunder_srs"]["pass_streak"] == 0
     assert len(_decisions(db_session, session_id)) == 1
+
+
+def test_legacy_ghost_retry_projects_only_retired_counters(
+    client, auth_headers, create_game_session, db_session
+):
+    """Legacy replay loses exactly two keys, without recomputing or rewriting history."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    blunder_id = _seed_ghost_target(db_session, 123)
+    first = _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
+    assert first.status_code == 200
+
+    legacy = first.json()
+    # Distinct nonzero frozen values make defaulting or reconstructing from live
+    # evidence observable. Model the response persisted by the previous release.
+    legacy["target_blunder_srs"].update(
+        last_reviewed_at="2026-01-02T03:04:05.123456+00:00",
+        pass_count=13,
+        fail_count=7,
+        pass_streak=3,
+        opportunities_since_review=29,
+        opportunities_30d=83,
+        reached_30d=11,
+        targeted_30d=17,
+        targeted_reached_30d=5,
+        p_reach=0.3333,
+    )
+    row = _decisions(db_session, session_id)[0]
+    stored_payload = json.dumps(legacy)
+    row.response_payload = stored_payload
+    db_session.commit()
+    served_at = row.served_at
+    decision_id = row.decision_id
+
+    expected = json.loads(stored_payload)
+    del expected["target_blunder_srs"]["opportunities_30d"]
+    del expected["target_blunder_srs"]["reached_30d"]
+    with (
+        patch("app.api.game.find_ghost_move", side_effect=AssertionError("recomputed target")),
+        patch("app.api.game.load_opportunity_counters", side_effect=AssertionError("reloaded counters")),
+        patch("app.opponent_move_controller.choose_move", side_effect=AssertionError("recomputed move")),
+    ):
+        for _ in range(2):
+            replay = _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
+            assert replay.status_code == 200
+            assert replay.json() == expected
+
+    db_session.expire_all()
+    rows = _decisions(db_session, session_id)
+    assert len(rows) == 1
+    assert rows[0].decision_id == decision_id
+    assert rows[0].served_at == served_at
+    assert rows[0].response_payload == stored_payload
+    assert rows[0].target_blunder_id == blunder_id
+    assert rows[0].resulting_fen == AFTER_E4_E5_PLAYED_FEN
+    assert rows[0].reaches_drill_root is False
 
 
 # ---------------------------------------------------------------------------

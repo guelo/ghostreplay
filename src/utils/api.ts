@@ -923,7 +923,7 @@ export interface TargetBlunderSrs {
   // server SCORED this target on, so the current session — including the decision
   // that carried this payload — is excluded. Optional because this is a
   // hand-maintained PARTIAL mirror of the backend model (which also carries
-  // the broad opportunity counters and p_reach); the backend always sends them.
+  // opportunities_since_review and p_reach); the backend always sends them.
   targeted_30d?: number
   targeted_reached_30d?: number
 }
@@ -1923,11 +1923,9 @@ export interface BlunderListItem {
   last_session_id: string | null
   last_played_at: string | null
   opportunities_since_review: number
-  opportunities_30d: number
-  reached_30d: number
   reached_since_review: number
-  // Denominator/numerator behind p_reach. The opportunities_* counters above
-  // stay BROAD neighbourhood evidence and drive SRS dueness only.
+  // Denominator/numerator behind p_reach. opportunities_since_review above
+  // is broad neighbourhood evidence and drives SRS dueness.
   targeted_30d?: number
   targeted_reached_30d?: number
   p_reach: number

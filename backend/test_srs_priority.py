@@ -508,12 +508,6 @@ class TestSelectionScore:
             last_reviewed_at=NOW - timedelta(days=1),
             created_at=NOW - timedelta(days=7),
             opportunities_since_review=40,
-            # Broad counters drive URGENCY only. Deliberately set to a ratio that
-            # would produce a visibly different reach weight (~0.09) than the
-            # targeted pair below, so a regression to the broad denominator fails
-            # rather than coincidentally passing.
-            opportunities_30d=500,
-            reached_30d=1,
             has_opportunity_events=True,
             targeted_30d=100,
             targeted_reached_30d=10,
@@ -614,15 +608,13 @@ class TestGhostEligibleOpportunityGate:
         last_reviewed_at=None,
         created_at=None,
         now=NOW,
-        opportunities_30d=0,
-        reached_30d=0,
+        reached_since_review=0,
         targeted_30d=0,
         targeted_reached_30d=0,
     ):
         counters = OpportunityCounters(
             opportunities_since_review=opportunities_since_review,
-            opportunities_30d=opportunities_30d,
-            reached_30d=reached_30d,
+            reached_since_review=reached_since_review,
             event_count=1 if has_opportunity_events else 0,
             targeted_30d=targeted_30d,
             targeted_reached_30d=targeted_reached_30d,
@@ -649,8 +641,7 @@ class TestGhostEligibleOpportunityGate:
         assert self._call(
             opportunities_since_review=40,
             pass_streak=5,
-            opportunities_30d=100,
-            reached_30d=10,
+            reached_since_review=0,
         ) is True
 
     def test_backstop_fires_when_p_reach_below_floor_with_sufficient_samples(self):
@@ -683,9 +674,8 @@ class TestGhostEligibleOpportunityGate:
         # blunder at the floor. 183 broad opportunities with zero broad reaches
         # must not exclude anything on their own.
         assert self._call(
-            opportunities_since_review=5,
-            opportunities_30d=183,
-            reached_30d=0,
+            opportunities_since_review=183,
+            reached_since_review=0,
         ) is True
 
     def test_backstop_fires_without_opportunity_events(self):

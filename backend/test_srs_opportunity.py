@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import re
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 import chess
 import pytest
 from sqlalchemy import event
 
+from conftest import pg_required
 from app.api.session import (
     _compute_blunder_opportunity_events,
     _forward_reachable_position_ids,
@@ -25,6 +28,7 @@ from app.models import (
     OpponentDecision,
     Position,
     SessionMove,
+    User,
 )
 from app.srs_math import (
     OPPORTUNITY_ANCESTOR_RADIUS_PLY,
@@ -421,8 +425,8 @@ def test_same_session_review_event_is_excluded_from_since_review(db_session):
 
     counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 0
-    assert counters.opportunities_30d == 1
-    assert counters.reached_30d == 1
+    assert counters.event_count == 1
+    assert counters.reached_since_review == 0
 
 
 def test_opportunity_counters_ignore_events_before_blunder_creation(db_session):
@@ -453,8 +457,75 @@ def test_opportunity_counters_ignore_events_before_blunder_creation(db_session):
 
     counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 1
-    assert counters.opportunities_30d == 1
-    assert counters.reached_30d == 1
+    assert counters.event_count == 1
+    assert counters.reached_since_review == 1
+
+
+def _assert_five_counter_contract(db_session):
+    """Mixed-age evidence preserves exact counters and scores on both dialects."""
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+    pos = _position(db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=123, position=pos)
+    blunder.created_at = now - timedelta(days=90)
+    reviewed_at = now - timedelta(days=60)
+    sessions = []
+    # pre-creation, pre-review, review session, old post-review, recent,
+    # current session, future. Broad evidence deliberately has no upper bound.
+    evidence = [(91, True), (70, True), (59, True), (45, True), (1, False), (0, True), (-1, True)]
+    for days, reached in evidence:
+        sessions.append(_opportunity_event(
+            db_session, user_id=123, blunder=blunder, opportunity=True,
+            reached=reached, occurred_at=now - timedelta(days=days),
+        ))
+    db_session.add(BlunderReview(
+        blunder_id=blunder.id, session_id=sessions[2].id, reviewed_at=reviewed_at,
+        passed=True, move_played_san="good", eval_delta_cp=0,
+    ))
+    # The pre-creation broad reach is still eligible for the targeted numerator.
+    for idx in (0, 4, 5, 6):
+        _decision(db_session, session=sessions[idx], blunder=blunder, served_at=now)
+    # Repeated targeting in one session still counts only once.
+    _decision(db_session, session=sessions[4], blunder=blunder, served_at=now)
+    db_session.commit()
+
+    for exclude_current in (False, True):
+        for elapsed_days in (0, 60):
+            query_now = now + timedelta(days=elapsed_days)
+            counters = load_opportunity_counters(
+                db_session, [blunder.id], user_id=123, now=query_now,
+                exclude_session_id=sessions[5].id if exclude_current else None,
+            )[blunder.id]
+            expected = {
+                "event_count": 6 - int(exclude_current),
+                "opportunities_since_review": 4 - int(exclude_current),
+                "reached_since_review": 3 - int(exclude_current),
+                "targeted_30d": 0 if elapsed_days else 4 - int(exclude_current),
+                "targeted_reached_30d": 0 if elapsed_days else 3 - int(exclude_current),
+            }
+            assert asdict(counters) == expected
+            reach = (expected["targeted_reached_30d"] + 2) / (expected["targeted_30d"] + 4)
+            assert counters.p_reach == pytest.approx(reach)
+            scoring = dict(
+                counters=counters, pass_streak=1, last_reviewed_at=reviewed_at,
+                created_at=blunder.created_at, now=query_now,
+            )
+            priority = expected["opportunities_since_review"] / 2
+            assert srs_priority(**scoring) == pytest.approx(priority)
+            assert practice_priority_score(eval_loss_cp=200, **scoring) == pytest.approx(
+                priority * math.log1p(200 / 50) * reach**1.5
+            )
+
+
+def test_five_counter_contract(db_session):
+    _assert_five_counter_contract(db_session)
+
+
+@pg_required
+def test_five_counter_contract_postgres(pg_session_factory):
+    with pg_session_factory() as db:
+        db.add(User(id=123))
+        db.flush()
+        _assert_five_counter_contract(db)
 
 
 def test_event_count_ignores_rows_the_broad_predicate_rejects(db_session):
@@ -612,7 +683,7 @@ def test_reached_since_review_counts_only_post_review_reaches(db_session):
     counters = load_opportunity_counters(db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
     assert counters.opportunities_since_review == 183
     assert counters.reached_since_review == 0
-    assert counters.reached_30d == 0
+    assert counters.event_count == 183
 
 
 def test_reached_since_review_excludes_pre_review_and_same_session_reaches(db_session):
@@ -1372,7 +1443,8 @@ def test_targeted_counts_a_session_that_never_uploaded(db_session):
     assert counters.targeted_reached_30d == 0
     # Broad evidence is genuinely absent — the two streams degrade independently.
     assert counters.event_count == 0
-    assert counters.opportunities_30d == 0
+    assert counters.opportunities_since_review == 0
+    assert counters.reached_since_review == 0
 
 
 def test_later_reached_event_moves_numerator_not_denominator(db_session):
@@ -1693,7 +1765,9 @@ def test_p_reach_uses_targeted_counters_not_broad_ones(db_session):
     db_session.commit()
 
     counters = load_opportunity_counters(db_session, [blunder.id], user_id=123, now=now)[blunder.id]
-    assert counters.opportunities_30d == 44
+    assert counters.event_count == 44
+    assert counters.opportunities_since_review == 44
+    assert counters.reached_since_review == 3
     assert counters.targeted_30d == 4
     assert counters.targeted_reached_30d == 3
     assert counters.p_reach == pytest.approx(compute_p_reach(3, 4))
@@ -1765,8 +1839,12 @@ def test_find_ghost_move_does_not_collapse_onto_one_target_under_broad_evidence(
     )
     for blunder_id in blunder_ids:
         broad = counters[blunder_id]
-        assert broad.opportunities_30d >= P_REACH_MIN_SAMPLE
-        assert compute_p_reach(broad.reached_30d, broad.opportunities_30d) < P_REACH_FLOOR
+        # All fixture events are within 30 days and none has been reviewed, so
+        # the surviving since-review pair also reproduces the former broad ratio.
+        assert broad.opportunities_since_review >= P_REACH_MIN_SAMPLE
+        assert compute_p_reach(
+            broad.reached_since_review, broad.opportunities_since_review
+        ) < P_REACH_FLOOR
         assert broad.targeted_30d == 0
 
     served = {

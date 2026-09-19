@@ -60,8 +60,6 @@ class OpportunityCounters:
     """
 
     opportunities_since_review: int = 0
-    opportunities_30d: int = 0
-    reached_30d: int = 0
     reached_since_review: int = 0
     event_count: int = 0
     targeted_30d: int = 0
@@ -238,8 +236,6 @@ def load_opportunity_counters(
             event_time > latest_review.c.reviewed_at,
         ),
     )
-    opportunity_30d = and_(eligible_broad, event_time >= cutoff)
-    reached_30d = and_(eligible_reached, event_time >= cutoff)
     opportunity_since_review = and_(eligible_broad, since_review)
     reached_since_review = and_(eligible_reached, since_review)
 
@@ -258,8 +254,6 @@ def load_opportunity_counters(
             func.coalesce(func.sum(case((opportunity_since_review, 1), else_=0)), 0).label(
                 "opportunities_since_review"
             ),
-            func.coalesce(func.sum(case((opportunity_30d, 1), else_=0)), 0).label("opportunities_30d"),
-            func.coalesce(func.sum(case((reached_30d, 1), else_=0)), 0).label("reached_30d"),
             func.coalesce(func.sum(case((reached_since_review, 1), else_=0)), 0).label(
                 "reached_since_review"
             ),
@@ -284,8 +278,6 @@ def load_opportunity_counters(
         targeted_30d, targeted_reached_30d = targeted.pop(row.blunder_id, (0, 0))
         counters[row.blunder_id] = OpportunityCounters(
             opportunities_since_review=int(row.opportunities_since_review or 0),
-            opportunities_30d=int(row.opportunities_30d or 0),
-            reached_30d=int(row.reached_30d or 0),
             reached_since_review=int(row.reached_since_review or 0),
             event_count=int(row.event_count or 0),
             targeted_30d=targeted_30d,

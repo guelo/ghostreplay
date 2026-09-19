@@ -166,6 +166,15 @@ available, it asks Maia3 for an engine move. The same check on every player
 move means Ghost steering can resume when a transposition returns to a known
 position.
 
+Opponent decisions preserve their served move, target, and SRS snapshot on retry.
+Legacy snapshots are projected to the current response schema, omitting only the
+retired broad rolling opportunity/reach fields while preserving every surviving
+value and leaving stored history intact. SRS continues to use broad since-review
+evidence and the targeted-session reach rate. The response contract lives in
+[`backend/app/api/game.py`](backend/app/api/game.py) and
+[`backend/app/api/blunder.py`](backend/app/api/blunder.py); replay preservation is
+covered by [`backend/test_opponent_decision_record.py`](backend/test_opponent_decision_record.py).
+
 The browser's analysis coordinator evaluates player moves for two decisions:
 whether the first eligible early-game mistake becomes a target, and whether an
 armed target review passes or fails. Automatic capture stores the pre-move

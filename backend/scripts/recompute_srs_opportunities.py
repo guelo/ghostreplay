@@ -443,8 +443,6 @@ def main(
                 print(
                     "Counters: "
                     f"opportunities_since_review={counters.opportunities_since_review} "
-                    f"opportunities_30d={counters.opportunities_30d} "
-                    f"reached_30d={counters.reached_30d} "
                     # targeted_30d reads opponent_decisions; targeted_reached_30d
                     # joins the broad reach row. The rollout fingerprints both.
                     f"targeted_30d={counters.targeted_30d} "

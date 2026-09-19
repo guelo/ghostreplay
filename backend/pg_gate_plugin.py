@@ -212,6 +212,8 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_session_graph_lock.py::test_moves_graph_lock_timeout_degrades",
     # SRS review NKU idempotency (g-writer-locks)
     "test_srs_api.py::test_srs_review_concurrent_same_key_single_row",
+    # Five retained SRS counters and scoring after API removal (g-srs-api-counters)
+    "test_srs_opportunity.py::test_five_counter_contract_postgres",
     # SRS/moves cross-root deadlock matrix (g-writer-locks); param cases pinned below
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix",
     # Release-A schema migration on a disposable PostgreSQL DB (g-accuracy-schema)

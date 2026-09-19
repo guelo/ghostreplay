@@ -90,8 +90,6 @@ const BLUNDERS_RESPONSE = [
     created_at: '2026-04-20T12:00:00Z',
     last_played_at: '2026-04-21T12:00:00Z',
     opportunities_since_review: 0,
-    opportunities_30d: 0,
-    reached_30d: 0,
     reached_since_review: 0,
     p_reach: 0.5,
   },

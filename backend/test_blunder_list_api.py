@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import event
 
 from conftest import engine
@@ -15,6 +16,29 @@ from app.models import (
     OpponentDecision,
     Position,
 )
+
+
+@pytest.mark.parametrize(
+    ("schema_name", "retained_fields"),
+    [
+        (
+            "BlunderListItem",
+            {"opportunities_since_review", "reached_since_review", "targeted_30d",
+             "targeted_reached_30d", "p_reach", "srs_priority", "practice_priority_score"},
+        ),
+        (
+            "TargetBlunderSrs",
+            {"opportunities_since_review", "targeted_30d", "targeted_reached_30d", "p_reach"},
+        ),
+    ],
+)
+def test_openapi_srs_counter_contract(client, schema_name, retained_fields):
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    fields = response.json()["components"]["schemas"][schema_name]["properties"]
+    assert retained_fields <= fields.keys()
+    assert "opportunities_30d" not in fields
+    assert "reached_30d" not in fields
 
 
 def _create_blunder(
@@ -413,6 +437,8 @@ def test_list_blunders_exposes_practice_fields(client, auth_headers, db_session)
     assert isinstance(item["srs_due"], bool)
     assert isinstance(item["ghost_eligible"], bool)
     assert "reached_since_review" in item
+    assert "opportunities_30d" not in item
+    assert "reached_30d" not in item
     assert data["practice_ready_total"] is not None
 
 

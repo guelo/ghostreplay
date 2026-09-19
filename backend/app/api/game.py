@@ -114,12 +114,8 @@ class GhostMoveCandidate:
     last_reviewed_at: datetime | None
     created_at: datetime | None
     opportunities_since_review: int = 0
-    opportunities_30d: int = 0
-    reached_30d: int = 0
     has_opportunity_events: bool = False
     # Targeted-session reach rate (g-targeted-reach-rate): the p_reach source.
-    # The broad opportunities_30d / reached_30d above stay for urgency and the
-    # SRS surfaces; they are no longer the reach denominator.
     targeted_30d: int = 0
     targeted_reached_30d: int = 0
     opening_family: str | None = None
@@ -521,8 +517,6 @@ def find_ghost_move(
             last_reviewed_at=row[5],
             created_at=row[6],
             opportunities_since_review=counters.opportunities_since_review if counters else 0,
-            opportunities_30d=counters.opportunities_30d if counters else 0,
-            reached_30d=counters.reached_30d if counters else 0,
             has_opportunity_events=bool(counters and counters.event_count > 0),
             targeted_30d=counters.targeted_30d if counters else 0,
             targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
@@ -704,9 +698,9 @@ class TargetBlunderSrs(BaseModel):
     OpportunityCounters find_ghost_move scored, carried out on GhostSelection. That
     read excludes the serving session, so the decision this payload ships with — and
     every earlier steer in the same game — is outside the counts by construction.
-    A payload is frozen at serve time and replayed verbatim, so anything less exact
-    (a re-read, even a correctly scoped one) stores a snapshot that can contradict
-    the score it is supposed to explain.
+    Surviving payload fields are frozen at serve time and replayed unchanged.
+    Anything less exact (a re-read, even a correctly scoped one) stores a snapshot
+    that can contradict the score it is supposed to explain.
     """
     last_reviewed_at: str | None = Field(None, description="ISO timestamp of last review")
     created_at: str | None = Field(None, description="ISO timestamp of when the blunder was first recorded")
@@ -714,8 +708,6 @@ class TargetBlunderSrs(BaseModel):
     fail_count: int = Field(0, description="Total times failed")
     pass_streak: int = Field(0, description="Current consecutive pass streak")
     opportunities_since_review: int = Field(0, description="Opportunity events since latest review")
-    opportunities_30d: int = Field(0, description="Opportunity events in the last 30 days")
-    reached_30d: int = Field(0, description="Exact blunder reaches in the last 30 days")
     targeted_30d: int = Field(
         0,
         description=(
@@ -1166,11 +1158,16 @@ def _replay_decision(
 ) -> NextOpponentMoveResponse | None:
     """Return the stored response for an already-recorded request, else None.
 
-    Replay, NOT recompute: the payload is deserialized verbatim, with no business
+    Replay, NOT recompute: the payload is deserialized with no business
     logic and no re-query of mutable state. That is the whole point of storing the
     serialized response — ``target_blunder_srs`` snapshots counters that move between
     the original request and its retry, so a reconstruction would answer a retry with
     a different response than the one first served.
+
+    Schema-deprecation exception: legacy target_blunder_srs may contain
+    opportunities_30d and reached_30d. Pydantic ignores these removed fields,
+    projecting old payloads to the same schema as fresh decisions. Every surviving
+    value stays frozen; the stored payload and served_at are never rewritten.
     """
     # Typed columns rather than raw SQL: the UUID storage form differs between
     # Postgres (native uuid) and the SQLite test dialect, and a hand-bound string
@@ -1630,8 +1627,6 @@ def get_next_opponent_move(
                 fail_count=review_counter.fail_count if review_counter else 0,
                 pass_streak=blunder_row[0] if blunder_row else 0,
                 opportunities_since_review=counters.opportunities_since_review if counters else 0,
-                opportunities_30d=counters.opportunities_30d if counters else 0,
-                reached_30d=counters.reached_30d if counters else 0,
                 targeted_30d=counters.targeted_30d if counters else 0,
                 targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
                 p_reach=round(counters.p_reach, 4) if counters else 0.5,

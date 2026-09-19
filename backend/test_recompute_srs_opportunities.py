@@ -627,3 +627,10 @@ def test_each_recompute_cli_mode_executes_and_preserves_targeted_counters(
 
     output = capsys.readouterr().out
     assert output.count("opponent_decisions_written=false") == 4
+    # Compare full field names: targeted_reached_30d remains part of the output.
+    output_fields = {token.split("=", 1)[0] for token in output.split() if "=" in token}
+    assert "opportunities_since_review" in output_fields
+    assert "targeted_30d" in output_fields
+    assert "targeted_reached_30d" in output_fields
+    assert "opportunities_30d" not in output_fields
+    assert "reached_30d" not in output_fields

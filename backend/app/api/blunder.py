@@ -548,8 +548,6 @@ class BlunderListItem(BaseModel):
     # Broad neighbourhood evidence — SRS dueness. Still the opportunity counters
     # they always were; they are no longer where p_reach comes from.
     opportunities_since_review: int = 0
-    opportunities_30d: int = 0
-    reached_30d: int = 0
     reached_since_review: int = 0
     # Targeted-session reach rate — the p_reach source (g-targeted-reach-rate).
     targeted_30d: int = 0
@@ -681,8 +679,6 @@ def _build_blunder_item(
         fail_count=review_counters.fail_count if review_counters else 0,
         last_result=review_counters.last_result if review_counters else None,
         opportunities_since_review=counters.opportunities_since_review if counters else 0,
-        opportunities_30d=counters.opportunities_30d if counters else 0,
-        reached_30d=counters.reached_30d if counters else 0,
         reached_since_review=counters.reached_since_review if counters else 0,
         targeted_30d=counters.targeted_30d if counters else 0,
         targeted_reached_30d=counters.targeted_reached_30d if counters else 0,
