@@ -34,7 +34,6 @@ REQUIRED_DIRECT_LOCKS = {
 }
 REQUIRED_DRILL_WRITER_LOCKS = {
     "fail_drill",
-    "continue_drill",
     "natural_end_drill",
     "abandon_drill",
     # check_drill_route locks only the two mutating branches (g-branch-locks); its

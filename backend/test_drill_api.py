@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import chess
+import pytest
 
 from conftest import TestingSessionLocal
 
@@ -127,6 +128,55 @@ def _start_drill(client, auth_headers, *, user_id: int = 123):
             },
             headers=auth_headers(user_id=user_id),
         )
+
+
+def _seed_legacy_conversion(db_session, session):
+    """Persist the historical rated shape without a live conversion action."""
+    now = datetime.now(timezone.utc)
+    session.drill_state = "converted"
+    session.is_rated = True
+    session.normal_started_at = now
+    session.converted_at = now
+    session.rated_start_ply = 0
+    db_session.commit()
+
+
+@pytest.mark.parametrize("drill_state", ["active", "root_reached", "failed"])
+def test_drill_conversion_route_removed(client, auth_headers, db_session, drill_state):
+    start = _start_drill(client, auth_headers)
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+    session = db_session.get(GameSession, uuid.UUID(session_id))
+    session.drill_state = drill_state
+    if drill_state == "failed":
+        session.drill_terminal_reason = "accuracy"
+    db_session.commit()
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    response = client.post(
+        f"/api/drills/{session_id}/continue",
+        json={"current_ply": 0},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 404
+    db_session.refresh(session)
+    assert session.drill_state == drill_state
+    assert session.status == "active"
+    assert session.is_rated is False
+    assert session.rated_start_ply is None
+    assert session.normal_started_at is None
+    assert session.converted_at is None
+    assert current_evidence_seq(db_session, 123, "black") == seq_before
+    assert db_session.query(RatingHistory).filter(RatingHistory.game_session_id == session.id).count() == 0
+
+
+def test_drill_conversion_absent_from_openapi(client):
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    assert "/api/drills/{session_id}/continue" not in schema["paths"]
+    assert "DrillContinueRequest" not in schema["components"]["schemas"]
 
 
 def test_start_drill_persists_contract(client, auth_headers, db_session):
@@ -499,75 +549,6 @@ def test_post_root_steering_preserves_compatible_ghost_metadata(
     mock_maia.assert_not_called()
 
 
-def test_continue_drill_sets_boundary_and_resegments(client, auth_headers, db_session):
-    start = _start_drill(client, auth_headers)
-    session_id = start.json()["session_id"]
-    session_uuid = uuid.UUID(session_id)
-    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    upload = client.post(
-        f"/api/session/{session_id}/moves",
-        json={
-            "moves": [
-                {
-                    "move_number": 1,
-                    "color": "white",
-                    "move_san": "e4",
-                    "fen_after": "fen-after-e4",
-                },
-                {
-                    "move_number": 1,
-                    "color": "black",
-                    "move_san": "e5",
-                    "fen_after": "fen-after-e5",
-                },
-            ]
-        },
-        headers=auth_headers(),
-    )
-    assert upload.status_code == 200
-    assert {row.segment for row in db_session.query(SessionMove).filter(SessionMove.session_id == session_uuid)} == {"drill"}
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        response = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=auth_headers(),
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["drill_state"] == "converted"
-    assert data["is_rated"] is True
-    assert data["rated_start_ply"] == 1
-    assert data["normal_started_at"] is not None
-    assert data["converted_at"] is not None
-
-    rows = (
-        db_session.query(SessionMove)
-        .filter(SessionMove.session_id == session_uuid)
-        .order_by(SessionMove.move_number, SessionMove.color)
-        .all()
-    )
-    assert [(row.color, row.segment) for row in rows] == [("black", "normal"), ("white", "drill")]
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        repeated = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=auth_headers(),
-        )
-        conflict = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 2},
-            headers=auth_headers(),
-        )
-    assert repeated.status_code == 200
-    assert conflict.status_code == 409
-
-
 def test_converted_drill_next_opponent_move_uses_ghost_srs_metadata(
     client,
     auth_headers,
@@ -686,20 +667,6 @@ def test_converted_drill_next_opponent_move_uses_backend_engine_fallback(
     assert data["decision_source"] == "backend_engine"
     assert data["move"] == {"uci": "e7e5", "san": "e5"}
     assert data["target_blunder_id"] is None
-
-
-def test_continue_drill_rejects_active_only(client, auth_headers):
-    start = _start_drill(client, auth_headers)
-    session_id = start.json()["session_id"]
-
-    active = client.post(
-        f"/api/drills/{session_id}/continue",
-        json={"current_ply": 0},
-        headers=auth_headers(),
-    )
-
-    assert active.status_code == 400
-    assert active.json()["detail"] == "Drill must be at root or stopped before continuing"
 
 
 def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers, db_session):
@@ -864,42 +831,6 @@ def test_fail_drill_rejects_active_and_non_accuracy_reason(client, auth_headers,
     assert bad_reason.status_code == 422
 
 
-def test_continue_drill_accepts_failed(client, auth_headers, db_session):
-    start = _start_drill(client, auth_headers)
-    session_id = start.json()["session_id"]
-    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    failed = client.post(
-        f"/api/drills/{session_id}/fail",
-        json={"terminal_reason": "accuracy"},
-        headers=auth_headers(),
-    )
-    assert failed.status_code == 200
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        cont = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 3},
-            headers=auth_headers(),
-        )
-    assert cont.status_code == 200
-    data = cont.json()
-    assert data["drill_state"] == "converted"
-    assert data["rated_start_ply"] == 3
-    assert data["is_rated"] is True
-    assert data["normal_started_at"] is not None
-    assert data["converted_at"] is not None
-
-    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.is_rated is True
-    assert session.drill_state == "converted"
-    assert session.rated_start_ply == 3
-    assert session.normal_started_at is not None
-    assert session.converted_at is not None
-
-
 def test_converted_drill_game_end_submits_delta_after_durable_transition(
     client, auth_headers, db_session
 ):
@@ -907,17 +838,7 @@ def test_converted_drill_game_end_submits_delta_after_durable_transition(
     session_id = start.json()["session_id"]
     session_uuid = uuid.UUID(session_id)
     session = db_session.get(GameSession, session_uuid)
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        continued = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 0},
-            headers=auth_headers(),
-        )
-    assert continued.status_code == 200
-    assert continued.json()["drill_state"] == "converted"
+    _seed_legacy_conversion(db_session, session)
 
     observed = []
 
@@ -1207,16 +1128,7 @@ def test_converted_drill_ignores_request_is_rated_false(client, auth_headers, db
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        converted = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 0},
-            headers=auth_headers(),
-        )
-    assert converted.status_code == 200
+    _seed_legacy_conversion(db_session, session)
 
     ended = client.post(
         "/api/game/end",
@@ -1239,16 +1151,7 @@ def test_converted_drill_abandon_preserves_rated_session_without_rating_history(
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
-        converted = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 0},
-            headers=auth_headers(),
-        )
-    assert converted.status_code == 200
+    _seed_legacy_conversion(db_session, session)
 
     ended = client.post(
         "/api/game/end",
@@ -1791,7 +1694,7 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
 
 
 def test_unconverted_drill_records_automatic_blunder(client, auth_headers, db_session):
-    """Amended drill policy (2026-06-01): pre-continue drill flows (e.g. strictness
+    """Amended drill policy (2026-06-01): unconverted drill flows (e.g. strictness
     failures) record blunders through regular logic — no unconverted-drill 400."""
     user_id = 123
     with patch("app.api.drills.get_opening_roots", return_value=_roots()):
@@ -2308,7 +2211,7 @@ def test_densification_never_routes_a_move_that_would_close_a_cycle(
 
 
 def test_unconverted_drill_blunder_feeds_srs_review_queue(client, auth_headers, db_session):
-    """Regular evidence side effect: a blunder recorded during pre-continue drill
+    """Regular evidence side effect: a blunder recorded during unconverted drill
     play feeds the SRS review queue (GET /api/blunder) like any normal game, even
     while the drill is still unconverted."""
     user_id = 4242
@@ -2858,78 +2761,6 @@ def test_fail_drill_terminal_write_precedes_cursor_which_is_last(
     assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
 
 
-def test_continue_drill_resegment_writes_precede_cursor_which_is_last(
-    client, auth_headers, db_session
-):
-    """Continuing an accuracy-failed (evidence-eligible) drill removes its moves from
-    the evidence set — a true->false flip that bumps. The resegment UPDATEs and the
-    terminal game_sessions UPDATE all flush before the bump, which is the
-    transaction's final statement, and it commits."""
-    headers = auth_headers(user_id=123)
-    session_id = _start_drill(client, auth_headers).json()["session_id"]
-    session_uuid = uuid.UUID(session_id)
-    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-
-    upload = client.post(
-        f"/api/session/{session_id}/moves",
-        json={
-            "moves": [
-                {"move_number": 1, "color": "white", "move_san": "e4", "fen_after": "fen-after-e4"},
-                {"move_number": 1, "color": "black", "move_san": "e5", "fen_after": "fen-after-e5"},
-            ]
-        },
-        headers=headers,
-    )
-    assert upload.status_code == 200, upload.text
-
-    # /continue accepts root_reached or failed; only the accuracy-FAILED source state
-    # is evidence-eligible, so only it produces the true->false flip that bumps.
-    with patch("app.opening_score_scheduler.request_recompute"):
-        failed = client.post(
-            f"/api/drills/{session_id}/fail",
-            json={"terminal_reason": "accuracy"},
-            headers=headers,
-        )
-    assert failed.status_code == 200, failed.text
-    seq_before = current_evidence_seq(db_session, 123, "black")
-
-    # current_ply MUST be 1: resegment_session_moves only assigns row.segment, and the
-    # ORM emits an UPDATE only when the value CHANGES. Both plies start 'drill'; at
-    # ply 1 white stays 'drill' and black flips to 'normal' (one real UPDATE), while at
-    # ply 2 both stay 'drill' and the resegment assertion below would be vacuous.
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()), capture_statements() as log:
-        response = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=headers,
-        )
-    assert response.status_code == 200, response.text
-    assert response.json()["drill_state"] == "converted"
-
-    pre, cursor_idx = cursor_last_before_commit(log)
-    move_writes = [i for i, s in enumerate(pre) if s.startswith("update session_moves")]
-    terminal_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
-    # How MANY resegment UPDATEs the ORM emits is emission detail (batching); the
-    # contract is only that every one of them precedes the cursor bump.
-    assert move_writes, pre
-    assert all(i < cursor_idx for i in move_writes), pre
-    assert terminal_idx < cursor_idx, pre
-
-    db_session.expire_all()
-    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
-    # Behavioural proof that the resegmentation actually ran (a statement count could
-    # not show which rows moved).
-    rows = (
-        db_session.query(SessionMove)
-        .filter(SessionMove.session_id == session_uuid)
-        .order_by(SessionMove.move_number, SessionMove.color)
-        .all()
-    )
-    assert [(row.color, row.segment) for row in rows] == [("black", "normal"), ("white", "drill")]
-
-
 def test_natural_end_drill_terminal_write_precedes_cursor_which_is_last(
     client, auth_headers, db_session
 ):
@@ -2992,35 +2823,9 @@ def test_abandon_drill_terminal_write_precedes_cursor_which_is_last(
 # Without these, a future "fix" to a failing cursor assertion could make a bump
 # unconditional — reintroducing exactly the per-move recompute churn
 # SESSION_EVIDENCE_ELIGIBLE_SQL exists to prevent (the g-dmd1 CPU loop). Each also
-# asserts its domain write persisted: both endpoints have a successful, write-free
-# early return that would satisfy "no cursor write" vacuously.
+# asserts its domain write persisted: abandon has a successful, write-free early
+# return that would satisfy "no cursor write" vacuously.
 # ---------------------------------------------------------------------------
-def test_continue_from_root_reached_does_not_bump_cursor(client, auth_headers, db_session):
-    """A root_reached drill is NOT evidence-eligible, and neither is the converted
-    one: false->false, so converting it writes the session but bumps nothing."""
-    headers = auth_headers(user_id=123)
-    session_id = _start_drill(client, auth_headers).json()["session_id"]
-    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    session.drill_state = "root_reached"
-    db_session.commit()
-    seq_before = current_evidence_seq(db_session, 123, "black")
-
-    with patch("app.api.drills.get_opening_roots", return_value=_roots()), capture_statements() as log:
-        response = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=headers,
-        )
-    assert response.status_code == 200, response.text
-    assert response.json()["drill_state"] == "converted"
-
-    pre = no_cursor_bump(log)
-    assert any(s.startswith("update game_sessions") for s in pre), pre  # the write DID run
-
-    db_session.expire_all()
-    assert current_evidence_seq(db_session, 123, "black") == seq_before
-
-
 def test_abandon_accuracy_failed_drill_does_not_bump_cursor(client, auth_headers, db_session):
     """An accuracy-failed drill is ALREADY evidence-eligible, so ending it is
     true->true: the terminal write lands, eligibility does not flip, nothing bumps.

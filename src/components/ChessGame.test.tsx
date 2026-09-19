@@ -14,7 +14,6 @@ const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
 const getNextOpponentMoveMock = vi.fn();
-const continueDrillMock = vi.fn();
 const failDrillMock = vi.fn();
 const checkDrillRouteMock = vi.fn();
 const naturalEndDrillMock = vi.fn();
@@ -50,7 +49,6 @@ vi.mock("../utils/api", async (importOriginal) => {
     uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
     newClientRequestId: () => "final-request-123",
     getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
-    continueDrill: (...args: unknown[]) => continueDrillMock(...args),
     failDrill: (...args: unknown[]) => failDrillMock(...args),
     checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
     naturalEndDrill: (...args: unknown[]) => naturalEndDrillMock(...args),
@@ -503,7 +501,6 @@ describe("ChessGame start flow", () => {
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
-    continueDrillMock.mockReset();
     failDrillMock.mockReset();
     checkDrillRouteMock.mockReset();
     mockCoordinator.waitForAnalysis.mockReset();
@@ -625,7 +622,6 @@ describe("ChessGame characterization safeguards", () => {
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
-    continueDrillMock.mockReset();
     checkDrillRouteMock.mockReset();
     abandonDrillMock.mockReset();
     // The real post-fix response for a STOPPED drill: the server preserves the
@@ -789,7 +785,6 @@ describe("ChessGame characterization safeguards", () => {
       );
     });
     expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
-    expect(continueDrillMock).not.toHaveBeenCalled();
     // This call IS the boundary confirmation for a player arrival, and the drill
     // cannot advance until it settles — so it is bounded like the opponent one.
     expect(checkDrillRouteMock).toHaveBeenCalledWith(
@@ -849,7 +844,6 @@ describe("ChessGame characterization safeguards", () => {
       screen.queryByRole("button", { name: /toggle ghost info/i }),
     ).not.toBeInTheDocument();
     expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
-    expect(continueDrillMock).not.toHaveBeenCalled();
 
     getNextOpponentMoveMock.mockResolvedValueOnce({
       mode: "engine",

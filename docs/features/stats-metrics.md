@@ -7,8 +7,9 @@ and its tests are authoritative for query and calculation details.
 ## Scope
 
 The Games, Moves, and Colors cards are scoped to the signed-in player's visible sessions
-in the requested time window. Visible sessions are normal games and drills converted to
-normal play, so failed and unconverted drills do not enter those populations.
+in the requested time window. Visible sessions are normal games and legacy drills
+converted to normal play before conversion was removed, so failed and unconverted
+drills do not enter those populations.
 
 The remaining card families intentionally use other scopes: Training combines all-time
 retention with review-date window measures, Library combines all-time and creation-date
@@ -57,7 +58,7 @@ semantics; for example, an empty library can report zero average blunder loss.
 
 - Population, calculation, and response contract:
   [backend/app/api/stats.py](../../backend/app/api/stats.py).
-- Session visibility and converted-drill boundary:
+- Session visibility and legacy converted-drill boundary:
   [backend/app/session_contracts.py](../../backend/app/session_contracts.py).
 - Cached session-accuracy lifecycle:
   [session accuracy versioning](../session-accuracy-versioning.md).

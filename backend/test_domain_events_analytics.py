@@ -392,28 +392,6 @@ def test_natural_end_emits_drill_natural_end(client, auth_headers, captured):
     _assert_terminal_baseline_properties(props, "drill_natural_end")
 
 
-def test_continue_emits_drill_continued_once(client, auth_headers, captured, db_session):
-    session_id = _start_kp_drill(client, auth_headers, user_id=55)
-    _force_drill_state(db_session, session_id, "root_reached")
-    with patch("app.api.drills.get_opening_roots", return_value=_drill_roots()):
-        first = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=auth_headers(user_id=55),
-        )
-        # Idempotent repeat (same rated_start_ply) echoes the contract; no re-emit.
-        repeat = client.post(
-            f"/api/drills/{session_id}/continue",
-            json={"current_ply": 1},
-            headers=auth_headers(user_id=55),
-        )
-    assert first.status_code == 200
-    assert repeat.status_code == 200
-    did, _event, props = _one(captured, "drill_continued")
-    assert did == "55"
-    assert props == {}
-
-
 def test_opponent_move_served_drill_route_ghost(client, auth_headers, captured):
     graph = _steering_graph()
     with (

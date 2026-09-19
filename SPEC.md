@@ -90,8 +90,9 @@ evidence or score-boundary protocol.
 
 The openings area separates White and Black repertoires, lets a player explore
 a scored opening tree, and can start a drill from a selected branch. A drill is
-initially unrated; after its opening objective is reached, the player may
-convert it to rated normal play. For registered openings, opponent guidance
+unrated and remains outside normal game history and statistics. After stopping,
+Analyze opens transient review and finalizes the drill through abandon without
+creating a rating event or saved game. For registered openings, opponent guidance
 continues after the target position along score-relevant reference or routing
 continuations while that structural topology remains available, preserving
 compatible due Ghost targets before falling back to ordinary opponent play.

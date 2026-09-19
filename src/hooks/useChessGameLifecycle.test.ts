@@ -11,7 +11,6 @@ const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
 const startDrillMock = vi.fn();
-const continueDrillMock = vi.fn();
 const abandonDrillMock = vi.fn();
 const naturalEndDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
@@ -25,7 +24,6 @@ vi.mock("../utils/api", () => ({
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   newClientRequestId: () => "final-request-123",
   startDrill: (...args: unknown[]) => startDrillMock(...args),
-  continueDrill: (...args: unknown[]) => continueDrillMock(...args),
   abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
   naturalEndDrill: (...args: unknown[]) => naturalEndDrillMock(...args),
   getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
@@ -235,7 +233,6 @@ beforeEach(() => {
   endGameMock.mockReset();
   uploadSessionMovesMock.mockReset();
   startDrillMock.mockReset();
-  continueDrillMock.mockReset();
   abandonDrillMock.mockReset();
   naturalEndDrillMock.mockReset();
   getOpeningRootsMock.mockReset();
@@ -1890,58 +1887,6 @@ describe("useChessGameLifecycle", () => {
     expect(store.moveHistory).toEqual([]);
     expect(store.drillOpeningKey).toBe("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
     expect(getOpeningBookMock).not.toHaveBeenCalled();
-  });
-
-  it("handleContinueDrill converts only after root_reached", async () => {
-    const { result, coordinator } = setup({
-      isGameActive: true,
-      isRated: false,
-      moveHistory: [
-        {
-          san: "e4",
-          fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-          uci: "e2e4",
-        },
-      ],
-    });
-    useGameStore.setState({
-      sessionId: "drill-session-123",
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictness: "standard",
-    });
-    continueDrillMock.mockResolvedValueOnce({
-      session_id: "drill-session-123",
-      mode: "drill",
-      drill_state: "converted",
-      opening_key: "target-fen",
-      opening_name: "Target",
-      opening_family: "Target",
-      eco: null,
-      depth: 1,
-      player_color: "white",
-      engine_elo: 1000,
-      strictness: "standard",
-      is_rated: true,
-      rated_start_ply: 1,
-      normal_started_at: "2026-05-20T00:00:00Z",
-      converted_at: "2026-05-20T00:00:00Z",
-    });
-
-    await act(async () => {
-      await result.current.handleContinueDrill();
-    });
-
-    expect(coordinator.flushPendingUploads).toHaveBeenCalledTimes(1);
-    expect(continueDrillMock).toHaveBeenCalledWith("drill-session-123", 1);
-    expect(useGameStore.getState()).toEqual(
-      expect.objectContaining({
-        drillState: "converted",
-        isRated: true,
-        isPracticeContinuation: false,
-      }),
-    );
-    expect(coordinator.startSession).not.toHaveBeenCalled();
   });
 
   // --- opening-score delta wiring (g-xanz) --------------------------------

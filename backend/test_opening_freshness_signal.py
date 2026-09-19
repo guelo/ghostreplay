@@ -17,7 +17,7 @@ the raw digest while the batch correctly remains fresh; that divergence has an
 explicit regression test below.
 
 Per-user mutation scenarios drive the PRODUCTION choke-points (the /end, /fail,
-/continue, /abandon, /moves, SRS-review endpoints and blunder recording),
+/abandon, /moves, SRS-review endpoints and blunder recording),
 so a missed or mis-gated bump site fails here. Shared-table scenarios use raw
 SQL on purpose: the evidence_epoch DB triggers must fire for ANY writer,
 including direct UPDATE/DELETE that bypass every app code path.
@@ -433,9 +433,8 @@ def _insert_drill(db, *, drill_state: str, reason: str | None = None) -> str:
     )
 
 
-def test_accuracy_fail_then_convert_flips_both_ways(client, auth_headers, db_session):
-    # Scenarios 4 (accuracy fail: F->T with NO timestamp write) and 10 (convert:
-    # T->F removes the drill's moves from the evidence set).
+def test_accuracy_fail_makes_evidence_freshness_stale(client, auth_headers, db_session):
+    # Accuracy failure makes the drill evidence-eligible without a timestamp write.
     _seed_base_evidence(db_session)
     drill_sid = _insert_drill(db_session, drill_state="root_reached")
     # Give the drill an uploaded move so eligibility actually moves evidence.
@@ -452,18 +451,6 @@ def test_accuracy_fail_then_convert_flips_both_ways(client, auth_headers, db_ses
         resp = client.post(
             f"/api/drills/{drill_sid}/fail",
             json={"terminal_reason": "accuracy"},
-            headers=auth_headers(user_id=USER),
-        )
-    assert resp.status_code == 200
-    _assert_stale(db_session, digest)
-
-    # Rebuild over the now-eligible drill, then convert it (T->F flip).
-    _build_batch(db_session)
-    digest = raw_evidence_inputs_digest(db_session, USER, "white")
-    with patch("app.opening_score_scheduler.request_recompute"):
-        resp = client.post(
-            f"/api/drills/{drill_sid}/continue",
-            json={"current_ply": 2},
             headers=auth_headers(user_id=USER),
         )
     assert resp.status_code == 200

@@ -50,7 +50,6 @@ from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
-    resegment_session_moves,
     utcnow,
 )
 from app.terminal_row_reconcile import (
@@ -95,10 +94,6 @@ class DrillStartRequest(BaseModel):
     strictness_cp: int | None = Field(None, ge=0, le=50)
     line: list[str] | None = None
     route_mode: DrillRouteMode = DrillRouteMode.AUTO
-
-
-class DrillContinueRequest(BaseModel):
-    current_ply: int = Field(..., ge=0)
 
 
 class DrillFailRequest(BaseModel):
@@ -173,7 +168,7 @@ class DrillSessionContract(BaseModel):
     terminal_reason: str | None = None
     # Played-opening score deltas (before -> after) vs the drill baseline, set
     # only by the terminal drill endpoints (natural-end, accuracy fail). None for
-    # start/get/continue/abandon, which don't recompute.
+    # start/get/abandon, which don't recompute.
     opening_score_changes: list[OpeningScoreDeltaItem] | None = None
 
 
@@ -674,48 +669,6 @@ def fail_drill(
     # The opening root was reached before the accuracy slip, so the played chain
     # carries a meaningful delta to surface in the stopped-drill banner.
     return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
-
-
-@router.post("/{session_id}/continue", response_model=DrillSessionContract)
-def continue_drill(
-    session_id: uuid.UUID,
-    request: DrillContinueRequest,
-    db: Session = Depends(get_db),
-    user: TokenPayload = Depends(get_current_user),
-) -> DrillSessionContract:
-    session = _get_drill_for_update(db, session_id)
-    _ensure_owner(session, user)
-    if session.session_mode != DRILL_SESSION_MODE:
-        raise HTTPException(status_code=400, detail="Session is not a drill")
-    if session.status != "active":
-        raise HTTPException(status_code=400, detail="Drill session is not active")
-    if session.drill_state == "converted":
-        if session.rated_start_ply == request.current_ply:
-            return _contract(session)
-        raise HTTPException(status_code=409, detail="Drill already converted with a different rated_start_ply")
-    if session.drill_state not in ("root_reached", "failed"):
-        raise HTTPException(status_code=400, detail="Drill must be at root or stopped before continuing")
-
-    now = utcnow()
-    # Converting an ELIGIBLE accuracy-failed drill (true->false flip) REMOVES its
-    # moves from the opening-evidence set — a digest-visible change the counter
-    # must carry (g-jact). A root_reached->converted transition stays ineligible
-    # on both sides -> no bump. (``segment``, which resegment rewrites, is not
-    # read by the digest — the eligibility flip is the whole signal.)
-    was_evidence_eligible = session_is_evidence_eligible(session)
-    session.drill_state = "converted"
-    session.is_rated = True
-    session.normal_started_at = now
-    session.converted_at = now
-    session.rated_start_ply = request.current_ply
-    resegment_session_moves(db, session)
-    db.flush()
-    if session_is_evidence_eligible(session) != was_evidence_eligible:
-        bump_evidence_seq(db, user.user_id, session.player_color)
-    db.commit()
-    db.refresh(session)
-    capture(str(user.user_id), "drill_continued", {})
-    return _contract(session)
 
 
 @router.post("/{session_id}/route-check", response_model=DrillRouteCheckResponse)

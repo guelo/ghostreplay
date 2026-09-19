@@ -3,14 +3,12 @@ import type { Dispatch, SetStateAction } from "react";
 import { Chess } from "chess.js";
 import type {
   DrillRouteMode,
-  DrillSessionContract,
   DrillStrictness,
   TargetBlunderSrs,
   TerminalAction,
 } from "../utils/api";
 import {
   abandonDrill,
-  continueDrill,
   endGame,
   fetchCurrentRating,
   naturalEndDrill,
@@ -640,7 +638,7 @@ export const useChessGameLifecycle = ({
             "drill_natural_end",
           );
           s.setIsRated(false);
-          // Natural-ended drills remain hidden and unrated unless converted.
+          // Natural-ended drills remain hidden and unrated.
           // (The upload tail was already discarded by stopSessionUploads, folded
           // into uploadFullMoveHistoryBeforeEnd above — g-y90g.)
           finishLocalGame(result, {
@@ -1280,8 +1278,8 @@ export const useChessGameLifecycle = ({
       // (g-drill-failed-overwrite), so it no longer reports 'abandoned' for a
       // stopped drill. The store's drillState is the CLIENT lifecycle: a successful
       // abandon is this client's "finalized" sentinel, regardless of the persisted
-      // outcome label. Read by isReviewedDrillReturnValid, isStoppedDrill, and
-      // handleContinueDrill, none of which should see 'failed' after finalization.
+      // outcome label. Read by isReviewedDrillReturnValid and isStoppedDrill,
+      // neither of which should see 'failed' after finalization.
       s.setDrillState("abandoned");
       s.setIsRated(false);
     }
@@ -1503,34 +1501,6 @@ export const useChessGameLifecycle = ({
     onOpenHistory?.({ select: "latest", source: "post_game_view_analysis", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
-  const handleContinueDrill = useCallback(async (): Promise<
-    DrillSessionContract | undefined
-  > => {
-    const store = useGameStore.getState();
-    if (
-      !store.sessionId ||
-      (store.drillState !== "root_reached" && store.drillState !== "failed")
-    ) {
-      return;
-    }
-    try {
-      setEngineMessage(null);
-      await coordinator.flushPendingUploads();
-      const contract = await continueDrill(store.sessionId, store.moveHistory.length);
-      const next = useGameStore.getState();
-      next.setDrillState(contract.drill_state);
-      next.setIsRated(contract.is_rated);
-      next.setIsPracticeContinuation(false);
-      setShowPostGamePrompt(false);
-      return contract;
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to continue drill.";
-      setEngineMessage(message);
-      setStartError(message);
-    }
-  }, [coordinator, setEngineMessage, setShowPostGamePrompt, setStartError]);
-
   return {
     handleGameEnd,
     executeRevert,
@@ -1544,7 +1514,6 @@ export const useChessGameLifecycle = ({
     handleReset,
     handleShowStartOverlay,
     handleViewAnalysis,
-    handleContinueDrill,
     abandonStoppedDrill,
     // Exposed so the drill accuracy-fail path (in ChessGame) can apply the same
     // bounded full-history upload barrier before requesting its terminal delta.

@@ -15,10 +15,11 @@ unrated and carries its own drill outcome in addition to the normal session life
 - **root reached** means the server has confirmed the target position.
 - **failed** records an off-route failure, a post-root accuracy failure, or a natural game end.
 - **abandoned** records an unconverted stop with no earlier failure outcome.
-- **converted** marks a drill that became a rated normal game.
+- **converted** is a legacy state for drills that previously became rated normal games.
+  New drills cannot convert to normal play.
 
 The outcome and ordinary session lifecycle are intentionally separate. Stopping a failed
-drill ends its session but preserves the failure; only converted drills are visible to
+drill ends its session but preserves the failure; only legacy converted drills are visible to
 normal game history and statistics.
 
 ## Route confirmation and the evidence boundary
@@ -49,7 +50,7 @@ line, and full server opening metadata. Registry depth is independent of line le
 
 Preference affects opponent selection only before the target. Player and opponent
 root confirmation retain their existing evidence proofs and record the actual arrival
-ply, which can differ from the saved line length. Post-root and converted play retain
+ply, which can differ from the saved line length. Post-root and legacy converted play retain
 the behavior below. Saved-route replay and combined reverse BFS run before acquiring
 the opponent endpoint's session row lock; refreshed state and cached decisions keep
 their existing precedence. Supplemental route edges never modify shared graph or
@@ -66,7 +67,7 @@ Pre-root moves are guided route play. At the current evidence boundary, observat
 after it seed downstream opportunity discovery, but only observations strictly after it
 count as a reached opportunity; when the boundary is the root, the root is therefore a
 seed rather than a reach. A drill without a confirmed boundary contributes no broad
-evidence. Conversion supplies its own normal-play boundary. Historical repair is
+evidence. Legacy converted sessions retain their recorded normal-play boundary. Historical repair is
 operational maintenance, not a runtime fallback.
 
 For a registered target, opponent guidance continues after the root while the live position
@@ -79,13 +80,13 @@ affect the selected opening's score without changing scorer weights or evidence 
 A due Ghost target whose first move parses to an allowed continuation keeps ordinary Ghost
 priority and metadata. If none is due, the server chooses a stable structural move for that
 session and position. Off-graph positions, exhausted opening topology, ad-hoc exact-line
-targets after their root, and converted drills use the ordinary unconstrained Ghost-then-Maia
+targets after their root, and legacy converted drills use the ordinary unconstrained Ghost-then-Maia
 pipeline. Structural guidance uses the existing Ghost response mode, so the board displays
 **Replay Ghost** during that phase and returns to Maia presentation at the boundary. A later
 transposition back into structural topology can therefore produce the existing “The haunting
 resumes” presentation.
 
-## Strictness, terminal outcomes, and conversion
+## Strictness and terminal outcomes
 
 Before the root, leaving the accepted route fails the drill. After the root, strictness
 sets the allowed engine-loss threshold; an exact-best setting requires the engine's best
@@ -93,14 +94,15 @@ move. A natural game end from either active or root-reached state is also a term
 outcome. The terminal reason records how a failure occurred and is not a substitute for the
 session outcome.
 
-A root-reached or failed drill can be converted to rated normal play while its session remains
-open. Conversion records the point where normal play begins and resegments moves so rating and
-ordinary game policies start there. It does not turn an unconverted practice session into
-history.
+Stopped drills remain unrated and outside normal game history. The former
+"Continue as normal game" action and its API endpoint have been removed. Historical
+converted sessions retain their stored rating boundary, normal-game visibility, and
+game-end behavior; removing the action does not migrate those rows.
 
 ## Transient drill review
 
 After a stopped drill, Analyze may open an in-memory review of the moves just played.
+Analyze finalizes the stopped drill through abandon, preserving any failure outcome.
 The snapshot is identity-bound to that session and disappears on refresh or direct entry.
 It creates no rating event, saved game review, history row, or normal-game statistic.
 Returning to the stopped-drill presentation never revives the ended backend session.
@@ -139,7 +141,7 @@ The model edit changes scorer source provenance, not the scoring formula.
 
 ## Authorities
 
-- Lifecycle, conversion, and route validation:
+- Lifecycle and route validation:
   [backend/app/api/drills.py](../../backend/app/api/drills.py) and
   [backend/app/api/game.py](../../backend/app/api/game.py).
 - Route selection and steering:

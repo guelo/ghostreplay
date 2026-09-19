@@ -4,9 +4,8 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from sqlalchemy import case, or_
-from sqlalchemy.orm import Session
 
-from app.models import GameSession, SessionMove
+from app.models import GameSession
 from app.ply_coordinates import ply_after
 
 SessionMode = Literal["normal", "drill"]
@@ -79,12 +78,6 @@ def segment_for_move(session: GameSession, move_number: int, color: str) -> Move
     if rated_start_ply is None:
         return DRILL_MOVE_SEGMENT
     return DRILL_MOVE_SEGMENT if ply_after(move_number, color) <= rated_start_ply else NORMAL_MOVE_SEGMENT
-
-
-def resegment_session_moves(db: Session, session: GameSession) -> None:
-    rows = db.query(SessionMove).filter(SessionMove.session_id == session.id).all()
-    for row in rows:
-        row.segment = segment_for_move(session, row.move_number, row.color)
 
 
 def utcnow() -> datetime:

@@ -890,7 +890,7 @@ class TestSessionEligibilityParity:
         self, db_session, branching_graph
     ):
         # POST /api/drills/{id}/fail (accuracy) computes an opening-score delta
-        # WITHOUT ending the session (so /continue stays possible); its quiescent
+        # WITHOUT ending the session; its quiescent
         # played chain must be included or the end-of-drill delta reads empty.
         _insert_user(db_session)
         empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
@@ -2012,7 +2012,7 @@ class TestDifferentialParity:
         """Eligibility ROUND TRIP: eligible → ineligible → eligible again.
 
         An accuracy-failed drill is evidence-eligible while its status is still
-        'active'; /continue flips ``drill_state`` to 'converted' → ineligible; the
+        'active'; seeding the legacy 'converted' shape makes it ineligible; the
         session later ENDS → eligible again. (There is no converted → failed edge
         to test: ``ck_game_sessions_drill_rating_boundary`` requires is_rated=true
         for 'converted' and is_rated=false for 'failed', so a converted session

@@ -75,7 +75,6 @@ const NUMERIC_SEGMENT = /^\d+$/
  */
 const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`^/api/drills/${UUID_SOURCE}/fail$`, 'i'), '/api/drills/{session_id}/fail'],
-  [new RegExp(`^/api/drills/${UUID_SOURCE}/continue$`, 'i'), '/api/drills/{session_id}/continue'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}/route-check$`, 'i'), '/api/drills/{session_id}/route-check'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}/natural-end$`, 'i'), '/api/drills/{session_id}/natural-end'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}/abandon$`, 'i'), '/api/drills/{session_id}/abandon'],
@@ -998,24 +997,6 @@ export const getDrill = async (sessionId: string): Promise<DrillSessionContract>
     `${API_BASE_URL}/api/drills/${sessionId}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load drill session' },
-  )
-}
-
-/**
- * Continue the current drill from the given ply.
- */
-export const continueDrill = async (
-  sessionId: string,
-  currentPly: number,
-): Promise<DrillSessionContract> => {
-  return requestJson<DrillSessionContract>(
-    `${API_BASE_URL}/api/drills/${sessionId}/continue`,
-    {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ current_ply: currentPly }),
-    },
-    { fallbackMessage: 'Failed to continue drill' },
   )
 }
 
