@@ -26,6 +26,7 @@ from app.opening_prewarm import start_prewarm
 from app.opening_score_delta_lane import get_delta_lane
 from app.opening_score_scheduler import get_scheduler
 from app.opponent_target_facts import target_source
+from app.srs_write_telemetry import get_store as initialize_srs_telemetry
 from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
 from app.security import AuthMiddleware
@@ -39,6 +40,9 @@ configure_logging()
 async def lifespan(app: FastAPI):
     # Reject a mistyped rollout setting before accepting traffic or starting workers.
     target_source()
+    # Validate once before workers/requests. A disabled or unavailable collector
+    # must not prevent gameplay startup; its static health message gates observation.
+    initialize_srs_telemetry()
 
     # Database health check
     with engine.connect() as connection:

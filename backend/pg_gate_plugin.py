@@ -229,6 +229,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_srs_api.py::test_srs_review_concurrent_same_key_single_row",
     # Five retained SRS counters and scoring after API removal (g-srs-api-counters)
     "test_srs_opportunity.py::test_five_counter_contract_postgres",
+    # Private evidence completion observations and original-table retention census.
+    "test_srs_write_telemetry_pg.py::test_completion_bound_uses_post_commit_database_time",
+    "test_srs_write_telemetry_pg.py::test_census_original_pairs_pins_storage_and_aggregate_privacy",
+    "test_srs_write_telemetry_pg.py::test_empty_census_and_invalid_candidates",
     # SRS/moves cross-root deadlock matrix (g-writer-locks); param cases pinned below
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix",
     # Release-A schema migration on a disposable PostgreSQL DB (g-accuracy-schema)

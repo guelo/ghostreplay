@@ -311,7 +311,8 @@ def test_facade_forwards_recompute_opportunity_false(monkeypatch):
     captured: dict = {}
 
     def fake_enqueue(
-        self, session_id, user_id, player_color, moves, run_opportunity=True, is_final=False
+        self, session_id, user_id, player_color, moves, run_opportunity=True, is_final=False,
+        sources=None,
     ):
         captured["run_opportunity"] = run_opportunity
         captured["is_final"] = is_final

@@ -188,6 +188,13 @@ evidence and the targeted-session reach rate. The response contract lives in
 [`backend/app/api/blunder.py`](backend/app/api/blunder.py); replay preservation is
 covered by [`backend/test_opponent_decision_record.py`](backend/test_opponent_decision_record.py).
 
+Optional SRS write observations distinguish committed evidence mutations from
+worker/repair failures and use a post-commit database clock bound. Private
+per-session observations expire; reporting and the read-only retention census
+export aggregates. Collection does not change evidence retention or select a
+mutation deadline. Deployment coverage, expiry and the observation procedure live
+in [`backend/scripts/OBSERVE_SRS_WRITES.md`](backend/scripts/OBSERVE_SRS_WRITES.md).
+
 New targeted decisions also atomically preserve each session/target's latest
 served time in compact facts. Targeted counters can read those facts after a
 verified backfill, while reached evidence remains current and mutable. Decision

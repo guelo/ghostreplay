@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from app.db import SessionLocal
+from app import srs_write_telemetry as srs_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,9 @@ class _Entry:
     # (see the SessionMovesRequest.terminal_action note in app/api/session.py).
     is_final: bool = False
     enqueue_count: int = 0
+    sources: set[str] = field(default_factory=set)
+    telemetry_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    telemetry_expires_at: float = field(default_factory=lambda: time.time() + srs_telemetry.TTL_SECONDS)
 
 
 @dataclass
@@ -115,7 +119,8 @@ class SessionEvidenceScheduler:
         moves: list,
         run_opportunity: bool,
         is_final: bool,
-    ) -> None:
+        sources: set[str],
+    ) -> dict:
         """Coalesce an enqueue for ``session_id``. Caller must hold ``_cond``.
 
         New key: create a pending entry with the move payload. Existing key: fold
@@ -152,7 +157,14 @@ class SessionEvidenceScheduler:
             entry.run_opportunity = entry.run_opportunity or run_opportunity
             entry.is_final = entry.is_final or is_final
         entry.enqueue_count += 1
+        entry.sources.update(sources)
+        observation = dict(
+            observation_id=entry.telemetry_id, session_id=session_id,
+            expires_at=entry.telemetry_expires_at,
+            sources=set(entry.sources), outcome="queued" if entry.run_opportunity else "not_requested",
+        )
         self._cond.notify_all()
+        return observation
 
     def enqueue(
         self,
@@ -162,6 +174,7 @@ class SessionEvidenceScheduler:
         moves: list,
         run_opportunity: bool = True,
         is_final: bool = False,
+        sources: set[str] | None = None,
     ) -> None:
         """Coalesce an evidence run for ``session_id``.
 
@@ -169,15 +182,32 @@ class SessionEvidenceScheduler:
         never propagate into the ``/moves`` handler.
         """
         with self._cond:
-            if self._shutdown:
-                return
-            self._enqueue_locked(
-                session_id, user_id, player_color, moves, run_opportunity, is_final
-            )
+            rejected = self._shutdown
+            if rejected:
+                observation = dict(
+                    observation_id=str(uuid.uuid4()), session_id=session_id,
+                    sources=sources or {"worker"},
+                    outcome="enqueue_rejected" if run_opportunity else "not_requested",
+                )
+            else:
+                observation = self._enqueue_locked(
+                    session_id, user_id, player_color, moves, run_opportunity, is_final,
+                    sources or {"upload_final" if is_final else "upload_ordinary"},
+                )
+        # The worker can finish before this write. Store outcomes only advance,
+        # and equal-stage coalesced writes merge source labels.
+        srs_telemetry.emit(**observation)
+        if rejected:
+            return
         if self.auto_start:
             try:
                 self.start()
             except Exception:
+                srs_telemetry.emit(
+                    observation_id=str(uuid.uuid4()), session_id=session_id,
+                    sources=sources or {"worker"},
+                    outcome="worker_start_failed" if observation["outcome"] == "queued" else "not_requested",
+                )
                 logger.exception(
                     "session evidence scheduler start failed; side effects will not run"
                 )
@@ -261,12 +291,22 @@ class SessionEvidenceScheduler:
         Draining remains on the worker thread so a hung run cannot wedge the
         caller performing application teardown.
         """
+        dropped = []
         with self._cond:
             self._shutdown = True
             if not drain:
+                for session_id, entry in self._pending.items():
+                    dropped.append(dict(
+                        observation_id=entry.telemetry_id, session_id=session_id,
+                        expires_at=entry.telemetry_expires_at,
+                        sources=entry.sources,
+                        outcome="dropped" if entry.run_opportunity else "not_requested",
+                    ))
                 self._pending.clear()
             self._cond.notify_all()
             thread = self._thread
+        for observation in dropped:
+            srs_telemetry.emit(**observation)
         if thread is not None:
             thread.join(timeout=timeout)
             if thread.is_alive():
@@ -279,6 +319,9 @@ class SessionEvidenceScheduler:
 
     def _worker_loop(self) -> None:
         while True:
+            # Expiry also runs when there is no user traffic. Startup prunes
+            # downtime's expired data before this worker accepts due work.
+            srs_telemetry.expire_observations()
             with self._cond:
                 if self._shutdown and not self._pending:
                     return
@@ -305,7 +348,7 @@ class SessionEvidenceScheduler:
                         else max(0.0, min(due_deadlines) - now)
                     )
                     if wait_for is None or wait_for > 0:
-                        self._cond.wait(timeout=wait_for)
+                        self._cond.wait(timeout=3600 if wait_for is None else min(wait_for, 3600))
                     shutting_down = self._shutdown
             self.run_due(now=float("inf") if shutting_down else None)
 
@@ -317,6 +360,16 @@ class SessionEvidenceScheduler:
         moves = list(entry.moves.values())
         try:
             db = self.session_factory()
+            if hasattr(db, "info"):
+                db.info["srs_upload_sources"] = entry.sources
+                db.info["srs_job_id"] = entry.telemetry_id
+                db.info["srs_evidence_completed"] = False
+            srs_telemetry.emit(
+                observation_id=entry.telemetry_id, session_id=session_id,
+                expires_at=entry.telemetry_expires_at,
+                sources=entry.sources,
+                outcome="worker_started" if entry.run_opportunity else "not_requested",
+            )
             self.run_side_effects(
                 db,
                 session_id=session_id,
@@ -328,7 +381,23 @@ class SessionEvidenceScheduler:
                 run_opportunity=entry.run_opportunity,
                 is_final=entry.is_final,
             )
+            srs_telemetry.emit(
+                observation_id=entry.telemetry_id, session_id=session_id,
+                expires_at=entry.telemetry_expires_at,
+                sources=entry.sources,
+                outcome="worker_finished" if entry.run_opportunity else "not_requested",
+            )
         except Exception:
+            # Cache/recompute failures after evidence durability do not erase
+            # the observed SRS result. No-opportunity jobs never create SRS gaps.
+            evidence_completed = getattr(db, "info", {}).get("srs_evidence_completed", False)
+            srs_telemetry.emit(
+                observation_id=entry.telemetry_id, session_id=session_id,
+                expires_at=entry.telemetry_expires_at,
+                sources=entry.sources,
+                outcome=("not_requested" if not entry.run_opportunity else
+                         "worker_finished" if evidence_completed else "worker_failed"),
+            )
             logger.exception(
                 "session evidence side effects failed",
                 extra={
@@ -407,8 +476,14 @@ def enqueue_session_evidence(
             evidence_moves,
             run_opportunity=recompute_opportunity,
             is_final=is_final,
+            sources=getattr(db, "info", {}).get("srs_upload_sources"),
         )
     except Exception:
+        srs_telemetry.emit(
+            observation_id=str(uuid.uuid4()), session_id=session_id,
+            sources={"worker"},
+            outcome="enqueue_failed" if recompute_opportunity else "not_requested",
+        )
         logger.exception(
             "session evidence enqueue failed",
             extra={

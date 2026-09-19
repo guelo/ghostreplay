@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app import srs_write_telemetry as srs_telemetry
 from app.analysis_cache_policy import (
     BROWSER_ANALYSIS_ACCEPTED_REASONS,
     ROW_MUTATING_REASONS,
@@ -610,6 +611,9 @@ def _bulk_upsert_opportunity_events(db: Session, rows: list[dict]) -> None:
     if not rows:
         return
 
+    for session_id in {row["session_id"] for row in rows}:
+        srs_telemetry.evidence_mutated(db, session_id)
+
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
         stmt = sqlite_insert(BlunderOpportunityEvent).values(rows)
@@ -844,6 +848,7 @@ def _compute_blunder_opportunity_events(
     if game_session is None:
         return
 
+    srs_telemetry.observe_session(db, game_session)
     evidence = session_evidence_hashes(db, game_session)
     opponent_color = "black" if player_color == "white" else "white"
     # Reach candidates only — strictly post-boundary observations.
@@ -893,6 +898,7 @@ def _compute_blunder_opportunity_events(
     # scoping and bounds the IN-list by stale-row count (g-b809).
     stale_ids = [e.id for e in existing_events if e.blunder_id not in matched]
     if stale_ids:
+        srs_telemetry.evidence_mutated(db, session_id)
         db.query(BlunderOpportunityEvent).filter(
             BlunderOpportunityEvent.id.in_(stale_ids)
         ).delete(synchronize_session=False)
@@ -1219,8 +1225,9 @@ def _run_graph_evidence_txn(
     opportunity recompute, when enabled, stays in THIS txn AFTER the graph upsert
     so its forward BFS sees this upload's fresh edges.
 
-    This is the FIRST statement of a fresh autobegun txn (the prior
-    ``session_moves_upsert`` stage committed). On Postgres it takes
+    The prior ``session_moves_upsert`` stage committed. Optional telemetry reads
+    session metadata and persists its pending observation before the lock window.
+    On Postgres the first graph statement takes
     ``pg_advisory_xact_lock(user_id)`` so concurrent same-user uploads serialize
     deterministically instead of racing the (user_id, fen_hash) unique index, and
     sets txn-local ``lock_timeout``/``statement_timeout`` so a stuck queue or
@@ -1231,13 +1238,15 @@ def _run_graph_evidence_txn(
 
     Raises ``OperationalError`` on timeout; the caller owns rollback + retry/degrade.
     """
+    if run_opportunity:
+        srs_telemetry.prepare_worker_observation(db, session_id)
     with _timed_side_effect(
         "graph_lock",
         session_id=session_id,
         user_id=user_id,
         move_count=move_count,
     ):
-        # First statement of this fresh graph txn: take the per-user advisory lock
+        # First graph statement: take the per-user advisory lock
         # (+ txn-local timeouts) shared with the blunder-recording paths. Released,
         # with the SET LOCALs, at the evidence_commit below. No-op off Postgres.
         acquire_graph_write_lock(db, user_id=user_id, dialect_name=dialect_name)
@@ -1270,13 +1279,16 @@ def _run_graph_evidence_txn(
     # synchronize_session=False so it emits SQL there, not at commit). This stage
     # owns the COMMIT (durability) only. Timed separately so commit cost is not
     # misattributed to compute.
-    with _timed_side_effect(
-        "evidence_commit",
-        session_id=session_id,
-        user_id=user_id,
-        move_count=move_count,
-    ):
-        db.commit()
+    with srs_telemetry.completion_after_timing(db):
+        with _timed_side_effect(
+            "evidence_commit",
+            session_id=session_id,
+            user_id=user_id,
+            move_count=move_count,
+        ):
+            db.commit()
+    if run_opportunity:
+        db.info["srs_evidence_completed"] = True
 
 
 def _run_session_move_evidence_side_effects(
@@ -1333,12 +1345,16 @@ def _run_session_move_evidence_side_effects(
             # error type) propagate unchanged — the narrow catch only owns timeouts.
             raise
         db.rollback()
+        if run_opportunity:
+            srs_telemetry.worker_signal(db, session_id, "retry")
         try:
             _run_graph_evidence_txn(db, **graph_txn_kwargs)
         except OperationalError as retry_err:
             if _graph_timeout_sqlstate(retry_err) is None:
                 raise
             db.rollback()
+            if run_opportunity:
+                srs_telemetry.worker_signal(db, session_id, "dropped")
             logger.warning(
                 "upsert_session_moves graph evidence timed out twice; opportunity "
                 "events skipped for session_id=%s user_id=%s; not self-healing — "
@@ -1808,6 +1824,7 @@ def upsert_session_moves(
     # writer of a durable receipt. The middleware already validated + normalized
     # the client-generated correlation id and published both ids to request state.
     is_final_full = request.terminal_action is not None
+    db.info["srs_upload_sources"] = srs_telemetry.upload_sources(request)
     client_request_id = getattr(http_request.state, "client_request_id", None)
     server_request_id = getattr(http_request.state, "request_id", None)
     if (request.line_revision is None and game_session.move_line_revision > 0) or (

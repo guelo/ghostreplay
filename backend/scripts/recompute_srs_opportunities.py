@@ -47,6 +47,7 @@ from app.models import (  # noqa: E402
 from app.session_contracts import normal_play_started_at  # noqa: E402
 from app.srs_opportunity import load_opportunity_counters  # noqa: E402
 from app.srs_math import as_utc  # noqa: E402
+from app import srs_write_telemetry as srs_telemetry  # noqa: E402
 
 
 def _safe_database_url(database_url: str) -> str:
@@ -119,6 +120,7 @@ def _cached_session_position_ids(
     return position_ids
 
 
+@srs_telemetry.repair_operation("repair_blunder")
 def recompute_one_blunder(
     db,
     *,
@@ -170,6 +172,8 @@ def recompute_one_blunder(
         if blunder.created_at and as_utc(occurred_at) < as_utc(blunder.created_at):
             existing = existing_events.get(session.id)
             if existing is not None:
+                srs_telemetry.observe_session(db, session)
+                srs_telemetry.evidence_mutated(db, session.id)
                 db.delete(existing)
             continue
 
@@ -184,6 +188,7 @@ def recompute_one_blunder(
 
         existing = existing_events.get(session.id)
         if opportunity:
+            srs_telemetry.observe_session(db, session)
             opportunities += 1
             reached_count += 1 if reached else 0
             _upsert_opportunity_event(
@@ -195,6 +200,8 @@ def recompute_one_blunder(
                 reached=reached,
             )
         elif existing is not None:
+            srs_telemetry.observe_session(db, session)
+            srs_telemetry.evidence_mutated(db, session.id)
             db.delete(existing)
 
         if progress_every > 0 and index % progress_every == 0:
@@ -209,6 +216,7 @@ def recompute_one_blunder(
     return len(sessions), opportunities, reached_count
 
 
+@srs_telemetry.repair_operation("repair_session", bulk_source="repair_all_sessions")
 def recompute_srs_opportunities(
     db,
     *,
@@ -283,6 +291,7 @@ def recompute_srs_opportunities(
     )
 
 
+@srs_telemetry.repair_operation("repair_all_blunders")
 def recompute_all_blunders(
     db,
     *,
