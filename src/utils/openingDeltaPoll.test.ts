@@ -185,28 +185,40 @@ describe("pollFreshOpeningDelta", () => {
     });
   });
 
-  it("routes a superseded session's fresh delta to the late queue, not the current slot", async () => {
-    // THE core regression: drill A reconciles after the player clicked "Again".
-    // Its diff belongs to A — surfaced as a late notification, never dropped and
-    // never rendered as B's inline badges.
-    const fresh = [makeItem("k1", 60)];
+  it.each([
+    { label: "renderable", items: [makeItem("k1", 60)], renderable: true },
+    { label: "null", items: null, renderable: false },
+    { label: "empty", items: [], renderable: false },
+    { label: "rounded-zero", items: [makeItem("k1", 0.1)], renderable: false },
+  ])("reports a replaced session's $label fresh result without changing its replacement", async ({ items, renderable }) => {
+    useGameStore.getState().setTerminalOpeningDelta("s1", null);
+    let replacementSlot: unknown;
     getOpeningScoreDeltaMock.mockImplementation(async () => {
       useGameStore.getState().beginSession("s2");
-      return { opening_score_changes: fresh, is_fresh: true };
+      useGameStore.getState().setTerminalOpeningDelta("s2", [makeItem("k2", 25)]);
+      replacementSlot = useGameStore.getState().openingScoreDelta;
+      return { opening_score_changes: items, is_fresh: true };
     });
 
     const done = pollFreshOpeningDelta("s1", "game_end");
     await settle();
-    await done;
+    const result = await done;
 
-    const state = useGameStore.getState();
-    expect(state.openingScoreDelta).toBeNull();
-    expect(state.lateOpeningDeltas).toHaveLength(1);
-    expect(state.lateOpeningDeltas[0]).toMatchObject({
-      sessionId: "s1",
-      items: fresh,
-      freshness: "fresh",
+    expect(useGameStore.getState().openingScoreDelta).toBe(replacementSlot);
+    expect(result).toMatchObject({
+      outcome: "fresh",
+      sessionReplacedBeforeCompletion: true,
+      hasRenderableChange: renderable,
     });
+    expect(captureEventMock).toHaveBeenCalledExactlyOnceWith(
+      "opening_delta_poll_completed",
+      expect.objectContaining({
+        trigger: "game_end",
+        outcome: "fresh",
+        session_replaced_before_completion: true,
+        has_renderable_change: renderable,
+      }),
+    );
   });
 
   it("drops a fresh delta whose poll was abandoned mid-flight (token race)", async () => {
@@ -225,12 +237,10 @@ describe("pollFreshOpeningDelta", () => {
 
     const state = useGameStore.getState();
     expect(state.openingScoreDelta).toBeNull();
-    expect(state.lateOpeningDeltas).toEqual([]);
 
-    // ...and both slots stay empty through the next session start.
+    // The current slot stays empty through the next session start.
     useGameStore.getState().beginSession("s2");
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
 
   it("stops after the max attempts when the cache never goes fresh", async () => {
@@ -441,10 +451,10 @@ describe("pollFreshOpeningDelta", () => {
     expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(2);
   });
 
-  it("lets an old session's loop run to completion alongside a new one", async () => {
-    // The old loop is no longer cancelled by the session flip — that cancellation
-    // is what used to lose drill A's diff entirely.
-    const s1fresh = [makeItem("k1", 30)];
+  it.each([
+    { label: "renderable", s1fresh: [makeItem("k1", 30)], renderable: true },
+    { label: "no-change", s1fresh: null, renderable: false },
+  ])("finishes an old session's $label loop alongside a new one for telemetry", async ({ s1fresh, renderable }) => {
     const s2fresh = [makeItem("k2", 61)];
     let s1Calls = 0;
     getOpeningScoreDeltaMock.mockImplementation(async (sid: unknown) => {
@@ -455,18 +465,20 @@ describe("pollFreshOpeningDelta", () => {
         : { opening_score_changes: null, is_fresh: false };
     });
 
-    const s1loop = pollFreshOpeningDelta("s1", "game_end");
+    const s1loop = pollFreshOpeningDelta("s1", "drill_natural_end");
     await settle(); // s1 attempt 0 — not fresh, keeps looping
 
     useGameStore.getState().beginSession("s2");
     const s2loop = pollFreshOpeningDelta("s2", "game_end");
     await settle();
     await s2loop;
+    const replacementSlot = useGameStore.getState().openingScoreDelta;
     await tick(); // s1's retry lands fresh
     await s1loop;
 
     const state = useGameStore.getState();
-    // s2 owns the inline slot; s1's late diff is queued for its own toast.
+    // s2 keeps its own scores while s1 completes for telemetry.
+    expect(state.openingScoreDelta).toBe(replacementSlot);
     expect(state.openingScoreDelta).toEqual({
       sessionId: "s2",
       items: s2fresh,
@@ -474,13 +486,22 @@ describe("pollFreshOpeningDelta", () => {
       source: "terminal",
       reconciliationToken: expect.any(String),
     });
-    expect(state.lateOpeningDeltas).toHaveLength(1);
-    expect(state.lateOpeningDeltas[0].sessionId).toBe("s1");
+    expect(captureEventMock).toHaveBeenCalledTimes(2);
+    const oldCompletions = captureEventMock.mock.calls.filter(
+      ([, properties]) => properties.trigger === "drill_natural_end",
+    );
+    expect(oldCompletions).toEqual([[
+      "opening_delta_poll_completed",
+      expect.objectContaining({
+        outcome: "fresh",
+        session_replaced_before_completion: true,
+        has_renderable_change: renderable,
+      }),
+    ]]);
   });
 
   it("aborts and drops the oldest active poll when the concurrency cap is hit", async () => {
-    // Overflow must mirror the late queue's drop-oldest rule, or the two layers
-    // discard different drills.
+    // Overflow evicts the oldest loop to bound concurrent client work.
     getOpeningScoreDeltaMock.mockResolvedValue({
       opening_score_changes: null,
       is_fresh: false,
@@ -534,6 +555,7 @@ describe("pollFreshOpeningDelta", () => {
     // after the await, a fulfilled response still runs its continuation and
     // commits for a drill the cap already gave up on.
     const fresh = [makeItem("k1", 44)];
+    const warm = [makeItem("k1", 12)];
     let releaseA!: (res: unknown) => void;
     const aResponse = new Promise((resolve) => {
       releaseA = resolve;
@@ -546,7 +568,7 @@ describe("pollFreshOpeningDelta", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
 
     useGameStore.setState({ sessionId: "a" });
-    useGameStore.getState().setTerminalOpeningDelta("a", null);
+    useGameStore.getState().setTerminalOpeningDelta("a", warm);
     const a = pollFreshOpeningDelta("a", "game_end");
     await settle(); // "a" is registered and parked on its request
 
@@ -562,8 +584,8 @@ describe("pollFreshOpeningDelta", () => {
     expect(useGameStore.getState().openingScoreDelta).toMatchObject({
       sessionId: "a",
       freshness: "unavailable",
+      items: warm,
     });
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
 
   it("stops retrying once the polls are aborted, freeing the concurrency slot", async () => {

@@ -30,9 +30,8 @@ export function describeOpeningDeltaBadge(badge: OpeningDeltaBadge): string {
  * while the capsule communicates the full gain (g-ptea). A new score that rounds
  * to 0 has no visible diff and remains unscored.
  *
- * Extracted from GameOpeningLineage (g-f3m4) so the inline lineage badges and the
- * last-drill toast agree on exactly what counts as a change — a delta that renders
- * nothing inline must never be surfaced as a toast either.
+ * Shared by lineage cards and the post-game banner so both surfaces agree on
+ * exactly what counts as a visible change.
  */
 export function badgeFor(
   change: OpeningScoreDeltaItem | undefined | null,
@@ -51,9 +50,8 @@ export function badgeFor(
 }
 
 /**
- * Whether a delta payload would render at least one badge. Null / empty / fully
- * badge-suppressed payloads are unrenderable: they must not be queued as late
- * notifications, or an invisible head would block the drills behind it.
+ * Whether a response would render at least one badge. Poll completion telemetry
+ * uses this even when session replacement prevents presentation.
  */
 export function hasRenderableBadge(
   items: OpeningScoreDeltaItem[] | null | undefined,

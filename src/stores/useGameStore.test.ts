@@ -41,7 +41,7 @@ describe("useGameStore sound settings", () => {
   });
 });
 
-describe("useGameStore opening deltas (g-f3m4)", () => {
+describe("useGameStore opening deltas", () => {
   beforeEach(() => {
     useGameStore.setState(useGameStore.getInitialState(), true);
   });
@@ -99,10 +99,13 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       source: "terminal",
       reconciliationToken: expect.any(String),
     });
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
 
-  it.each([null, []])("marks a no-change %s response fresh", (items) => {
+  it.each([
+    { label: "null", items: null },
+    { label: "empty", items: [] },
+    { label: "rounded-zero", items: [item("k1", 41.6, 42.1)] },
+  ])("marks a no-change $label response fresh", ({ items }) => {
     useGameStore.setState({ sessionId: "s1" });
     useGameStore.getState().setTerminalOpeningDelta("s1", null);
 
@@ -137,7 +140,6 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
       source: "terminal",
       reconciliationToken: expect.any(String),
     });
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
 
   it("does not downgrade an already-fresh record to unavailable", () => {
@@ -191,155 +193,126 @@ describe("useGameStore opening deltas (g-f3m4)", () => {
     expect(useGameStore.getState().openingScoreDelta).toEqual(terminal);
   });
 
-  it("queues a superseded session's delta instead of dropping it", () => {
-    useGameStore.setState({ sessionId: "s2" });
-    const fresh = [item("k1", 41, 47)];
+  it.each(
+    (["terminal", "opening_boundary"] as const).flatMap((source) =>
+      (["no session", "empty", "pending", "fresh"] as const).map((slot) => ({
+        source,
+        slot,
+      })),
+    ),
+  )("ignores a replaced $source result with a $slot current slot", ({ source, slot }) => {
+    useGameStore.setState({
+      sessionId: slot === "no session" ? null : "s2",
+      isGameActive: true,
+    });
+    if (slot === "pending" || slot === "fresh") {
+      if (source === "terminal") {
+        useGameStore.getState().setTerminalOpeningDelta("s2", [item("k2", 10, 20)]);
+      } else {
+        useGameStore.getState().setBoundaryOpeningDeltaPending("s2", "boundary-b");
+      }
+      if (slot === "fresh") reconcile("s2", [item("k2", 10, 22)]);
+    }
+    const before = useGameStore.getState().openingScoreDelta;
 
-    reconcile("s1", fresh);
+    useGameStore.getState().applyPolledOpeningDelta(
+      "s1",
+      [item("k1", 41, 47)],
+      useGameStore.getState().openingDeltaPollToken,
+      source,
+      // Match the other ownership fields to isolate the session-ID guard.
+      before?.reconciliationToken ?? "old-owner",
+    );
 
-    const state = useGameStore.getState();
-    // Never contaminates the current drill's inline slot.
-    expect(state.openingScoreDelta).toBeNull();
-    expect(state.lateOpeningDeltas).toHaveLength(1);
-    expect(state.lateOpeningDeltas[0]).toMatchObject({ sessionId: "s1", items: fresh });
+    expect(useGameStore.getState().openingScoreDelta).toBe(before);
   });
+
+  it.each(["terminal", "opening_boundary"] as const)(
+    "rejects source and reconciliation-token mismatches for a %s owner",
+    (source) => {
+      useGameStore.setState({ sessionId: "s1", isGameActive: true });
+      const state = useGameStore.getState();
+      if (source === "terminal") state.setTerminalOpeningDelta("s1", null);
+      else state.setBoundaryOpeningDeltaPending("s1", "boundary-a");
+      const owner = useGameStore.getState().openingScoreDelta!;
+      const otherSource = source === "terminal" ? "opening_boundary" : "terminal";
+      for (const [requestedSource, requestedToken] of [
+        [otherSource, owner.reconciliationToken],
+        [source, "wrong-token"],
+      ] as const) {
+        state.applyPolledOpeningDelta(
+          "s1", [item("k1", 41, 99)], state.openingDeltaPollToken,
+          requestedSource, requestedToken,
+        );
+        state.markOpeningDeltaUnavailable(
+          "s1", state.openingDeltaPollToken, requestedSource, requestedToken,
+        );
+        expect(useGameStore.getState().openingScoreDelta).toBe(owner);
+      }
+    },
+  );
 
   it("drops a commit carrying a stale poll token", () => {
     useGameStore.setState({ sessionId: "s1" });
     const staleToken = useGameStore.getState().openingDeltaPollToken;
-    useGameStore.getState().abandonOpeningDeltas(); // bumps the token
+    useGameStore.getState().abandonOpeningDeltas();
+    useGameStore.getState().setTerminalOpeningDelta("s1", [item("k1", 41, 42)]);
+    const before = useGameStore.getState().openingScoreDelta;
 
-    useGameStore
-      .getState()
-      .applyPolledOpeningDelta("s1", [item("k1", 41, 47)], staleToken);
+    useGameStore.getState().applyPolledOpeningDelta(
+      "s1", [item("k1", 41, 47)], staleToken,
+    );
 
-    expect(useGameStore.getState().openingScoreDelta).toBeNull();
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
+    expect(useGameStore.getState().openingScoreDelta).toBe(before);
   });
 
-  it("never queues an unrenderable delta, so it cannot block the head", () => {
-    useGameStore.setState({ sessionId: "s2" });
+  it.each(["pending", "fresh"] as const)(
+    "beginSession clears %s data atomically and permits the new session's result",
+    (freshness) => {
+      useGameStore.setState({ sessionId: "s1" });
+      const state = useGameStore.getState();
+      state.setTerminalOpeningDelta("s1", [item("k1", 41, 47)]);
+      if (freshness === "fresh") reconcile("s1", [item("k1", 41, 48)]);
+      const transitions: unknown[] = [];
+      const unsubscribe = useGameStore.subscribe((next) => transitions.push({
+        sessionId: next.sessionId,
+        moveLineRevision: next.moveLineRevision,
+        openingScoreDelta: next.openingScoreDelta,
+      }));
 
-    reconcile("s1", []);
-    reconcile("s1", [item("k1", 41.6, 42.1)]); // rounds to a zero diff -> no badge
+      state.beginSession("s2", 3);
+      unsubscribe();
 
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
-  });
+      expect(transitions).toEqual([{
+        sessionId: "s2", moveLineRevision: 3, openingScoreDelta: null,
+      }]);
+      expect(useGameStore.getState().openingDeltaPollToken).toBe(state.openingDeltaPollToken);
+      reconcile("s2", [item("k2", 10, 20)]);
+      expect(useGameStore.getState().openingScoreDelta).toMatchObject({
+        sessionId: "s2", freshness: "fresh", items: [item("k2", 10, 20)],
+      });
+    },
+  );
 
-  it("queues a departing session's delta rather than filling an unseen slot", () => {
-    // The player clicked "Again"; the end screen is gone but /start has not
-    // resolved, so sessionId is still s1. Committing inline here would render to
-    // nobody and then be cleared by beginSession.
-    useGameStore.setState({ sessionId: "s1" });
-    useGameStore.getState().setDepartingSession("s1");
-    const fresh = [item("k1", 41, 47)];
-
-    reconcile("s1", fresh);
-
-    const state = useGameStore.getState();
-    expect(state.openingScoreDelta).toBeNull();
-    expect(state.lateOpeningDeltas).toHaveLength(1);
-    expect(state.lateOpeningDeltas[0]).toMatchObject({ sessionId: "s1" });
-  });
-
-  it("does not replay an already-visible delta as a late toast", () => {
-    // Reconciled while s1's end screen was up -> the player SAW the badges.
-    // Promoting it on the next session start would show the same numbers twice.
-    useGameStore.setState({ sessionId: "s1" });
-    reconcile("s1", [item("k1", 41, 47)]);
-    expect(useGameStore.getState().openingScoreDelta).not.toBeNull();
-
-    useGameStore.getState().beginSession("s2");
-
-    const state = useGameStore.getState();
-    expect(state.sessionId).toBe("s2");
-    expect(state.openingScoreDelta).toBeNull();
-    expect(state.lateOpeningDeltas).toEqual([]);
-  });
-
-  it("beginSession clears the departure mark", () => {
-    useGameStore.setState({ sessionId: "s1" });
-    useGameStore.getState().setDepartingSession("s1");
-
-    useGameStore.getState().beginSession("s2");
-    expect(useGameStore.getState().departingSessionId).toBeNull();
-
-    // ...so s2's own reconciliation lands inline as usual.
-    reconcile("s2", [item("k2", 10, 20)]);
-    expect(useGameStore.getState().openingScoreDelta?.sessionId).toBe("s2");
-  });
-
-  it("setDepartingSession(null) restores inline delivery after a failed start", () => {
-    useGameStore.setState({ sessionId: "s1" });
-    useGameStore.getState().setDepartingSession("s1");
-    useGameStore.getState().setDepartingSession(null);
-
-    reconcile("s1", [item("k1", 41, 47)]);
-
-    expect(useGameStore.getState().openingScoreDelta?.sessionId).toBe("s1");
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
-  });
-
-  it("beginSession discards an unreconciled terminal delta", () => {
-    // A warm terminal delta is commonly equal to the stored before-score, so
-    // promoting it would surface the same suppressed zero-diff as a toast.
+  it("clearOpeningDelta clears the current slot", () => {
     useGameStore.setState({ sessionId: "s1" });
     useGameStore.getState().setTerminalOpeningDelta("s1", [item("k1", 41, 47)]);
-
-    useGameStore.getState().beginSession("s2");
-
-    expect(useGameStore.getState().openingScoreDelta).toBeNull();
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
-  });
-
-  it("clearOpeningDelta clears the current slot but leaves the queue intact", () => {
-    useGameStore.setState({ sessionId: "s2" });
-    reconcile("s1", [item("k1", 41, 47)]);
-    useGameStore.getState().setTerminalOpeningDelta("s2", [item("k2", 10, 20)]);
 
     useGameStore.getState().clearOpeningDelta();
 
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
-    expect(useGameStore.getState().lateOpeningDeltas).toHaveLength(1);
   });
 
-  it("abandonOpeningDeltas clears both slots without promoting", () => {
+  it("abandonOpeningDeltas clears the slot and invalidates in-flight polls", () => {
     useGameStore.setState({ sessionId: "s1" });
     reconcile("s1", [item("k1", 41, 47)]);
+    const token = useGameStore.getState().openingDeltaPollToken;
 
     useGameStore.getState().abandonOpeningDeltas();
 
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
-    // ...and stays empty across the next session start.
+    expect(useGameStore.getState().openingDeltaPollToken).toBe(token + 1);
     useGameStore.getState().beginSession("s2");
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
-  });
-
-  it("caps the queue at 3, dropping the oldest", () => {
-    useGameStore.setState({ sessionId: "current" });
-    for (const id of ["a", "b", "c", "d"]) {
-      reconcile(id, [item(id, 41, 47)]);
-    }
-
-    const queued = useGameStore.getState().lateOpeningDeltas;
-    expect(queued).toHaveLength(3);
-    expect(queued.map((d) => d.sessionId)).toEqual(["b", "c", "d"]);
-  });
-
-  it("acknowledges by nonce, leaving an unshown duplicate of the same session", () => {
-    useGameStore.setState({ sessionId: "current" });
-    reconcile("s1", [item("k1", 41, 47)]);
-    reconcile("s1", [item("k1", 47, 52)]);
-
-    const [first, second] = useGameStore.getState().lateOpeningDeltas;
-    expect(first.nonce).not.toBe(second.nonce);
-
-    useGameStore.getState().acknowledgeLateOpeningDelta(first.nonce);
-
-    // Acking by sessionId would have removed the later duplicate too.
-    const remaining = useGameStore.getState().lateOpeningDeltas;
-    expect(remaining).toHaveLength(1);
-    expect(remaining[0].nonce).toBe(second.nonce);
+    expect(useGameStore.getState().openingScoreDelta).toBeNull();
   });
 });

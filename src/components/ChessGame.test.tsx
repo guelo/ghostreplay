@@ -2873,7 +2873,6 @@ describe("ChessGame characterization safeguards", () => {
       drillStrictnessCp: 25,
       drillTerminalReason: "accuracy",
       playerColor: "white",
-      departingSessionId: null,
     });
     useGameStore.getState().setTerminalOpeningDelta("drill-wait", null);
     getOpeningDeltaPollSnapshotMock.mockReturnValue({
@@ -2918,7 +2917,6 @@ describe("ChessGame characterization safeguards", () => {
     ]);
     expect(startDrillMock).not.toHaveBeenCalled();
     expect(abandonDrillMock).not.toHaveBeenCalled();
-    expect(useGameStore.getState().departingSessionId).toBeNull();
 
     act(() => {
       const state = useGameStore.getState();
@@ -2943,7 +2941,6 @@ describe("ChessGame characterization safeguards", () => {
       surface: "drill_stop",
       opening_delta_state_at_click: "fresh",
     });
-    expect(useGameStore.getState().lateOpeningDeltas).toEqual([]);
   });
 
   it("blocks the repeat-handler settings fallback while its adjacent gear remains usable", async () => {
@@ -3129,6 +3126,67 @@ describe("ChessGame characterization safeguards", () => {
     await act(async () => {
       resolveStart(makeDrillResponse());
     });
+  });
+
+  it("keeps repeat disabled when freshness arrives during a settings replacement, then releases it on failure", async () => {
+    pollFreshOpeningDeltaMock.mockClear();
+    getOpeningRootsMock.mockResolvedValue({ families: [{
+      family_name: "Target",
+      roots: [{ opening_key: "target-fen", opening_name: "Target",
+        opening_family: "Target", eco: null, depth: 1 }],
+    }] });
+    useGameStore.setState({
+      sessionId: "drill-pending-replacement", isGameActive: true, isRated: false,
+      drillOpeningKey: "target-fen", drillOpeningName: "Target",
+      drillState: "failed", drillStrictness: "standard", drillStrictnessCp: 25,
+      drillTerminalReason: "accuracy", playerColor: "white",
+    });
+    useGameStore.getState().setTerminalOpeningDelta("drill-pending-replacement", null);
+    const owner = useGameStore.getState().openingScoreDelta!;
+    let rejectStart!: (error: Error) => void;
+    startDrillMock.mockReturnValueOnce(new Promise((_resolve, reject) => {
+      rejectStart = reject;
+    }));
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+    await waitFor(() => expect(screen.getByRole("combobox")).toHaveTextContent("Target"));
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^start drill$/i }));
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Updating score before another drill" })).toBeDisabled();
+
+    act(() => {
+      const state = useGameStore.getState();
+      state.applyPolledOpeningDelta(
+        owner.sessionId, [], state.openingDeltaPollToken,
+        owner.source, owner.reconciliationToken,
+      );
+    });
+    const repeat = screen.getByRole("button", { name: /^new drill$/i });
+    expect(repeat).toBeDisabled();
+    // Native disabled buttons suppress React click dispatch. This checks the
+    // control, not the separate isStartingGame guard in the repeat handler.
+    fireEvent.click(repeat);
+    expect(startDrillMock).toHaveBeenCalledTimes(1);
+    expect(startGameMock).not.toHaveBeenCalled();
+
+    await act(async () => rejectStart(new Error("replacement unavailable")));
+    expect(useGameStore.getState()).toMatchObject({
+      sessionId: owner.sessionId, isGameActive: false, drillState: "abandoned",
+      openingScoreDelta: { ...owner, items: [], freshness: "fresh" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    expect(screen.getByRole("button", { name: /^new drill$/i })).toBeEnabled();
+    expect(pollFreshOpeningDeltaMock).not.toHaveBeenCalled();
+
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+    fireEvent.click(screen.getByRole("button", { name: /^new drill$/i }));
+    await waitFor(() => expect(startDrillMock).toHaveBeenCalledTimes(2));
+    expect(captureEventMock).toHaveBeenCalledWith(
+      "drill_again_clicked",
+      expect.objectContaining({ opening_delta_state_at_click: "fresh" }),
+    );
   });
 
   it("applies the opponent move when restarting an opponent-first drill", async () => {
@@ -5702,6 +5760,8 @@ describe("ChessGame opening lineage", () => {
       drillStrictnessCp: 25,
     });
 
+    useGameStore.getState().setTerminalOpeningDelta("session-active-drill", null);
+    const oldOwner = useGameStore.getState().openingScoreDelta!;
     render(<ChessGame />);
 
     // The active drill sits on this card's crossing, so it is expanded and the
@@ -5760,6 +5820,27 @@ describe("ChessGame opening lineage", () => {
         isRated: false,
       }),
     );
+    const currentItems = [{
+      opening_key: targetOpeningKey, opening_name: "King's Pawn Game",
+      opening_family: "King's Pawn", eco: "C20", depth: 0,
+      before: 41, after: 44, delta: 3, is_new: false,
+    }];
+    await act(async () => {
+      const state = useGameStore.getState();
+      state.setTerminalOpeningDelta(state.sessionId!, null);
+      state.applyPolledOpeningDelta(state.sessionId!, currentItems, state.openingDeltaPollToken);
+    });
+    const currentDelta = useGameStore.getState().openingScoreDelta;
+    act(() => {
+      const state = useGameStore.getState();
+      state.applyPolledOpeningDelta(
+        oldOwner.sessionId, [{ ...currentItems[0], after: 99, delta: 58 }],
+        state.openingDeltaPollToken, oldOwner.source, oldOwner.reconciliationToken,
+      );
+    });
+    expect(useGameStore.getState().openingScoreDelta).toBe(currentDelta);
+    expect(screen.queryByRole("button", { name: "Dismiss last drill score change" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Last drill")).not.toBeInTheDocument();
   });
 
   it("replaces a retained same-mount ad-hoc selection from the cached registry", async () => {

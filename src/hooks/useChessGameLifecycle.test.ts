@@ -213,6 +213,7 @@ const setup = ({
     setShowRevertWarning,
     setShowPostGamePrompt,
     setShowStartOverlay,
+    setIsStartingGame,
     setStartError,
     setSeedEngineElo,
     setResolvedReview,
@@ -1636,7 +1637,6 @@ describe("useChessGameLifecycle", () => {
         isRated: false,
         drillState: "abandoned",
         gameResult: { type: "resign", message: "Drill abandoned." },
-        departingSessionId: "drill-session-old",
       }),
     );
 
@@ -1654,9 +1654,120 @@ describe("useChessGameLifecycle", () => {
         isRated: false,
         drillState: "abandoned",
         gameResult: { type: "resign", message: "Drill abandoned." },
-        departingSessionId: null,
       }),
     );
+  });
+
+  describe.each([
+    { start: "game", source: "terminal" },
+    { start: "game", source: "opening_boundary" },
+    { start: "drill", source: "terminal" },
+  ] as const)("$source reconciliation during a new $start request", ({ start, source }) => {
+    const deltaItem = (before: number, after: number) => ({
+      opening_key: "old-target", opening_name: "Old opening",
+      opening_family: "Old", eco: null, depth: 1,
+      before, after, delta: after - before, is_new: false,
+    });
+    const fresh = [deltaItem(41, 47)];
+
+    const startReplacement = async () => {
+      const context = setup({ isGameActive: true, playerColor: "white" });
+      if (start === "drill") {
+        useGameStore.setState({
+          drillOpeningKey: "old-target", drillState: "active", isRated: false,
+        });
+        abandonDrillMock.mockResolvedValueOnce({ drill_state: "abandoned" });
+      } else {
+        // Boundary ownership survives the endGame-abandon path. Drill abandon
+        // stops uploads and cancels its boundary before the start request.
+        endGameMock.mockResolvedValueOnce({});
+      }
+      const state = useGameStore.getState();
+      if (source === "terminal") state.setTerminalOpeningDelta("session-123", null);
+      else state.setBoundaryOpeningDeltaPending("session-123", "boundary-a");
+      const owner = useGameStore.getState().openingScoreDelta!;
+      let resolveStart!: (response: unknown) => void;
+      let rejectStart!: (error: Error) => void;
+      const request = new Promise((resolve, reject) => {
+        resolveStart = resolve;
+        rejectStart = reject;
+      });
+      const startMock = start === "game" ? startGameMock : startDrillMock;
+      startMock.mockReturnValueOnce(request);
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = start === "game"
+          ? context.result.current.handleNewGame("white")
+          : context.result.current.handleNewDrill({
+            openingKey: "new-target", playerColor: "white", engineElo: 1000,
+            strictness: "standard", strictnessCp: 25,
+          });
+      });
+      expect(startMock).toHaveBeenCalledTimes(1);
+      if (start === "game") {
+        expect(endGameMock).toHaveBeenCalledWith(
+          "session-123", "abandon", expect.any(String), true, 0,
+        );
+        expect(context.coordinator.stopSessionUploads).not.toHaveBeenCalled();
+      }
+      expect(useGameStore.getState().openingScoreDelta).toBe(owner);
+      expect(context.setIsStartingGame).toHaveBeenLastCalledWith(true);
+      const reconcile = (items: typeof fresh | null) => {
+        act(() => state.applyPolledOpeningDelta(
+          "session-123", items, state.openingDeltaPollToken,
+          source, owner.reconciliationToken,
+        ));
+        expect(useGameStore.getState().openingScoreDelta).toEqual({
+          ...owner, items, freshness: "fresh",
+        });
+      };
+      return { ...context, pending, resolveStart, rejectStart, reconcile };
+    };
+
+    it("clears a mid-start fresh result when replacement succeeds", async () => {
+      const { pending, resolveStart, reconcile, setIsStartingGame } = await startReplacement();
+      reconcile(fresh);
+      await act(async () => {
+        resolveStart({
+          session_id: "session-new", move_line_revision: 2,
+          opening_name: "New opening", drill_state: "active", strictness_cp: 25,
+        });
+        await pending;
+      });
+      expect(useGameStore.getState()).toMatchObject({
+        sessionId: "session-new", moveLineRevision: 2, openingScoreDelta: null,
+        isGameActive: true,
+      });
+      expect(setIsStartingGame).toHaveBeenLastCalledWith(false);
+    });
+
+    it.each([
+      { label: "renderable", items: fresh },
+      { label: "null", items: null },
+      { label: "empty", items: [] },
+      { label: "rounded-zero", items: [deltaItem(41.6, 42.1)] },
+    ])("does not strand the repeat gate when $label freshness precedes start failure", async ({ items }) => {
+      const { pending, rejectStart, reconcile, setStartError, setIsStartingGame } = await startReplacement();
+      // Regression: freshness must arrive BEFORE rejection, while the previous
+      // departure routing used to divert/discard it and leave the slot pending.
+      reconcile(items);
+      const reconciled = useGameStore.getState().openingScoreDelta;
+      await act(async () => {
+        rejectStart(new Error("replacement unavailable"));
+        await pending;
+      });
+      expect(setStartError).toHaveBeenCalledWith("replacement unavailable");
+      expect(setIsStartingGame).toHaveBeenLastCalledWith(false);
+      expect(useGameStore.getState().sessionId).toBe("session-123");
+      expect(useGameStore.getState().openingScoreDelta).toBe(reconciled);
+      expect(pollFreshOpeningDeltaMock).not.toHaveBeenCalled();
+      if (start === "drill") {
+        expect(useGameStore.getState()).toMatchObject({
+          drillState: "abandoned", isGameActive: false, isRated: false,
+          gameResult: { type: "resign", message: "Drill abandoned." },
+        });
+      }
+    });
   });
 
   it("handleNewDrill forwards the ad-hoc line to startDrill", async () => {

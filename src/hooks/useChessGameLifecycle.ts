@@ -898,9 +898,7 @@ export const useChessGameLifecycle = ({
         announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
-        // The end screen is gone as of this click; a delta reconciling during the
-        // awaits below belongs in the late queue, not an invisible slot (g-f3m4).
-        store.setDepartingSession(store.sessionId);
+        // This session retains delta ownership until replacement succeeds.
         if (
           store.sessionId &&
           store.isGameActive &&
@@ -947,10 +945,7 @@ export const useChessGameLifecycle = ({
 
         const response = await startGame(store.engineElo, resolvedPlayerColor);
         const s2 = useGameStore.getState();
-        // Flip the session and clear the delta slot as ONE transition (g-f3m4);
-        // a separate flip-then-clear would destroy a delta that resolved during
-        // the await. Late arrivals were already routed to the queue by the
-        // setDepartingSession mark above.
+        // Atomically replace the session and clear its predecessor's delta.
         s2.beginSession(response.session_id, response.move_line_revision);
         s2.setIsGameActive(true);
         setIsStartingGame(false);
@@ -1004,9 +999,7 @@ export const useChessGameLifecycle = ({
         setEngineMessage(message);
         setStartError(message);
         setIsStartingGame(false);
-        // The start failed, so the player is still on the old session's end
-        // screen — undo the departure mark or its delta would only ever queue.
-        useGameStore.getState().setDepartingSession(null);
+        // The retained session keeps any score reconciled during the request.
       }
     },
     [
@@ -1057,9 +1050,7 @@ export const useChessGameLifecycle = ({
         announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
-        // The end screen is gone as of this click; a delta reconciling during the
-        // awaits below belongs in the late queue, not an invisible slot (g-f3m4).
-        store.setDepartingSession(store.sessionId);
+        // This session retains delta ownership until replacement succeeds.
         if (store.sessionId && store.isGameActive && !store.isPracticeContinuation) {
           // Cancel pending SRS reviews BEFORE the awaited abandon/endGame.
           coordinator.decisionOwner.cancelPendingSrsReviews();
@@ -1118,7 +1109,7 @@ export const useChessGameLifecycle = ({
         const records: MoveRecord[] = [];
 
         const s = useGameStore.getState();
-        // Atomic flip + clear; see the startGame path (g-f3m4).
+        // Atomically replace the session and clear its predecessor's delta.
         s.beginSession(response.session_id, response.move_line_revision);
         s.setIsGameActive(true);
         s.setPlayerColor(options.playerColor);
@@ -1205,10 +1196,7 @@ export const useChessGameLifecycle = ({
         setEngineMessage(message);
         setStartError(message);
         setIsStartingGame(false);
-        // A successfully abandoned drill was finalized locally before startDrill;
-        // clearing this marker only restores delta routing and never reactivates
-        // that old board. Other failures still leave their prior end screen up.
-        useGameStore.getState().setDepartingSession(null);
+        // Retain reconciled scores; a successfully abandoned drill stays ended.
         return null;
       }
     },
@@ -1409,10 +1397,8 @@ export const useChessGameLifecycle = ({
     setEngineMessage(null);
     store.setSessionId(null);
     store.setMoveLineRevision(0);
-    // Deliberate abandonment, not a supersede: drop the current delta, drop any
-    // queued late notifications, and invalidate in-flight polls so a response
-    // already on the wire cannot resurface as a phantom toast (g-f3m4). The
-    // token invalidates results; aborting stops the loops still retrying.
+    // Clear the current delta and invalidate responses already in flight.
+    // The token fences commits; aborting stops the loops still retrying.
     store.abandonOpeningDeltas();
     abortOpeningDeltaPolls();
     store.setIsGameActive(false);

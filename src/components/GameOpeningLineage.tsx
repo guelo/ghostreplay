@@ -10,8 +10,7 @@ import type {
   OpeningScoreDeltaItem,
   OpeningScoreStatus,
 } from "../utils/api";
-// Shared with the last-drill toast (g-f3m4) so both surfaces agree on exactly
-// what counts as a change.
+// Shared with the post-game banner so both surfaces agree on visible changes.
 import {
   badgeFor,
   describeOpeningDeltaBadge,

@@ -16,8 +16,8 @@ const DELTA_POLL_INTERVAL_MS = 1500;
 // the full gate can last 28 * 4s + 27 * 1.5s = 152.5s (plus browser suspension).
 const DELTA_POLL_MAX_ATTEMPTS = 28;
 const DELTA_POLL_REQUEST_TIMEOUT_MS = 4000;
-// Matches the bounded late-result queue: no more than three live computations
-// are useful, regardless of how many evicted continuations are still waking.
+// Bound client work to three live polls, including replaced sessions finishing
+// for telemetry, regardless of how many evicted continuations are still waking.
 const DELTA_POLL_MAX_CONCURRENT = 3;
 
 export type OpeningDeltaPollTrigger =

@@ -8,8 +8,6 @@ import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
 import ReturnToLiveButton from "./ReturnToLiveButton";
 import type { BoardNotice, CopyPositionNotice } from "../types";
-import type { LastDrillDeltaToast } from "../../../hooks/useLastDrillDeltaToast";
-import { formatOpeningDeltaValue } from "../../../utils/openingDeltaBadge";
 
 type BoardOrientation = "white" | "black";
 
@@ -70,11 +68,6 @@ type BoardStageProps = {
   onPromotionPick: (piece: 'q' | 'r' | 'b' | 'n') => void;
   onPromotionCancel: () => void;
   streakToast: { type: "milestone" | "record"; streak: number } | null;
-  // Last-drill opening-score notification (g-f3m4): a diff that reconciled after
-  // the player already started the next drill. Its own slot, top-right, so it
-  // never competes with the single-slot boardNotice arbiter.
-  lastDrillDeltaToast?: LastDrillDeltaToast | null;
-  onDismissLastDrillDelta?: () => void;
   // Single board-anchored notice (review warning / result / rehook), top-left.
   boardNotice: BoardNotice | null;
   // Clipboard result lives in its own bottom-left slot so it cannot displace
@@ -159,8 +152,6 @@ const BoardStage = ({
   onPromotionPick,
   onPromotionCancel,
   streakToast,
-  lastDrillDeltaToast = null,
-  onDismissLastDrillDelta,
   boardNotice,
   copyPositionNotice = null,
   isDrillMode = false,
@@ -230,41 +221,6 @@ const BoardStage = ({
 
   return (
       <div className="chessboard-board-area">
-          {lastDrillDeltaToast && lastDrillDeltaToast.badges.length > 0 && (
-            <div
-              key={lastDrillDeltaToast.nonce}
-              className="last-drill-delta-toast"
-              role="status"
-              aria-live="polite"
-            >
-              <button
-                type="button"
-                className="last-drill-delta-toast__dismiss"
-                aria-label="Dismiss last drill score change"
-                onClick={onDismissLastDrillDelta}
-              >
-                ×
-              </button>
-              <span className="last-drill-delta-toast__label">Last drill</span>
-              <ul className="last-drill-delta-toast__list">
-                {lastDrillDeltaToast.badges.map((badge) => (
-                  <li
-                    key={badge.openingName}
-                    className={`last-drill-delta-toast__item last-drill-delta-toast__item--${badge.dir}`}
-                  >
-                    <span className="last-drill-delta-toast__opening">
-                      {badge.openingName}
-                    </span>
-                    <span className="last-drill-delta-toast__delta">
-                      {badge.diff > 0 ? "+" : ""}
-                      {formatOpeningDeltaValue(badge.diff)} →{" "}
-                      {formatOpeningDeltaValue(badge.after)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
           {streakToast && (
             <div
               className={`streak-toast streak-toast--${streakToast.type}`}

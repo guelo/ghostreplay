@@ -1,7 +1,7 @@
 # Opening-score drill-repeat wait telemetry
 
 This document describes the client events used to evaluate the player-visible
-wait between ending a drill and repeating it. The initial behavior uses the
+wait between ending a drill and repeating it. The accepted behavior uses the
 entire opening-delta poll as the gate: a matching repeat action unlocks when the
 poll reports fresh data, exhausts its attempts, or is evicted by the client work
 cap.
@@ -20,9 +20,15 @@ separately filterable.
 Emitted exactly once for each newly-created poll loop. A second caller for the
 same session joins the existing loop and does not emit another event.
 
+A fresh completion does not imply presentation: after session replacement, the
+result cannot update the current score or show a previous-drill notification.
+The old terminal loop still reports its actual outcome, with
+`session_replaced_before_completion=true` and response-derived
+`has_renderable_change`.
+
 | Property | Meaning |
 |---|---|
-| `trigger` | `drill_accuracy_fail`, `drill_natural_end`, `game_end`, `game_resign`, or `game_revert` |
+| `trigger` | `drill_accuracy_fail`, `drill_natural_end`, `game_end`, `game_resign`, `game_revert`, `game_opening_boundary`, or `drill_opening_boundary` |
 | `mode` | `drill` or `game`, derived from the trigger |
 | `outcome` | `fresh`, `attempts_exhausted`, `abandoned`, or `capacity_evicted` |
 | `elapsed_ms` | Monotonic time from loop creation through finalization |

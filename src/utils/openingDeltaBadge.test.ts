@@ -48,7 +48,7 @@ describe("badgeFor", () => {
   });
 
   // The four suppression rules — each must render nothing, and (via
-  // hasRenderableBadge) must not be queued as a late notification either.
+  // hasRenderableBadge) must also be reported as unrenderable in telemetry.
   it("suppresses a missing change", () => {
     expect(badgeFor(undefined)).toBeNull();
     expect(badgeFor(null)).toBeNull();

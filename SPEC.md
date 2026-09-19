@@ -98,8 +98,9 @@ compatible due Ghost targets before falling back to ordinary opponent play.
 After a drill ends and opening-score
 reconciliation begins, repeating that drill waits for the current session's
 fresh result or a fail-open outcome; settings, analysis, and other departures
-remain available, and late results retain ownership of the session that earned
-them. The focused lifecycle and timing contract is in
+remain available. Opening-score changes are presented only for the current
+session; results arriving after replacement are suppressed. The focused lifecycle
+and timing contract is in
 [drill mode](docs/features/drill-mode.md).
 
 ## System architecture

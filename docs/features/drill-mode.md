@@ -90,12 +90,19 @@ capacity eviction fails open rather than stranding the end screen; a pre-root
 off-route failure starts no reconciliation and remains immediately repeatable.
 Settings, analysis, ordinary new-game actions, and other departures are not gated.
 
-The initial evaluation uses the full reconciliation lifetime as the repeat gate.
+The accepted repeat gate uses the full reconciliation lifetime.
 The exact attempt, timeout, failure, accessibility, and telemetry mechanics live in
 [opening-score drill-repeat wait telemetry](../opening-delta-drill-wait.md) and the
-browser implementation. A fresh result that belongs to a session left through a
-non-repeat path retains its previous-session ownership and cannot contaminate the
-new session's inline score.
+browser implementation. Score changes appear only for the current session, in
+the opening cards and post-game banner. Results arriving after a successful
+replacement are suppressed; there is no previous-drill notification. Old terminal
+polls still finish or are evicted and report their actual completion outcome.
+
+While a replacement request is pending, the old session keeps ownership of its
+score. Freshness may arrive during that request, but repeat controls stay disabled
+until the start settles. A failed start retains that fresh score and releases the
+repeat gate; an already-abandoned drill stays ended. Visiting drill analysis and
+returning without replacing the session preserves its reconciliation and gate.
 
 ## Authorities
 

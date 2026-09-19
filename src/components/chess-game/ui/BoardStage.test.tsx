@@ -307,31 +307,6 @@ describe("BoardStage", () => {
     expect(screen.getByText("⭐ Perfect streak")).toBeInTheDocument();
   });
 
-  it("renders last-drill score changes without decimals", () => {
-    const props = makeProps();
-    render(
-      <BoardStage
-        {...props}
-        lastDrillDeltaToast={{
-          nonce: 1,
-          badges: [
-            {
-              openingName: "Italian Game",
-              before: 41,
-              diff: 1,
-              after: 42,
-              dir: "up",
-            },
-          ],
-        }}
-      />,
-    );
-
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Italian Game+1 → 42",
-    );
-  });
-
   it("announces a successful position copy", () => {
     const props = makeProps();
     render(

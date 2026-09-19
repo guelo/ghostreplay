@@ -31,7 +31,6 @@ import {
   pollFreshOpeningDelta,
 } from "../utils/openingDeltaPoll";
 import { openingPlyCount } from "../utils/gamePhase";
-import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
 import { checkDrillRoute, failDrill } from "../utils/api";
@@ -380,9 +379,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isDrillDeltaPending =
     openingScoreDelta?.sessionId === sessionId &&
     openingScoreDelta.freshness === "pending";
-  // Inline badges render a delta ONLY for the session that earned it (g-f3m4).
-  // A stale-stamped delta (its drill was replaced) renders nothing here; it is
-  // surfaced as a last-drill toast instead.
+  // Score changes render only for the session that earned them.
   const openingScoreChanges = useMemo(
     () =>
       openingScoreDelta?.sessionId === sessionId ? openingScoreDelta.items : null,
@@ -402,9 +399,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     openingDeltaRefetchClaimRef.current.claimed = true;
   }
   const ratingChange = useGameStore((s) => s.ratingChange);
-  // A previous drill's diff that reconciled after the player moved on (g-f3m4).
-  const { toast: lastDrillDeltaToast, dismiss: dismissLastDrillDelta } =
-    useLastDrillDeltaToast();
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
@@ -1146,8 +1140,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           // barrier before the backend reads session_moves, and going off-route
           // means the target opening was never reached. Clear any prior value so
           // DrillStopActions shows no (stale) delta.
-          // Clear the CURRENT slot only — a queued late notification from a
-          // previous drill is owned by that drill and must survive (g-f3m4).
           useGameStore.getState().clearOpeningDelta();
           drillFailedMoveIndexRef.current = result.moveIndex;
           setEngineMessage(
@@ -2768,8 +2760,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPromotionPick={handlePromotionPick}
                 onPromotionCancel={handlePromotionCancel}
                 streakToast={blocksStreakToast ? null : streakToast}
-                lastDrillDeltaToast={lastDrillDeltaToast}
-                onDismissLastDrillDelta={dismissLastDrillDelta}
                 boardNotice={boardNotice}
                 copyPositionNotice={copyPositionNotice}
                 isDrillMode={isDrillMode}
@@ -2805,9 +2795,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 scoreChanges={scoreChanges}
                 accuracy={postGameAccuracy}
                 accuracyStatus={postGameAccuracyStatus}
-                // The SAME session-stamped items the lineage cards badge — the
-                // banner rows are an addition, not a replacement, so a stale
-                // delta still falls through to the last-drill toast unchanged.
+                // Share the current session's reconciled scores with the lineage cards.
                 openingScoreChanges={openingScoreChanges}
                 openingDeltaFreshness={
                   openingScoreDelta?.sessionId === sessionId
