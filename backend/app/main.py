@@ -25,6 +25,7 @@ from app.opening_baseline_scheduler import get_baseline_scheduler
 from app.opening_prewarm import start_prewarm
 from app.opening_score_delta_lane import get_delta_lane
 from app.opening_score_scheduler import get_scheduler
+from app.opponent_target_facts import target_source
 from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
 from app.security import AuthMiddleware
@@ -36,6 +37,9 @@ configure_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Reject a mistyped rollout setting before accepting traffic or starting workers.
+    target_source()
+
     # Database health check
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))

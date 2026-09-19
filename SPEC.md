@@ -182,6 +182,13 @@ evidence and the targeted-session reach rate. The response contract lives in
 [`backend/app/api/blunder.py`](backend/app/api/blunder.py); replay preservation is
 covered by [`backend/test_opponent_decision_record.py`](backend/test_opponent_decision_record.py).
 
+New targeted decisions also atomically preserve each session/target's latest
+served time in compact facts. Targeted counters can read those facts after a
+verified backfill, while reached evidence remains current and mutable. Decision
+envelopes remain the default reader source; expiry and deletion are inactive.
+The source handoff and verification procedure lives in
+[`backend/scripts/RETAIN_OPPONENT_DECISIONS.md`](backend/scripts/RETAIN_OPPONENT_DECISIONS.md).
+
 The browser's analysis coordinator evaluates player moves for two decisions:
 whether the first eligible early-game mistake becomes a target, and whether an
 armed target review passes or fails. Automatic capture stores the pre-move

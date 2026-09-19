@@ -443,8 +443,8 @@ def main(
                 print(
                     "Counters: "
                     f"opportunities_since_review={counters.opportunities_since_review} "
-                    # targeted_30d reads opponent_decisions; targeted_reached_30d
-                    # joins the broad reach row. The rollout fingerprints both.
+                    # Targeting reads the selected server decision/fact source;
+                    # reached joins the broad reach row. Rollout fingerprints both.
                     f"targeted_30d={counters.targeted_30d} "
                     f"targeted_reached_30d={counters.targeted_reached_30d} "
                     f"p_reach={counters.p_reach:.4f}"
@@ -489,6 +489,7 @@ def main(
             raise AssertionError("argparse accepted no recompute mode")
         print(
             "Targeted invariant: opponent_decisions_written=false "
+            "opponent_target_facts_written=false "
             "frozen_counter_verification_required=true"
         )
         return 0

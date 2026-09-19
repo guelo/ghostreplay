@@ -314,6 +314,8 @@ class GameSession(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
     started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Expansion only: initialized/enforced by the subsequent expiry release.
+    opponent_decisions_expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     result: Mapped[str | None] = mapped_column(String(20))
@@ -659,6 +661,28 @@ class SessionUploadReceipt(Base):
         server_default=statement_timestamp(),
         nullable=False,
     )
+
+
+class OpponentTargetFact(Base):
+    """Latest winning server target per session, independent of replay envelopes.
+
+    Reached evidence stays mutable in BlunderOpportunityEvent. Only a newly
+    inserted decision (or the historical MAX backfill) may advance this fact.
+    """
+
+    __tablename__ = "opponent_target_facts"
+    __table_args__ = (
+        Index("idx_opponent_target_facts_target_served", "blunder_id", "last_served_at"),
+        Index("idx_opponent_target_facts_expiry", "last_served_at", "session_id", "blunder_id"),
+    )
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("game_sessions.id", ondelete="CASCADE"), primary_key=True,
+    )
+    blunder_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE, ForeignKey("blunders.id"), primary_key=True,
+    )
+    last_served_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class OpponentDecision(Base):

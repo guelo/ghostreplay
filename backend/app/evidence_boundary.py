@@ -87,7 +87,7 @@ def evidence_start_ply(session: GameSession) -> int | None:
       the session can be distinguished from scripted route play. It contributes NO
       broad evidence. That is a real, expected residue for legacy and soft-declined
       sessions (see ``GameSession.drill_root_reached_ply``), not a defect — its
-      targeted attempts survive independently in ``opponent_decisions``.
+      targeted attempts survive independently in the server decision/fact source.
     """
     if session.session_mode == NORMAL_SESSION_MODE:
         return NORMAL_SESSION_EVIDENCE_START_PLY

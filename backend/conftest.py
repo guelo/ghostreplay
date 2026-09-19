@@ -1,6 +1,7 @@
 import os
 import subprocess
 import threading
+import time
 import uuid
 from unittest.mock import patch
 
@@ -53,6 +54,24 @@ engine = create_engine(
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+
+def await_pg_lock(observer, blocked_pid: int, blocker_pid: int | None = None,
+                  *, timeout: float = 10) -> bool:
+    """Wait for a database-observed lock barrier, optionally on a specific backend.
+
+    The observer is an independent connection/session. pg_blocking_pids reads the
+    lock manager, so a slow worker cannot be mistaken for a blocked one.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        blockers = observer.execute(
+            text("SELECT pg_blocking_pids(:pid)"), {"pid": blocked_pid},
+        ).scalar()
+        if blockers and (blocker_pid is None or blocker_pid in blockers):
+            return True
+        threading.Event().wait(0.01)
+    return False
+
 # Serializes the ``auth_headers`` users-row seed. The seed runs on the shared
 # in-memory SQLite StaticPool connection, which is a single DBAPI connection; the
 # fixture is called concurrently from Postgres concurrency tests, so the seed must
@@ -77,6 +96,7 @@ def _create_test_schema(conn) -> None:
             id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
             started_at TIMESTAMP NOT NULL,
+            opponent_decisions_expires_at TIMESTAMP,
             ended_at TIMESTAMP,
             status VARCHAR(20) NOT NULL,
             result VARCHAR(20),
@@ -610,10 +630,29 @@ def _create_test_schema(conn) -> None:
         CREATE INDEX IF NOT EXISTS idx_opponent_decisions_target_served
         ON opponent_decisions (target_blunder_id, served_at)
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opponent_target_facts (
+            session_id TEXT NOT NULL,
+            blunder_id INTEGER NOT NULL,
+            last_served_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (session_id, blunder_id),
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (blunder_id) REFERENCES blunders(id)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_opponent_target_facts_target_served
+        ON opponent_target_facts (blunder_id, last_served_at)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_opponent_target_facts_expiry
+        ON opponent_target_facts (last_served_at, session_id, blunder_id)
+    """))
     conn.commit()
 
 
 def _reset_test_schema(conn) -> None:
+    conn.execute(text("DROP TABLE IF EXISTS opponent_target_facts"))
     # Before game_sessions / blunders: opponent_decisions references both.
     conn.execute(text("DROP TABLE IF EXISTS opponent_decisions"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))

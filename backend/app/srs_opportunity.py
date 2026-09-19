@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.centipawn_loss import centipawn_loss
 from app.fen import normalize_fen
-from app.models import Blunder, BlunderOpportunityEvent, BlunderReview, OpponentDecision
+from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
+from app.opponent_target_facts import TargetSource, current_target_pairs
 from app.opening_roots import get_opening_roots
 from app.srs_math import (
     OPPORTUNITY_POWER,
@@ -45,7 +46,7 @@ class OpportunityCounters:
     reach and you did not review it" is exactly the intended signal.
 
     ``targeted_*`` is the TARGETED-SESSION reach rate, read straight from the
-    authoritative ``opponent_decisions`` log: sessions in which the ghost
+    server-authoritative decision/fact source: sessions in which the ghost
     actually steered at this blunder, and how many of those reached it. Broad
     evidence is structurally ~1/N in a dense neighbourhood, so using it as the
     p_reach denominator put the AVERAGE blunder at the exclusion floor and
@@ -167,8 +168,8 @@ def load_opportunity_counters(
 ) -> dict[int, OpportunityCounters]:
     """Per-blunder opportunity counters, broad and targeted.
 
-    ``user_id`` is REQUIRED, not defaulted. ``opponent_decisions.target_blunder_id``
-    is a bare FK to ``blunders.id`` with no user scoping of its own, so the
+    ``user_id`` is REQUIRED, not defaulted. Both targeting sources reference
+    ``blunders.id`` through a bare FK with no user scoping of its own, so the
     targeted aggregate below joins through ``Blunder.user_id`` to scope it. A
     default would let a caller silently skip that scoping; making it required
     turns every call site into a compile-time sweep instead.
@@ -302,53 +303,37 @@ def _load_targeted_counters(
     cutoff: datetime,
     exclude_session_id: uuid.UUID | None,
 ) -> dict[int, tuple[int, int]]:
-    """Targeted-session denominator/numerator from ``opponent_decisions``.
+    """Current targeted attempts and reaches from the selected server source."""
+    rows = targeted_counters_query(
+        db, cutoff=cutoff, blunder_ids=unique_blunder_ids, user_id=user_id,
+        exclude_session_id=exclude_session_id,
+    ).all()
+    return {
+        row.blunder_id: (int(row.targeted_30d), int(row.targeted_reached_30d))
+        for row in rows
+    }
 
-    A SECOND aggregate rather than more columns on the broad query: the grains
-    differ (one is over events, the other over decisions), so they cannot fold
-    into one GROUP BY. It reads the decision log directly instead of
-    materializing targeting into ``blunder_opportunity_events``, which is
-    written by the client upload path — a session served a target and then
-    never uploading would drop the FAILED steer and bias p_reach upward, the
-    exact client-controlled-denominator hole the decision log exists to close.
 
-    FILTER BEFORE GROUPING. Eligibility is a property of an individual decision
-    ROW, not of a group's ``MIN(served_at)``. Grouping first and testing the
-    minimum would drop a whole session whose EARLIEST targeting of a blunder
-    falls outside the window, even when a later attempt sits squarely inside
-    it; the same error hits ``served_at >= created_at`` for a blunder created
-    mid-session.
+def targeted_counters_query(
+    db: Session, *, cutoff: datetime, source: TargetSource | None = None,
+    blunder_ids: list[int] | None = None, user_id: int | None = None,
+    exclude_session_id: uuid.UUID | None = None,
+):
+    """Compose one statement so denominator and mutable reach share a snapshot.
+
+    Explicit sources/all owners are used by the migration comparison under a
+    repeatable-read snapshot. Live callers retain their existing now interface.
     """
-    filters = [
-        OpponentDecision.target_blunder_id.in_(unique_blunder_ids),
-        Blunder.user_id == user_id,
-        OpponentDecision.served_at >= cutoff,
-        # Per-decision served_at IS the targeted timeline. Not session.started_at:
-        # that would date a late-session decision to the session's opening and
-        # silently drop targeting of a blunder created during that same session.
-        OpponentDecision.served_at >= Blunder.created_at,
-    ]
-    if exclude_session_id is not None:
-        filters.append(OpponentDecision.session_id != exclude_session_id)
-
-    groups = (
-        db.query(
-            OpponentDecision.session_id.label("session_id"),
-            OpponentDecision.target_blunder_id.label("blunder_id"),
-        )
-        .join(Blunder, Blunder.id == OpponentDecision.target_blunder_id)
-        .filter(*filters)
-        # Grouping by session is what makes the denominator count targeted
-        # SESSIONS: re-hooking the same blunder later in one session counts once.
-        .group_by(OpponentDecision.session_id, OpponentDecision.target_blunder_id)
-        .subquery()
+    groups = current_target_pairs(
+        db, cutoff=cutoff, source=source, blunder_ids=blunder_ids, user_id=user_id,
+        exclude_session_id=exclude_session_id,
     )
 
     # reached stays whole-session position-set membership from the broad stream,
     # joined in for the NUMERATOR only. The unique (session_id, blunder_id) on
     # blunder_opportunity_events means this outer join cannot fan out a group.
     # No event row means not reached.
-    rows = (
+    return (
         db.query(
             groups.c.blunder_id,
             func.count().label("targeted_30d"),
@@ -379,12 +364,7 @@ def _load_targeted_counters(
             ),
         )
         .group_by(groups.c.blunder_id)
-        .all()
     )
-    return {
-        row.blunder_id: (int(row.targeted_30d or 0), int(row.targeted_reached_30d or 0))
-        for row in rows
-    }
 
 
 def opportunity_priority(

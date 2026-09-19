@@ -29,7 +29,8 @@ from sqlalchemy.schema import CreateTable
 
 from app.api.game import _decision_fingerprint
 from app.fen import fen_hash, normalize_fen
-from app.models import GameSession, OpponentDecision
+from app.models import GameSession, OpponentDecision, OpponentTargetFact
+from conftest import await_pg_lock, pg_required
 from test_drill_api import ROOT_FEN, START_FEN, _roots_for, _steering_graph
 
 AFTER_E4_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
@@ -153,6 +154,7 @@ def test_engine_decision_is_recorded(
     assert row.ply_before == 1
     assert row.served_at is not None
     assert row.target_blunder_id is None
+    assert db_session.query(OpponentTargetFact).count() == 0
     assert row.reaches_drill_root is False
     assert row.resulting_fen == AFTER_E4_E5_PLAYED_FEN
 
@@ -397,6 +399,8 @@ def test_ghost_decision_records_target_and_resulting_fen(
     assert row.resulting_fen == AFTER_E4_E5_PLAYED_FEN
     assert row.reaches_drill_root is False
     assert json.loads(row.response_payload)["target_blunder_srs"] is not None
+    fact = db_session.get(OpponentTargetFact, (row.session_id, blunder_id))
+    assert fact.last_served_at == row.served_at
 
 
 def _seed_decision(db_session, *, session_id: str, blunder_id: int, served_at) -> None:
@@ -517,6 +521,8 @@ def test_ghost_retry_replays_the_srs_snapshot_verbatim(
     first = _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
     assert first.status_code == 200
     assert first.json()["target_blunder_srs"]["pass_streak"] == 0
+    fact_key = (uuid.UUID(session_id), blunder_id)
+    first_served_at = db_session.get(OpponentTargetFact, fact_key).last_served_at
 
     # Move the counters the response snapshotted.
     db_session.execute(
@@ -530,6 +536,8 @@ def test_ghost_retry_replays_the_srs_snapshot_verbatim(
     assert second.json() == first.json()
     assert second.json()["target_blunder_srs"]["pass_streak"] == 0
     assert len(_decisions(db_session, session_id)) == 1
+    db_session.expire_all()
+    assert db_session.get(OpponentTargetFact, fact_key).last_served_at == first_served_at
 
 
 def test_legacy_ghost_retry_projects_only_retired_counters(
@@ -865,3 +873,158 @@ def test_migration_ddl_default_matches_the_model_construct():
         assert str(
             migration.statement_timestamp().compile(dialect=dialect)
         ) == str(model_construct().compile(dialect=dialect))
+
+
+# Compact facts must participate in the envelope transaction, never in replay.
+def _record_target(db, session_id, blunder_id, fingerprint="target-fingerprint"):
+    from app.api.game import NextOpponentMoveResponse, _record_decision
+
+    return _record_decision(
+        db, session_id=session_id, request_fingerprint=fingerprint,
+        request_fen_hash=fen_hash(AFTER_E4_FEN), uci_history='["e2e4"]', ply_before=1,
+        response=NextOpponentMoveResponse(
+            mode="ghost", move={"uci": "e7e5", "san": "e5"},
+            target_blunder_id=blunder_id, decision_source="ghost_path",
+        ),
+        resulting_fen=AFTER_E4_E5_PLAYED_FEN,
+    )
+
+
+def test_unsupported_dialect_rejected_before_decision_write():
+    from unittest.mock import Mock
+    from sqlalchemy.orm import Session
+
+    db = Mock(spec=Session)
+    db.get_bind.return_value.dialect.name = "mysql"
+    with pytest.raises(NotImplementedError, match="Opponent decisions do not support mysql"):
+        _record_target(db, uuid.uuid4(), 42)
+    db.execute.assert_not_called()
+    db.commit.assert_not_called()
+
+
+def test_conflicting_target_cannot_publish_or_renew_fact(client, db_session, create_game_session):
+    from test_srs_opportunity import _position, _blunder
+
+    session_id = uuid.UUID(create_game_session(user_id=123))
+    target = _seed_ghost_target(db_session, 123)
+    pos = _position(db_session, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white")
+    losing_target = _blunder(db_session, user_id=123, position=pos).id
+    db_session.commit()
+    winner, replayed = _record_target(db_session, session_id, target)
+    assert not replayed
+    original = db_session.get(OpponentTargetFact, (session_id, target)).last_served_at
+    # Both a different losing target and the same target must leave facts alone.
+    for candidate in (losing_target, target):
+        response, replayed = _record_target(db_session, session_id, candidate)
+        assert replayed and response == winner
+        db_session.expire_all()
+        assert db_session.get(OpponentTargetFact, (session_id, target)).last_served_at == original
+        assert db_session.get(OpponentTargetFact, (session_id, losing_target)) is None
+    assert db_session.query(OpponentDecision).count() == 1
+
+
+def test_fact_failure_rolls_back_envelope_and_serves_no_move(
+    client, auth_headers, db_session, create_game_session,
+):
+    from sqlalchemy import event
+
+    session_id = create_game_session(user_id=123, player_color="white")
+    _seed_ghost_target(db_session, 123)
+
+    def fail_fact(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO opponent_target_facts"):
+            raise OperationalError(statement, {}, Exception("fact write failed"))
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", fail_fact)
+    try:
+        with pytest.raises(OperationalError, match="fact write failed"):
+            _post(client, auth_headers, session_id, AFTER_E4_FEN, moves=["e2e4"])
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_fact)
+    # Even a subsequent commit cannot expose the failed envelope.
+    db_session.commit()
+    assert _decisions(db_session, session_id) == []
+    assert db_session.query(OpponentTargetFact).count() == 0
+
+
+def test_winning_fact_is_monotonic_when_decisions_finish_out_of_order(
+    client, db_session, create_game_session,
+):
+    from app.srs_math import as_utc
+
+    session_id = uuid.UUID(create_game_session(user_id=123))
+    target = _seed_ghost_target(db_session, 123)
+    newer = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    older = newer - timedelta(microseconds=1)
+    for fingerprint, stamp in (("newer", newer), ("older", older), ("latest", newer + timedelta(seconds=1))):
+        with patch("app.api.game.datetime") as clock:
+            clock.now.return_value = stamp
+            _, replayed = _record_target(db_session, session_id, target, fingerprint)
+        assert not replayed
+        db_session.expire_all()
+        expected = newer if fingerprint != "latest" else stamp
+        assert as_utc(db_session.get(OpponentTargetFact, (session_id, target)).last_served_at) == expected
+    assert db_session.query(OpponentDecision).count() == 3
+
+
+@pg_required
+def test_pg_conflicting_decisions_publish_only_winning_fact(pg_session_factory, pg_engine):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from sqlalchemy.orm import Session
+    from app.models import User
+    from test_srs_opportunity import _session, _position, _blunder
+
+    with pg_session_factory() as db:
+        db.add(User(id=123))
+        db.flush()
+        session = _session(db, user_id=123)
+        targets = []
+        for fen in ("8/8/8/8/8/8/K7/4k3 w - - 0 1", "8/8/8/8/8/8/K7/5k2 w - - 0 1"):
+            pos = _position(db, user_id=123, fen=fen, active_color="white")
+            targets.append(_blunder(db, user_id=123, position=pos).id)
+        sid = session.id
+        db.commit()
+    published, finish, loser_ready = threading.Event(), threading.Event(), threading.Event()
+    original_commit = Session.commit
+    loser_pid = []
+
+    def winner():
+        with pg_session_factory() as db:
+            def held_commit():
+                published.set()
+                assert finish.wait(10)
+                original_commit(db)
+            db.commit = held_commit
+            return _record_target(db, sid, targets[0])
+
+    def loser():
+        with pg_session_factory() as db:
+            loser_pid.append(db.scalar(text("SELECT pg_backend_pid()")))
+            loser_ready.set()
+            return _record_target(db, sid, targets[1])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        winning = pool.submit(winner)
+        try:
+            assert published.wait(10)
+            # Neither half is visible until the same transaction commits.
+            with pg_session_factory() as db:
+                assert db.query(OpponentDecision).count() == 0
+                assert db.query(OpponentTargetFact).count() == 0
+            losing = pool.submit(loser)
+            assert loser_ready.wait(10)
+            with pg_engine.connect() as observer:
+                assert await_pg_lock(observer, loser_pid[0]), "loser never reached its lock barrier"
+        finally:
+            finish.set()
+        first, was_replayed = winning.result(timeout=10)
+        assert not was_replayed
+        second, was_replayed = losing.result(timeout=10)
+        assert was_replayed and first == second
+    with pg_session_factory() as db:
+        decision = db.query(OpponentDecision).one()
+        fact = db.query(OpponentTargetFact).one()
+        assert fact.blunder_id == targets[0]
+        assert fact.last_served_at == decision.served_at

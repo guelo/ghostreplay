@@ -157,6 +157,14 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
     "test_drill_route_mode_migration.py::test_pg_route_mode_migration_constraints",
+    # Compact decision targeting: migration, counter parity and snapshot/upsert races.
+    "test_opponent_decision_retention_migration.py::test_pg_backfill_command_refuses_initialized_deadlines",
+    "test_opponent_decision_record.py::test_pg_conflicting_decisions_publish_only_winning_fact",
+    "test_opponent_decision_retention_migration.py::test_pg_verification_uses_readonly_repeatable_snapshot",
+    "test_opponent_decision_retention_migration.py::test_pg_fact_expansion_populated_upgrade",
+    "test_opponent_decision_retention_migration.py::test_pg_backfill_cannot_overwrite_concurrent_winning_fact",
+    "test_opponent_decision_retention_migration.py::test_pg_target_fact_reached_join_has_one_snapshot",
+    "test_srs_opportunity.py::test_pg_target_fact_counters_match_raw_decisions",
     # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
     "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",

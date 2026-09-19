@@ -353,7 +353,10 @@ def test_list_blunders_due_includes_high_opportunity_zero_reach(client, auth_hea
     assert blunder.id in ids
 
 
-def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers, db_session):
+@pytest.mark.parametrize("target_source", ["decisions", "facts"])
+def test_list_blunders_practice_ready_differs_from_srs_due(
+    client, auth_headers, db_session, monkeypatch, target_source,
+):
     """A heavily-steered, zero-reach target is SRS due but not ghost-eligible,
     so it appears under due=true but not under practice_ready=true.
 
@@ -404,6 +407,13 @@ def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers,
             )
         )
     db_session.commit()
+
+    from app.opponent_target_facts import backfill_target_facts
+
+    if target_source == "facts":
+        backfill_target_facts(db_session)
+        db_session.commit()
+    monkeypatch.setenv("OPPONENT_TARGET_SOURCE", target_source)
 
     due = client.get("/api/blunder?due=true", headers=auth_headers(user_id=123)).json()
     assert {item["id"] for item in due["items"]} == {blunder.id}

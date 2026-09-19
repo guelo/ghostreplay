@@ -16,7 +16,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.accuracy import recompute_session_accuracy
@@ -56,6 +55,7 @@ from app.opening_score_delta import (
     compute_opening_score_delta,
 )
 from app.posthog_client import capture
+from app.opponent_target_facts import publish_target_fact
 from app.row_locks import for_no_key_update
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
@@ -1217,7 +1217,15 @@ def _record_decision(
     endpoint fails closed instead of serving a move it did not record, because an
     unrecorded served target silently drops a FAILED steer from the p_reach
     denominator.
+
+    A winning targeted decision and its monotonic targeting fact commit atomically,
+    using the envelope's returned served_at. Fact failure rolls back the envelope;
+    replay and fingerprint losers never publish or renew a fact.
     """
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name not in ("sqlite", "postgresql"):
+        raise NotImplementedError(f"Opponent decisions do not support {dialect_name}")
+
     decision_id = uuid.uuid4()
     # Allocate BEFORE serializing so response_payload carries the decision_id of the
     # row it is stored in. A database-default id is unknown until after the INSERT,
@@ -1246,31 +1254,21 @@ def _record_decision(
         ),
     }
 
-    dialect_name = db.bind.dialect.name if db.bind else ""
-    if dialect_name in ("sqlite", "postgresql"):
-        insert = sqlite_insert if dialect_name == "sqlite" else postgresql_insert
-        stmt = (
-            insert(OpponentDecision)
-            .values(**values)
-            .on_conflict_do_nothing(
-                index_elements=[
-                    OpponentDecision.session_id,
-                    OpponentDecision.request_fingerprint,
-                ]
-            )
-            .returning(OpponentDecision.decision_id)
+    insert = sqlite_insert if dialect_name == "sqlite" else postgresql_insert
+    stmt = (
+        insert(OpponentDecision)
+        .values(**values)
+        .on_conflict_do_nothing(
+            index_elements=[
+                OpponentDecision.session_id,
+                OpponentDecision.request_fingerprint,
+            ]
         )
-        won = db.execute(stmt).first() is not None
-    else:
-        # Generic-dialect fallback: a plain insert, with the constraint violation as
-        # the loss signal. The savepoint keeps the surrounding transaction usable
-        # after the rollback.
-        try:
-            with db.begin_nested():
-                db.execute(OpponentDecision.__table__.insert().values(**values))
-            won = True
-        except IntegrityError:
-            won = False
+        .returning(OpponentDecision.served_at)
+    )
+    inserted = db.execute(stmt).first()
+    won = inserted is not None
+    served_at = inserted.served_at if won else None
 
     if not won:
         # Lost. Commit to release whatever this transaction still holds — the route
@@ -1295,6 +1293,16 @@ def _record_decision(
             )
         return winner, True
 
+    if stamped.target_blunder_id is not None:
+        try:
+            publish_target_fact(
+                db, session_id=session_id, blunder_id=stamped.target_blunder_id,
+                served_at=served_at,
+            )
+        except Exception:
+            # A failed fact must not leave an envelope available to commit/replay.
+            db.rollback()
+            raise
     db.commit()
     return stamped, False
 

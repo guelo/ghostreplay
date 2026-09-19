@@ -1859,3 +1859,113 @@ def test_find_ghost_move_does_not_collapse_onto_one_target_under_broad_evidence(
     }
     assert None not in served
     assert len(served) > 1, f"ghost collapsed onto a single reply: {served}"
+
+
+def _assert_target_fact_parity(db, monkeypatch):
+    from app.models import OpponentTargetFact
+    from app.opponent_target_facts import backfill_target_facts
+    from scripts.backfill_opponent_target_facts import compare_target_facts
+
+    now = datetime(2026, 9, 18, 12, 0, 0, 123456, tzinfo=timezone.utc)
+    cutoff = now - timedelta(days=30)
+    microsecond = timedelta(microseconds=1)
+    pos = _position(db, user_id=123, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white")
+    target = _blunder(db, user_id=123, position=pos)
+    target.created_at = cutoff
+    foreign_pos = _position(db, user_id=999, fen=pos.fen_raw, active_color="white")
+    foreign = _blunder(db, user_id=999, position=foreign_pos)
+    foreign.created_at = cutoff
+    recent_pos = _position(db, user_id=123, fen="8/8/8/8/8/8/K7/5k2 w - - 0 1", active_color="white")
+    recent = _blunder(db, user_id=123, position=recent_pos)
+    recent.created_at = now - timedelta(hours=1)
+    db.flush()
+    sessions = []
+    # Just before/equal/after cutoff; older+newer in one pair; no upper time bound.
+    for times in ((cutoff - microsecond,), (cutoff,), (cutoff + microsecond,),
+                  (cutoff - microsecond, now), (now + microsecond,)):
+        session = _session(db, user_id=123, started_at=cutoff - timedelta(days=2))
+        sessions.append(session)
+        for stamp in times:
+            _decision(db, session=session, blunder=target, served_at=stamp)
+    for times in ((recent.created_at - microsecond,), (recent.created_at,),
+                  (recent.created_at - microsecond, recent.created_at + microsecond)):
+        session = _session(db, user_id=123)
+        for stamp in times:
+            _decision(db, session=session, blunder=recent, served_at=stamp)
+    _decision(db, session=sessions[0], blunder=foreign, served_at=now)
+    _decision(db, session=sessions[0], blunder=None, served_at=now)
+    # Reached evidence is broad-ineligible (older than target creation), yet
+    # must count toward targeted reach. Another event is not an opportunity.
+    db.add_all([
+        BlunderOpportunityEvent(session_id=sessions[1].id, blunder_id=target.id,
+            opportunity=True, reached=True, occurred_at=cutoff - timedelta(days=1)),
+        BlunderOpportunityEvent(session_id=sessions[2].id, blunder_id=target.id,
+            opportunity=False, reached=False, occurred_at=now),
+    ])
+    db.commit()
+    ids = [target.id, recent.id, foreign.id, target.id]
+    monkeypatch.delenv("OPPONENT_TARGET_SOURCE", raising=False)
+    assert db.query(OpponentTargetFact).count() == 0
+    oracle = load_opportunity_counters(db, ids, user_id=123, now=now)
+    assert (oracle[target.id].targeted_30d, oracle[target.id].targeted_reached_30d) == (4, 1)
+    assert oracle[recent.id].targeted_30d == 2
+    assert oracle[foreign.id].targeted_30d == 0
+    assert not compare_target_facts(db, now=now).matches
+    assert backfill_target_facts(db) == 9
+    assert backfill_target_facts(db) == 0
+    db.commit()
+    assert compare_target_facts(db, now=now).matches
+
+    def compare(exclude=None):
+        monkeypatch.setenv("OPPONENT_TARGET_SOURCE", "decisions")
+        raw = load_opportunity_counters(db, ids, user_id=123, now=now, exclude_session_id=exclude)
+        monkeypatch.setenv("OPPONENT_TARGET_SOURCE", "facts")
+        facts = load_opportunity_counters(db, ids, user_id=123, now=now, exclude_session_id=exclude)
+        assert facts == raw
+        assert load_opportunity_counters(db, [recent.id], user_id=123, now=now) == {recent.id: facts[recent.id]}
+        return facts[target.id]
+
+    assert compare() == oracle[target.id]
+    excluded = compare(sessions[1].id)
+    assert (excluded.targeted_30d, excluded.targeted_reached_30d) == (3, 0)
+    # Missing upload -> late reach -> reversion -> repair; denominator is stable.
+    late = BlunderOpportunityEvent(session_id=sessions[3].id, blunder_id=target.id,
+        opportunity=True, reached=True, occurred_at=now)
+    db.add(late)
+    db.commit()
+    assert compare().targeted_reached_30d == 2
+    late.reached = False
+    db.commit()
+    assert compare().targeted_reached_30d == 1
+    db.delete(late)
+    db.commit()
+    assert compare().targeted_reached_30d == 1
+    db.add(BlunderOpportunityEvent(session_id=sessions[3].id, blunder_id=target.id,
+        opportunity=True, reached=True, occurred_at=cutoff - timedelta(days=1)))
+    db.commit()
+    final = compare()
+    assert (final.targeted_30d, final.targeted_reached_30d) == (4, 2)
+    # Once switched, envelope deletion cannot alter current counters.
+    db.query(OpponentDecision).delete(synchronize_session=False)
+    db.commit()
+    assert load_opportunity_counters(db, ids, user_id=123, now=now)[target.id] == final
+
+
+def test_target_fact_counters_match_raw_decisions(db_session, monkeypatch):
+    _assert_target_fact_parity(db_session, monkeypatch)
+
+
+@pg_required
+def test_pg_target_fact_counters_match_raw_decisions(pg_session_factory, monkeypatch):
+    with pg_session_factory() as db:
+        db.add_all([User(id=123), User(id=999)])
+        db.commit()
+        _assert_target_fact_parity(db, monkeypatch)
+
+
+def test_target_source_rejects_unknown_setting(monkeypatch):
+    from app.opponent_target_facts import target_source
+
+    monkeypatch.setenv("OPPONENT_TARGET_SOURCE", "factz")
+    with pytest.raises(ValueError, match="must be decisions or facts"):
+        target_source()

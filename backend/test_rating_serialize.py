@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import threading
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -36,7 +35,7 @@ from app.models import GameSession, RatingHistory, User
 from app.opening_cache import bump_evidence_seq, current_evidence_seq
 from app.rating_scores import latest_rating_order
 from app.row_locks import for_no_key_update
-from conftest import pg_required
+from conftest import await_pg_lock, pg_required
 from sql_capture import capture_statements, cursor_last_before_commit
 
 
@@ -361,26 +360,6 @@ def test_same_user_distinct_session_ends_chain_cleanly(pg_client, pg_session_fac
     assert games == [1, 2, 3, 4]
 
 
-def _await_blocked_by(observer, blocked_pid: int, blocker_pid: int) -> bool:
-    """Poll until Postgres itself reports ``blocked_pid`` waiting on ``blocker_pid``.
-
-    ``pg_blocking_pids`` is the authority on "is this backend blocked, and by whom" —
-    it reads the lock manager, so it cannot mistake a merely-slow backend for a
-    blocked one, which is exactly what a wall-clock stall CAN do on a loaded machine.
-    Runs on the ``observer`` session (the leader's own connection, idle in its
-    transaction while holding the lock, so it is free to query).
-    """
-    deadline = time.perf_counter() + _HANDSHAKE_TIMEOUT_SECONDS
-    while time.perf_counter() < deadline:
-        blockers = observer.execute(
-            text("SELECT pg_blocking_pids(:p)"), {"p": blocked_pid}
-        ).scalar()
-        if blocker_pid in (blockers or []):
-            return True
-        time.sleep(0.02)
-    return False
-
-
 @pg_required
 def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_factory):
     """Lost-update proof, sequenced by observed state rather than by the clock.
@@ -440,8 +419,9 @@ def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_fact
                         "the follower never reached the lock"
                     )
                     leader_pid = db.execute(pid_sql).scalar()
-                    observed["blocked_by_leader"] = _await_blocked_by(
-                        db, follower_pid["pid"], leader_pid
+                    observed["blocked_by_leader"] = await_pg_lock(
+                        db, follower_pid["pid"], leader_pid,
+                        timeout=_HANDSHAKE_TIMEOUT_SECONDS,
                     )
                     observed["read_during_hold"] = follower_has_read.is_set()
                 else:
