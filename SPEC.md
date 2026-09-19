@@ -277,6 +277,10 @@ there is no cross-tab branch merge protocol.
 
 ## Cross-cutting contracts
 
+- **Browser diagnostics.** The persistent debug log captures bounded, redacted
+  fetch responses by default. Request bodies are opt-in, and a Metadata choice
+  persists the body-capture opt-out. Capture modes, redaction limits, and log
+  persistence are defined in [browser debug logging](docs/debug-logging.md).
 - **Identity and recovery.** On first visit, the browser auto-registers an
   anonymous user and keeps its generated credentials and bearer token in
   origin-scoped `localStorage`; until claimed, account recovery is bound to

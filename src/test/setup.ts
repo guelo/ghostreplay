@@ -24,6 +24,7 @@ afterEach(() => {
   try {
     localStorage.removeItem('gr.debugLog')
     localStorage.removeItem('gr.debugBody')
+    localStorage.removeItem('gr.debugCaptureMode')
   } catch {
     /* ignore */
   }

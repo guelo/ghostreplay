@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, act, waitFor } from '@testing-library/react'
 import DebugOverlay from './DebugOverlay'
 import {
   installConsoleCapture,
-  isBodyCaptureEnabled,
+  getNetworkCaptureMode,
+  getEntries,
+  type NetworkCaptureMode,
   uninstallConsoleCapture,
 } from '../utils/debugLog'
 
@@ -11,11 +13,13 @@ let originalWindowFetch: typeof window.fetch | undefined
 
 beforeEach(() => {
   originalWindowFetch = window.fetch
+  window.fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response('{}')))
   installConsoleCapture()
 })
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllGlobals()
   uninstallConsoleCapture()
   if (typeof originalWindowFetch === 'function') {
     window.fetch = originalWindowFetch
@@ -25,7 +29,7 @@ afterEach(() => {
   window.history.replaceState({}, '', '/')
 })
 
-/** Re-install the capture with a stubbed window.fetch, then fire one request. */
+/** Configure fetch before mounting, then fire one request. */
 async function captureFetch(url: string, init?: ResponseInit): Promise<void> {
   uninstallConsoleCapture()
   window.fetch = vi.fn().mockResolvedValue(new Response('{}', init))
@@ -137,20 +141,92 @@ describe('DebugOverlay', () => {
     expect(row).toHaveClass('debug-entry--net-fail')
   })
 
-  it('renders a Bodies toggle that flips body capture', () => {
+  it('defaults to responses and changing mode controls the next fetch', async () => {
+    uninstallConsoleCapture()
+    window.fetch = vi.fn().mockImplementation(() => Promise.resolve(new Response('{"reply":"d5"}')))
+    installConsoleCapture()
     render(<DebugOverlay />)
     openOverlay()
+    const select = screen.getByRole('combobox', { name: 'Network capture' })
+    expect(select).toHaveValue('responses')
 
-    const btn = screen.getByRole('button', { name: 'Bodies' })
-    expect(btn).toHaveAttribute('aria-pressed', 'false')
-    expect(isBodyCaptureEnabled()).toBe(false)
-
-    fireEvent.click(btn)
-    expect(btn).toHaveAttribute('aria-pressed', 'true')
-    expect(isBodyCaptureEnabled()).toBe(true)
-
-    fireEvent.click(btn)
-    expect(btn).toHaveAttribute('aria-pressed', 'false')
-    expect(isBodyCaptureEnabled()).toBe(false)
+    for (const mode of ['metadata', 'bodies', 'responses'] as const) {
+      fireEvent.change(select, { target: { value: mode } })
+      expect(getNetworkCaptureMode()).toBe(mode)
+      await act(async () => {
+        await window.fetch(`/api/${mode}`, { method: 'POST', body: '{"move":"e4"}' })
+      })
+      if (mode !== 'metadata') {
+        await waitFor(() => expect(getEntries().at(-1)?.net?.resBody).toBe('{"reply":"d5"}'))
+      }
+      const net = getEntries().at(-1)!.net!
+      expect(net.reqBody).toBe(mode === 'bodies' ? '{"move":"e4"}' : undefined)
+      expect(net.resBody).toBe(mode === 'metadata' ? undefined : '{"reply":"d5"}')
+    }
   })
+
+  it.each<NetworkCaptureMode>(['metadata', 'responses', 'bodies'])(
+    'reflects stored %s mode, preserving it through Clear and close/reopen', (mode) => {
+      uninstallConsoleCapture()
+      localStorage.setItem('gr.debugCaptureMode', mode)
+      installConsoleCapture()
+      console.log('old-history')
+      render(<DebugOverlay />)
+      openOverlay()
+      expect(screen.getByRole('combobox', { name: 'Network capture' })).toHaveValue(mode)
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+      expect(getEntries()).toHaveLength(0)
+      expect(getNetworkCaptureMode()).toBe(mode)
+      openOverlay()
+      expect(screen.queryByRole('dialog')).toBeNull()
+      openOverlay()
+      expect(screen.getByRole('combobox', { name: 'Network capture' })).toHaveValue(mode)
+      expect(localStorage.getItem('gr.debugCaptureMode')).toBe(mode)
+    },
+  )
+
+  it('renders, searches, and copies an asynchronous redacted response captured while closed', async () => {
+    let resolveBody!: (body: string) => void
+    const body = new Promise<string>((resolve) => { resolveBody = resolve })
+    const response = new Response(null)
+    vi.spyOn(response, 'clone').mockReturnValue({ body: null, text: () => body } as Response)
+    uninstallConsoleCapture()
+    window.fetch = vi.fn().mockResolvedValue(response)
+    installConsoleCapture()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    render(<DebugOverlay />)
+    await act(async () => { await window.fetch('/api/result') })
+    openOverlay()
+    expect(screen.getByText(/\/api\/result/)).toBeInTheDocument()
+    fireEvent.change(screen.getByPlaceholderText('filter…'), { target: { value: 'body-only-match' } })
+    expect(screen.queryByText(/\/api\/result/)).toBeNull()
+
+    await act(async () => {
+      resolveBody('{"detail":"body-only-match","token":"private-value"}')
+      await body
+    })
+    expect(screen.getByText(/body-only-match/)).toBeInTheDocument()
+    expect(screen.queryByText(/private-value/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('body-only-match'))
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining('[redacted]'))
+    expect(writeText.mock.lastCall![0]).not.toContain('private-value')
+
+    // Changing mode keeps captured history; subsequent opt-out bodies stay out of Copy.
+    fireEvent.change(screen.getByRole('combobox', { name: 'Network capture' }), {
+      target: { value: 'metadata' },
+    })
+    expect(screen.getByText(/body-only-match/)).toBeInTheDocument()
+    await act(async () => { await window.fetch('/api/opt-out') })
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    expect(writeText.mock.lastCall![0]).not.toContain('/api/opt-out')
+    fireEvent.change(screen.getByPlaceholderText('filter…'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    const copied = writeText.mock.lastCall![0] as string
+    expect(copied).toContain('/api/opt-out')
+    expect(copied.match(/body-only-match/g)).toHaveLength(1)
+    expect(copied).not.toContain('private-value')
+  })
+
 })

@@ -2,16 +2,17 @@
 //
 // Standalone module (no React) so it can initialize before app mount and be used
 // anywhere. Captures console.*, uncaught errors, and fetch metadata (g-l8t2) —
-// plus opt-in, redacted request/response bodies (g-bsg9) — into an in-memory
+// plus redacted responses by default and opt-in request bodies — into an in-memory
 // ring buffer that is mirrored to localStorage, so logs are inspectable on
 // mobile / when devtools is closed via the in-app DebugOverlay.
 //
 // >>> RELEASE BLOCKER (decision #2): capture is ALWAYS on during the dev phase.
 // Before public release, revisit: persistent localStorage capture of all logs is a
-// privacy/security risk. Network BODY capture (g-bsg9) is opt-in (?debugbody=1 /
-// overlay "Bodies" toggle) and redacted (sensitive-key denylist + JWT/Bearer
-// scrub; the Authorization header is never captured) — but that guarantee covers
-// captured fetch bodies ONLY. The console.*/error path (serializeArg below) still
+// privacy/security risk. Network bodies use best-effort redaction (sensitive-key
+// denylist + JWT/Bearer/email scrub; the Authorization header is never captured).
+// Responses default on; requests require "Requests + responses". "Metadata"
+// opts out of both. Arbitrary payloads may still contain personal data. The
+// console.*/error path (serializeArg below) still
 // persists arbitrary args unredacted — a console.log(token) would leak. Required
 // follow-up: redaction in serializeArg, clear-on-logout, and a decision on PROD
 // gating (flag/?debug=1).
@@ -25,6 +26,7 @@ export type LogLevel = 'log' | 'warn' | 'error' | 'info' | 'debug' | 'net'
 export type ConsoleLogLevel = Exclude<LogLevel, 'net'>
 
 export type NetErrorKind = 'http' | 'network' | 'timeout' | 'abort'
+export type NetworkCaptureMode = 'metadata' | 'responses' | 'bodies'
 
 export interface NetMeta {
   method: string // upper-cased
@@ -34,7 +36,7 @@ export interface NetMeta {
   durationMs: number
   errorKind?: NetErrorKind // present only on failures
   requestId?: string | null // X-Request-ID echo, correlates with server logs
-  reqBody?: string // redacted + truncated; only when the body gate was on at request start
+  reqBody?: string // redacted + truncated; only in bodies mode at request start
   resBody?: string // redacted + truncated; attached asynchronously after the response resolves
 }
 
@@ -51,7 +53,8 @@ const PERSIST_ENTRIES = 200
 const PERSIST_DEBOUNCE_MS = 500
 const ARG_TRUNCATE = 2000
 const STORAGE_KEY = 'gr.debugLog'
-const BODY_STORAGE_KEY = 'gr.debugBody'
+const CAPTURE_MODE_STORAGE_KEY = 'gr.debugCaptureMode'
+const LEGACY_BODY_STORAGE_KEY = 'gr.debugBody'
 // Hard cap on bytes read from a response clone. Only needs to exceed the display
 // cap enough to keep redaction reliable (a JWT is short) — we never read
 // megabytes just to show 2 KB.
@@ -332,47 +335,53 @@ function classifyFetchError(error: unknown): NetErrorKind {
   return 'network'
 }
 
-// --- Body capture gate (g-bsg9) ---------------------------------------------
+// --- Network capture preference ---------------------------------------------
 
-// Body capture is OPT-IN: bodies are heavier and higher-risk than metadata
-// (login/register requests carry credentials, their responses carry a JWT), so
-// nothing is captured unless ?debugbody=1 (persisted) or the overlay "Bodies"
-// toggle turned it on. The fetch wrapper reads this flag PER-REQUEST, so a
-// runtime toggle takes effect without reinstalling the capture.
-let bodyCaptureOn = false
+let networkCaptureMode: NetworkCaptureMode = 'responses'
 
-function initBodyGate(): void {
+function isNetworkCaptureMode(value: string | null): value is NetworkCaptureMode {
+  return value === 'metadata' || value === 'responses' || value === 'bodies'
+}
+
+function initNetworkCaptureMode(): void {
+  networkCaptureMode = 'responses'
+  const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '')
+  const explicit = params.get('debugcapture')
+  const legacy = params.get('debugbody')
+  if (isNetworkCaptureMode(explicit)) {
+    setNetworkCaptureMode(explicit)
+    return
+  }
+  if (legacy === '0' || legacy === '1') {
+    setNetworkCaptureMode(legacy === '1' ? 'bodies' : 'metadata')
+    return
+  }
   try {
-    const p =
-      typeof window !== 'undefined'
-        ? new URLSearchParams(window.location.search).get('debugbody')
-        : null
-    if (p === '1') {
-      bodyCaptureOn = true
-      localStorage.setItem(BODY_STORAGE_KEY, '1')
-    } else if (p === '0') {
-      bodyCaptureOn = false
-      localStorage.removeItem(BODY_STORAGE_KEY)
-    } else {
-      bodyCaptureOn = localStorage.getItem(BODY_STORAGE_KEY) === '1'
+    const stored = localStorage.getItem(CAPTURE_MODE_STORAGE_KEY)
+    if (isNetworkCaptureMode(stored)) {
+      networkCaptureMode = stored
+    } else if (localStorage.getItem(LEGACY_BODY_STORAGE_KEY) === '1') {
+      setNetworkCaptureMode('bodies')
     }
   } catch {
-    bodyCaptureOn = false
+    /* unavailable storage — keep the in-memory default */
   }
 }
 
-export function isBodyCaptureEnabled(): boolean {
-  return bodyCaptureOn
+export function getNetworkCaptureMode(): NetworkCaptureMode {
+  return networkCaptureMode
 }
 
-/** Overlay "Bodies" toggle. Applies to the NEXT request (gate checked per-request). */
-export function setBodyCapture(on: boolean): void {
-  bodyCaptureOn = on
+/** Applies to future requests; captured history and in-flight requests keep their mode. */
+export function setNetworkCaptureMode(mode: NetworkCaptureMode): void {
+  networkCaptureMode = mode
   try {
-    if (on) localStorage.setItem(BODY_STORAGE_KEY, '1')
-    else localStorage.removeItem(BODY_STORAGE_KEY)
+    // Persist even metadata: deleting the key would restore the responses default.
+    localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, mode)
+    // Keep legacy preferences if the new write fails, so migration can be retried.
+    localStorage.removeItem(LEGACY_BODY_STORAGE_KEY)
   } catch {
-    /* ignore */
+    /* quota / unavailable — the in-memory choice still applies */
   }
 }
 
@@ -617,17 +626,16 @@ function installFetchCapture(): void {
   // original identity. Assigning to window.fetch gives the arrow the `typeof
   // fetch` contextual type, so input/init are typed for free.
   originalFetch = window.fetch
-  initBodyGate()
+  initNetworkCaptureMode()
   window.fetch = async (input, init) => {
-    // Snapshot the gate ONCE at request start so a mid-flight toggle cannot
-    // produce a half-captured request (reqBody without resBody or vice versa).
-    const captureBodies = bodyCaptureOn
+    // One request-start snapshot owns both body decisions, including failures.
+    const captureMode = networkCaptureMode
     const method = (
       init?.method ?? (input instanceof Request ? input.method : 'GET')
     ).toUpperCase()
     const rawUrl =
       typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    const reqBody = captureBodies ? captureRequestBody(init) : undefined
+    const reqBody = captureMode === 'bodies' ? captureRequestBody(init) : undefined
     const start = performance.now()
     try {
       // .call(window) because we stored the raw unbound fn; bare invocation would
@@ -643,7 +651,7 @@ function installFetchCapture(): void {
         requestId: readRequestIdHeader(res),
         reqBody,
       })
-      if (captureBodies) {
+      if (captureMode !== 'metadata') {
         // Clone happens inside (before anyone reads the stream); the clone is
         // read asynchronously so the caller gets its response back immediately
         // and untouched.
@@ -666,7 +674,7 @@ function installFetchCapture(): void {
 }
 
 function uninstallFetchCapture(): void {
-  bodyCaptureOn = false // test isolation — the gate never leaks across installs
+  networkCaptureMode = 'responses' // test isolation; persisted preferences stay intact
   if (originalFetch) {
     window.fetch = originalFetch
     originalFetch = null

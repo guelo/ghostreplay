@@ -3,16 +3,25 @@ import {
   clear,
   getEntries,
   installConsoleCapture,
-  isBodyCaptureEnabled,
+  getNetworkCaptureMode,
   recordError,
-  setBodyCapture,
+  setNetworkCaptureMode,
   uninstallConsoleCapture,
   type NetMeta,
+  type NetworkCaptureMode,
 } from './debugLog'
 import { getNextOpponentMove } from './api'
 
 const STORAGE_KEY = 'gr.debugLog'
 const BODY_STORAGE_KEY = 'gr.debugBody'
+const CAPTURE_MODE_STORAGE_KEY = 'gr.debugCaptureMode'
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
 
 function readPersisted(): Array<{ level: string; args: string; net?: NetMeta }> {
   const raw = localStorage.getItem(STORAGE_KEY)
@@ -23,10 +32,12 @@ beforeEach(() => {
   vi.useFakeTimers()
   localStorage.removeItem(STORAGE_KEY)
   localStorage.removeItem(BODY_STORAGE_KEY)
+  localStorage.removeItem(CAPTURE_MODE_STORAGE_KEY)
 })
 
 afterEach(() => {
   uninstallConsoleCapture()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
   localStorage.removeItem(STORAGE_KEY)
 })
@@ -240,7 +251,7 @@ describe('fetch capture', () => {
     installConsoleCapture()
 
     const returned = await window.fetch('http://localhost:8000/api/x')
-    // The wrapper never read the body, so it is still readable by the caller.
+    // Capture reads a clone; the original remains readable by the caller.
     await expect(returned.text()).resolves.toBe('{"a":1}')
   })
 
@@ -331,8 +342,7 @@ describe('fetch capture', () => {
   })
 
   it('keeps a 200 with invalid JSON as a net success', async () => {
-    // The wrapper never reads the body, so a downstream parse failure cannot
-    // demote the net row — the HTTP response WAS 200.
+    // A downstream parse failure cannot demote the captured HTTP 200 status.
     window.fetch = vi.fn().mockResolvedValue(new Response('not json', { status: 200 }))
     installConsoleCapture()
 
@@ -365,8 +375,9 @@ describe('body capture', () => {
 
   afterEach(() => {
     uninstallConsoleCapture()
-    setBodyCapture(false)
+    vi.unstubAllGlobals()
     localStorage.removeItem(BODY_STORAGE_KEY)
+    localStorage.removeItem(CAPTURE_MODE_STORAGE_KEY)
     window.history.replaceState({}, '', '/')
     if (typeof originalWindowFetch === 'function') {
       window.fetch = originalWindowFetch
@@ -394,14 +405,243 @@ describe('body capture', () => {
     installConsoleCapture()
   }
 
-  it('captures no bodies when the gate is off (default)', async () => {
-    install('{"token":"eyJa.eyJb.cccc"}')
+  it('defaults to redacted responses without request bodies and preserves the original', async () => {
+    install('{"detail":"ready","token":"response-secret"}')
+    expect(getNetworkCaptureMode()).toBe('responses')
+
+    const res = await window.fetch('/api/x', {
+      method: 'POST', body: '{"move":"e4","password":"request-secret"}',
+    })
+    await expect(res.json()).resolves.toEqual({ detail: 'ready', token: 'response-secret' })
+    await flushMicrotasks()
+
+    expect(netEntries()).toHaveLength(1)
+    expect(netEntries()[0].net!.reqBody).toBeUndefined()
+    expect(netEntries()[0].net!.resBody).toBe('{"detail":"ready","token":"[redacted]"}')
+  })
+
+  it.each<NetworkCaptureMode>(['metadata', 'responses', 'bodies'])(
+    'restores stored %s mode ahead of the legacy flag', (mode) => {
+      localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, mode)
+      localStorage.setItem(BODY_STORAGE_KEY, '1')
+      install('{}')
+      expect(getNetworkCaptureMode()).toBe(mode)
+    },
+  )
+
+  it.each<NetworkCaptureMode>(['metadata', 'responses', 'bodies'])(
+    'persists explicit %s mode across reinstall', (mode) => {
+      install('{}')
+      setNetworkCaptureMode(mode)
+      expect(getNetworkCaptureMode()).toBe(mode)
+      expect(localStorage.getItem(CAPTURE_MODE_STORAGE_KEY)).toBe(mode)
+      uninstallConsoleCapture()
+      // Overlay visibility must not override a capture preference.
+      window.history.replaceState({}, '', '/?debug=1')
+      install('{}')
+      expect(getNetworkCaptureMode()).toBe(mode)
+    },
+  )
+
+  it.each([
+    ['?debugcapture=metadata&debugbody=1', 'bodies', 'metadata'],
+    ['?debugcapture=responses&debugbody=0', 'metadata', 'responses'],
+    ['?debugcapture=bodies&debugbody=0', 'metadata', 'bodies'],
+    ['?debugbody=0', 'bodies', 'metadata'],
+    ['?debugbody=1', 'metadata', 'bodies'],
+    ['?debugcapture=invalid&debugbody=0', 'bodies', 'metadata'],
+    ['?debugcapture=invalid&debugbody=1', 'metadata', 'bodies'],
+    ['?debugcapture=invalid&debugbody=invalid', 'metadata', 'metadata'],
+  ])('resolves URL %s before stored %s', (query, stored, expected) => {
+    localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, stored)
+    window.history.replaceState({}, '', `/${query}`)
+    install('{}')
+    expect(getNetworkCaptureMode()).toBe(expected)
+    expect(localStorage.getItem(CAPTURE_MODE_STORAGE_KEY)).toBe(expected)
+  })
+
+  it.each([null, 'invalid'])('migrates legacy opt-in with new key %s', (stored) => {
+    if (stored) localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, stored)
+    localStorage.setItem(BODY_STORAGE_KEY, '1')
+    install('{}')
+    expect(getNetworkCaptureMode()).toBe('bodies')
+    expect(localStorage.getItem(CAPTURE_MODE_STORAGE_KEY)).toBe('bodies')
+    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBeNull()
+  })
+
+  it.each([null, '0', 'invalid'])('uses responses for unrecognized or absent legacy value %s', (legacy) => {
+    localStorage.setItem(CAPTURE_MODE_STORAGE_KEY, 'invalid')
+    if (legacy) localStorage.setItem(BODY_STORAGE_KEY, legacy)
+    window.history.replaceState({}, '', '/?debugcapture=invalid&debugbody=invalid')
+    install('{}')
+    expect(getNetworkCaptureMode()).toBe('responses')
+  })
+
+  it.each([
+    ['/', 'responses'],
+    ['/?debugcapture=metadata', 'metadata'],
+    ['/?debugbody=1', 'bodies'],
+  ])('keeps fetch working without storage at %s', async (url, expected) => {
+    const fail = () => { throw new Error('storage unavailable') }
+    vi.stubGlobal('localStorage', { getItem: fail, setItem: fail, removeItem: fail })
+    window.history.replaceState({}, '', url)
+    install('{}')
+    expect(getNetworkCaptureMode()).toBe(expected)
+    const res = await window.fetch('/api/x')
+    await expect(res.json()).resolves.toEqual({})
+    setNetworkCaptureMode('metadata')
+    expect(getNetworkCaptureMode()).toBe('metadata')
+  })
+
+  it.each(['/', '/?debugcapture=metadata'])(
+    'retains legacy preference if migration cannot persist at %s', (url) => {
+      const storage = localStorage
+      storage.setItem(BODY_STORAGE_KEY, '1')
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => storage.getItem(key),
+        setItem: () => { throw new Error('quota exceeded') },
+        removeItem: (key: string) => storage.removeItem(key),
+      })
+      window.history.replaceState({}, '', url)
+      install('{}')
+      expect(getNetworkCaptureMode()).toBe(url === '/' ? 'bodies' : 'metadata')
+      expect(storage.getItem(BODY_STORAGE_KEY)).toBe('1')
+      expect(storage.getItem(CAPTURE_MODE_STORAGE_KEY)).toBeNull()
+    },
+  )
+
+  it('removes the legacy preference after a URL choice is persisted', () => {
+    localStorage.setItem(BODY_STORAGE_KEY, '1')
+    window.history.replaceState({}, '', '/?debugbody=0')
+    install('{}')
+    expect(getNetworkCaptureMode()).toBe('metadata')
+    expect(localStorage.getItem(CAPTURE_MODE_STORAGE_KEY)).toBe('metadata')
+    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBeNull()
+  })
+
+  it.each<[NetworkCaptureMode, NetworkCaptureMode]>([
+    ['responses', 'metadata'], ['metadata', 'responses'], ['bodies', 'responses'],
+  ])('keeps request-start %s mode after switching to %s', async (start, next) => {
+    const pending = deferred<Response>()
+    window.fetch = vi.fn().mockReturnValue(pending.promise)
+    installConsoleCapture()
+    setNetworkCaptureMode(start)
+    const request = window.fetch('/api/x', { method: 'POST', body: '{"move":"e4"}' })
+    setNetworkCaptureMode(next)
+    pending.resolve(new Response('{"token":"response-secret"}'))
+    await request
+    await flushMicrotasks()
+    expect(netEntries()).toHaveLength(1)
+    expect(netEntries()[0].net!.reqBody).toBe(start === 'bodies' ? '{"move":"e4"}' : undefined)
+    expect(netEntries()[0].net!.resBody).toBe(
+      start === 'metadata' ? undefined : '{"token":"[redacted]"}',
+    )
+  })
+
+  it.each(['network', 'abort', 'timeout'])('omits request bodies on response-only %s failures', async (kind) => {
+    const err = kind === 'network'
+      ? new TypeError('Failed to fetch')
+      : new DOMException('stopped', kind === 'abort' ? 'AbortError' : 'TimeoutError')
+    const pending = deferred<Response>()
+    const stub = vi.fn().mockReturnValue(pending.promise)
+    window.fetch = stub
+    installConsoleCapture()
+    const init = { method: 'POST', body: '{"move":"e4"}', signal: new AbortController().signal }
+    const request = window.fetch('/api/x', init)
+    setNetworkCaptureMode('bodies')
+    pending.reject(err)
+    await expect(request).rejects.toBe(err)
+    expect(stub).toHaveBeenCalledWith('/api/x', init)
+    expect(netEntries()[0].net).toMatchObject({ status: 0, errorKind: kind })
+    expect(netEntries()[0].net!.reqBody).toBeUndefined()
+    expect(netEntries()[0].net!.resBody).toBeUndefined()
+  })
+
+  it.each([200, 400, 500])('captures response-only HTTP %s without consuming caller content', async (status) => {
+    install('{"detail":"test-result","token":"private-value"}', { status })
+    const res = await window.fetch('/api/x', { method: 'POST', body: '{"move":"e4"}' })
+    await expect(res.json()).resolves.toEqual({ detail: 'test-result', token: 'private-value' })
+    await flushMicrotasks()
+    expect(netEntries()[0].net!.reqBody).toBeUndefined()
+    expect(netEntries()[0].net!.resBody).toContain('test-result')
+    if (status !== 200) {
+      expect(readPersisted()[0].net!.resBody).toContain('test-result')
+      expect(localStorage.getItem(STORAGE_KEY)).not.toContain('private-value')
+    }
+  })
+
+  it('captures an empty response', async () => {
+    window.fetch = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    installConsoleCapture()
+    const res = await window.fetch('/api/x')
+    await flushMicrotasks()
+    expect(await res.text()).toBe('')
+    expect(netEntries()[0].net!.resBody).toBe('')
+  })
+
+  it('captures responses for Request inputs without reading their body', async () => {
+    install('{"move":"d5"}')
+    const request = new Request('http://localhost:8000/api/x', { method: 'POST', body: 'e4' })
+    await window.fetch(request)
+    await flushMicrotasks()
+    expect(netEntries()[0].net).toMatchObject({ method: 'POST', resBody: '{"move":"d5"}' })
+    expect(netEntries()[0].net!.reqBody).toBeUndefined()
+    expect(await request.text()).toBe('e4')
+  })
+
+  it.each(['clear', 'eviction'])('drops delayed response completion after %s', async (removal) => {
+    const body = deferred<string>()
+    const delayed = new Response(null)
+    vi.spyOn(delayed, 'clone').mockReturnValue({ body: null, text: () => body.promise } as Response)
+    window.fetch = vi.fn().mockResolvedValueOnce(delayed)
+      .mockImplementation(() => Promise.resolve(new Response('later')))
+    installConsoleCapture()
+    await window.fetch('/api/old')
+    const before = netEntries()[0]
+    if (removal === 'clear') clear()
+    setNetworkCaptureMode('metadata')
+    for (let i = 0; i < (removal === 'clear' ? 1 : 500); i++) await window.fetch('/api/new')
+    const snapshot = getEntries()
+    body.resolve('late-content')
+    await flushMicrotasks()
+    expect(getEntries()).toBe(snapshot)
+    expect(getEntries().some((entry) => entry.id === before.id)).toBe(false)
+    expect(getEntries().every((entry) => entry.net?.resBody === undefined)).toBe(true)
+    expect(before.net!.resBody).toBeUndefined()
+  })
+
+  it('publishes a new snapshot and entry when a response body attaches', async () => {
+    const body = deferred<string>()
+    const res = new Response(null)
+    vi.spyOn(res, 'clone').mockReturnValue({ body: null, text: () => body.promise } as Response)
+    window.fetch = vi.fn().mockResolvedValue(res)
+    installConsoleCapture()
+    await window.fetch('/api/x')
+    const before = getEntries()
+    body.resolve('{"move":"e4"}')
+    await flushMicrotasks()
+    expect(getEntries()).not.toBe(before)
+    expect(getEntries()[0]).not.toBe(before[0])
+    expect(getEntries()[0].id).toBe(before[0].id)
+    expect(before[0].net!.resBody).toBeUndefined()
+    expect(getEntries()[0].args).toContain('e4')
+  })
+
+  it('metadata mode never reads request bodies or clones responses', async () => {
+    const res = new Response('{"token":"eyJa.eyJb.cccc"}')
+    const clone = vi.spyOn(res, 'clone')
+    window.fetch = vi.fn().mockResolvedValue(res)
+    installConsoleCapture()
+    setNetworkCaptureMode('metadata')
+    const readBody = vi.fn(() => JSON.stringify({ password: 'secret' }))
 
     await window.fetch('http://localhost:8000/api/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ username: 'a', password: 'secret' }),
+      get body() { return readBody() },
     })
     await flushMicrotasks()
+    expect(readBody).not.toHaveBeenCalled()
+    expect(clone).not.toHaveBeenCalled()
 
     const entry = netEntries()[0]
     expect(entry.net!.reqBody).toBeUndefined()
@@ -410,37 +650,9 @@ describe('body capture', () => {
     expect(entry.args).not.toContain('←')
   })
 
-  it('honors ?debugbody=1 / persisted flag / ?debugbody=0 on install', () => {
-    window.history.replaceState({}, '', '/?debugbody=1')
-    install('{}')
-    expect(isBodyCaptureEnabled()).toBe(true)
-    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBe('1')
-    uninstallConsoleCapture()
-
-    // The persisted flag re-arms a later install without the param.
-    window.history.replaceState({}, '', '/')
-    install('{}')
-    expect(isBodyCaptureEnabled()).toBe(true)
-    uninstallConsoleCapture()
-
-    window.history.replaceState({}, '', '/?debugbody=0')
-    install('{}')
-    expect(isBodyCaptureEnabled()).toBe(false)
-    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBeNull()
-  })
-
-  it('setBodyCapture persists the flag and isBodyCaptureEnabled reflects it', () => {
-    setBodyCapture(true)
-    expect(isBodyCaptureEnabled()).toBe(true)
-    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBe('1')
-    setBodyCapture(false)
-    expect(isBodyCaptureEnabled()).toBe(false)
-    expect(localStorage.getItem(BODY_STORAGE_KEY)).toBeNull()
-  })
-
   it('redacts sensitive keys in a JSON request body, keeps username', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/auth/login', {
       method: 'POST',
@@ -455,7 +667,7 @@ describe('body capture', () => {
 
   it('redacts secret-ish keys beyond an exact denylist, keeps debugging identifiers', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', {
       method: 'POST',
@@ -480,7 +692,7 @@ describe('body capture', () => {
 
   it('suppresses assignment-shaped secrets inside JSON string values, keeps bare mentions', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', {
       method: 'POST',
@@ -499,7 +711,7 @@ describe('body capture', () => {
 
   it('suppresses a top-level JSON string body carrying an embedded secret', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     // '"password=hunter2"' IS valid JSON (a string scalar), so it used to skip
     // the sensitive-text fallback entirely.
@@ -515,7 +727,7 @@ describe('body capture', () => {
 
   it('scrubs email addresses out of any captured text', async () => {
     install('{"message":"sent to bob@example.com"}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await flushMicrotasks()
@@ -527,7 +739,7 @@ describe('body capture', () => {
 
   it('reads the response on a clone — the caller stream stays intact', async () => {
     install('{"token":"eyJa.eyJb.cccc"}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     const res = await window.fetch('http://localhost:8000/api/auth/login')
     // The wrapper only read its clone; the original body is still consumable.
@@ -541,7 +753,7 @@ describe('body capture', () => {
 
   it('attaches the response body asynchronously and rebuilds args', async () => {
     install('{"b":2}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', { method: 'POST', body: '{"a":1}' })
     await flushMicrotasks()
@@ -555,7 +767,7 @@ describe('body capture', () => {
   it('never persists a raw password or JWT from a login-shaped exchange', async () => {
     const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl'
     install(`{"token":"${jwt}","user":{"username":"a"}}`)
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/auth/login', {
       method: 'POST',
@@ -573,7 +785,7 @@ describe('body capture', () => {
   it('truncates long bodies at the display cap, after redaction', async () => {
     const big = JSON.stringify({ data: 'x'.repeat(5000) })
     install(big)
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', { method: 'POST', body: big })
     await flushMicrotasks()
@@ -592,7 +804,7 @@ describe('body capture', () => {
     const cloneSpy = vi.spyOn(res, 'clone')
     window.fetch = vi.fn().mockResolvedValue(res)
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/big')
     await flushMicrotasks()
@@ -613,7 +825,7 @@ describe('body capture', () => {
     })
     window.fetch = vi.fn().mockResolvedValue(new Response(stream))
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/big')
     await settle()
@@ -636,7 +848,7 @@ describe('body capture', () => {
     })
     window.fetch = vi.fn().mockResolvedValue(new Response(stream))
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await settle()
@@ -657,7 +869,7 @@ describe('body capture', () => {
     })
     window.fetch = vi.fn().mockResolvedValue(new Response(stream))
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await settle()
@@ -667,7 +879,7 @@ describe('body capture', () => {
 
   it('hides a raw form-encoded string body carrying sensitive keys', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', {
       method: 'POST',
@@ -682,7 +894,7 @@ describe('body capture', () => {
 
   it('structurally redacts URLSearchParams bodies, keeping benign params readable', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', {
       method: 'POST',
@@ -696,7 +908,7 @@ describe('body capture', () => {
 
   it('passes a benign non-JSON string body through, scrubbed', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x', { method: 'POST', body: 'ping' })
 
@@ -705,7 +917,7 @@ describe('body capture', () => {
 
   it('scrubs token shapes out of benign non-JSON response text', async () => {
     install('auth Bearer abc123xyz done')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await flushMicrotasks()
@@ -716,7 +928,7 @@ describe('body capture', () => {
 
   it('flushes a failed row response body immediately, without the debounce timer', async () => {
     install('{"detail":"boom"}', { status: 500 })
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/game/end')
     await flushMicrotasks()
@@ -727,7 +939,7 @@ describe('body capture', () => {
 
   it('keeps a successful row response body on the debounced path', async () => {
     install('{"a":1}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await flushMicrotasks()
@@ -737,52 +949,11 @@ describe('body capture', () => {
     expect(readPersisted()[0]?.net?.resBody).toBe('{"a":1}')
   })
 
-  it('snapshots the gate at request start — mid-flight toggles do not apply', async () => {
-    let resolveFetch!: (r: Response) => void
-    window.fetch = vi
-      .fn()
-      .mockImplementation(() => new Promise<Response>((r) => (resolveFetch = r)))
-    installConsoleCapture()
-    setBodyCapture(true)
-
-    const p = window.fetch('http://localhost:8000/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username: 'a', password: 'secret' }),
-    })
-    setBodyCapture(false) // toggled off while the request is in flight
-    resolveFetch(new Response('{"token":"eyJa.eyJb.cccc"}'))
-    await p
-    await flushMicrotasks()
-
-    const net = netEntries()[0].net!
-    expect(net.reqBody).toContain('[redacted]') // still captured — snapshot was ON
-    expect(net.resBody).toContain('[redacted]')
-    expect(net.resBody).not.toContain('eyJa')
-  })
-
-  it('snapshots the gate at request start — toggling ON mid-flight captures nothing', async () => {
-    let resolveFetch!: (r: Response) => void
-    window.fetch = vi
-      .fn()
-      .mockImplementation(() => new Promise<Response>((r) => (resolveFetch = r)))
-    installConsoleCapture()
-
-    const p = window.fetch('http://localhost:8000/api/x', { method: 'POST', body: '{"a":1}' })
-    setBodyCapture(true)
-    resolveFetch(new Response('{"b":2}'))
-    await p
-    await flushMicrotasks()
-
-    const net = netEntries()[0].net!
-    expect(net.reqBody).toBeUndefined()
-    expect(net.resBody).toBeUndefined()
-  })
-
   it('tolerates a response double without clone()', async () => {
     const double = { status: 200, ok: true, headers: { get: () => null } }
     window.fetch = vi.fn().mockResolvedValue(double as unknown as Response)
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await window.fetch('http://localhost:8000/api/x')
     await flushMicrotasks()
@@ -792,7 +963,7 @@ describe('body capture', () => {
 
   it('represents a non-string request body as a placeholder without consuming it', async () => {
     install('{}')
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
     const blob = new Blob(['x'])
 
     await window.fetch('http://localhost:8000/api/x', { method: 'POST', body: blob })
@@ -805,7 +976,7 @@ describe('body capture', () => {
     const err = new TypeError('Failed to fetch')
     window.fetch = vi.fn().mockRejectedValue(err)
     installConsoleCapture()
-    setBodyCapture(true)
+    setNetworkCaptureMode('bodies')
 
     await expect(
       window.fetch('http://localhost:8000/api/x', {

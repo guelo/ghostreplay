@@ -38,6 +38,7 @@
   padding: 6px 8px;
   border-bottom: 1px solid #2c2f3a;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 
 .debug-overlay__title {
@@ -50,6 +51,7 @@
 }
 
 .debug-overlay__header button,
+.debug-overlay__capture select,
 .debug-chip {
   background: #232634;
   color: #e6e6e6;
@@ -90,14 +92,18 @@
   color: #4fd0e0;
 }
 
-.debug-toggle {
-  opacity: 0.6;
+.debug-overlay__capture {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
 }
 
-.debug-toggle.is-active {
-  opacity: 1;
-  border-color: #2a7f8f; /* mirror .debug-chip--net.is-active — bodies are a net feature */
-  color: #4fd0e0;
+.debug-overlay__capture select {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .debug-overlay__search {
@@ -112,6 +118,7 @@
 }
 
 .debug-overlay__list {
+  min-height: 0;
   list-style: none;
   margin: 0;
   padding: 0;

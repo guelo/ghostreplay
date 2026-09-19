@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
   clear,
   getEntries,
-  isBodyCaptureEnabled,
-  setBodyCapture,
+  getNetworkCaptureMode,
+  setNetworkCaptureMode,
   subscribe,
   type LogEntry,
   type LogLevel,
+  type NetworkCaptureMode,
 } from '../utils/debugLog'
 import './DebugOverlay.css'
 
@@ -25,7 +26,7 @@ export default function DebugOverlay() {
   )
   const [levelFilter, setLevelFilter] = useState<Set<LogLevel>>(new Set(LEVELS))
   const [textFilter, setTextFilter] = useState('')
-  const [bodiesOn, setBodiesOn] = useState(isBodyCaptureEnabled)
+  const [captureMode, setCaptureMode] = useState(getNetworkCaptureMode)
 
   const entries = useSyncExternalStore(subscribe, getEntries)
 
@@ -65,12 +66,6 @@ export default function DebugOverlay() {
     void navigator.clipboard?.writeText(text)
   }
 
-  const toggleBodies = () => {
-    const next = !bodiesOn
-    setBodiesOn(next)
-    setBodyCapture(next)
-  }
-
   return (
     <>
       {/* Discreet mobile corner hotspot. */}
@@ -88,15 +83,21 @@ export default function DebugOverlay() {
             <span className="debug-overlay__count">
               {filtered.length}/{entries.length}
             </span>
-            {/* Opt-in gate for redacted request/response body capture (g-bsg9). */}
-            <button
-              type="button"
-              aria-pressed={bodiesOn}
-              className={'debug-toggle' + (bodiesOn ? ' is-active' : '')}
-              onClick={toggleBodies}
-            >
-              Bodies
-            </button>
+            <label className="debug-overlay__capture">
+              Network capture
+              <select
+                value={captureMode}
+                onChange={(e) => {
+                  const mode = e.target.value as NetworkCaptureMode
+                  setCaptureMode(mode)
+                  setNetworkCaptureMode(mode)
+                }}
+              >
+                <option value="metadata">Metadata</option>
+                <option value="responses">Responses</option>
+                <option value="bodies">Requests + responses</option>
+              </select>
+            </label>
             <button type="button" onClick={copyAll}>Copy</button>
             <button type="button" onClick={() => clear()}>Clear</button>
             <button type="button" onClick={() => setOpen(false)}>✕</button>
