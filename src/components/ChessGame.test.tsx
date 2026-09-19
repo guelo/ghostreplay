@@ -2788,6 +2788,7 @@ describe("ChessGame characterization safeguards", () => {
 
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
         opening_key: "target-fen",
         player_color: "white",
         // Difficulty is re-randomized (g-ncvm), so any sampled bin is valid.
@@ -3477,6 +3478,80 @@ describe("ChessGame characterization safeguards", () => {
     expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["failure", "late success"])("preserves complete history selection over sticky prefs and roots %s", async (outcome) => {
+    const selection = {
+      opening: { opening_key: "history-target", opening_name: "History opening", opening_family: "History family", eco: "D30", depth: 2 },
+      line: ["c2c4", "e7e6", "b1c3", "g8f6", "d2d4", "d7d5"],
+      routeMode: "prefer_line" as const,
+    };
+    localStorage.setItem("ghostreplay_drill_prefs", JSON.stringify({ openingKey: "sticky", playerColor: "white" }));
+    let resolveRoots!: (value: unknown) => void;
+    let rejectRoots!: (error: Error) => void;
+    getOpeningRootsMock.mockImplementation(() => new Promise((resolve, reject) => { resolveRoots = resolve; rejectRoots = reject; }));
+    mockLocation = { pathname: "/play", state: { drillSetup: { selection, playerColor: "black" } } };
+    render(<ChessGame />);
+    await screen.findByRole("combobox");
+    expect(screen.getByRole("combobox")).toHaveTextContent("D30");
+    expect(screen.getByRole("button", { name: /^black$/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/other routes are allowed/);
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.change(screen.getByRole("slider", { name: /fine-tune strictness/i }), { target: { value: "30" } });
+    await act(async () => {
+      if (outcome === "failure") rejectRoots(new Error("roots unavailable"));
+      else resolveRoots({ families: [{ family_name: "Sticky", roots: [{ ...selection.opening, opening_key: "sticky", opening_name: "Sticky" }] }] });
+    });
+    expect(screen.getByRole("combobox")).toHaveTextContent("History opening");
+    expect(screen.getByRole("slider", { name: /fine-tune strictness/i })).toHaveValue("30");
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse({ ...selection.opening, route_mode: "prefer_line", player_color: "black" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /^start drill$/i })); });
+    expect(startDrillMock).toHaveBeenLastCalledWith(expect.objectContaining({ opening_key: "history-target", line: selection.line, route_mode: "prefer_line", player_color: "black", strictness_cp: 30 }));
+    expect(useGameStore.getState()).toMatchObject({ drillRouteMode: "prefer_line", drillLine: selection.line, drillOpeningMetadata: { opening_family: "History family", eco: "D30", depth: 2 } });
+    localStorage.removeItem("ghostreplay_drill_prefs");
+  });
+
+  it("restores sticky color on the next setup opening after a history selection", async () => {
+    localStorage.setItem("ghostreplay_drill_prefs", JSON.stringify({ playerColor: "white" }));
+    mockLocation = { pathname: "/play", state: { drillSetup: {
+      playerColor: "black",
+      selection: {
+        opening: { opening_key: "history-target", opening_name: "History opening", opening_family: "History family", eco: "D30", depth: 2 },
+        line: ["c2c4", "e7e6"], routeMode: "prefer_line",
+      },
+    } } };
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    const { rerender } = render(<ChessGame />);
+    await screen.findByRole("combobox");
+    expect(screen.getByRole("button", { name: /^black$/i })).toHaveAttribute("aria-pressed", "true");
+
+    // Reflect the router's replace after consuming the navigation seed.
+    mockLocation = { pathname: "/play", state: null };
+    rerender(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    });
+
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("combobox")).toHaveTextContent("History opening");
+  });
+
+  it("does not request an opponent move when preferred guidance is unsupported", async () => {
+    mockLocation = { pathname: "/play", state: { drillSetup: { playerColor: "black", selection: {
+      opening: { opening_key: "history-target", opening_name: "History opening", opening_family: "History family", eco: "D30", depth: 2 },
+      line: ["c2c4", "e7e6"], routeMode: "prefer_line",
+    } } } };
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse({ session_id: "unsupported" }));
+    abandonDrillMock.mockResolvedValueOnce({});
+    render(<ChessGame />);
+    fireEvent.click(await screen.findByRole("button", { name: /^standard$/i }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /^start drill$/i })); });
+    expect(await screen.findByText(/cannot honor the selected route guidance/)).toBeInTheDocument();
+    expect(abandonDrillMock).toHaveBeenCalledWith("unsupported", undefined);
+    expect(useGameStore.getState().isGameActive).toBe(false);
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
   it("ad-hoc card drill survives a getOpeningRoots() failure and sends its line", async () => {
     // A /openings card navigates with the target FEN + full line. The roots
     // fetch fails, but the synthetic selection must survive and Start Drill stay
@@ -3517,6 +3592,7 @@ describe("ChessGame characterization safeguards", () => {
 
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
         opening_key: "target-fen",
         player_color: "white",
         engine_elo: expect.any(Number),
@@ -3695,6 +3771,7 @@ describe("ChessGame characterization safeguards", () => {
 
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
         opening_key: "target-fen",
         player_color: "white",
         // Difficulty is re-randomized (g-ncvm), so any sampled bin is valid.
@@ -5741,6 +5818,8 @@ describe("ChessGame opening lineage", () => {
     startDrillMock.mockReset();
     startDrillMock.mockResolvedValue({
       session_id: "session-replacement-drill",
+      opening_key: targetOpeningKey,
+      opening_family: "King's Pawn", eco: "C20", depth: 0, route_mode: "prefer_line",
       drill_state: "active",
       opening_name: "King's Pawn Game",
       strictness_cp: 25,
@@ -5882,12 +5961,16 @@ describe("ChessGame opening lineage", () => {
     startDrillMock
       .mockResolvedValueOnce({
         session_id: "session-mounted-drill",
+        opening_key: "stale-ad-hoc-target",
+        opening_family: "Custom line", eco: null, depth: 2,
         drill_state: "active",
         opening_name: "Stale custom line",
         strictness_cp: 25,
       })
       .mockResolvedValueOnce({
         session_id: "session-lineage-replacement",
+        opening_key: targetOpeningKey,
+        opening_family: "King's Pawn", eco: "C20", depth: 0, route_mode: "prefer_line",
         drill_state: "active",
         opening_name: "King's Pawn Game",
         strictness_cp: 25,
@@ -5960,13 +6043,14 @@ describe("ChessGame opening lineage", () => {
     expect(startDrillMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         opening_key: targetOpeningKey,
-        line: undefined,
+        line: ["e2e4"],
+        route_mode: "prefer_line",
       }),
     );
     expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("shares one roots request and preserves Black side from post-game lineage", async () => {
+  it.each([false, true])("preserves lineage side, then restores sticky color on reopening (overlay already open: %s)", async (overlayAlreadyOpen) => {
     const openingKey = LINEAGE_FEN_E4.split(" ").slice(0, 4).join(" ");
     getOpeningRootsMock.mockResolvedValue({
       families: [
@@ -6014,7 +6098,12 @@ describe("ChessGame opening lineage", () => {
     });
     expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
 
-    const drill = await screen.findByRole("button", { name: /start drill/i });
+    localStorage.setItem("ghostreplay_drill_prefs", JSON.stringify({ playerColor: "white" }));
+    if (overlayAlreadyOpen) {
+      fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    }
+    const drill = within(screen.getByRole("region", { name: /openings played/i }))
+      .getByRole("button", { name: /start drill/i });
     fireEvent.click(drill);
     await waitFor(() => {
       expect(screen.getByRole("combobox")).toHaveTextContent(
@@ -6030,6 +6119,16 @@ describe("ChessGame opening lineage", () => {
       "false",
     );
     expect(getOpeningRootsMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    });
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("combobox")).toHaveTextContent("King's Pawn Game");
   });
 
   it("post-game lineage select jumps the board to the opening's position", async () => {
@@ -7973,6 +8072,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
 
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
         opening_key: "ruy-lopez",
         player_color: "white",
         engine_elo: MAIA_ELO_BINS[0],
@@ -7984,7 +8084,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
   });
 
-  it("reviewed-return Again replays an ad-hoc drill with its line from the durable store", async () => {
+  it("reviewed-return settings and Again preserve preferred route and registry metadata", async () => {
     // The /drill-analysis round trip remounts ChessGame, wiping the component
     // ref. The line lives in the durable store, so Again can still resend it —
     // without it the backend 404s a non-root target FEN.
@@ -7993,6 +8093,8 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
       isGameActive: false,
       drillOpeningKey: "target-fen",
       drillLine: ["e2e4", "c7c5"],
+      drillRouteMode: "prefer_line",
+      drillOpeningMetadata: { opening_family: "Sicilian", eco: "B20", depth: 1 },
       drillOpeningName: "Sicilian Defense",
       drillState: "abandoned",
       drillStrictness: "standard",
@@ -8009,12 +8111,20 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     // Difficulty is re-randomized (g-ncvm); mock pins it to MAIA_ELO_BINS[0].
     vi.spyOn(Math, "random").mockReturnValue(0);
 
+    const { unmount } = render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+    expect(screen.getByRole("combobox")).toHaveTextContent("B20");
+    expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/other routes are allowed/);
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    unmount();
+    setReturnMarker("drill-1");
     render(<ChessGame />);
-
+    startDrillMock.mockResolvedValueOnce({ session_id: "preferred-restart", move_line_revision: 0, opening_key: "target-fen", opening_name: "Sicilian Defense", opening_family: "Sicilian", eco: "B20", depth: 1, route_mode: "prefer_line", drill_state: "active", strictness_cp: 25 });
     fireEvent.click(screen.getByRole("button", { name: /^again$/i }));
 
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "prefer_line",
         opening_key: "target-fen",
         player_color: "white",
         engine_elo: MAIA_ELO_BINS[0],
@@ -8023,6 +8133,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
         line: ["e2e4", "c7c5"],
       });
     });
+    expect(useGameStore.getState().drillOpeningMetadata).toEqual({ opening_family: "Sicilian", eco: "B20", depth: 1 });
   });
 
   it("Analyze re-opens the saved snapshot without rebuilding it", async () => {

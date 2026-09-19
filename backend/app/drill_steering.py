@@ -7,6 +7,7 @@ import chess
 from app.fen import normalize_fen
 from app.game_phase import is_middlegame_position
 from app.opening_densify import RoutingView
+from app.opening_limits import MAX_OPENING_LINE_PLY as MAX_DRILL_LINE_PLY
 from app.opening_transposition_artifact import coverage_structural_edge_is_eligible
 
 
@@ -35,6 +36,9 @@ class DrillRouteMap:
     # dict  → strict played-line map (off-book target). Keyed by normalized FEN
     #         to the single on-route next move; routing ignores the view entirely.
     forward_moves: dict[str, list[DrillRouteMove]] | None = None
+    # Request-local additions for prefer_line; never written into the graph/cache.
+    supplemental_children: dict[str, dict[str, str]] | None = None
+    preferred_ucis: dict[str, str] | None = None
 
     def plies_to_target(self, fen: str) -> int | None:
         return self.plies_by_fen.get(normalize_fen(fen))
@@ -117,7 +121,7 @@ def build_line_route_map(line_ucis: list[str]) -> DrillRouteMap:
     Unlike the BFS book map, "on route" means *following this exact line*: each
     position maps to the single next move that continues it, and success is
     reaching the line's final position. Positions are normalized so the keys
-    match route-check FENs. Lines are short (≤ MAX_TREE_PLY) and built fresh, so
+    match route-check FENs. Lines are short (≤ MAX_DRILL_LINE_PLY) and built fresh, so
     these maps are NOT cached.
 
     Duplicate-position policy: a position is keyed only on its first occurrence,
@@ -160,17 +164,82 @@ def build_line_route_map(line_ucis: list[str]) -> DrillRouteMap:
     )
 
 
+def validate_drill_line(line: list[str] | None, target_fen: str) -> DrillRouteMap:
+    """Validate a saved preference or strict line before using its position keys."""
+    if not line:
+        raise ValueError("Drill line is required")
+    if len(line) > MAX_DRILL_LINE_PLY:
+        raise ValueError("Drill line is too long")
+    board = chess.Board()
+    seen = {normalize_fen(board.fen())}
+    for uci in line:
+        if not isinstance(uci, str):
+            raise ValueError("Invalid move in drill line")
+        try:
+            move = chess.Move.from_uci(uci)
+        except ValueError as exc:
+            raise ValueError(f"Invalid move in drill line: {uci}") from exc
+        if move not in board.legal_moves:
+            raise ValueError(f"Illegal move in drill line: {uci}")
+        board.push(move)
+        fen = normalize_fen(board.fen())
+        if fen in seen:
+            raise ValueError("Drill line revisits a position")
+        seen.add(fen)
+    try:
+        target = normalize_fen(target_fen)
+    except (IndexError, ValueError) as exc:
+        raise ValueError("Invalid target position") from exc
+    if normalize_fen(board.fen()) != target:
+        raise ValueError("Drill line does not reach the target position")
+    return build_line_route_map(line)
+
+
+def _preferred_route_map(
+    routing: RoutingView, target_fen: str, line: list[str] | None,
+) -> DrillRouteMap:
+    saved = validate_drill_line(line, target_fen)
+    children: dict[str, dict[str, str]] = {}
+    parents: dict[str, list[str]] = {}
+    preferred: dict[str, str] = {}
+    for parent, moves in (saved.forward_moves or {}).items():
+        for move in moves:
+            children.setdefault(parent, {})[move.uci] = move.resulting_fen
+            parents.setdefault(move.resulting_fen, []).append(parent)
+            preferred[parent] = move.uci
+
+    distances = {saved.target_fen: 0}
+    queue = [saved.target_fen]
+    for fen in queue:
+        combined_parents = list(parents.get(fen, ()))
+        if routing.has_position(fen):
+            combined_parents.extend(node.fen for node, _ in routing.routing_parents(fen))
+        for parent in combined_parents:
+            if parent not in distances:
+                distances[parent] = distances[fen] + 1
+                queue.append(parent)
+    return DrillRouteMap(
+        target_fen=saved.target_fen, plies_by_fen=distances,
+        supplemental_children=children, preferred_ucis=preferred,
+    )
+
+
 def route_map_for_target(
     routing: RoutingView,
     target_fen: str,
     drill_line: list[str] | None,
+    route_mode: str = "auto",
 ) -> DrillRouteMap:
-    """Pick the route strategy for a target. Shared by route-check + opponent
-    steering so the two never diverge. In-book targets keep the transposition-
-    tolerant book BFS; off-book targets use the strict played line.
+    """Build the accepted-route context shared by route-check and opponent play.
 
-    Off-book targets are NOT in the graph, so densification cannot reach them —
-    they stay on the strict single-line map by design."""
+    Auto keeps book BFS for in-graph targets and a strict line off graph.
+    Prefer_line combines saved edges with the graph, retaining alternate routes
+    and indexing a separate position-based opponent preference.
+    """
+    if route_mode == "prefer_line":
+        return _preferred_route_map(routing, target_fen, drill_line)
+    if route_mode != "auto":
+        raise ValueError("Unknown drill route mode")
     normalized_target = normalize_fen(target_fen)
     if routing.has_position(normalized_target):
         return get_drill_route_map(routing, normalized_target)
@@ -190,11 +259,13 @@ def route_preserving_moves(
         return list(route_map.forward_moves.get(normalize_fen(fen), []))
     normalized_fen = normalize_fen(fen)
     current_distance = route_map.plies_by_fen.get(normalized_fen)
-    if current_distance is None or not routing.has_position(normalized_fen):
+    if current_distance is None:
         return []
 
+    children = dict(routing.routing_children(normalized_fen)) if routing.has_position(normalized_fen) else {}
+    children.update((route_map.supplemental_children or {}).get(normalized_fen, {}))
     moves: list[DrillRouteMove] = []
-    for uci, child_fen in routing.routing_children(normalized_fen).items():
+    for uci, child_fen in children.items():
         child_distance = route_map.plies_by_fen.get(child_fen)
         if child_distance is None:
             continue
@@ -212,6 +283,14 @@ def route_preserving_moves(
         )
 
     return sorted(moves, key=lambda move: (move.plies_to_target, move.uci))
+
+
+def opponent_route_move(
+    routing: RoutingView, route_map: DrillRouteMap, fen: str,
+) -> DrillRouteMove | None:
+    moves = route_preserving_moves(routing, route_map, fen)
+    preferred = (route_map.preferred_ucis or {}).get(normalize_fen(fen))
+    return next((move for move in moves if move.uci == preferred), moves[0] if moves else None)
 
 
 def post_root_structural_moves(
@@ -272,31 +351,7 @@ def route_move_for_uci(
     the result to label played_move_san. It reads routing children purely so it
     cannot disagree with route_preserving_moves about which edges exist.
     """
-    if route_map.forward_moves is not None:
-        # Strict line map: only the exact next line move matches (no graph node).
-        for move in route_map.forward_moves.get(normalize_fen(fen), []):
-            if move.uci == uci:
-                return move
-        return None
-    normalized_fen = normalize_fen(fen)
-    if not routing.has_position(normalized_fen):
-        return None
-    child_fen = routing.routing_children(normalized_fen).get(uci)
-    if child_fen is None:
-        return None
-    plies = route_map.plies_by_fen.get(child_fen)
-    if plies is None:
-        return None
-    try:
-        san = _san_for_uci(normalized_fen, uci)
-    except ValueError:
-        return None
-    return DrillRouteMove(
-        uci=uci,
-        san=san,
-        resulting_fen=child_fen,
-        plies_to_target=plies,
-    )
+    return next((move for move in route_preserving_moves(routing, route_map, fen) if move.uci == uci), None)
 
 
 def safe_san_for_uci(fen: str, uci: str) -> str | None:

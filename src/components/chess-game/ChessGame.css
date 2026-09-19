@@ -2709,3 +2709,12 @@
         transition: opacity 300ms ease;
     }
 }
+
+.drill-route-guidance {
+    min-width: 0;
+    margin: 0.4rem 0 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}

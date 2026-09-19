@@ -598,7 +598,7 @@ describe('HistoryPage', () => {
       player_color: 'white',
       lineage: [
         {
-          opening_key: 'key-ruy',
+          opening_key: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -',
           opening_name: 'Ruy Lopez',
           opening_family: 'Ruy Lopez',
           eco: 'C60',
@@ -629,7 +629,13 @@ describe('HistoryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start Drill' }));
 
     expect(mockNavigate).toHaveBeenCalledWith('/play', {
-      state: { drillSetup: { openingKey: 'key-ruy', playerColor: 'white' } },
+      state: { drillSetup: { selection: {
+        opening: {
+          opening_key: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -',
+          opening_name: 'Ruy Lopez', opening_family: 'Ruy Lopez', eco: 'C60', depth: 0,
+        },
+        line: ['e2e4'], routeMode: 'prefer_line',
+      }, playerColor: 'white' } },
     });
   });
 

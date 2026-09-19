@@ -316,3 +316,23 @@ describe("useGameStore opening deltas", () => {
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
   });
 });
+
+describe("atomic drill selection", () => {
+  it("publishes and clears one complete snapshot, copying the supplied line", () => {
+    useGameStore.setState(useGameStore.getInitialState(), true);
+    const snapshots: unknown[] = [];
+    const unsubscribe = useGameStore.subscribe((s) => snapshots.push({ key: s.drillOpeningKey, line: s.drillLine, metadata: s.drillOpeningMetadata, mode: s.drillRouteMode }));
+    const line = ["e2e4", "c7c5"];
+    useGameStore.getState().setDrillSelection({
+      opening: { opening_key: "target", opening_name: "Sicilian", opening_family: "Sicilian", eco: "B20", depth: 1 },
+      line, routeMode: "prefer_line",
+    });
+    line.push("g1f3");
+    useGameStore.getState().setDrillSelection(null);
+    unsubscribe();
+    expect(snapshots).toEqual([
+      { key: "target", line: ["e2e4", "c7c5"], metadata: { opening_family: "Sicilian", eco: "B20", depth: 1 }, mode: "prefer_line" },
+      { key: null, line: null, metadata: null, mode: "auto" },
+    ]);
+  });
+});

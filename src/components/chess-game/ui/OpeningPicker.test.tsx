@@ -489,3 +489,35 @@ describe("OpeningPicker", () => {
     expect(trigger).toHaveFocus();
   });
 });
+
+// Exercise the actual StartPanel -> picker boundary: only confirmation changes mode.
+import StartPanel from "./StartPanel";
+
+it("preserves preferred guidance through tentative Tree changes and cancel, then switches the same target to auto on confirmation", () => {
+  const opening = { opening_key: treeTarget.targetFen, opening_name: "Sicilian Defense", opening_family: "Sicilian", eco: "B20", depth: 1 };
+  const onStartDrill = vi.fn();
+  render(<StartPanel
+    isDrillMode isStartingGame={false} startError={null}
+    onClose={vi.fn()} onSwitchToPlayMode={vi.fn()} onSwitchToDrillMode={vi.fn()}
+    maiaEloBins={[1000]} seedEngineElo={1000} seedStrictnessCp={25} seedColor="white"
+    seedSelection={{ opening, line: treeTarget.line, routeMode: "prefer_line" }}
+    playerRating={1200} isProvisional={false}
+    openingFamilies={[{ family_name: "Sicilian", roots: [opening] }]}
+    isLoadingOpenings={false} onStartPlay={vi.fn()} onStartDrill={onStartDrill}
+  />);
+  openTree();
+  fireEvent.click(screen.getByRole("button", { name: "Explore e4" }));
+  fireEvent.click(screen.getByRole("button", { name: "Adopt canonical line" }));
+  expect(screen.getByRole("note", { name: "Route guidance", hidden: true })).toHaveTextContent(/other routes are allowed/);
+  fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+  expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/other routes are allowed/);
+  fireEvent.click(screen.getByRole("button", { name: "Start Drill" }));
+  expect(onStartDrill).toHaveBeenLastCalledWith(expect.objectContaining({ selection: { opening, line: treeTarget.line, routeMode: "prefer_line" } }));
+  openTree();
+  fireEvent.click(screen.getByRole("button", { name: "Use this opening" }));
+  expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/automatic/i);
+  fireEvent.click(screen.getByRole("button", { name: "Start Drill" }));
+  expect(onStartDrill).toHaveBeenLastCalledWith(expect.objectContaining({ selection: {
+    opening: expect.objectContaining({ opening_key: opening.opening_key }), line: treeTarget.line, routeMode: "auto",
+  } }));
+});

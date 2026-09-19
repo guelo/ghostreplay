@@ -156,6 +156,7 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
+    "test_drill_route_mode_migration.py::test_pg_route_mode_migration_constraints",
     # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
     "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",

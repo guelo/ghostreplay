@@ -423,6 +423,8 @@ def test_post_root_steering_preserves_compatible_ghost_metadata(
                 "player_color": "white",
                 "engine_elo": 1500,
                 "strictness": "standard",
+                "route_mode": "prefer_line",
+                "line": ["e2e4"],
             },
             headers=auth_headers(user_id=user_id),
         )
@@ -3229,3 +3231,193 @@ def test_abandon_of_unfailed_drill_still_records_abandoned(client, auth_headers,
             assert session.drill_terminal_reason is None, state
             assert session.status == "ended", state
     delta.assert_not_called()
+
+
+# Preferred routes are local supplemental topology, not a required player script.
+def _preferred_start(client, auth_headers, target, line, color='white'):
+    return client.post('/api/drills/start', headers=auth_headers(), json={
+        'opening_key': target, 'player_color': color, 'engine_elo': 1500,
+        'strictness': 'standard', 'route_mode': 'prefer_line', 'line': line,
+    })
+
+
+def test_registered_preferred_route_validation_and_authoritative_metadata(client, auth_headers, db_session):
+    from test_drill_steering import ENGLISH, _positions
+
+    target = _positions(ENGLISH)[-1]
+    with patch('app.api.drills.get_opening_roots', return_value=_roots_for(target)):
+        response = _preferred_start(client, auth_headers, target, ENGLISH)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body['route_mode'] == 'prefer_line'
+    assert body['depth'] == 1 and body['depth'] != len(ENGLISH)
+    assert body['eco'] == 'T00' and body['opening_family'] == 'Test Root'
+    session = db_session.get(GameSession, uuid.UUID(body['session_id']))
+    assert session.drill_route_mode == 'prefer_line'
+    assert session.drill_line.split() == ENGLISH
+
+
+def test_invalid_preferred_requests_create_no_session(client, auth_headers, db_session):
+    from test_drill_steering import ENGLISH, _positions
+
+    target = _positions(ENGLISH)[-1]
+    count = db_session.query(GameSession).count()
+    for line in (None, [], ['0000'], ['bad'], ['e2e4', 'e2e4'], ['e2e4'],
+                 ENGLISH * 14, ['g1f3', 'g8f6', 'f3g1', 'f6g8']):
+        with patch('app.api.drills.get_opening_roots', return_value=_roots_for(target)):
+            response = _preferred_start(client, auth_headers, target, line)
+        assert response.status_code == 422, response.text
+        assert db_session.query(GameSession).count() == count
+    response = _preferred_start(client, auth_headers, 'invalid-target', ENGLISH)
+    assert response.status_code == 422
+    assert db_session.query(GameSession).count() == count
+
+
+def test_preferred_english_guidance_both_sides_and_missing_edges(client, auth_headers, db_session):
+    from test_drill_steering import ENGLISH, QGD, _positions, _routing_view
+
+    # The English intermediate positions are missing from this graph. Its canonical
+    # and c4/d5 branches still remain accepted; the saved English edges bridge them.
+    reentry = ['g1f3', 'g8f6', 'f3g1', 'f6g8', 'c2c4']
+    routing = _routing_view([QGD, reentry, ['c2c4', 'd7d5', 'd2d4', 'e7e6', 'b1c3', 'g8f6']])
+    target = _positions(ENGLISH)[-1]
+    with (
+        patch('app.api.drills.get_opening_roots', return_value=_roots_for(target)),
+        patch('app.api.drills.routing_view', return_value=routing),
+        patch('app.api.game.routing_view', return_value=routing),
+    ):
+        for color, prefix, next_uci in [('white', ENGLISH[:1], 'e7e6'), ('black', [], 'c2c4')]:
+            started = _preferred_start(client, auth_headers, target, ENGLISH, color)
+            sid = started.json()['session_id']
+            response = client.post('/api/game/next-opponent-move', headers=auth_headers(), json={
+                'session_id': sid, 'fen': _positions(prefix)[-1], 'moves': prefix,
+            })
+            assert response.status_code == 200, response.text
+            assert response.json()['move']['uci'] == next_uci
+        # White's d4 alternative is accepted, and the opponent falls back to d5.
+        started = _preferred_start(client, auth_headers, target, ENGLISH)
+        sid = started.json()['session_id']
+        checked = client.post(f'/api/drills/{sid}/route-check', headers=auth_headers(), json={
+            'current_fen': _positions(QGD[:1])[-1], 'current_ply': 1,
+        })
+        assert checked.json()['status'] == 'on_route'
+        response = client.post('/api/game/next-opponent-move', headers=auth_headers(), json={
+            'session_id': sid, 'fen': _positions(QGD[:1])[-1], 'moves': QGD[:1],
+        })
+        assert response.json()['move']['uci'] == 'd7d5'
+        resumed = client.post('/api/game/next-opponent-move', headers=auth_headers(), json={
+            'session_id': sid, 'fen': _positions(reentry)[-1], 'moves': reentry,
+        })
+        assert resumed.status_code == 200, resumed.text
+        assert resumed.json()['move']['uci'] == 'e7e6'
+        unreachable = client.post(f'/api/drills/{sid}/route-check', headers=auth_headers(), json={
+            'current_fen': _positions(['a2a4'])[-1], 'current_ply': 1,
+            'previous_fen': _positions([])[0], 'played_uci': 'a2a4',
+        })
+        assert unreachable.json()['status'] == 'failed'
+
+
+def _preferred_alternate_arrival(client, auth_headers, db_session, *, player_arrival):
+    from test_drill_steering import _positions, _routing_view
+
+    # Both pawn two-step moves replace two saved one-step moves. Actual root ply
+    # differs from the saved line for both arrival proofs (3 vs 5, and 2 vs 4).
+    saved = ['d2d3', 'e7e6', 'd3d4', 'e6e5'] + (['c2c4'] if player_arrival else [])
+    actual = ['d2d4', 'e7e5'] + (['c2c4'] if player_arrival else [])
+    fens = _positions(actual)
+    target = fens[-1]
+    routing = _routing_view([actual])
+    with (
+        patch('app.api.drills.get_opening_roots', return_value=_roots_for(target)),
+        patch('app.api.drills.routing_view', return_value=routing),
+        patch('app.api.game.routing_view', return_value=routing),
+    ):
+        sid = _preferred_start(client, auth_headers, target, saved).json()['session_id']
+        served = client.post('/api/game/next-opponent-move', headers=auth_headers(), json={
+            'session_id': sid, 'fen': fens[1], 'moves': actual[:1],
+        })
+        assert served.status_code == 200, served.text
+        decision = served.json()
+        assert decision['move']['uci'] == 'e7e5'
+        session = db_session.get(GameSession, uuid.UUID(sid))
+        db_session.refresh(session)
+        assert session.drill_state == 'active'
+        assert session.drill_root_reached_ply is None
+        payload = {'current_fen': target, 'current_ply': len(actual)}
+        if player_arrival:
+            payload.update(previous_fen=fens[-2], played_uci=actual[-1])
+        else:
+            assert decision['drill_route']['status'] == 'root_pending'
+            payload['decision_id'] = decision['decision_id']
+        confirmed = client.post(f'/api/drills/{sid}/route-check', headers=auth_headers(), json=payload)
+        assert confirmed.status_code == 200, confirmed.text
+        assert confirmed.json()['status'] == 'root_reached'
+        assert confirmed.json()['drill_root_reached_ply'] == len(actual) != len(saved)
+
+
+def test_preferred_player_alternate_arrival_uses_actual_boundary(client, auth_headers, db_session):
+    _preferred_alternate_arrival(client, auth_headers, db_session, player_arrival=True)
+
+
+def test_preferred_opponent_alternate_arrival_uses_actual_boundary(client, auth_headers, db_session):
+    _preferred_alternate_arrival(client, auth_headers, db_session, player_arrival=False)
+
+
+def test_preferred_preparation_precedes_lock_and_replay_skips_it(client, auth_headers, monkeypatch):
+    from app.api import game as game_api
+    from test_drill_steering import ENGLISH, _positions, _routing_view
+
+    routing = _routing_view([ENGLISH])
+    target = _positions(ENGLISH)[-1]
+    events = []
+    real_prepare = game_api.route_map_for_target
+    real_lock = game_api.for_no_key_update
+    def prepare(*args, **kwargs):
+        events.append('prepare')
+        return real_prepare(*args, **kwargs)
+    def lock(query):
+        events.append('lock')
+        return real_lock(query)
+    monkeypatch.setattr(game_api, 'route_map_for_target', prepare)
+    monkeypatch.setattr(game_api, 'for_no_key_update', lock)
+    monkeypatch.setattr(game_api, 'routing_view', lambda _: routing)
+    with patch('app.api.drills.get_opening_roots', return_value=_roots_for(target)):
+        sid = _preferred_start(client, auth_headers, target, ENGLISH).json()['session_id']
+    payload = {'session_id': sid, 'fen': _positions(ENGLISH[:1])[-1], 'moves': ENGLISH[:1]}
+    first = client.post('/api/game/next-opponent-move', headers=auth_headers(), json=payload)
+    assert first.status_code == 200, first.text
+    assert events == ['prepare', 'lock']
+    events.clear()
+    replay = client.post('/api/game/next-opponent-move', headers=auth_headers(), json=payload)
+    assert replay.json() == first.json()
+    assert events == []
+
+
+def test_preferred_start_rejects_incomplete_target_fen(client, auth_headers, db_session):
+    board = chess.Board()
+    board.push_uci('e2e4')
+    before = db_session.query(GameSession).count()
+    # python-chess accepts placement-only input, but route normalization needs
+    # the position fields. This must remain a controlled 4xx, not IndexError.
+    response = _preferred_start(client, auth_headers, board.board_fen(), ['e2e4'])
+    assert response.status_code == 422
+    assert response.json()['detail'] == 'Invalid target position'
+    assert db_session.query(GameSession).count() == before
+
+
+def test_malformed_saved_preference_yields_controlled_route_errors(client, auth_headers, db_session):
+    with patch('app.api.drills.get_opening_roots', return_value=_roots()):
+        sid = _preferred_start(client, auth_headers, ROOT_FEN, ['e2e4'], 'black').json()['session_id']
+    session = db_session.get(GameSession, uuid.UUID(sid))
+    session.drill_line = 'illegal'
+    db_session.commit()
+    for endpoint, payload in [
+        (f'/api/drills/{sid}/route-check', {'current_fen': START_FEN, 'current_ply': 0}),
+        ('/api/game/next-opponent-move', {'session_id': sid, 'fen': START_FEN, 'moves': []}),
+    ]:
+        response = client.post(endpoint, headers=auth_headers(), json=payload)
+        assert response.status_code == 400
+        assert response.json()['detail'] == 'Drill route is unavailable'
+    db_session.refresh(session)
+    assert session.drill_state == 'active'
+    assert session.drill_root_reached_ply is None

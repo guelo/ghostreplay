@@ -217,6 +217,14 @@ class GameSession(Base):
             "or (session_mode = 'drill' and drill_state is not null))",
             name="ck_game_sessions_mode_drill_state",
         ),
+        CheckConstraint(
+            "drill_route_mode in ('auto','prefer_line')",
+            name="ck_game_sessions_drill_route_mode",
+        ),
+        CheckConstraint(
+            "drill_route_mode != 'prefer_line' or (session_mode = 'drill' and drill_line is not null)",
+            name="ck_game_sessions_prefer_line_requires_drill_line",
+        ),
         CheckConstraint("rated_start_ply is null or rated_start_ply >= 0", name="ck_game_sessions_rated_start_ply"),
         CheckConstraint(
             "drill_root_reached_ply is null or drill_root_reached_ply >= 0",
@@ -317,9 +325,12 @@ class GameSession(Base):
     session_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
     drill_state: Mapped[str | None] = mapped_column(String(12))
     drill_opening_key: Mapped[str | None] = mapped_column(Text)
-    # Space-joined UCI line from the start position to the ad-hoc drill target
-    # (encode_uci_line / decode_uci_line). NULL for registered-root drills.
+    # Space-joined UCI route: strict for off-book auto, preferred for prefer_line.
+    # Registered auto drills have no saved line (encode_uci_line / decode_uci_line).
     drill_line: Mapped[str | None] = mapped_column(Text)
+    drill_route_mode: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="auto", server_default="auto",
+    )
     drill_strictness: Mapped[str | None] = mapped_column(String(12))
     drill_strictness_cp: Mapped[int | None] = mapped_column(Integer)
     drill_terminal_reason: Mapped[str | None] = mapped_column(String(20))

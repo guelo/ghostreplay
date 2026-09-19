@@ -41,6 +41,7 @@ from app.opening_transposition_artifact import (
 )
 from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
+from app.opening_limits import MAX_OPENING_LINE_PLY as MAX_TREE_PLY
 from app.opening_quality import mate_to_cp
 from app.opening_rootcalc import (
     SYNTHETIC_ROOT_FAMILY,
@@ -54,9 +55,6 @@ from app.opening_score_delta import OpeningScoreDeltaItem, read_opening_score_de
 from app.security import TokenPayload, get_current_user
 from app.tree_eval import lookup_move_evals, lookup_root_eval
 
-# Hard ply ceiling for a single resolved move line. Bounds replay/BFS work and
-# truncates a pathologically deep (or adversarial) deep-link URL.
-MAX_TREE_PLY = 80
 SLOW_OPENING_TREE_LOG_MS = 1000.0
 
 logger = logging.getLogger(__name__)

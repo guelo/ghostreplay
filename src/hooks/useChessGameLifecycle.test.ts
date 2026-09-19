@@ -1568,6 +1568,7 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
       opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
       player_color: "white",
       engine_elo: 1000,
@@ -1806,6 +1807,7 @@ describe("useChessGameLifecycle", () => {
 
     // The card's UCI line rides along so the backend can validate + persist it.
     expect(startDrillMock).toHaveBeenCalledWith({
+      route_mode: "auto",
       opening_key: "target-fen",
       player_color: "white",
       engine_elo: 1000,
@@ -2989,5 +2991,36 @@ describe("useChessGameLifecycle", () => {
 
       expect(onGameFinished).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe("preferred drill session contract", () => {
+  const options = { openingKey: "submitted-fen", playerColor: "white" as const, engineElo: 1000, strictness: "standard" as const, strictnessCp: 25, routeMode: "prefer_line" as const, line: ["e2e4", "c7c5"] };
+  const response = { session_id: "preferred-session", move_line_revision: 0, drill_state: "active", opening_key: "canonical-fen", opening_name: "Sicilian Defense", opening_family: "Sicilian", eco: "B20", depth: 1, route_mode: "prefer_line" };
+
+  it("retains response-owned metadata/mode and a copied line, then clears them on a normal start", async () => {
+    const { result } = setup();
+    startDrillMock.mockResolvedValueOnce(response);
+    await act(async () => { await result.current.handleNewDrill(options); });
+    expect(startDrillMock).toHaveBeenLastCalledWith(expect.objectContaining({ route_mode: "prefer_line", line: options.line }));
+    const store = useGameStore.getState();
+    expect(store).toMatchObject({ drillOpeningKey: "canonical-fen", drillOpeningName: "Sicilian Defense", drillOpeningMetadata: { opening_family: "Sicilian", eco: "B20", depth: 1 }, drillRouteMode: "prefer_line", drillLine: options.line });
+    expect(store.drillLine).not.toBe(options.line);
+    abandonDrillMock.mockResolvedValueOnce({});
+    startGameMock.mockResolvedValueOnce({ session_id: "normal-session", move_line_revision: 0 });
+    await act(async () => { await result.current.handleNewGame("white"); });
+    expect(useGameStore.getState()).toMatchObject({ drillOpeningMetadata: null, drillRouteMode: "auto", drillLine: null, drillOpeningKey: null });
+  });
+
+  it.each([undefined, "auto", "unknown"])("rejects unsupported mode %s without installing the new session, even if cleanup fails", async (route_mode) => {
+    const { result, coordinator, setStartError } = setup({ isGameActive: true, isRated: false });
+    useGameStore.setState({ drillOpeningKey: "old", drillOpeningName: "Old", drillOpeningMetadata: { opening_family: "Old", eco: "A00", depth: 4 }, drillLine: ["a2a4"], drillRouteMode: "prefer_line", drillState: "active" });
+    abandonDrillMock.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("cleanup unavailable"));
+    startDrillMock.mockResolvedValueOnce({ ...response, route_mode });
+    await act(async () => { expect(await result.current.handleNewDrill(options)).toBeNull(); });
+    expect(abandonDrillMock).toHaveBeenLastCalledWith("preferred-session", 0);
+    expect(setStartError).toHaveBeenCalledWith(expect.stringMatching(/cannot honor.*route guidance/));
+    expect(coordinator.startSession).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toMatchObject({ sessionId: "session-123", isGameActive: false, drillState: "abandoned", drillOpeningKey: "old", drillRouteMode: "prefer_line", drillOpeningMetadata: { opening_family: "Old", eco: "A00", depth: 4 } });
   });
 });

@@ -257,7 +257,7 @@ describe("GameOpeningLineage", () => {
 
   it("fires onStartDrill from the Start Drill button inside the card", async () => {
     const user = userEvent.setup();
-    const item = makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" });
+    const item = makeItem({ opening_key: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -", opening_name: "Ruy Lopez", moves: ["e4"] });
     const onStartDrill = vi.fn();
     renderLineage([item], { onStartDrill });
 
@@ -265,7 +265,27 @@ describe("GameOpeningLineage", () => {
     await user.click(screen.getByRole("button", { name: /Start Drill/ }));
 
     expect(onStartDrill).toHaveBeenCalledTimes(1);
-    expect(onStartDrill).toHaveBeenCalledWith(item);
+    expect(onStartDrill).toHaveBeenCalledWith(item, ["e2e4"]);
+  });
+
+  it("disables only drilling for an invalid prefix with an accessible reason", async () => {
+    const item = makeItem({ opening_key: "invalid", opening_name: "Unavailable", moves: ["e4"] });
+    const { onStartDrill, onSelectRoot } = renderLineage([item]);
+    fireEvent.click(screen.getByRole("button", { name: /Select Unavailable/ }));
+    const start = screen.getByRole("button", { name: "Start Drill" });
+    expect(start).toBeDisabled();
+    expect(start).toHaveAccessibleDescription(/does not reach/);
+    expect(screen.getByRole("link", { name: "View in Openings" })).toHaveAttribute("href");
+    expect(onSelectRoot).toHaveBeenCalledWith(item);
+    fireEvent.click(start);
+    expect(onStartDrill).not.toHaveBeenCalled();
+  });
+
+  it("launches a locally derived card before score hydration", () => {
+    const item = makeItem({ opening_key: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -", moves: ["e4"] });
+    const { onStartDrill } = renderLineage([item], { pendingScoreIndices: new Set([0]), activeMoveIndex: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "Start Drill" }));
+    expect(onStartDrill).toHaveBeenCalledWith(item, ["e2e4"]);
   });
 
   it("shows the no-data grade token and em-dash score for a null-score opening", () => {

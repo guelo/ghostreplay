@@ -1,6 +1,7 @@
 import type { SetStateAction } from "react";
 import { create } from "zustand";
-import type { DrillSessionState, DrillStrictness, OpeningScoreDeltaItem, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
+import type { DrillSelection } from "../openings/drillSelection";
+import type { DrillRouteMode, OpeningRootItem, DrillSessionState, DrillStrictness, OpeningScoreDeltaItem, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 import {
@@ -87,11 +88,10 @@ export type GameState = {
   isRated: boolean;
   isPracticeContinuation: boolean;
   drillOpeningKey: string | null;
-  // Ad-hoc card drills: the full UCI line to the target FEN. Durable (not a
-  // component ref) so it survives the /drill-analysis route round trip and the
-  // reviewed-return "Again" can replay a non-root drill. null for registered
-  // roots (routed via the book BFS, no line needed).
+  // Saved route and response metadata survive analysis remounts and Again.
   drillLine: string[] | null;
+  drillRouteMode: DrillRouteMode;
+  drillOpeningMetadata: Pick<OpeningRootItem, "opening_family" | "eco" | "depth"> | null;
   drillOpeningName: string | null;
   drillState: DrillSessionState | null;
   drillStrictness: DrillStrictness | null;
@@ -152,9 +152,7 @@ export type GameActions = {
   setEngineElo: (update: SetStateAction<number>) => void;
   setIsRated: (update: SetStateAction<boolean>) => void;
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
-  setDrillOpeningKey: (update: SetStateAction<string | null>) => void;
-  setDrillLine: (update: SetStateAction<string[] | null>) => void;
-  setDrillOpeningName: (update: SetStateAction<string | null>) => void;
+  setDrillSelection: (selection: DrillSelection | null) => void;
   setDrillState: (update: SetStateAction<DrillSessionState | null>) => void;
   setDrillStrictness: (
     update: SetStateAction<DrillStrictness | null>,
@@ -236,6 +234,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   isPracticeContinuation: false,
   drillOpeningKey: null,
   drillLine: null,
+  drillRouteMode: "auto",
+  drillOpeningMetadata: null,
   drillOpeningName: null,
   drillState: null,
   drillStrictness: null,
@@ -281,11 +281,17 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({
       isPracticeContinuation: resolve(u, s.isPracticeContinuation),
     })),
-  setDrillOpeningKey: (u) =>
-    set((s) => ({ drillOpeningKey: resolve(u, s.drillOpeningKey) })),
-  setDrillLine: (u) => set((s) => ({ drillLine: resolve(u, s.drillLine) })),
-  setDrillOpeningName: (u) =>
-    set((s) => ({ drillOpeningName: resolve(u, s.drillOpeningName) })),
+  setDrillSelection: (selection) => set({
+    drillOpeningKey: selection?.opening.opening_key ?? null,
+    drillOpeningName: selection?.opening.opening_name ?? null,
+    drillLine: selection?.line ? [...selection.line] : null,
+    drillRouteMode: selection?.routeMode ?? "auto",
+    drillOpeningMetadata: selection ? {
+      opening_family: selection.opening.opening_family,
+      eco: selection.opening.eco,
+      depth: selection.opening.depth,
+    } : null,
+  }),
   setDrillState: (u) =>
     set((s) => ({ drillState: resolve(u, s.drillState) })),
   setDrillStrictness: (u) =>

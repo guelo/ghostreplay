@@ -97,8 +97,7 @@ const makeProps = () => {
     // Mirrors the force-always production default (g-09mu): no tier pre-selected.
     seedStrictnessCp: null,
     seedColor: "white" as const,
-    seedOpening: null,
-    seedLine: null,
+    seedSelection: null,
     playerRating: 1200,
     isProvisional: false,
     onStartPlay,

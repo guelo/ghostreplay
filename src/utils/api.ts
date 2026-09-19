@@ -567,6 +567,7 @@ interface StartGameRequest {
 }
 
 // ---- Drill types --------------------------------------------------
+export type DrillRouteMode = 'auto' | 'prefer_line'
 export type DrillStrictness = 'lenient' | 'standard' | 'strict'
 export type DrillSessionState =
   | 'active'
@@ -583,15 +584,17 @@ export interface DrillStartRequest {
   // Always required on new drills — the slider always produces a value.
   // The response type has strictness_cp? because legacy sessions may lack it.
   strictness_cp: number
-  // Ad-hoc card drills: the full UCI line from the start to the target FEN
-  // (opening_key). Omitted for registered-root drills.
+  // Saved route from the standard start; required for prefer_line.
   line?: string[]
+  route_mode?: DrillRouteMode
 }
 
 export interface DrillSessionContract {
   session_id: string
   mode: string
   drill_state: DrillSessionState
+  // Older servers omit this; only an auto request accepts that omission.
+  route_mode?: DrillRouteMode
   opening_key: string
   opening_name: string
   opening_family: string

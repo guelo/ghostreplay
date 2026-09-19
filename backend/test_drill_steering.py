@@ -185,3 +185,81 @@ def test_post_root_overlay_uses_parent_and_child_boundary(monkeypatch):
     )
 
     assert post_root_structural_moves(routing, parent) == []
+
+
+ENGLISH = ['c2c4', 'e7e6', 'b1c3', 'g8f6', 'd2d4', 'd7d5']
+QGD = ['d2d4', 'd7d5', 'c2c4', 'e7e6', 'b1c3', 'g8f6']
+
+
+def test_preferred_route_preserves_alternates_fallback_and_position_reentry():
+    from app.drill_steering import opponent_route_move, route_map_for_target
+
+    alternate = ['c2c4', 'd7d5', 'd2d4', 'e7e6', 'b1c3', 'g8f6']
+    reentry = ["g1f3", "g8f6", "f3g1", "f6g8"] + ENGLISH[:1]
+    routing = _routing_view([QGD, ENGLISH, alternate, reentry])
+    positions = _positions(ENGLISH)
+    route = route_map_for_target(routing, positions[-1], ENGLISH, 'prefer_line')
+    # Preference wins over the alphabetically first equally short graph choice.
+    assert [m.uci for m in route_preserving_moves(routing, route, positions[1])] == ['d7d5', 'e7e6']
+    assert opponent_route_move(routing, route, positions[1]).uci == 'e7e6'
+    # Player deviations still reach the target; off-line opponent falls back.
+    off_line = _positions(alternate)[2]
+    assert route.is_on_route(off_line)
+    assert off_line not in route.preferred_ucis
+    assert opponent_route_move(routing, route, off_line).uci == 'd2d4'
+    # Accepted actual play can repeat even though saved preferences cannot.
+    assert all(route.is_on_route(fen) for fen in _positions(reentry))
+    assert _positions(reentry)[-1] == positions[1]
+    assert opponent_route_move(routing, route, _positions(reentry)[-1] + ' 9 7').uci == 'e7e6'
+    assert not route.is_on_route(_positions(['a2a4'])[-1])
+    # Graph and saved-line children are deduplicated, also for correction metadata.
+    moves = route_preserving_moves(routing, route, positions[1])
+    assert len({m.uci for m in moves}) == len(moves)
+    assert route_move_for_uci(routing, route, positions[1], 'e7e6') == moves[1]
+
+
+def test_supplemental_edges_admit_graph_ancestors_and_off_graph_positions():
+    from app.drill_steering import get_drill_route_map, route_map_for_target, opponent_route_move
+
+    # Neither branch reaches the target in the graph. The graph-only d4 ancestor
+    # reconnects through a supplied e6 edge, then traverses off-graph positions.
+    saved = ['c2c4', 'd7d5', 'd2d4', 'e7e6', 'b1c3', 'g8f6']
+    branch = ['d2d4', 'd7d5', 'c2c4']
+    # The target absent from the graph exercises the combined BFS boundary.
+    routing = _routing_view([branch, saved[:3]])
+    positions = _positions(saved)
+    auto = get_drill_route_map(routing, positions[-1])
+    route = route_map_for_target(routing, positions[-1], saved, 'prefer_line')
+    assert route.is_on_route(_positions(branch)[1])
+    assert not routing.has_position(positions[4])
+    assert opponent_route_move(routing, route, positions[4]).uci == 'b1c3'
+    assert auto.plies_by_fen == {}
+    assert route.forward_moves is None
+
+
+def test_two_preferences_leave_graph_and_auto_cache_unchanged():
+    from app.drill_steering import get_drill_route_map, route_map_for_target, opponent_route_move
+
+    routing = _routing_view([ENGLISH, QGD])
+    target = _positions(ENGLISH)[-1]
+    auto = get_drill_route_map(routing, target)
+    original = dict(auto.plies_by_fen)
+    english = route_map_for_target(routing, target, ENGLISH, 'prefer_line')
+    qgd = route_map_for_target(routing, target, QGD, 'prefer_line')
+    start = _positions([])[0]
+    assert opponent_route_move(routing, english, start).uci == 'c2c4'
+    assert opponent_route_move(routing, qgd, start).uci == 'd2d4'
+    assert get_drill_route_map(routing, target) is auto
+    assert auto.plies_by_fen == original
+    assert auto.preferred_ucis is None and auto.supplemental_children is None
+
+
+def test_invalid_stored_preference_is_rejected():
+    import pytest
+    from app.drill_steering import route_map_for_target
+
+    routing = _routing_view([QGD])
+    for line in (None, [], ['0000'], ['e2e4'], ['bad'], ['e2e4'] * 81,
+                 ['g1f3', 'g8f6', 'f3g1', 'f6g8']):
+        with pytest.raises(ValueError):
+            route_map_for_target(routing, _positions(QGD)[-1], line, 'prefer_line')

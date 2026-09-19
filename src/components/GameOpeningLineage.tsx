@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import OpeningTreeNodeCard, {
   type OpeningTreeNodeView,
@@ -15,6 +15,7 @@ import {
   badgeFor,
   describeOpeningDeltaBadge,
 } from "../utils/openingDeltaBadge";
+import { lineageDrillRoute } from "../openings/lineageDrill";
 import "./GameOpeningLineage.css";
 
 interface GameOpeningLineageProps {
@@ -33,7 +34,7 @@ interface GameOpeningLineageProps {
   onSelectRoot?: (item: OpeningLineageItem) => void;
   /** When provided, the expanded card shows a Start Drill button. Omit to hide
    *  it (regular/converted live game panel). */
-  onStartDrill?: (item: OpeningLineageItem) => void;
+  onStartDrill?: (item: OpeningLineageItem, line: string[]) => void;
   /** Whether the server's opening scores are still being computed (g-a5v3).
    *  "pending" makes each card render a loading placeholder in place of its
    *  score, so a cold cache reads as "loading" rather than "unscored".
@@ -160,6 +161,12 @@ function GameOpeningLineage({
   activeMoveIndex,
   revealIdentity = "static",
 }: GameOpeningLineageProps) {
+  const reasonId = useId();
+  const drillingAvailable = onStartDrill !== undefined;
+  const drillRoutes = useMemo(
+    () => drillingAvailable ? lineage.map((item) => lineageDrillRoute(item, startPly)) : [],
+    [lineage, startPly, drillingAvailable],
+  );
   // A manual expand/collapse, stamped with the synchronization state it was made
   // against (see `syncToken`). Cards are addressed by a per-occurrence key
   // (opening_key + index), not the bare opening_key: a lineage can (defensively)
@@ -265,6 +272,8 @@ function GameOpeningLineage({
       <p className="game-opening-lineage__label">Openings</p>
       <ol className="game-opening-lineage__list">
         {lineage.map((item, index) => {
+          const route = drillRoutes[index];
+          const routeReasonId = `${reasonId}-${index}`;
           const cardKey = `${item.opening_key}:${index}`;
           const isExpanded = expandedKey === cardKey;
           const cardId = `opening-card-${index}`;
@@ -327,7 +336,9 @@ function GameOpeningLineage({
                           <button
                             type="button"
                             className="tree-node-card__action-button"
-                            onClick={() => onStartDrill(item)}
+                            disabled={route.line === null}
+                            aria-describedby={route.reason ? routeReasonId : undefined}
+                            onClick={() => { if (route.line) onStartDrill(item, route.line); }}
                           >
                             Start Drill
                           </button>
@@ -338,6 +349,9 @@ function GameOpeningLineage({
                         >
                           View in Openings
                         </Link>
+                        {onStartDrill && route.reason && (
+                          <p className="opening-lineage-card__drill-reason" id={routeReasonId}>{route.reason}</p>
+                        )}
                       </>
                     }
                   />

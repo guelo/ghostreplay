@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { Chess } from "chess.js";
 import type {
+  DrillRouteMode,
   DrillSessionContract,
   DrillStrictness,
   TargetBlunderSrs,
@@ -980,9 +981,7 @@ export const useChessGameLifecycle = ({
         setIsRevertPending(false);
         s2.setIsRated(true);
         s2.setIsPracticeContinuation(false);
-        s2.setDrillOpeningKey(null);
-        s2.setDrillLine(null);
-        s2.setDrillOpeningName(null);
+        s2.setDrillSelection(null);
         s2.setDrillState(null);
         s2.setDrillStrictness(null);
         s2.setDrillStrictnessCp(null);
@@ -1038,9 +1037,8 @@ export const useChessGameLifecycle = ({
       engineElo: number;
       strictness: DrillStrictness;
       strictnessCp: number;
-      // Ad-hoc card drills: the full UCI line to the target FEN. Omitted/undefined
-      // for registered-root drills (routed via the book BFS).
       line?: string[];
+      routeMode?: DrillRouteMode;
     }) => {
       let clearedDepartingDrillCoordinator = false;
       try {
@@ -1103,7 +1101,21 @@ export const useChessGameLifecycle = ({
           strictness: options.strictness,
           strictness_cp: options.strictnessCp,
           line: options.line,
+          route_mode: options.routeMode ?? "auto",
         });
+
+        const acceptedMode = response.route_mode === undefined ? "auto" : response.route_mode;
+        if (
+          (options.routeMode === "prefer_line" && response.route_mode !== "prefer_line") ||
+          (acceptedMode !== "auto" && acceptedMode !== "prefer_line")
+        ) {
+          // Never install an unsupported session. Cleanup is best effort and must
+          // not hide the compatibility error or revive an abandoned predecessor.
+          try {
+            await abandonDrill(response.session_id, response.move_line_revision);
+          } catch { /* The guidance error remains the actionable start failure. */ }
+          throw new Error("This server cannot honor the selected route guidance. Please try again after it is updated.");
+        }
 
         const tempChess = new Chess();
         const records: MoveRecord[] = [];
@@ -1117,11 +1129,17 @@ export const useChessGameLifecycle = ({
         s.setEngineElo(options.engineElo);
         s.setIsRated(false);
         s.setIsPracticeContinuation(false);
-        s.setDrillOpeningKey(options.openingKey);
-        // Durable copy of the ad-hoc line (null for registered roots) so the
-        // reviewed-return "Again" survives the /drill-analysis remount.
-        s.setDrillLine(options.line ?? null);
-        s.setDrillOpeningName(response.opening_name);
+        s.setDrillSelection({
+          opening: {
+            opening_key: response.opening_key,
+            opening_name: response.opening_name,
+            opening_family: response.opening_family,
+            eco: response.eco,
+            depth: response.depth,
+          },
+          line: options.line ? [...options.line] : null,
+          routeMode: acceptedMode,
+        });
         s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
         s.setDrillStrictnessCp(response.strictness_cp ?? options.strictnessCp);
@@ -1428,9 +1446,7 @@ export const useChessGameLifecycle = ({
     setPendingPromotion(null);
     store.setIsRated(true);
     store.setIsPracticeContinuation(false);
-    store.setDrillOpeningKey(null);
-    store.setDrillLine(null);
-    store.setDrillOpeningName(null);
+    store.setDrillSelection(null);
     store.setDrillState(null);
     store.setDrillStrictness(null);
     store.setDrillStrictnessCp(null);

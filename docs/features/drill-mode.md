@@ -7,9 +7,9 @@ for exact implementation details.
 
 ## Start and session lifecycle
 
-A player chooses an opening target from the opening registry or a reachable position in
-the openings tree. A drill session starts unrated and carries its own drill outcome in
-addition to the normal session lifecycle.
+A player chooses an opening target from the opening registry, a reachable position in
+the openings tree, or a played opening card on /play or /history. A drill session starts
+unrated and carries its own drill outcome in addition to the normal session lifecycle.
 
 - **active** means the player is working toward the target.
 - **root reached** means the server has confirmed the target position.
@@ -23,13 +23,37 @@ normal game history and statistics.
 
 ## Route confirmation and the evidence boundary
 
-The drill route is selected from the opening graph when the target belongs to it, or from
-the exact chosen line for an ad-hoc target. The same route selection is used for opponent
+In automatic mode, the drill route is selected from the opening graph when the target
+belongs to it, or from the exact chosen line for an ad-hoc target. The same route selection is used for opponent
 steering so guidance and validation cannot choose different routes. In-book routing's
 backwards BFS is already transposition-tolerant across recorded graph edges; the routing-only
 transposition overlay additionally connects otherwise unrecorded move orders. If that artifact
 is unavailable, routing degrades to the base graph rather than failing the drill; ad-hoc targets
-always keep their exact-line route.
+keep their exact-line route in automatic mode.
+
+Played opening cards use **preferred route guidance** (`prefer_line`). The selected
+occurrence's actual prefix, replayed from the standard start, supplies the opponent's
+preferred continuation at each normalized position. Other routes remain valid when
+they can reach the target through the known graph, routing overlay, or the supplied
+line's legal edges. After an accepted deviation the opponent uses target-directed
+guidance; when play transposes back onto the saved route it resumes the preference,
+regardless of the history or ply used to get there. Unknown routes still fail off-route;
+this does not perform arbitrary forward chess search.
+
+An unavailable, illegal, overlong, nonstandard-start, repeated-position, or mismatched
+card prefix disables only its drill action, with an accessible explanation. Setup
+shows the guidance mode. Confirming a List or Tree picker selection selects automatic
+guidance, including when the target is unchanged; tentative exploration and cancel
+preserve the preference. Again, settings, and analysis return retain the accepted mode,
+line, and full server opening metadata. Registry depth is independent of line length.
+
+Preference affects opponent selection only before the target. Player and opponent
+root confirmation retain their existing evidence proofs and record the actual arrival
+ply, which can differ from the saved line length. Post-root and converted play retain
+the behavior below. Saved-route replay and combined reverse BFS run before acquiring
+the opponent endpoint's session row lock; refreshed state and cached decisions keep
+their existing precedence. Supplemental route edges never modify shared graph or
+target-route caches.
 
 A route-check normally confirms target arrival. It records both the root-reached state and
 a write-once boundary ply when the server can prove the arrival. Serving a suggested move
@@ -104,6 +128,15 @@ until the start settles. A failed start retains that fresh score and releases th
 repeat gate; an already-abandoned drill stays ended. Visiting drill analysis and
 returning without replacing the session preserves its reconciliation and gate.
 
+## Rollout
+
+Roll out the additive `20260919_02` migration and backend before the frontend producer.
+Existing rows and omitted request modes remain `auto`. A preferred start requires the
+server to echo `prefer_line`; an older or incompatible response produces a start error
+and best-effort cleanup of the returned session, without making it playable. No graph
+rebuild, artifact regeneration, score recomputation, or production repair is required.
+The model edit changes scorer source provenance, not the scoring formula.
+
 ## Authorities
 
 - Lifecycle, conversion, and route validation:
@@ -118,5 +151,8 @@ returning without replacing the session preserves its reconciliation and gate.
 - Browser lifecycle and review behavior:
   [src/hooks/useChessGameLifecycle.ts](../../src/hooks/useChessGameLifecycle.ts),
   [src/components/ChessGame.tsx](../../src/components/ChessGame.tsx), and their tests.
+- Played-card route validation and complete setup selections:
+  [src/openings/lineageDrill.ts](../../src/openings/lineageDrill.ts) and
+  [src/openings/drillSelection.ts](../../src/openings/drillSelection.ts).
 - Repeat-gate timing and event contract:
   [opening-score drill-repeat wait telemetry](../opening-delta-drill-wait.md).

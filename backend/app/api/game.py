@@ -26,7 +26,7 @@ from app.drill_steering import (
     post_root_structural_moves,
     replay_history_fen,
     route_map_for_target,
-    route_preserving_moves,
+    opponent_route_move,
 )
 from app.fen import fen_hash, active_color, normalize_fen
 from app.models import (
@@ -1392,6 +1392,8 @@ def get_next_opponent_move(
         and session.drill_state == "root_reached"
     )
     drill_opening_key = session.drill_opening_key
+    drill_line = session.drill_line
+    drill_route_mode = session.drill_route_mode
     if (
         session.session_mode == DRILL_SESSION_MODE
         and session.drill_state != VISIBLE_DRILL_STATE
@@ -1432,10 +1434,18 @@ def get_next_opponent_move(
         return _serve(replayed, True)
 
     if is_active_preroot_drill:
-        # The entry snapshot said active pre-root — a branch that mutates drill
-        # state. Lock and refresh the row immediately, then re-derive from current
-        # state: a concurrent request may have converted the drill or reached root
-        # since the unlocked read.
+        # Immutable route preparation (line replay + BFS) must not hold the row
+        # lock. Defer invalid-data errors until refresh confirms routing is needed.
+        routing = routing_view(get_opening_graph())
+        route_map = None
+        if drill_opening_key:
+            try:
+                route_map = route_map_for_target(
+                    routing, drill_opening_key, decode_uci_line(drill_line), drill_route_mode,
+                )
+            except ValueError:
+                pass
+        # Refresh mutable state after preparation: a concurrent transition wins.
         session = for_no_key_update(
             db.query(GameSession).filter(GameSession.id == request.session_id)
         ).first()
@@ -1484,11 +1494,7 @@ def get_next_opponent_move(
                     status_code=400,
                     detail="Move history does not reproduce the requested position",
                 )
-            routing = routing_view(get_opening_graph())
-            route_map = route_map_for_target(
-                routing, session.drill_opening_key, decode_uci_line(session.drill_line)
-            )
-            if not route_map.plies_by_fen:
+            if route_map is None or not route_map.plies_by_fen:
                 raise HTTPException(status_code=400, detail="Drill route is unavailable")
             if route_map.is_target(request.fen):
                 # The request position IS the root: client-OBSERVED, not merely
@@ -1504,11 +1510,10 @@ def get_next_opponent_move(
                     session.drill_root_reached_ply = len(request.moves)
                 db.commit()
                 raise HTTPException(status_code=400, detail="Drill root already reached")
-            suggestions = route_preserving_moves(routing, route_map, request.fen)
-            if not suggestions:
+            move = opponent_route_move(routing, route_map, request.fen)
+            if move is None:
                 raise HTTPException(status_code=400, detail="Current drill position is off route")
 
-            move = suggestions[0]
             # Serving is NOT a transition. A root-reaching route move is served as
             # `root_pending` and mutates no drill state; the client applies it and
             # then confirms the resulting position via /api/drills/{id}/route-check,

@@ -80,6 +80,7 @@ def _create_test_schema(conn) -> None:
             drill_state VARCHAR(12),
             drill_opening_key TEXT,
             drill_line TEXT,
+            drill_route_mode VARCHAR(12) NOT NULL DEFAULT 'auto',
             drill_strictness VARCHAR(12),
             drill_strictness_cp INTEGER,
             drill_terminal_reason VARCHAR(20),
@@ -126,6 +127,8 @@ def _create_test_schema(conn) -> None:
                 (baseline_watermark_seq IS NOT NULL AND baseline_watermark_epoch IS NOT NULL
                     AND baseline_watermark_fingerprint IS NOT NULL)
             ),
+            CONSTRAINT ck_game_sessions_drill_route_mode CHECK (drill_route_mode IN ('auto','prefer_line')),
+            CONSTRAINT ck_game_sessions_prefer_line_requires_drill_line CHECK (drill_route_mode != 'prefer_line' OR (session_mode = 'drill' AND drill_line IS NOT NULL)),
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
             CHECK (drill_strictness_cp IS NULL OR (drill_strictness_cp >= 0 AND drill_strictness_cp <= 50)),

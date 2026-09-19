@@ -95,6 +95,12 @@ convert it to rated normal play. For registered openings, opponent guidance
 continues after the target position along score-relevant reference or routing
 continuations while that structural topology remains available, preserving
 compatible due Ghost targets before falling back to ordinary opponent play.
+Drills launched from played opening cards prefer that game's move order for the
+opponent before the target, while accepting other known target-reaching routes
+and resuming the preference on position-based re-entry. The mode, line, and full
+opening metadata survive setup and repeat flows; see
+[route steering](backend/app/drill_steering.py) and
+[card-route validation](src/openings/lineageDrill.ts).
 After a drill ends and opening-score
 reconciliation begins, repeating that drill waits for the current session's
 fresh result or a fail-open outcome; settings, analysis, and other departures

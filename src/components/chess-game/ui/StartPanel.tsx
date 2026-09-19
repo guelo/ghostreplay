@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import { defaultPieces } from "react-chessboard";
+import type { DrillSelection } from "../../../openings/drillSelection";
 import type { OpeningRootItem } from "../../../utils/api";
 import { MAIA_BOT_NAMES } from "../config";
 import { eloStakes } from "../elo";
@@ -15,8 +16,7 @@ export type StartDrillDraft = {
   engineElo: number;
   strictnessCp: number;
   playerColor: "white" | "black";
-  opening: OpeningRootItem;
-  line: string[] | null;
+  selection: DrillSelection;
 };
 
 type StartPanelProps = {
@@ -37,8 +37,7 @@ type StartPanelProps = {
   // no strictness tier selected so the user makes a conscious choice.
   seedStrictnessCp: number | null;
   seedColor: "white" | "black";
-  seedOpening: OpeningRootItem | null;
-  seedLine: string[] | null;
+  seedSelection: DrillSelection | null;
 
   // For locally derived win/loss stakes.
   playerRating: number;
@@ -64,8 +63,7 @@ const StartPanel = ({
   seedEngineElo,
   seedStrictnessCp,
   seedColor,
-  seedOpening,
-  seedLine,
+  seedSelection,
   playerRating,
   isProvisional,
   openingFamilies,
@@ -78,29 +76,28 @@ const StartPanel = ({
   const [draftElo, setDraftElo] = useState(seedEngineElo);
   const [draftStrictnessCp, setDraftStrictnessCp] = useState(seedStrictnessCp);
   const [draftColor, setDraftColor] = useState(seedColor);
-  const [draftOpening, setDraftOpening] = useState(seedOpening);
-  const [draftLine, setDraftLine] = useState(seedLine);
+  const [draftSelection, setDraftSelection] = useState(seedSelection);
 
   // Resync a draft when its seed prop changes (async reseeds: prefill effect,
   // again-settings, openingFamilies-match). A live drag leaves the seed prop
-  // untouched, so it never fights the resync. Opening + line resync together,
-  // keyed on the opening identity (a registered opening carries no ad-hoc line).
+  // untouched, so it never fights the resync. The whole selection resyncs together,
+  // including line-only or mode-only changes with the same opening identity.
   const [previousSeeds, setPreviousSeeds] = useState(() => ({
     engineElo: seedEngineElo,
     strictnessCp: seedStrictnessCp,
     color: seedColor,
-    opening: seedOpening,
+    selection: seedSelection,
   }));
   const eloChanged = previousSeeds.engineElo !== seedEngineElo;
   const strictnessChanged = previousSeeds.strictnessCp !== seedStrictnessCp;
   const colorChanged = previousSeeds.color !== seedColor;
-  const openingChanged = previousSeeds.opening !== seedOpening;
-  if (eloChanged || strictnessChanged || colorChanged || openingChanged) {
+  const selectionChanged = previousSeeds.selection !== seedSelection;
+  if (eloChanged || strictnessChanged || colorChanged || selectionChanged) {
     setPreviousSeeds({
       engineElo: seedEngineElo,
       strictnessCp: seedStrictnessCp,
       color: seedColor,
-      opening: seedOpening,
+      selection: seedSelection,
     });
   }
   if (eloChanged) {
@@ -112,9 +109,8 @@ const StartPanel = ({
   if (colorChanged) {
     setDraftColor(seedColor);
   }
-  if (openingChanged) {
-    setDraftOpening(seedOpening);
-    setDraftLine(seedLine);
+  if (selectionChanged) {
+    setDraftSelection(seedSelection);
   }
 
   const botLabel = MAIA_BOT_NAMES[draftElo as keyof typeof MAIA_BOT_NAMES];
@@ -155,27 +151,26 @@ const StartPanel = ({
         <div className="chess-start-scroll chess-start-scroll--drill">
           <DrillSetupPanel
             openingFamilies={openingFamilies}
-            selectedOpening={draftOpening}
-            selectedLine={draftLine}
+            selectedOpening={draftSelection?.opening ?? null}
+            selectedLine={draftSelection?.line ?? null}
+            routeMode={draftSelection?.routeMode ?? "auto"}
             playerColor={draftColor}
             strictnessCp={draftStrictnessCp}
             isLoadingOpenings={isLoadingOpenings}
             isStarting={isStartingGame}
             startError={startError}
             onSelectOpening={(selection) => {
-              setDraftOpening(selection.opening);
-              setDraftLine(selection.line);
+              setDraftSelection({ ...selection, routeMode: "auto" });
             }}
             onPlayerColorChange={setDraftColor}
             onStrictnessChange={setDraftStrictnessCp}
             onStartDrill={() => {
-              if (!draftOpening || draftStrictnessCp == null) return;
+              if (!draftSelection || draftStrictnessCp == null) return;
               onStartDrill({
                 engineElo: draftElo,
                 strictnessCp: draftStrictnessCp,
                 playerColor: draftColor,
-                opening: draftOpening,
-                line: draftLine,
+                selection: draftSelection,
               });
             }}
           />

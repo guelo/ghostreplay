@@ -1,6 +1,6 @@
 import { memo } from "react";
 import OpeningSideToggle from "../../OpeningSideToggle";
-import type { OpeningRootItem } from "../../../utils/api";
+import type { DrillRouteMode, OpeningRootItem } from "../../../utils/api";
 import OpeningPicker, { type OpeningPickerSelection } from "./OpeningPicker";
 import {
   STRICTNESS_TIERS,
@@ -14,6 +14,7 @@ type DrillSetupPanelProps = {
   openingFamilies: Array<{ family_name: string; roots: OpeningRootItem[] }> | null;
   selectedOpening: OpeningRootItem | null;
   selectedLine: string[] | null;
+  routeMode?: DrillRouteMode;
   playerColor: "white" | "black";
   // null = no tier chosen yet; Start stays disabled until the user picks one.
   strictnessCp: number | null;
@@ -34,6 +35,7 @@ const DrillSetupPanel = ({
   openingFamilies,
   selectedOpening,
   selectedLine,
+  routeMode = "auto",
   playerColor,
   strictnessCp,
   isLoadingOpenings,
@@ -62,6 +64,11 @@ const DrillSetupPanel = ({
               onSelect={onSelectOpening}
               onPlayerColorChange={onPlayerColorChange}
             />
+            <p className="drill-route-guidance" role="note" aria-label="Route guidance">
+              {routeMode === "prefer_line"
+                ? "Opponent follows this game’s route when possible; other routes are allowed."
+                : "Automatic route guidance"}
+            </p>
           </div>
         </div>
 

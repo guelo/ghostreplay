@@ -19,6 +19,8 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { projectExactBest } from "../utils/projectExactBest";
 import { captureEvent } from "../analytics/posthog";
+import { lineageDrillSelection } from "../openings/lineageDrill";
+import type { DrillSetupNavigation } from "../openings/drillSelection";
 import "./HistoryPage.css";
 
 const POLL_INTERVAL_MS = 2000;
@@ -252,13 +254,13 @@ function HistoryPage() {
   );
 
   const handleStartDrill = useCallback(
-    (item: OpeningLineageItem) => {
+    (item: OpeningLineageItem, line: string[]) => {
       navigate("/play", {
         state: {
           drillSetup: {
-            openingKey: item.opening_key,
+            selection: lineageDrillSelection(item, line),
             playerColor,
-          },
+          } satisfies DrillSetupNavigation,
         },
       });
     },

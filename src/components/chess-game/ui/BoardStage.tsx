@@ -1,6 +1,7 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { DrillSelection } from "../../../openings/drillSelection";
 import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import StartPanel, { type StartDrillDraft } from "./StartPanel";
@@ -46,8 +47,7 @@ type BoardStageProps = {
   seedEngineElo: number;
   seedStrictnessCp: number | null;
   seedColor: "white" | "black";
-  seedOpening: OpeningRootItem | null;
-  seedLine: string[] | null;
+  seedSelection: DrillSelection | null;
   playerRating: number;
   isProvisional: boolean;
   onStartPlay: (side: "white" | "random" | "black", engineElo: number) => void;
@@ -130,8 +130,7 @@ const BoardStage = ({
   seedEngineElo,
   seedStrictnessCp,
   seedColor,
-  seedOpening,
-  seedLine,
+  seedSelection,
   playerRating,
   isProvisional,
   onStartPlay,
@@ -316,8 +315,7 @@ const BoardStage = ({
                 seedEngineElo={seedEngineElo}
                 seedStrictnessCp={seedStrictnessCp}
                 seedColor={seedColor}
-                seedOpening={seedOpening}
-                seedLine={seedLine}
+                seedSelection={seedSelection}
                 playerRating={playerRating}
                 isProvisional={isProvisional}
                 openingFamilies={openingFamilies ?? null}

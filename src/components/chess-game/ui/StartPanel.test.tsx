@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "../../../test/utils";
+import type { DrillSelection } from "../../../openings/drillSelection";
 import StartPanel from "./StartPanel";
 import type { OpeningRootItem } from "../../../utils/api";
 
@@ -81,8 +82,7 @@ const baseProps = () => ({
   // a tier before Start.
   seedStrictnessCp: null as number | null,
   seedColor: "white" as const,
-  seedOpening: null as OpeningRootItem | null,
-  seedLine: null as string[] | null,
+  seedSelection: null as DrillSelection | null,
   playerRating: 1200,
   isProvisional: false,
   openingFamilies: [{ family_name: "Sicilian", roots: [registered] }],
@@ -111,8 +111,7 @@ describe("StartPanel", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
-      seedOpening: adHocOpening,
-      seedLine: ["e2e4", "e7e5"],
+      seedSelection: { opening: adHocOpening, line: ["e2e4", "e7e5"], routeMode: "auto" as const },
     };
     render(<StartPanel {...props} />);
 
@@ -129,8 +128,7 @@ describe("StartPanel", () => {
       engineElo: 1000,
       strictnessCp: 30,
       playerColor: "white",
-      opening: adHocOpening,
-      line: ["e2e4", "e7e5"],
+      selection: { opening: adHocOpening, line: ["e2e4", "e7e5"], routeMode: "auto" },
     });
   });
 
@@ -138,7 +136,7 @@ describe("StartPanel", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
-      seedOpening: registered,
+      seedSelection: { opening: registered, line: null, routeMode: "auto" as const },
     };
     const { rerender } = render(<StartPanel {...props} />);
 
@@ -156,8 +154,7 @@ describe("StartPanel", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
-      seedOpening: adHocOpening,
-      seedLine: ["e2e4", "e7e5"],
+      seedSelection: { opening: adHocOpening, line: ["e2e4", "e7e5"], routeMode: "auto" as const },
     };
     render(<StartPanel {...props} />);
 
@@ -172,8 +169,7 @@ describe("StartPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
     expect(props.onStartDrill).toHaveBeenCalledWith(
       expect.objectContaining({
-        opening: expect.objectContaining({ opening_key: registered.opening_key }),
-        line: null,
+        selection: { opening: registered, line: null, routeMode: "auto" },
       }),
     );
   });
@@ -182,7 +178,7 @@ describe("StartPanel", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
-      seedOpening: registered,
+      seedSelection: { opening: registered, line: null, routeMode: "auto" as const },
     };
     render(<StartPanel {...props} />);
 
@@ -196,6 +192,7 @@ describe("StartPanel", () => {
       engineElo: 1000,
       strictnessCp: 25,
       playerColor: "white",
+      selection: {
       opening: {
         opening_key: "tree-target-fen",
         opening_name: "Sicilian Defense",
@@ -204,6 +201,8 @@ describe("StartPanel", () => {
         depth: 3,
       },
       line: ["e2e4", "c7c5", "g1f3"],
+      routeMode: "auto",
+      },
     });
   });
 
@@ -211,7 +210,7 @@ describe("StartPanel", () => {
     const props = {
       ...baseProps(),
       isDrillMode: true,
-      seedOpening: registered,
+      seedSelection: { opening: registered, line: null, routeMode: "auto" as const },
     };
     render(<StartPanel {...props} />);
 
@@ -241,7 +240,7 @@ describe("StartPanel", () => {
   });
 
   it("resyncs the draft when a seed prop changes (async reseed, null → number)", () => {
-    const props = { ...baseProps(), isDrillMode: true, seedOpening: registered };
+    const props = { ...baseProps(), isDrillMode: true, seedSelection: { opening: registered, line: null, routeMode: "auto" as const } };
     const { rerender } = render(<StartPanel {...props} />);
     expect(
       screen.getByText(/pick a strictness to start/i),
@@ -258,7 +257,7 @@ describe("StartPanel", () => {
   });
 
   it("gates Start Drill until a tier is picked, then commits that tier's seed cp", () => {
-    const props = { ...baseProps(), isDrillMode: true, seedOpening: registered };
+    const props = { ...baseProps(), isDrillMode: true, seedSelection: { opening: registered, line: null, routeMode: "auto" as const } };
     render(<StartPanel {...props} />);
 
     const start = screen.getByRole("button", { name: /start drill/i });
@@ -271,5 +270,36 @@ describe("StartPanel", () => {
     expect(props.onStartDrill).toHaveBeenCalledWith(
       expect.objectContaining({ strictnessCp: 50 }),
     );
+  });
+});
+
+describe("route selection reseeding", () => {
+  it("reseeds line and mode with the same opening object while preserving edited controls", () => {
+    const seedSelection: DrillSelection = { opening: registered, line: ["e2e4", "c7c5"], routeMode: "prefer_line" };
+    const props = { ...baseProps(), isDrillMode: true, seedSelection };
+    const { rerender } = render(<StartPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.change(strictnessSlider(), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: /^black$/i }));
+    expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/other routes are allowed/);
+    const lineOnly = { ...seedSelection, line: ["c2c4", "e7e6"] };
+    rerender(<StartPanel {...props} seedSelection={lineOnly} />);
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenLastCalledWith({ selection: lineOnly, strictnessCp: 30, playerColor: "black", engineElo: 1000 });
+    const modeOnly = { ...lineOnly, routeMode: "auto" as const };
+    rerender(<StartPanel {...props} seedSelection={modeOnly} />);
+    expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/automatic/i);
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenLastCalledWith({ selection: modeOnly, strictnessCp: 30, playerColor: "black", engineElo: 1000 });
+  });
+
+  it("confirmed same-target List selection switches to auto and clears the preferred line", () => {
+    const props = { ...baseProps(), isDrillMode: true, seedSelection: { opening: registered, line: ["e2e4", "c7c5"], routeMode: "prefer_line" as const } };
+    render(<StartPanel {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /pick registered opening/i }));
+    expect(screen.getByRole("note", { name: "Route guidance" })).toHaveTextContent(/automatic/i);
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    expect(props.onStartDrill).toHaveBeenCalledWith(expect.objectContaining({ selection: { opening: registered, line: null, routeMode: "auto" } }));
   });
 });
