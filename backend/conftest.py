@@ -1,4 +1,5 @@
 import os
+import subprocess
 import threading
 import uuid
 from unittest.mock import patch
@@ -35,6 +36,14 @@ from app.security import create_access_token, hash_password
 pytest.register_assert_rewrite("pg_gate_plugin")
 pytest_plugins = ["pg_gate_plugin"]
 from pg_gate_plugin import pg_gate, pg_required  # noqa: E402,F401
+
+# Git also exports these settings to `bisect run` and `rebase --exec` children.
+# Clear them before test collection, even when pytest bypasses pre-push, so
+# fixture Git commands discover their temporary repositories independently.
+for _git_env_var in subprocess.check_output(
+    ["git", "rev-parse", "--local-env-vars"], text=True,
+).splitlines():
+    os.environ.pop(_git_env_var, None)
 
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(

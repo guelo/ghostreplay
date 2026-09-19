@@ -4,8 +4,8 @@ published artifact + reviewable provenance diff (g-p4ih-capture).
 WHY THIS RUNS FROM A CLONE. Capture refuses a dirty derivation tree, so a full success path
 cannot be exercised from a working tree with uncommitted scorer edits — and demanding that
 the developer commit first would make the producer's most important test the one nobody can
-run. So the fixture makes a throwaway `git clone` of this repository, copies in whatever
-SCORER_SOURCE_FILES differ from the clone's HEAD, and commits THERE. The clone is a real
+run. So the fixture makes a throwaway `git clone` of this repository, overlays current
+working-tree changes, and commits THERE. The clone is a real
 main worktree with a real clean tree and a real HEAD revision; nothing is written to the
 developer's repository. As a bonus this is also the multi-checkout case: the clone's git
 common dir is its own, which is exactly the condition the output-keyed lock exists for.
@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from conftest import pg_required
+from git_test_support import overlay_worktree
 
 import scripts.calibrate_opening_scores_v2 as cal
 from test_capture_cohort_pg import _reset, _seed_scorable_cohort
@@ -53,22 +54,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _REPO_VENV_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 VENV_PYTHON = _REPO_VENV_PYTHON if _REPO_VENV_PYTHON.exists() else Path(sys.executable)
 GUARD_USER = 14
-
-# Files the clone needs at working-tree state, not HEAD state: everything the source digest
-# covers, plus capture's own two entrypoints (which are not part of SCORER_SOURCE_FILES —
-# the digest binds what the SCORER is derived from, and the launcher is upstream of it).
-_EXTRA_SYNC = (
-    "backend/scripts/capture_cohort.sh",
-    "backend/scripts/capture_cohort_launcher.py",
-    "backend/scripts/source_fence_launcher.py",
-    # Canonical profile manifests are data files (not in the .py import closure of
-    # SCORER_SOURCE_FILES) that analysis_profiles.py reads at import time. Their
-    # ``dominates`` sets must stay consistent with evidence_policy.EDGES, so sync
-    # the working-tree copies into the clone (g-reuse-d21-search added
-    # browser-analysis-multipv-v2 to both).
-    "backend/app/canonical_profiles/canonical-sf18-depth24-v1.json",
-    "backend/app/canonical_profiles/canonical-sf18-depth24-linux-v1.json",
-)
 
 pytestmark = pytest.mark.skipif(
     not os.access(VENV_PYTHON, os.X_OK),
@@ -93,14 +78,8 @@ def capture_clone():
              str(REPO_ROOT), str(clone)],
             check=True, capture_output=True, timeout=300,
         )
-        for rel in (*cal.SCORER_SOURCE_FILES, *_EXTRA_SYNC):
-            src, dst = REPO_ROOT / rel, clone / rel
-            if not src.exists():
-                continue
-            if not dst.exists() or dst.read_bytes() != src.read_bytes():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
-        _git(clone, "add", "-A", "--", "backend")
+        overlay_worktree(REPO_ROOT, clone)
+        _git(clone, "add", "-A", "--", ".", ":(exclude).beads", ":(exclude).beads.gate.lock")
         # -c: do not depend on (or read) the developer's git identity.
         subprocess.run(
             ["git", "-c", "user.email=capture-e2e@invalid", "-c", "user.name=capture e2e",

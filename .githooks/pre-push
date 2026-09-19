@@ -5,6 +5,14 @@ set -euo pipefail
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
+# Hooks inherit repository-local Git settings (including an absolute GIT_DIR in
+# linked worktrees). Clear them after locating this checkout so Git subprocesses
+# in test fixtures discover their own repositories instead of modifying ours.
+git_local_env_vars=$(git rev-parse --local-env-vars)
+while IFS= read -r git_env_var; do
+  unset "$git_env_var"
+done <<< "$git_local_env_vars"
+
 # Turn Node deprecations and rejected promises into hard failures. ESLint and
 # pytest have their own warning-as-error flags below.
 NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--throw-deprecation --unhandled-rejections=strict"

@@ -14,9 +14,10 @@ Each hostile-vector test comes in two halves, and BOTH halves are load-bearing:
   * the NEGATIVE assertion that the same plant, with the same environment, produces no side
     effect when the run goes through `capture_cohort.sh`.
 
-WHAT A DIRTY WORKING TREE STILL PROVES. Capture refuses a dirty derivation tree, so on a
-tree with uncommitted scorer edits a real run stops at the clean-tree gate. That gate is the
-LAST step of the source fence, so reaching it proves everything before it succeeded:
+WHY THE FIXTURE STOPS AT THE CLEAN-TREE GATE. The clone preserves current working-tree
+bytes, then removes the scorer's entry from its own index. Capture must refuse that dirty
+derivation tree. This is the LAST step of the source fence, so reaching it proves everything
+before it succeeded:
 
   * the launcher started under `-I -S` and computed the manifest digest pre-exec;
   * the child imported `scripts.calibrate_opening_scores_v2` in full under `-S` — which
@@ -28,12 +29,15 @@ LAST step of the source fence, so reaching it proves everything before it succee
   * the child's own read of the manifest AGREED with that pre-exec digest (PRE-EXEC
     VERIFICATION), and the bytecode, import-origin, and chess-distribution checks passed.
 
-So the tests assert a STAGE, not an exit code: the run must get at least as far as the
-clean-tree gate, and must not fail at any earlier one. That assertion holds on a clean tree
-too, where the run proceeds past the fence to the evidence DB.
+The tests require that known child refusal, not just the launcher's pre-exec log line.
+A child import crash or an unreachable database traceback cannot satisfy the assertion.
 
 These tests never touch a real evidence database: DATABASE_URL is overridden to an
 unreachable local address, and the source fence is reached before the first connection.
+
+The launcher runs from a disposable main checkout with the current scorer sources copied
+in. Capture intentionally refuses linked worktrees; testing it in a clone lets the suite
+run from any checkout without weakening that production guard or writing to our Git dir.
 """
 from __future__ import annotations
 
@@ -46,6 +50,8 @@ from pathlib import Path
 
 import pytest
 
+from git_test_support import overlay_worktree
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "backend" / "scripts" / "capture_cohort.sh"
 LAUNCHER = REPO_ROOT / "backend" / "scripts" / "capture_cohort_launcher.py"
@@ -56,16 +62,6 @@ VENV_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
 # clean tree lets the run continue past the source fence.
 UNREACHABLE_DB = "postgresql://127.0.0.1:1/nonexistent"
 
-# Refusals that happen BEFORE the source fence's clean-tree gate. If a hostile plant were
-# taking effect, this is where the run would visibly derail.
-PRE_FENCE_REFUSALS = (
-    "CaptureIsolationError",
-    "CaptureWorktreeError",
-    "CaptureGovernanceError",
-    "CaptureDialectError",
-    "CaptureLockError",
-)
-
 pytestmark = pytest.mark.skipif(
     not WRAPPER.exists() or not VENV_PYTHON.exists(),
     reason="needs the repo venv and the capture wrapper on disk",
@@ -75,6 +71,38 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module", autouse=True)
+def capture_checkout():
+    """Point this module's launcher paths at an independent main worktree."""
+    with tempfile.TemporaryDirectory(
+        prefix="ghostreplay-capture-checkout-", dir=os.path.realpath("/tmp"),
+    ) as scratch:
+        root = Path(scratch)
+        checkout = root / "checkout"
+        subprocess.run(
+            ["git", "clone", "--quiet", "--local", "--no-hardlinks",
+             str(REPO_ROOT), str(checkout)],
+            # In particular, never inherit a surrounding hook's GIT_DIR.
+            env=_base_env(root), check=True, capture_output=True, timeout=120,
+        )
+        overlay_worktree(REPO_ROOT, checkout)
+        (checkout / "backend/.venv").symlink_to(REPO_ROOT / "backend/.venv",
+                                                target_is_directory=True)
+        # Preserve the exact source bytes but guarantee a typed clean-tree refusal
+        # after import/digest validation, before the child can attempt any DB work.
+        subprocess.run(
+            ["git", "-C", str(checkout), "rm", "--cached", "--quiet", "--",
+             "backend/scripts/calibrate_opening_scores_v2.py"],
+            env=_base_env(root), check=True, capture_output=True,
+        )
+        with pytest.MonkeyPatch.context() as patch:
+            module = sys.modules[__name__]
+            patch.setattr(module, "REPO_ROOT", checkout)
+            patch.setattr(module, "WRAPPER", checkout / "backend/scripts/capture_cohort.sh")
+            patch.setattr(module, "LAUNCHER", checkout / "backend/scripts/capture_cohort_launcher.py")
+            yield checkout
 
 
 @pytest.fixture
@@ -112,20 +140,24 @@ def _run_wrapper(workdir: Path, env_extra: dict[str, str] | None = None):
 def _assert_reached_the_source_fence(res) -> None:
     """The run got at least as far as the clean-tree gate: the launcher hashed the tree,
     the child imported and passed every earlier gate. See the module docstring."""
+    assert "Traceback" not in res.stderr, res.stderr
+    assert res.returncode == 1, res.stderr
     assert "[source-fence] tree=" in res.stderr, res.stderr
     assert "digest=" in res.stderr, res.stderr
-    for marker in PRE_FENCE_REFUSALS:
-        assert marker not in res.stderr, f"derailed at {marker}:\n{res.stderr}"
-    # In a filesystem-sandboxed test runner the provenance lock can be denied after the
-    # child has completed its source checks. It is an acceptable terminal stage here; the
-    # fixture's purpose is to verify that hostile startup settings did not derail the fence.
-    if "CapturePublicationError" in res.stderr:
-        assert "provenance lock" in res.stderr, res.stderr
-    # The only source-fence refusal allowed here is the clean-tree one. Any OTHER
-    # CaptureSourceError (digest disagreement, bytecode, import origin, chess origin) means
-    # a plant DID reach the child.
-    if "CaptureSourceError" in res.stderr:
-        assert "DIRTY derivation tree" in res.stderr, res.stderr
+    assert "[capture] CaptureSourceError:" in res.stderr, res.stderr
+    assert "DIRTY derivation tree" in res.stderr, res.stderr
+
+
+@pytest.mark.parametrize("child_stderr", [
+    "Traceback (most recent call last):\nModuleNotFoundError: No module named 'new_dependency'\n",
+    "",  # The launcher's line alone does not prove that the child ran.
+])
+def test_source_fence_assertion_requires_the_child_terminal_stage(child_stderr):
+    result = subprocess.CompletedProcess([], 1, stdout="", stderr=(
+        "[source-fence] tree=/scratch/checkout digest=0123456789ab\n" + child_stderr
+    ))
+    with pytest.raises(AssertionError):
+        _assert_reached_the_source_fence(result)
 
 
 def _plant(directory: Path, name: str, marker: Path) -> None:
