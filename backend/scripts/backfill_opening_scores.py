@@ -21,6 +21,8 @@ from app.opening_cache import (
     recompute_opening_scores,
 )
 
+from app.opening_score_storage import PublicationSuperseded
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -71,19 +73,25 @@ def main() -> None:
 
         recomputed = 0
         skipped = 0
+        superseded = 0
 
         for pair_user_id, pair_color in pairs:
             latest = get_latest_opening_score_batch(db, pair_user_id, pair_color)
             if latest is not None and not args.force:
                 skipped += 1
                 continue
-            recompute_opening_scores(db, pair_user_id, pair_color)
-            recomputed += 1
+            try:
+                recompute_opening_scores(db, pair_user_id, pair_color)
+            except PublicationSuperseded:
+                superseded += 1
+            else:
+                recomputed += 1
 
         log.info(
-            "Opening score backfill complete: %d recomputed, %d skipped, %d candidates",
+            "Opening score backfill complete: %d recomputed, %d skipped, %d superseded, %d candidates",
             recomputed,
             skipped,
+            superseded,
             len(pairs),
         )
 

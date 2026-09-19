@@ -885,6 +885,7 @@ def test_prune_helper_recovers_from_failure_without_poisoning_session(db_session
     _seed_black_opening_session(db_session)
     recompute_opening_scores(db_session, 123, "black")
 
+    db_session.rollback()
     with patch.object(db_session, "commit", side_effect=RuntimeError("boom")):
         deleted = prune_old_opening_score_batches(db_session, 123, "black", keep=0)
 
@@ -2865,3 +2866,26 @@ def test_equivalent_disposition_string_normalizes_to_the_enum():
 def test_impossible_result_combinations_are_rejected(kwargs, match):
     with pytest.raises(ValueError, match=match):
         OpeningScoreRecomputeResult(**kwargs)
+
+
+def test_selected_storage_preserves_real_scorer_payload_and_freshness(db_session):
+    from app.opening_score_storage import (
+        ScoreHandle, StorageFormat, handle_is_live, read_payload,
+    )
+    _seed_black_opening_session(db_session)
+    now = datetime.now(timezone.utc)
+    legacy = recompute_opening_scores(db_session, 123, "black", computed_at=now)
+    handle = ScoreHandle.from_batch(legacy)
+    expected = read_payload(db_session, handle)
+    stamps = (legacy.registry_fingerprint, legacy.inputs_fingerprint,
+              legacy.evidence_seq, legacy.cache_epoch, legacy.scoped_shared_digest)
+    current = recompute_opening_scores(db_session, 123, "black", computed_at=now,
+                                      storage_format=StorageFormat.CURRENT)
+    actual = read_payload(db_session, ScoreHandle.from_batch(current))
+    for group in ("roots", "positions", "edges", "scope"):
+        assert {tuple(sorted(row.items())) for row in getattr(actual, group)} == {
+            tuple(sorted(row.items())) for row in getattr(expected, group)
+        }
+    assert not handle_is_live(db_session, handle)
+    assert (current.registry_fingerprint, current.inputs_fingerprint,
+            current.evidence_seq, current.cache_epoch, current.scoped_shared_digest) == stamps

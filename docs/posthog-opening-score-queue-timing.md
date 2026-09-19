@@ -137,12 +137,12 @@ other value can appear here.
   would otherwise join a version-1 aggregate with incompatible semantics and no error.
   Compare against the **quoted** `'1'`; see "HogQL dialect notes".
 
-`failed`, `cached`, and `no_evidence` runs are **not** in this event at all (it fires
+`failed`, `cached`, `superseded`, and `no_evidence` runs are **not** in this event at all (it fires
 only on a real rebuild), so neither run frequency nor failure rate can be measured from
 it. Read those from the operational log instead:
 
 ```
-opening_score_recompute_run run_id=… run_outcome=rebuilt|cached|no_evidence|failed …
+opening_score_recompute_run run_id=… run_outcome=rebuilt|cached|superseded|no_evidence|failed …
 ```
 
 That record is emitted once per executed run with the same `run_id`, carries

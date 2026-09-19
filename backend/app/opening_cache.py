@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Iterable, Literal
 
-from sqlalchemy import func, insert, text, update
+from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -62,6 +62,10 @@ from app.opening_transposition_artifact import (
     DensifiedEdges,
     EMPTY_DENSIFIED_EDGES,
     load_strict_densified_edges,
+)
+from app.opening_score_storage import (
+    PublicationSuperseded, ScorePayload, StorageFormat, publish_scores,
+    acquire_publication_lock, UnsupportedScoreStorage,
 )
 from app.posthog_client import capture
 
@@ -245,14 +249,17 @@ def prune_old_opening_score_batches(
     *,
     keep: int = OPENING_SCORE_BATCH_RETENTION,
 ) -> int:
-    """Delete all but the newest `keep` batches for (user_id, player_color).
+    """Best-effort pruning of legacy markers under the publication lock.
 
-    Cascade (user_opening_scores.batch_id ON DELETE CASCADE) removes the snapshot
-    rows. Best-effort: rolls back and swallows on failure so a failed DELETE never
-    leaves the shared session in a failed-transaction state or fails the request.
+    Requires a fresh transaction; caller work is never committed or discarded.
+    Retain the newest `keep` legacy markers and leave current markers alone.
+    Cascade deletes snapshot rows. Failures roll back this maintenance transaction.
     """
     _validate_player_color(player_color)
+    if db.in_transaction():
+        raise ValueError("pruning requires a fresh transaction")
     try:
+        acquire_publication_lock(db, user_id, player_color)
         stale_ids = [
             row.id
             for row in (
@@ -260,6 +267,7 @@ def prune_old_opening_score_batches(
                 .filter(
                     OpeningScoreBatch.user_id == user_id,
                     OpeningScoreBatch.player_color == player_color,
+                    OpeningScoreBatch.storage_format == StorageFormat.LEGACY.value,
                 )
                 .order_by(OpeningScoreBatch.generation.desc())
                 .offset(keep)
@@ -267,6 +275,7 @@ def prune_old_opening_score_batches(
             )
         ]
         if not stale_ids:
+            db.rollback()
             return 0
         deleted = (
             db.query(OpeningScoreBatch)
@@ -364,7 +373,7 @@ def get_latest_opening_score_batch(
     player_color: PlayerColor,
 ) -> OpeningScoreBatch | None:
     _validate_player_color(player_color)
-    return (
+    batch = (
         db.query(OpeningScoreBatch)
         .filter(
             OpeningScoreBatch.user_id == user_id,
@@ -373,6 +382,13 @@ def get_latest_opening_score_batch(
         .order_by(OpeningScoreBatch.generation.desc())
         .first()
     )
+
+    if batch is not None and batch.storage_format != StorageFormat.LEGACY.value:
+        raise UnsupportedScoreStorage(
+            "legacy opening reader cannot serve current storage; reverse-convert "
+            "the pair or install compatible readers"
+        )
+    return batch
 
 
 def reserve_opening_score_generation(
@@ -1449,6 +1465,7 @@ def recompute_opening_scores(
     user_id: int,
     player_color: PlayerColor,
     *,
+    storage_format: StorageFormat = StorageFormat.LEGACY,
     overlay: EvidenceOverlay | None = None,
     freshness: FreshnessSnapshot | None = None,
     computed_at: datetime | None = None,
@@ -1530,153 +1547,82 @@ def recompute_opening_scores(
         computed_at=computed_at,
     )
 
-    try:
-        db.add(batch)
-        db.flush()
-
-        # Persist the batch's shared-FEN scope so an epoch drift can be resolved
-        # by re-hashing only these positions (see _cheap_evidence_fresh).
-        scope_rows = [
-            OpeningScoreBatchSharedScope(batch_id=batch.id, fen=fen, kind="raw")
-            for fen in freshness.shared_raw_fens
-        ]
-        scope_rows.extend(
-            OpeningScoreBatchSharedScope(batch_id=batch.id, fen=fen, kind="norm")
-            for fen in freshness.shared_norm_fens
-        )
-        if scope_rows:
-            db.add_all(scope_rows)
-
-        if scores:
-            db.add_all(
-                [
-                    UserOpeningScore(
-                        batch_id=batch.id,
-                        user_id=user_id,
-                        player_color=player_color,
-                        opening_key=score.opening_key,
-                        opening_name=score.opening_name,
-                        opening_family=score.opening_family,
-                        opening_score=score.opening_score,
-                        confidence=score.confidence,
-                        coverage=score.coverage,
-                        weighted_depth=score.weighted_depth,
-                        sample_size=score.sample_size,
-                        game_count=score.game_count,
-                        last_practiced_at=score.last_practiced_at,
-                        strongest_branch_name=(
-                            score.strongest_branch.opening_name if score.strongest_branch else None
-                        ),
-                        strongest_branch_key=(
-                            score.strongest_branch.opening_key if score.strongest_branch else None
-                        ),
-                        strongest_branch_score=(
-                            score.strongest_branch.value if score.strongest_branch else None
-                        ),
-                        weakest_branch_name=(
-                            score.weakest_branch.opening_name if score.weakest_branch else None
-                        ),
-                        weakest_branch_key=(
-                            score.weakest_branch.opening_key if score.weakest_branch else None
-                        ),
-                        weakest_branch_score=score.weakest_branch.value if score.weakest_branch else None,
-                        underexposed_branch_name=(
-                            score.underexposed_branch.opening_name if score.underexposed_branch else None
-                        ),
-                        underexposed_branch_key=(
-                            score.underexposed_branch.opening_key if score.underexposed_branch else None
-                        ),
-                        underexposed_branch_value=(
-                            score.underexposed_branch.value if score.underexposed_branch else None
-                        ),
-                        computed_at=computed_at,
-                    )
-                    for score in scores
-                ]
+    payload = ScorePayload(
+        roots=tuple(
+            dict(
+                opening_key=score.opening_key,
+                opening_name=score.opening_name,
+                opening_family=score.opening_family,
+                opening_score=score.opening_score,
+                confidence=score.confidence,
+                coverage=score.coverage,
+                weighted_depth=score.weighted_depth,
+                sample_size=score.sample_size,
+                game_count=score.game_count,
+                last_practiced_at=score.last_practiced_at,
+                strongest_branch_name=(
+                    score.strongest_branch.opening_name if score.strongest_branch else None
+                ),
+                strongest_branch_key=(
+                    score.strongest_branch.opening_key if score.strongest_branch else None
+                ),
+                strongest_branch_score=(
+                    score.strongest_branch.value if score.strongest_branch else None
+                ),
+                weakest_branch_name=(
+                    score.weakest_branch.opening_name if score.weakest_branch else None
+                ),
+                weakest_branch_key=(
+                    score.weakest_branch.opening_key if score.weakest_branch else None
+                ),
+                weakest_branch_score=score.weakest_branch.value if score.weakest_branch else None,
+                underexposed_branch_name=(
+                    score.underexposed_branch.opening_name if score.underexposed_branch else None
+                ),
+                underexposed_branch_key=(
+                    score.underexposed_branch.opening_key if score.underexposed_branch else None
+                ),
+                underexposed_branch_value=(
+                    score.underexposed_branch.value if score.underexposed_branch else None
+                ),
             )
-
-        # Keep both large read-model writes below as mapping-based Core bulk
-        # inserts WITHOUT ``.returning(...)``. Their generated row IDs have no
-        # consumer: every child row is already linked by the flushed ``batch.id``.
-        # RETURNING would therefore make the database produce and transfer one
-        # unused result per inserted row. Both executes still share this batch
-        # transaction with the pending scope/named-root rows; the single commit
-        # publishes everything, and any failure reaches the rollback below.
-        if position_scores:
-            insert_started = time.monotonic()
-            db.execute(
-                insert(OpeningPositionScore),
-                [
-                    {
-                        "batch_id": batch.id,
-                        "user_id": user_id,
-                        "player_color": player_color,
-                        "normalized_fen": position.normalized_fen,
-                        "in_book": position.in_book,
-                        "has_evidence": position.has_evidence,
-                        "opening_score": position.opening_score,
-                        "confidence": position.confidence,
-                        "coverage": position.coverage,
-                        "weighted_depth": position.weighted_depth,
-                        "sample_size": position.sample_size,
-                        "game_count": position.game_count,
-                        "last_practiced_at": position.last_practiced_at,
-                        "computed_at": computed_at,
-                    }
-                    for position in position_scores
-                ],
-            )
-            logger.info(
-                "opening position-score rows staged",
-                extra={
-                    "user_id": user_id,
-                    "player_color": player_color,
-                    "position_row_count": len(position_scores),
-                    "stage_seconds": round(time.monotonic() - insert_started, 4),
-                },
-            )
-
-        if overlay.edges:
-            edge_insert_started = time.monotonic()
-            db.execute(
-                insert(OpeningPositionEdge),
-                [
-                    {
-                        "batch_id": batch.id,
-                        "user_id": user_id,
-                        "player_color": player_color,
-                        "parent_fen": edge.parent_fen,
-                        "child_fen": edge.child_fen,
-                        "uci": edge.uci,
-                        "traversal_count": edge.traversal_count,
-                        "live_attempts": edge.live_attempts,
-                        "live_passes": edge.live_passes,
-                        "live_fails": edge.live_fails,
-                        "computed_at": computed_at,
-                    }
-                    for edge in overlay.edges.values()
-                ],
-            )
-            logger.info(
-                "opening position-edge rows staged",
-                extra={
-                    "user_id": user_id,
-                    "player_color": player_color,
-                    "edge_row_count": len(overlay.edges),
-                    "stage_seconds": round(time.monotonic() - edge_insert_started, 4),
-                },
-            )
-
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-
-    db.refresh(batch)
-    # Best-effort retention pruning as its own committed statement after the new
-    # batch is durable. Never fails the request (see prune helper).
-    prune_old_opening_score_batches(db, user_id, player_color)
-    return batch
+            for score in scores
+        ),
+        positions=tuple(
+            {
+                "normalized_fen": position.normalized_fen,
+                "in_book": position.in_book,
+                "has_evidence": position.has_evidence,
+                "opening_score": position.opening_score,
+                "confidence": position.confidence,
+                "coverage": position.coverage,
+                "weighted_depth": position.weighted_depth,
+                "sample_size": position.sample_size,
+                "game_count": position.game_count,
+                "last_practiced_at": position.last_practiced_at,
+            }
+            for position in position_scores
+        ),
+        edges=tuple(
+            {
+                "parent_fen": edge.parent_fen,
+                "child_fen": edge.child_fen,
+                "uci": edge.uci,
+                "traversal_count": edge.traversal_count,
+                "live_attempts": edge.live_attempts,
+                "live_passes": edge.live_passes,
+                "live_fails": edge.live_fails,
+            }
+            for edge in overlay.edges.values()
+        ),
+        scope=tuple(
+            {"kind": kind, "fen": fen}
+            for kind, fens in (("raw", freshness.shared_raw_fens),
+                               ("norm", freshness.shared_norm_fens))
+            for fen in sorted(set(fens))
+        ),
+    )
+    return publish_scores(db, batch, payload, storage_format=storage_format)
 
 
 def ensure_opening_scores(
@@ -1689,7 +1635,10 @@ def ensure_opening_scores(
         return batch, rows
     if not has_opening_evidence(db, user_id, player_color):
         return None, []
-    recompute_opening_scores(db, user_id, player_color)
+    try:
+        recompute_opening_scores(db, user_id, player_color)
+    except PublicationSuperseded:
+        pass  # A covering publisher won; reload through the ordinary reader.
     return list_cached_opening_scores(db, user_id, player_color)
 
 
@@ -1706,6 +1655,7 @@ class RecomputeDisposition(str, Enum):
 
     REBUILT = "rebuilt"
     CACHED = "cached"
+    SUPERSEDED = "superseded"
     NO_EVIDENCE = "no_evidence"
 
 
@@ -1739,7 +1689,7 @@ class OpeningScoreRecomputeResult:
 
       - ``rebuilt``     → a batch, one of ``_REBUILD_REASONS``, and an isolation
         summary for the completed calculation;
-      - ``cached``      → a batch, no reason, and no isolation summary;
+      - ``cached`` / ``superseded`` → a batch, no reason, no isolation summary;
       - ``no_evidence`` → no batch, no reason, and no isolation summary.
 
     A ``failed`` run is NOT representable here: an exception stays exceptional and
@@ -1783,9 +1733,9 @@ class OpeningScoreRecomputeResult:
             raise ValueError(
                 f"{self.disposition.value} recompute result must carry no row isolation"
             )
-        if self.disposition is RecomputeDisposition.CACHED:
+        if self.disposition in {RecomputeDisposition.CACHED, RecomputeDisposition.SUPERSEDED}:
             if self.batch is None:
-                raise ValueError("cached recompute result requires the existing batch")
+                raise ValueError(f"{self.disposition.value} recompute result requires the existing batch")
             return
         if self.batch is not None:
             raise ValueError("no_evidence recompute result must carry no batch")
@@ -1810,7 +1760,7 @@ def _emit_opening_scores_recomputed(
 ) -> None:
     """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
 
-    Fires ONLY for an actual rebuild — never for a ``cached`` or ``no_evidence``
+    Fires ONLY for an actual rebuild — never for a ``cached``, ``superseded`` or ``no_evidence``
     disposition.
 
     ``duration_ms`` stays the narrow actual-rebuild span measured by the caller
@@ -1935,15 +1885,20 @@ def recompute_opening_scores_if_needed(
         # + overlay reads above so it stays an upper bound on the batch's evidence
         # (g-mxeo). ``now`` is kept only for the decay-staleness gate below.
         row_isolation = RowIsolationTelemetry()
-        result = recompute_opening_scores(
-            db,
-            user_id,
-            player_color,
-            overlay=overlay,
-            freshness=freshness,
-            row_isolation=row_isolation,
-            routing_snapshot=routing_snapshot,
-        )
+        try:
+            result = recompute_opening_scores(
+                db,
+                user_id,
+                player_color,
+                overlay=overlay,
+                freshness=freshness,
+                row_isolation=row_isolation,
+                routing_snapshot=routing_snapshot,
+            )
+        except PublicationSuperseded as exc:
+            return OpeningScoreRecomputeResult(
+                disposition=RecomputeDisposition.SUPERSEDED, batch=exc.batch
+            )
         isolation_summary = row_isolation.snapshot()
         _emit_opening_scores_recomputed(
             db,
@@ -2018,15 +1973,20 @@ def recompute_opening_scores_if_needed(
     # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
     # for the decay-staleness gate only.
     row_isolation = RowIsolationTelemetry()
-    result = recompute_opening_scores(
-        db,
-        user_id,
-        player_color,
-        overlay=overlay,
-        freshness=freshness,
-        row_isolation=row_isolation,
-        routing_snapshot=routing_snapshot,
-    )
+    try:
+        result = recompute_opening_scores(
+            db,
+            user_id,
+            player_color,
+            overlay=overlay,
+            freshness=freshness,
+            row_isolation=row_isolation,
+            routing_snapshot=routing_snapshot,
+        )
+    except PublicationSuperseded as exc:
+        return OpeningScoreRecomputeResult(
+            disposition=RecomputeDisposition.SUPERSEDED, batch=exc.batch
+        )
     isolation_summary = row_isolation.snapshot()
     _emit_opening_scores_recomputed(
         db,

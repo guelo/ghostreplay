@@ -459,3 +459,25 @@ def test_mixed_source_run_is_selected_by_set_membership_not_by_endpoints(
     # ...while equality against either endpoint would have missed it.
     assert props["trigger_first"] != "session_lineage_cold"
     assert props["trigger_last"] != "session_lineage_cold"
+
+
+@pytest.mark.parametrize("cache_miss", [True, False])
+def test_superseded_candidate_returns_latest_without_rebuilt_analytics(db_session, captured, monkeypatch, cache_miss):
+    from app.opening_score_storage import PublicationSuperseded
+
+    _seed_black_opening_session(db_session)
+    latest = opening_cache.recompute_opening_scores(db_session, 123, "black")
+    if cache_miss:
+        monkeypatch.setattr(opening_cache, "list_cached_opening_scores", lambda *args: (None, []))
+    else:
+        latest.registry_fingerprint = "old-model"
+        db_session.commit()
+    def lost_race(*args, **kwargs):
+        raise PublicationSuperseded(latest)
+    monkeypatch.setattr(opening_cache, "recompute_opening_scores", lost_race)
+    result = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert result.disposition is RecomputeDisposition.SUPERSEDED
+    assert result.batch is latest
+    assert result.reason is None
+    assert result.row_isolation is None
+    assert _events(captured) == []

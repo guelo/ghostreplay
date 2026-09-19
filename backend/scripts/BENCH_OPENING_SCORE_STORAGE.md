@@ -338,3 +338,52 @@ retains its historical proposal status and field names; the reports record appro
 The recorded environment
 used PostgreSQL 18.4, SQLAlchemy 2.0.51, psycopg 3.3.4, chess 1.11.2, and
 pytest 9.1.1. Reproduction should record any library/server version differences.
+
+## Application writer milestone (inactive)
+
+The reviewed B50 implementation now lives in `app/opening_score_storage.py`, with
+schema migration `20260919_03`. This is separate from the sealed disposable spike
+adapters above: their historical measurements do not qualify the application
+implementation. Production calls still default to legacy. The test-only/internal
+`storage_format=StorageFormat.CURRENT` argument exercises the selected writer;
+there is no deployment activation flag yet. Legacy readers explicitly reject
+current-format markers until reader integration lands. Maintenance calls require
+a fresh session transaction. Legacy bulk insert paging and timing events are
+preserved; qualification must include the already-active atomic retirement cost.
+
+Writer correctness checks (activate `backend/.venv` first):
+
+```bash
+TMPDIR=/private/tmp pytest -q -W error test_opening_score_storage.py \
+  test_opening_cache.py test_opening_score_scheduler.py \
+  test_opening_recompute_analytics.py test_model_schema.py
+# With explicit disposable PostgreSQL test and maintenance URLs configured:
+TMPDIR=/private/tmp pytest -q -W error test_opening_score_storage_pg.py
+TMPDIR=/private/tmp pytest -q \
+  test_pg_gate_plugin.py::test_manifest_matches_real_pg_gate_collection
+```
+
+The required PostgreSQL gate includes schema/model parity and fillfactor,
+collations, atomic failure boundaries, conversion/downgrade, commit recovery,
+serialized competing publishers, evidence-order independence, advisory namespace
+isolation and repeatable-snapshot visibility. Current transport is bounded Core
+executemany of 500 with full-read exact diffs; legacy root/scope transport remains
+available. No cache/hash/COPY deliverables were selected.
+
+For rollback **within the compatibility release**, retain both format readers and
+all publisher guards. Stop/drain publishers and direct scripts before any binary
+or schema rollback. Disable selected-format writes, then rebuild legacy lazily or
+invoke `convert_pair(db, owner, color, StorageFormat.LEGACY)` for each current
+pair. Conversion preserves evidence/scoring stamps and retires the old marker in
+the same transaction. Inspect for any non-legacy markers and any current payload
+before downgrade; the migration refuses either condition. Do not start an old
+binary until conversion is complete. This is an implementation contract, not a
+claim that a production rollout or rollback has run.
+
+`g-score-store-readers` supplies compatible APIs and freshness/baseline consumers;
+`g-score-store-qualify` owns integrated correctness and serial sustained storage/
+delta-lane release measurements over the actual deployment network. The reviewed
+fixture budgets and at least 500 comparable read samples remain prerequisites,
+with separately reviewed production-shape ceilings required before cutover and
+observation. No benchmark, activation or observation milestone is completed by
+these writer tests.

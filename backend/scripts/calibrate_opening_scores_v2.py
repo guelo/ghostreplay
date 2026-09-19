@@ -103,6 +103,7 @@ SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/opening_score_delta.py",
     "backend/app/opening_score_delta_lane.py",
     "backend/app/opening_score_scheduler.py",
+    "backend/app/opening_score_storage.py",
     "backend/app/opening_transposition_artifact.py",
     "backend/app/ply_coordinates.py",
     "backend/app/position_analysis_policy.py",
@@ -10157,11 +10158,18 @@ def run_write_bench(db, user_id: int, player_color: str, database_url: str) -> d
     """Persist one batch on the (already guarded) isolated DB and time a cache read."""
     from app.opening_cache import list_cached_opening_scores, recompute_opening_scores
 
-    recompute_opening_scores(db, user_id, player_color)
+    from app.opening_score_storage import PublicationSuperseded
+
+    disposition = "rebuilt"
+    try:
+        recompute_opening_scores(db, user_id, player_color)
+    except PublicationSuperseded:
+        disposition = "superseded"
     started = time.perf_counter()
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     cache_read_ms = (time.perf_counter() - started) * 1000.0
     return {
+        "disposition": disposition,
         "database_url": database_url,
         "user_id": user_id,
         "player_color": player_color,

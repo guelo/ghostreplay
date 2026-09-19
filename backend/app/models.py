@@ -1055,6 +1055,7 @@ class OpeningScoreBatch(Base):
         CheckConstraint("player_color in ('white','black')", name="ck_opening_score_batches_player_color"),
         UniqueConstraint("user_id", "player_color", "generation", name="uq_opening_score_batches_user_color_generation"),
         Index("idx_opening_score_batches_user_color", "user_id", "player_color", "generation"),
+        {"sqlite_autoincrement": True},
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
@@ -1084,6 +1085,7 @@ class OpeningScoreBatch(Base):
         server_default=func.now(),
         nullable=False,
     )
+    storage_format: Mapped[str] = mapped_column(String(16), nullable=False, server_default="legacy")
 
 
 class EvidenceEpoch(Base):
@@ -1765,4 +1767,108 @@ class UserOpeningScore(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
+    )
+
+
+# Storage identity is independent of score-model identity. Current payload rows
+# have stable IDs and no publication metadata. Their unique keys serve prefix reads.
+MACHINE_KEY = Text(collation="C").with_variant(Text(collation="BINARY"), "sqlite")
+
+
+class CurrentOpeningRoot(Base):
+    __tablename__ = "opening_current_roots"
+    __table_args__ = (
+        UniqueConstraint("user_id", "player_color", "opening_key", name="uq_opening_current_roots_identity"),
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_current_roots_color"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    opening_key: Mapped[str] = mapped_column(MACHINE_KEY, nullable=False)
+    opening_name: Mapped[str] = mapped_column(Text, nullable=False)
+    opening_family: Mapped[str] = mapped_column(Text, nullable=False)
+    opening_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    coverage: Mapped[float] = mapped_column(Float, nullable=False)
+    weighted_depth: Mapped[float] = mapped_column(Float, nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    game_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_practiced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    strongest_branch_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    strongest_branch_key: Mapped[str | None] = mapped_column(MACHINE_KEY, nullable=True)
+    strongest_branch_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weakest_branch_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    weakest_branch_key: Mapped[str | None] = mapped_column(MACHINE_KEY, nullable=True)
+    weakest_branch_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    underexposed_branch_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    underexposed_branch_key: Mapped[str | None] = mapped_column(MACHINE_KEY, nullable=True)
+    underexposed_branch_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class CurrentOpeningPosition(Base):
+    __tablename__ = "opening_current_positions"
+    __table_args__ = (
+        UniqueConstraint("user_id", "player_color", "normalized_fen", name="uq_opening_current_positions_identity"),
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_current_positions_color"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    normalized_fen: Mapped[str] = mapped_column(MACHINE_KEY, nullable=False)
+    in_book: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    has_evidence: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    opening_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coverage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weighted_depth: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    game_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_practiced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CurrentOpeningEdge(Base):
+    __tablename__ = "opening_current_edges"
+    __table_args__ = (
+        UniqueConstraint("user_id", "player_color", "parent_fen", "child_fen", name="uq_opening_current_edges_identity"),
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_current_edges_color"),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    parent_fen: Mapped[str] = mapped_column(MACHINE_KEY, nullable=False)
+    child_fen: Mapped[str] = mapped_column(MACHINE_KEY, nullable=False)
+    uci: Mapped[str] = mapped_column(MACHINE_KEY, nullable=False)
+    traversal_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    live_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    live_passes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    live_fails: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class CurrentOpeningScope(Base):
+    __tablename__ = "opening_current_scope"
+    __table_args__ = (
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_current_scope_color"),
+        CheckConstraint("kind in ('raw','norm')", name="ck_opening_current_scope_kind"),
+    )
+
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True)
+    player_color: Mapped[str] = mapped_column(String(5), primary_key=True)
+    kind: Mapped[str] = mapped_column(MACHINE_KEY, primary_key=True)
+    fen: Mapped[str] = mapped_column(MACHINE_KEY, primary_key=True)
+
+
+# PostgreSQL table storage settings are DDL, not a SQLAlchemy Table dialect option.
+# Install on model-driven schemas as well as in the frozen Alembic migration.
+from sqlalchemy import DDL, event as schema_event  # noqa: E402
+
+for _score_table in (CurrentOpeningRoot.__table__, CurrentOpeningPosition.__table__):
+    schema_event.listen(
+        _score_table, "after_create",
+        DDL("ALTER TABLE %(fullname)s SET (fillfactor = 50)").execute_if(dialect="postgresql"),
     )

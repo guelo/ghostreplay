@@ -976,3 +976,86 @@ That makes it suitable for the dedicated opening page you want:
 - one honest score per opening
 - drill-down into sub-openings like `Queen's Gambit Declined`
 - clear explanations for whether a branch is weak, uncertain, or simply underexposed
+
+### Current-row storage implementation (inactive)
+
+`app/opening_score_storage.py` implements the reviewed B50 publisher. The default
+`recompute_opening_scores` writer remains `StorageFormat.LEGACY`; there is no
+production environment switch in this milestone. Reader integration and release
+qualification must land before activation. The selected schema adds
+`opening_current_roots`, `opening_current_positions`, `opening_current_edges`,
+and `opening_current_scope`, plus `opening_score_batches.storage_format`.
+Storage identity does not change the score-model/config fingerprint or session
+baseline compatibility.
+
+Current roots and positions are wide rows with PostgreSQL fillfactor 50. Natural
+keys use PostgreSQL C / SQLite BINARY collations, unique identity indexes also
+serve owner/color and edge-parent prefix reads, and numeric IDs survive updates.
+Every semantic field, including continuous confidence, nullable metrics, branch
+summaries and timestamps, participates in exact typed comparison. The publisher
+reads the complete current payload under its lock and sends inserts, deletions,
+and updates of only changed fields using Core executemany groups of at most 500.
+No payload cache, hash, separate confidence table, COPY or quantized time is used.
+
+Generation reservation and matched evidence capture retain their existing order;
+CPU scoring holds neither a checked-out connection nor a publication lock. Both
+legacy and current publishers acquire the pair's two-int4 transaction advisory
+lock (class `0x47525343`, SHA-256 full-int64 owner bucket with a color bit).
+SQLite acquires its writer transaction before reading the comparison payload.
+An already published equal/higher generation discards the candidate. The
+operational caller returns `SUPERSEDED` with the winning batch, no rebuild reason
+or isolation summary, and emits no rebuilt analytics. Scheduler waiters treat it
+as a successful reload and may fill baselines from the winning batch. Generation
+order does not prove evidence freshness; ordinary cheap freshness checks still
+converge evidence.
+
+Current publication replaces the small marker and retires every previous marker
+and legacy child in the same transaction as payload changes. Empty/quarantined
+score sets delete omitted rows while retaining any navigation edges. Legacy-only
+publication retains the previous snapshot for existing readers; maintenance
+pruning uses the same lock and targets only legacy markers. Returning metadata
+requires no post-commit refresh. If commit acknowledgement fails, invalidate that
+connection and inspect the reserved generation under the same lock on a fresh
+connection: confirmed publication returns normally, a newer publication reports
+supersession, and an absent attempt remains an exception without an automatic
+scoring retry.
+
+`ScorePayload` provides detached immutable typed rows. `ScoreHandle` captures
+exact owner/color, batch ID, generation and format. `payload_query` gives reader
+integration a legacy-shaped SELECT to narrow by requested keys; current queries
+join the exact marker. `handle_is_live` is the final fence primitive and
+`read_payload` raises `RetiredScoreHandle` instead of resolving a retired ID to
+current rows. Bounded API reads, fence/retry/snapshot orchestration and mixed
+format freshness consumers are owned by `g-score-store-readers`.
+
+`convert_pair` is an explicit per-pair forward/reverse converter using the same
+reservation and publication guard, preserving computed time and evidence stamps.
+Real rebuilds also convert lazily when their target format differs. Reverse
+conversion writes a complete legacy snapshot and clears current rows atomically.
+No startup fleet sweep is installed. Migration `20260919_03` refuses downgrade
+while any current marker (even empty) or current payload remains. Operators must
+drain publishers and reverse-convert before reverting to a pre-compatibility
+binary; disabling new writes alone is insufficient.
+
+
+Writer review constraints: until `g-score-store-readers` lands, the legacy reader
+entry point raises `UnsupportedScoreStorage` for a non-legacy latest marker.
+It cannot serve that marker as an empty cache or report it as healthy/CACHED;
+reverse-convert the pair to restore service. Current writes remain an explicit
+internal/test operation, with no production activation switch.
+
+Legacy position/edge inserts retain their rows-staged timing events and a single
+bulk execution per group (dialect paging); the 500-row transport applies to current diffs. Atomic retirement and
+strict scalar validation already apply to the production-default legacy writer.
+A retirement failure therefore rolls back publication, and deletion holds the
+publication lock. Qualification must measure this legacy transaction against the
+previous writer, including retention cost. Float fields require floats (`0.0`,
+not `0`); this catches malformed scorer output before persistence.
+
+Pruning and conversion reject an open caller transaction without changing it.
+Conversion preflights no-op/absent pairs without reserving a generation, then
+rechecks under the lock after reservation. Conversion preserves old evidence and
+can supersede an earlier-reserved rebuild with fresher evidence. A subsequent
+freshness check remains responsible for rebuilding; supersession is publication
+order only. Ambiguous-commit recovery uses a five-second PostgreSQL lock timeout;
+timeout propagates as failure rather than confirming an unknown outcome.

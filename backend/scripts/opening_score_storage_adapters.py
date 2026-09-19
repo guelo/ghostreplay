@@ -529,6 +529,9 @@ class LegacyAdapter:
             Session(self.engine) as db,
             patch.object(oc, "_build_cached_scores", return_value=(roots, positions)),
         ):
+            # A superseded publication deliberately aborts this isolated spike
+            # sample: timing a discarded candidate as a successful write would
+            # invalidate qualification. PublicationSuperseded propagates.
             batch = oc.recompute_opening_scores(
                 db,
                 OWNER,

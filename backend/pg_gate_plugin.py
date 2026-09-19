@@ -156,6 +156,12 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
+    "test_opening_score_storage_pg.py::test_pg_current_schema_model_and_migration_parity",
+    "test_opening_score_storage_pg.py::test_pg_conversion_retirement_and_downgrade_guard",
+    "test_opening_score_storage_pg.py::test_pg_atomic_failure_boundaries_and_commit_recovery",
+    "test_opening_score_storage_pg.py::test_pg_publication_serialization_supersession_and_evidence_order",
+    "test_opening_score_storage_pg.py::test_pg_lock_namespaces_colors_and_collision_isolation",
+    "test_opening_score_storage_pg.py::test_pg_exact_diff_ids_collation_and_snapshot_rollback",
     "test_drill_route_mode_migration.py::test_pg_route_mode_migration_constraints",
     # Compact decision targeting: migration, counter parity and snapshot/upsert races.
     "test_opponent_decision_retention_migration.py::test_pg_backfill_command_refuses_initialized_deadlines",

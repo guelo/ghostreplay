@@ -43,7 +43,7 @@ Read side (stale-while-revalidate):
     evidence change, decay staleness) are consolidated in
     ``recompute_opening_scores_if_needed`` so the worker is the only reader-driven
     path that writes a batch. That function returns an explicit
-    ``OpeningScoreRecomputeResult`` (``rebuilt`` / ``cached`` / ``no_evidence``)
+    ``OpeningScoreRecomputeResult`` (``rebuilt`` / ``cached`` / ``superseded`` / ``no_evidence``)
     rather than a bare batch, so this scheduler can label its run outcome without
     inferring anything from batch presence; an exception is the fourth outcome,
     ``failed``.
@@ -430,7 +430,7 @@ class OpeningScoreScheduler:
 
         Returns ``True`` only when a run that covers this enqueue's sequence
         completed **successfully** — any of the three normal dispositions
-        (``rebuilt``, ``cached``, ``no_evidence``) counts as covering — and the key
+        (``rebuilt``, ``cached``, ``superseded``, ``no_evidence``) counts as covering — and the key
         has no pending or in-flight work remaining. Returns ``False`` on a
         covering-run failure (including a recompute-contract violation),
         worker-start failure, scheduler shutdown, or ``timeout`` — in which case
@@ -563,7 +563,7 @@ class OpeningScoreScheduler:
             and observer.original_deadline_remaining_ms is not None
             and worker_run_ms is not None
             and not forced_dispatch
-            and disposition in {"rebuilt", "cached"}
+            and disposition in {"rebuilt", "cached", "superseded"}
         ):
             optimistic_lower_bound_ms = (
                 observer.original_deadline_remaining_ms + worker_run_ms
@@ -1043,7 +1043,7 @@ class OpeningScoreScheduler:
             reached_push_fill = (
                 push_fill_batch_id is not None
                 and not push_fill_failed
-                and run_outcome in {"rebuilt", "cached"}
+                and run_outcome in {"rebuilt", "cached", "superseded"}
             )
             for observer in covering_observers:
                 self._log_terminal_convergence(

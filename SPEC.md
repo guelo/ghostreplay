@@ -147,7 +147,12 @@ Alongside this game and training data, PostgreSQL holds reusable analysis
 evidence, rating history, and side-scoped opening-score snapshots. Opening-score
 generations are published atomically; a materially invalid derived coverage row
 is isolated as honest no-data while valid score rows and observed navigation
-edges still converge in the same current generation. The exact relational
+edges still converge in the same current generation. Publishers serialize by
+owner and color. An inactive current-row storage implementation applies exact
+changes and retires the previous publication marker in the same transaction;
+legacy readers explicitly reject current-format markers; legacy snapshots remain
+the production default pending compatible readers and release qualification. Storage conversion preserves scoring and evidence identity.
+The exact relational
 schema, constraints, and migration history remain authoritative in the backend
 model and migration layer, not in this overview.
 

@@ -458,9 +458,15 @@ def _create_test_schema(conn) -> None:
             cache_epoch INTEGER,
             scoped_shared_digest TEXT,
             computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            storage_format VARCHAR(16) NOT NULL DEFAULT 'legacy',
             UNIQUE(user_id, player_color, generation)
         )
     """))
+    from app.models import (
+        CurrentOpeningRoot, CurrentOpeningPosition, CurrentOpeningEdge, CurrentOpeningScope,
+    )
+    for model in (CurrentOpeningRoot, CurrentOpeningPosition, CurrentOpeningEdge, CurrentOpeningScope):
+        model.__table__.create(conn, checkfirst=True)
     # evidence_seq: per-(user,color) counter over the PER-USER evidence surfaces
     # (see OpeningScoreCursor.evidence_seq). OUT-OF-BAND-WRITER CONTRACT: anything
     # mutating session_moves / game_sessions eligibility / blunders /
@@ -669,6 +675,9 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS shared_evidence_scope_invalidations"))
     conn.execute(text("DROP TABLE IF EXISTS evidence_epoch"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
+    for table in ("opening_current_roots", "opening_current_positions",
+                  "opening_current_edges", "opening_current_scope"):
+        conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))
     conn.execute(text("DROP TABLE IF EXISTS position_analysis_conflicts"))
     conn.execute(text("DROP TABLE IF EXISTS position_analysis"))

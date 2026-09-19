@@ -90,6 +90,13 @@ def _cached(generation: int = 7, batch_id: int | None = None):
     )
 
 
+def _superseded(generation=9, batch_id=None):
+    return OpeningScoreRecomputeResult(
+        disposition=RecomputeDisposition.SUPERSEDED,
+        batch=_FakeBatch(generation, batch_id),
+    )
+
+
 def _no_evidence():
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.NO_EVIDENCE, batch=None
@@ -762,7 +769,7 @@ def test_refresh_now_waits_for_followup_enqueued_during_run():
 
 
 @pytest.mark.parametrize(
-    "result_factory", [lambda: _rebuilt("evidence_change"), _cached, _no_evidence]
+    "result_factory", [lambda: _rebuilt("evidence_change"), _cached, _superseded, _no_evidence]
 )
 def test_every_normal_disposition_is_a_covering_run_for_refresh_now(result_factory):
     # rebuilt / cached / no_evidence are all successful COVERING runs: refresh_now's
@@ -791,10 +798,11 @@ def test_exception_reports_failure_to_refresh_now():
     [
         (lambda *a: _rebuilt("evidence_change", 42), "rebuilt", "evidence_change", "42"),
         (lambda *a: _cached(9), "cached", "None", "9"),
+        (lambda *a: _superseded(9), "superseded", "None", "9"),
         (lambda *a: _no_evidence(), "no_evidence", "None", "None"),
         (Mock(side_effect=RuntimeError("boom")), "failed", "None", "None"),
     ],
-    ids=["rebuilt", "cached", "no_evidence", "failed"],
+    ids=["rebuilt", "cached", "superseded", "no_evidence", "failed"],
 )
 def test_completion_log_reports_the_exact_run_outcome(
     caplog, recompute, expected_outcome, expected_reason, expected_generation
@@ -1686,3 +1694,20 @@ def test_shutdown_censors_pending_probe_and_forced_run_has_no_optimistic_bound(c
     assert f"convergence_probe_id={forced.convergence_probe_id}" in records[0]
     assert "forced_dispatch=True" in records[0]
     assert "optimistic_lower_bound_ms=None" in records[0]
+
+
+def test_superseded_reload_completes_observer_and_fills_winning_batch(caplog):
+    clock = _FakeClock()
+    fills = []
+    sched, _ = _make_scheduler(clock, lambda *args: _superseded(batch_id=17),
+                              fill_baselines=fills.append)
+    sched.request_recompute(1, "white", source=_TRIGGER)
+    sched.probe_terminal_recompute(1, "white", register_convergence=True)
+    clock.advance(1.5)
+    with caplog.at_level(logging.INFO, logger="app.opening_score_scheduler"):
+        sched.run_due()
+    assert fills == [17]
+    records = _convergence_records(caplog)
+    assert len(records) == 1
+    assert "disposition=superseded" in records[0]
+    assert "completion_lag_ms=None" not in records[0]

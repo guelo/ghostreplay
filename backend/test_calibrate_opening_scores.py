@@ -2933,6 +2933,7 @@ class TestScorerSourceDigest:
             "backend/app/opening_score_delta.py",
             "backend/app/opening_score_delta_lane.py",
             "backend/app/opening_score_scheduler.py",
+            "backend/app/opening_score_storage.py",
             "backend/app/opening_transposition_artifact.py",
             "backend/app/ply_coordinates.py",
             "backend/app/position_analysis_policy.py",
