@@ -10,18 +10,26 @@ from sqlalchemy.orm import Session
 from app.models import CurrentOpeningPosition, OpeningScoreBatch
 from app.opening_cache import reserve_opening_score_generation
 from app.opening_score_storage import (
+    BatchView,
     PublicationSuperseded,
     RetiredScoreHandle,
     ScoreHandle,
     ScorePayload,
     StorageFormat,
     _GROUPS,
+    _semantic_columns,
+    _value,
     convert_pair,
     handle_is_live,
+    latest_batch_view,
+    pair_has_no_batch,
     payload_query,
     publication_lock_key,
     publish_scores,
+    read_group,
+    read_latest_group,
     read_payload,
+    score_snapshot,
 )
 
 NOW = datetime(2026, 9, 19, tzinfo=timezone.utc)
@@ -517,20 +525,235 @@ def test_noop_conversion_does_not_reserve_generation(db_session, existing):
     assert (cursor.latest_generation if cursor else 0) == int(existing)
 
 
-def test_converted_pair_cannot_be_served_or_reported_cached_by_legacy_readers(db_session):
-    from app.opening_cache import list_cached_opening_scores, recompute_opening_scores_if_needed
-    from app.opening_score_storage import UnsupportedScoreStorage
+# ---------------------------------------------------------------------------
+# Reader adapters (g-score-store-readers)
+#
+# Shape A resolves the newest marker inside one statement, so it can never see a
+# retirement. Shape B is handed an exact marker and must distinguish retirement
+# from a valid-empty payload. Both must serve either storage format identically.
+# ---------------------------------------------------------------------------
 
+GROUPS = [name for name, _, _, _ in _GROUPS]
+FORMATS = [StorageFormat.LEGACY, StorageFormat.CURRENT]
+
+
+def semantic(rows, group):
+    """Reader rows reduced to the group's semantic columns, in table order.
+
+    Timestamps go through the writer's own normalization: SQLite round-trips
+    ``DateTime(timezone=True)`` naive, PostgreSQL aware.
+    """
+    current = next(g for g in _GROUPS if g[0] == group)[1]
+    names = [c.name for c in _semantic_columns(current)]
+    return [tuple(_value(getattr(row, name)) for name in names) for row in rows]
+
+
+def read_all(db, view, group, **kwargs):
+    """Both shapes for one group, asserted to agree."""
+    seen_view, latest = read_latest_group(db, view.user_id, view.player_color, group, **kwargs)
+    exact = read_group(db, view.handle, group, **kwargs)
+    assert seen_view == view
+    assert semantic(latest, group) == semantic(exact, group)
+    return latest
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+def test_readers_serve_every_group_in_either_format(db_session, fmt):
+    batch = publish(db_session, format=fmt)
+    view = latest_batch_view(db_session, 123, "white")
+    assert view.id == batch.id and view.storage_format == fmt.value
+    expected = payload()
+    for group in GROUPS:
+        rows = read_all(db_session, view, group)
+        names = [c.name for c in _semantic_columns(next(g for g in _GROUPS if g[0] == group)[1])]
+        assert semantic(rows, group) == [
+            tuple(_value(row[name]) for name in names)
+            for row in getattr(expected, group)
+        ]
+        # Marker columns come from the marker, never from a legacy row's own copy.
+        assert all(row.batch_id == batch.id for row in rows)
+        assert all(row.computed_at == batch.computed_at for row in rows)
+        assert all(row.player_color == "white" for row in rows)
+
+
+def test_both_formats_serve_identical_reader_output_across_a_conversion(db_session):
+    """The conversion boundary is invisible to readers — the point of this bead.
+
+    Replaces the pinned ``UnsupportedScoreStorage`` raise that legacy readers used
+    to emit for a converted pair.
+    """
     publish(db_session, format=StorageFormat.LEGACY)
-    assert len(list_cached_opening_scores(db_session, 123, "white")[1]) == 1
     db_session.rollback()
+    before = {
+        group: semantic(
+            read_all(db_session, latest_batch_view(db_session, 123, "white"), group),
+            group,
+        )
+        for group in GROUPS
+    }
+    db_session.rollback()
+
     convert_pair(db_session, 123, "white", StorageFormat.CURRENT)
-    for reader in (list_cached_opening_scores, recompute_opening_scores_if_needed):
-        with pytest.raises(UnsupportedScoreStorage, match="reverse-convert"):
-            reader(db_session, 123, "white")
+    view = latest_batch_view(db_session, 123, "white")
+    assert view.storage_format == StorageFormat.CURRENT.value
+    assert {g: semantic(read_all(db_session, view, g), g) for g in GROUPS} == before
     db_session.rollback()
+
     convert_pair(db_session, 123, "white", StorageFormat.LEGACY)
-    assert len(list_cached_opening_scores(db_session, 123, "white")[1]) == 1
+    view = latest_batch_view(db_session, 123, "white")
+    assert {g: semantic(read_all(db_session, view, g), g) for g in GROUPS} == before
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+@pytest.mark.parametrize("group", GROUPS)
+def test_a_live_marker_with_no_payload_reads_valid_empty(db_session, fmt, group):
+    publish(db_session, ScorePayload(), format=fmt)
+    view = latest_batch_view(db_session, 123, "white")
+    assert read_all(db_session, view, group) == []
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+@pytest.mark.parametrize("group", GROUPS)
+def test_shape_b_raises_on_a_retired_marker_while_shape_a_cannot(db_session, fmt, group):
+    first = publish(db_session, format=fmt)
+    retired = ScoreHandle.from_batch(first)
+    # Legacy publication deliberately keeps one prior generation for in-flight
+    # readers; current storage retires immediately. Publish until it is gone.
+    for _ in range(2):
+        db_session.rollback()
+        second = publish(db_session, format=fmt)
+        if not handle_is_live(db_session, retired):
+            break
+    assert not handle_is_live(db_session, retired)
+
+    with pytest.raises(RetiredScoreHandle):
+        read_group(db_session, retired, group)
+    # Shape A resolved its own marker in the statement, so it serves the new one.
+    view, rows = read_latest_group(db_session, 123, "white", group)
+    assert view.id == second.id
+    assert rows == read_group(db_session, view.handle, group)
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+def test_a_bounded_predicate_that_matches_nothing_is_valid_empty_not_retired(
+    db_session, fmt
+):
+    """The ``on`` predicate belongs in the ON clause, never in WHERE.
+
+    In WHERE it would filter the metadata root away, and "no row for this FEN"
+    would become indistinguishable from "this marker retired".
+    """
+    publish(db_session, format=fmt)
+    view = latest_batch_view(db_session, 123, "white")
+    miss = lambda table: table.c.normalized_fen == "no-such-fen w - -"  # noqa: E731
+    assert read_all(db_session, view, "positions", on=miss) == []
+    hit = lambda table: table.c.normalized_fen == "key"  # noqa: E731
+    assert len(read_all(db_session, view, "positions", on=hit)) == 1
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+def test_no_data_rows_keep_their_null_metrics(db_session, fmt):
+    """A ``has_evidence=False`` row's NULL metrics survive the coalesce.
+
+    Only one side of the join can match, so coalescing two NULLs is a legitimate
+    NULL — the non-nullable natural key, not a metric, is the emptiness signal.
+    """
+    value = payload()
+    value = replace(
+        value,
+        positions=(
+            {
+                **value.positions[0],
+                "has_evidence": False,
+                "opening_score": None,
+                "confidence": None,
+                "coverage": None,
+                "weighted_depth": None,
+                "last_practiced_at": None,
+            },
+        ),
+    )
+    publish(db_session, value, format=fmt)
+    view = latest_batch_view(db_session, 123, "white")
+    (row,) = read_all(db_session, view, "positions")
+    assert row.normalized_fen == "key"
+    assert row.has_evidence is False
+    assert (row.opening_score, row.confidence, row.coverage, row.weighted_depth) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert row.last_practiced_at is None
+
+
+@pytest.mark.parametrize("fmt", FORMATS, ids=lambda f: f.name.lower())
+def test_readers_are_scoped_to_one_owner_and_color(db_session, fmt):
+    publish(db_session, owner=123, color="white", format=fmt)
+    db_session.rollback()
+    publish(db_session, owner=123, color="black", format=fmt)
+    db_session.rollback()
+    publish(db_session, owner=456, color="white", format=fmt)
+    db_session.rollback()
+    for owner, color in ((123, "white"), (123, "black"), (456, "white")):
+        view, rows = read_latest_group(db_session, owner, color, "roots")
+        assert (view.user_id, view.player_color) == (owner, color)
+        assert len(rows) == 1
+        assert all(row.user_id == owner and row.player_color == color for row in rows)
+    assert read_latest_group(db_session, 999, "white", "roots") == (None, [])
+
+
+def test_legacy_and_current_pairs_read_side_by_side(db_session):
+    """Mixed storage during conversion: each pair reads its own format."""
+    publish(db_session, owner=123, color="white", format=StorageFormat.LEGACY)
+    db_session.rollback()
+    publish(db_session, owner=123, color="black", format=StorageFormat.CURRENT)
+    db_session.rollback()
+    white = latest_batch_view(db_session, 123, "white")
+    black = latest_batch_view(db_session, 123, "black")
+    assert white.storage_format == StorageFormat.LEGACY.value
+    assert black.storage_format == StorageFormat.CURRENT.value
+    assert semantic(read_all(db_session, white, "roots"), "roots") == semantic(
+        read_all(db_session, black, "roots"), "roots"
+    )
+
+
+def test_pair_has_no_batch_is_a_real_query(db_session):
+    """The book-only fence must be SQL: an ORM identity-map hit proves nothing."""
+    assert pair_has_no_batch(db_session, 123, "white") is True
+    publish(db_session, format=StorageFormat.CURRENT)
+    assert pair_has_no_batch(db_session, 123, "white") is False
+    assert pair_has_no_batch(db_session, 123, "black") is True
+
+
+def test_batch_view_mirrors_every_marker_column_and_carries_the_handle(db_session):
+    batch = publish(db_session, format=StorageFormat.CURRENT)
+    view = latest_batch_view(db_session, 123, "white")
+    assert [f.name for f in view.__dataclass_fields__.values()] == [
+        c.name for c in OpeningScoreBatch.__table__.columns
+    ]
+    assert view == BatchView.from_batch(batch)
+    assert view.handle == ScoreHandle.from_batch(batch)
+    with pytest.raises(Exception):
+        view.generation = 99
+
+
+def test_score_snapshot_refuses_an_open_transaction(db_session):
+    """``begin_readonly_snapshot`` must be a transaction's first statement.
+
+    Mid-transaction SQLAlchemy only warns that the execution options were ignored
+    and silently leaves READ COMMITTED, so the guard has to be explicit — and a
+    ``ValueError``, which ``python -O`` cannot strip.
+    """
+    publish(db_session, format=StorageFormat.CURRENT)
+    assert db_session.in_transaction()
+    with pytest.raises(ValueError, match="fresh transaction"):
+        with score_snapshot(db_session):
+            pass
+    db_session.rollback()
+    with score_snapshot(db_session):
+        assert latest_batch_view(db_session, 123, "white") is not None
+    assert not db_session.in_transaction()
 
 
 def test_legacy_bulk_inserts_keep_dialect_paging(db_session):

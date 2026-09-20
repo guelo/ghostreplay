@@ -1021,12 +1021,10 @@ supersession, and an absent attempt remains an exception without an automatic
 scoring retry.
 
 `ScorePayload` provides detached immutable typed rows. `ScoreHandle` captures
-exact owner/color, batch ID, generation and format. `payload_query` gives reader
-integration a legacy-shaped SELECT to narrow by requested keys; current queries
-join the exact marker. `handle_is_live` is the final fence primitive and
-`read_payload` raises `RetiredScoreHandle` instead of resolving a retired ID to
-current rows. Bounded API reads, fence/retry/snapshot orchestration and mixed
-format freshness consumers are owned by `g-score-store-readers`.
+exact owner/color, batch ID, generation, format and captured time. `handle_is_live`
+is the final fence primitive and `read_payload` raises `RetiredScoreHandle`
+instead of resolving a retired ID to current rows. The compatible readers built
+on these primitives are described next.
 
 `convert_pair` is an explicit per-pair forward/reverse converter using the same
 reservation and publication guard, preserving computed time and evidence stamps.
@@ -1038,11 +1036,65 @@ drain publishers and reverse-convert before reverting to a pre-compatibility
 binary; disabling new writes alone is insufficient.
 
 
-Writer review constraints: until `g-score-store-readers` lands, the legacy reader
-entry point raises `UnsupportedScoreStorage` for a non-legacy latest marker.
-It cannot serve that marker as an empty cache or report it as healthy/CACHED;
-reverse-convert the pair to restore service. Current writes remain an explicit
-internal/test operation, with no production activation switch.
+Current writes remain an explicit internal/test operation, resolved in the writer
+body through `opening_cache.default_storage_format()`, with no production
+activation switch.
+
+### Compatible readers (active)
+
+Every opening-score consumer serves either format. The one rule underneath all of
+it: **a publication changes current rows and deletes the prior marker atomically,
+so a marker still present after a reader's last payload query proves no
+publication committed during that read.** Two consequences shape every reader.
+
+*Every current-row query is anchored to a marker in the same SQL statement.* The
+marker drives a metadata-rooted outer join, so zero rows means the marker is gone
+and one row with a NULL natural key means a live marker with no payload. That is
+what keeps a retired generation from being served as a valid empty result — the
+rows are still physically present under the NEW generation, so an unanchored
+query would happily return them under the old marker's identity. The join carries
+format-guarded `ON` clauses over both the current and legacy tables and coalesces
+each semantic column, so one statement serves either format; only one side can
+match, so a coalesce of two NULLs is a legitimate `has_evidence=false` NULL.
+Bounded predicates (`normalized_fen IN (…)`, `parent_fen IN (…)`) go into the
+`ON` clauses, never `WHERE`, where they would filter the metadata root away and
+turn "no matching FEN" back into "retired".
+
+*Only a multi-statement reader needs a fence.* Single-statement readers
+(`/openings`, `/stats`, the session lineage, the delta lane's cached reads)
+resolve the newest marker INSIDE the statement, so they have no retirement to
+observe, nothing to retry and nothing to fence. Readers hand callers a detached
+`BatchView` and detached row snapshots rather than live ORM rows, so a later
+attribute read can never re-SELECT a marker a concurrent publication retired.
+
+`/tree` is the only multi-statement reader. It resolves a fresh exact handle,
+performs its bounded two-wave visible-parent and position reads anchored to that
+marker, and then executes a final SQL marker fence — never an ORM identity-map
+hit. A book-only attempt is fenced by proving the pair still has no marker at
+all. An invalidated attempt discards the entire builder (partial rows, the
+canonicalized line, cached edges and its timings) and retries once, with no
+second scheduler enqueue; `ensure_tree_cache` keeps its single trigger, blocking
+bootstrap, timeout and rollback boundary, and its returned batch ID is only a
+hint. If both optimistic attempts are invalidated the read completes inside one
+short read-only REPEATABLE READ snapshot, opened after bootstrap/graph/routing
+loading and closed after the response is detached, containing no scorer, no
+`refresh_now` and no whole-edge-graph fetch. `cache_state` is labelled against the
+marker actually served, so a bootstrap that timed out and was then overtaken by a
+fresh publication reports `bootstrapped` instead of making the client discard a
+good tree.
+
+Freshness and baseline consumers distinguish retirement from a genuinely empty
+scope. `_cheap_evidence_fresh` fails CLOSED on retirement (stale) while an empty
+stored scope keeps its existing meaning. Baseline proof 2 raises
+`RetiredScoreHandle` rather than returning a watermark mismatch, because
+`WATERMARK_MISMATCH` is terminal and would permanently drop a session's baseline
+whenever a rebuild published between the two proofs; the baseline job maps it to
+the retryable `skipped_stale` and captures on its next attempt, and an
+independent post-publication push-fill discards its work and returns 0. No
+freshness or baseline writer is converted to REPEATABLE READ. The full-batch
+delta fallback stays cache-only at the existing terminal POST/poll boundaries,
+the scoped delta lane is untouched, and no O(evidence) digest or replay enters
+the request path.
 
 Legacy position/edge inserts retain their rows-staged timing events and a single
 bulk execution per group (dialect paging); the 500-row transport applies to current diffs. Atomic retirement and

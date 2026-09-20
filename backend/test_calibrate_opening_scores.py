@@ -2939,6 +2939,9 @@ class TestScorerSourceDigest:
             "backend/app/position_analysis_policy.py",
             "backend/app/position_analysis_repo.py",
             "backend/app/posthog_client.py",
+            # g-score-store-readers: the tree read's snapshot fallback starts its
+            # transaction through this leaf seam.
+            "backend/app/readonly_snapshot.py",
             "backend/app/session_contracts.py",
             "backend/app/terminal_pgn.py",
             "backend/requirements.txt",

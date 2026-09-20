@@ -17,7 +17,8 @@ import pytest
 
 import app.opening_cache as opening_cache
 import app.opening_evidence as opening_evidence
-from app.models import SessionMove
+from app.models import OpeningScoreBatch, SessionMove
+from app.opening_score_storage import BatchView
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
     RecomputeDisposition,
@@ -249,7 +250,8 @@ def test_decay_staleness_reason(db_session, captured):
     captured.clear()
 
     stale_at = datetime.now(timezone.utc) - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL - timedelta(hours=1)
-    first.computed_at = stale_at
+    # A reader result is a detached snapshot; age the live row behind it.
+    db_session.get(OpeningScoreBatch, first.id).computed_at = stale_at
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
@@ -477,7 +479,7 @@ def test_superseded_candidate_returns_latest_without_rebuilt_analytics(db_sessio
     monkeypatch.setattr(opening_cache, "recompute_opening_scores", lost_race)
     result = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert result.disposition is RecomputeDisposition.SUPERSEDED
-    assert result.batch is latest
+    assert result.batch == BatchView.from_batch(latest)
     assert result.reason is None
     assert result.row_isolation is None
     assert _events(captured) == []

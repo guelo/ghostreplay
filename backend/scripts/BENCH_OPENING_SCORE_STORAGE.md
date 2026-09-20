@@ -346,9 +346,8 @@ schema migration `20260919_03`. This is separate from the sealed disposable spik
 adapters above: their historical measurements do not qualify the application
 implementation. Production calls still default to legacy. The test-only/internal
 `storage_format=StorageFormat.CURRENT` argument exercises the selected writer;
-there is no deployment activation flag yet. Legacy readers explicitly reject
-current-format markers until reader integration lands. Maintenance calls require
-a fresh session transaction. Legacy bulk insert paging and timing events are
+there is no deployment activation flag yet. Readers now serve both formats (see
+"Reader contract" below). Maintenance calls require a fresh session transaction. Legacy bulk insert paging and timing events are
 preserved; qualification must include the already-active atomic retirement cost.
 
 Writer correctness checks (activate `backend/.venv` first):
@@ -380,7 +379,67 @@ before downgrade; the migration refuses either condition. Do not start an old
 binary until conversion is complete. This is an implementation contract, not a
 claim that a production rollout or rollback has run.
 
-`g-score-store-readers` supplies compatible APIs and freshness/baseline consumers;
+## Reader contract (inactive writes, active readers)
+
+`g-score-store-readers` made every opening-score consumer format-agnostic while
+production writes stay legacy. Two shapes, and the difference is operational:
+
+- **Latest-marker single statement** — every non-tree reader (`/openings`,
+  `/stats`, the session lineage, the delta lane's cached reads). The statement
+  resolves the newest marker inside itself and outer-joins the payload to it, so
+  there is no retirement to observe, no retry, no fence and no fallback. Zero
+  rows means the pair has no marker at all; one row with a NULL natural key is a
+  live marker with no payload.
+- **Exact-handle statement** — the tree builder's bounded waves, the cheap
+  evidence-freshness scope read, baseline proof 2, and the push-fill. These CAN
+  observe retirement and raise `RetiredScoreHandle`; each caller maps it to an
+  existing stale/skip outcome. Retirement is always RETRYABLE, never terminal: a
+  baseline job that hits it reports `skipped_stale` and captures on its next run,
+  and an independent post-publication push-fill discards its work and returns 0.
+
+**Tree read, operationally.** `/tree` is the one multi-statement reader. It
+resolves a fresh marker, builds, then executes a final SQL marker fence (never an
+ORM identity-map hit). An invalidated attempt discards the whole builder —
+partial rows, canonical line, cached edges and its timings — and retries ONCE
+without a second scheduler enqueue. If both optimistic attempts are invalidated
+it completes inside one short read-only REPEATABLE READ snapshot opened after
+bootstrap/graph/routing loading, with no scorer, no `refresh_now` and no
+whole-edge-graph fetch inside it.
+
+The timing log carries `score_read_attempts` and `score_read_mode`
+(`optimistic` / `snapshot`), so the fallback is observable in production even
+though a healthy system should never reach it. A sustained non-zero
+`score_read_mode=snapshot` rate means publications are landing inside tree reads
+far more often than the scheduler's quiet window should allow — investigate the
+publication cadence, not the reader. `cache_state` is labelled against the marker
+actually served rather than the bootstrap hint, so a request that blocked on a
+bootstrap and was then overtaken by a fresh publication reports `bootstrapped`
+instead of making the client discard a good tree.
+
+**Bounded reads and collation.** Current-format keys are `C`-collated and the
+global `shared_evidence_*` tables are not. PostgreSQL resolves a comparison
+between them to `C`, and it will only use an index whose own collation matches
+the clause's — so a join between the two silently loses the shared table's
+primary key and degrades to a sequential scan of every shared FEN on the
+instance. Session-start baseline proof 2 is the one place the two meet; it names
+the shared side's collation to keep the probe bounded by the batch's own scope
+(`_shared_probe` in `app/opening_score_delta.py`). Equality under deterministic
+collations is byte equality, so this is a plan concern only. Anything new that
+joins a current-format key to a default-collated table needs the same treatment
+and an `EXPLAIN` gate; the existing ones are in `test_opening_score_reader_pg.py`.
+
+Reader correctness checks:
+
+```bash
+TMPDIR=/private/tmp pytest -q -W error test_opening_score_storage.py \
+  test_opening_score_format_matrix.py test_opening_cache.py test_tree_api.py \
+  test_openings_api.py test_stats_api.py test_session_openings.py \
+  test_opening_freshness_signal.py test_opening_baseline_scheduler.py \
+  test_opening_score_delta.py
+# With explicit disposable PostgreSQL test and maintenance URLs configured:
+TMPDIR=/private/tmp pytest -q test_opening_score_reader_pg.py
+```
+
 `g-score-store-qualify` owns integrated correctness and serial sustained storage/
 delta-lane release measurements over the actual deployment network. The reviewed
 fixture budgets and at least 500 comparable read samples remain prerequisites,

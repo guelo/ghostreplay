@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Iterable, Literal
 
-from sqlalchemy import func, text, update
+from sqlalchemy import text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -17,12 +17,8 @@ from app.fen import normalize_fen
 from app.game_phase import DIVIDER_VERSION
 from app.models import (
     EvidenceEpoch,
-    OpeningPositionEdge,
-    OpeningPositionScore,
     OpeningScoreBatch,
-    OpeningScoreBatchSharedScope,
     OpeningScoreCursor,
-    UserOpeningScore,
 )
 from app.opening_aggregate import (
     CachedOpeningScoreRow,
@@ -64,8 +60,9 @@ from app.opening_transposition_artifact import (
     load_strict_densified_edges,
 )
 from app.opening_score_storage import (
-    PublicationSuperseded, ScorePayload, StorageFormat, publish_scores,
-    acquire_publication_lock, UnsupportedScoreStorage,
+    BatchView, PublicationSuperseded, RetiredScoreHandle, ScoreHandle, ScorePayload,
+    StorageFormat, publish_scores, acquire_publication_lock, latest_batch_view,
+    read_group, read_latest_group,
 )
 from app.posthog_client import capture
 
@@ -367,28 +364,29 @@ def _build_cached_scores(
     return list(scores.values()), position_scores
 
 
+def default_storage_format() -> StorageFormat:
+    """Storage format new publications are written in.
+
+    The single patch point for the reader/qualification test matrix, resolved in
+    the writer BODY (never as a def-time default, which a fixture could not
+    reach). New PRODUCTION writes stay legacy until cutover.
+    """
+    return StorageFormat.LEGACY
+
+
 def get_latest_opening_score_batch(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> OpeningScoreBatch | None:
-    _validate_player_color(player_color)
-    batch = (
-        db.query(OpeningScoreBatch)
-        .filter(
-            OpeningScoreBatch.user_id == user_id,
-            OpeningScoreBatch.player_color == player_color,
-        )
-        .order_by(OpeningScoreBatch.generation.desc())
-        .first()
-    )
+) -> BatchView | None:
+    """The newest marker for (user, color) as a detached view, in either format.
 
-    if batch is not None and batch.storage_format != StorageFormat.LEGACY.value:
-        raise UnsupportedScoreStorage(
-            "legacy opening reader cannot serve current storage; reverse-convert "
-            "the pair or install compatible readers"
-        )
-    return batch
+    A ``BatchView`` rather than an ORM row: readers hand their result across a
+    ``db.rollback()`` and a concurrent publication may retire the marker at any
+    moment, so a live ORM instance could re-SELECT a row that no longer exists.
+    """
+    _validate_player_color(player_color)
+    return latest_batch_view(db, user_id, player_color)
 
 
 def reserve_opening_score_generation(
@@ -714,15 +712,18 @@ def _capture_operational_rebuild_inputs(
     )
 
 
-def _load_batch_shared_scope(db: Session, batch_id: int) -> tuple[list[str], list[str]]:
-    """The (raw_fens, norm_fens) shared scope stored for one batch."""
-    rows = (
-        db.query(OpeningScoreBatchSharedScope.fen, OpeningScoreBatchSharedScope.kind)
-        .filter(OpeningScoreBatchSharedScope.batch_id == batch_id)
-        .all()
-    )
-    raw_fens = [fen for fen, kind in rows if kind == "raw"]
-    norm_fens = [fen for fen, kind in rows if kind == "norm"]
+def _load_batch_shared_scope(
+    db: Session, handle: ScoreHandle
+) -> tuple[list[str], list[str]]:
+    """The (raw_fens, norm_fens) shared scope stored for one exact marker.
+
+    Marker-anchored (reader shape B): a genuinely empty scope comes back as two
+    empty lists, while a retired marker raises ``RetiredScoreHandle`` instead of
+    masquerading as one. The caller decides what retirement means for it.
+    """
+    rows = read_group(db, handle, "scope")
+    raw_fens = [row.fen for row in rows if row.kind == "raw"]
+    norm_fens = [row.fen for row in rows if row.kind == "norm"]
     return raw_fens, norm_fens
 
 
@@ -757,7 +758,7 @@ def _best_effort_rearm(db: Session, batch_id: int, epoch: int) -> None:
         )
 
 
-def _cheap_evidence_fresh(db: Session, batch: OpeningScoreBatch) -> bool:
+def _cheap_evidence_fresh(db: Session, batch: BatchView) -> bool:
     """Partitioned cheap evidence-freshness check for one batch (g-jact).
 
     Covers the EVIDENCE surfaces only — callers own the registry-fingerprint and
@@ -808,7 +809,13 @@ def _cheap_evidence_fresh(db: Session, batch: OpeningScoreBatch) -> bool:
         return False
     if epoch == batch.cache_epoch:
         return True
-    raw_fens, norm_fens = _load_batch_shared_scope(db, batch.id)
+    try:
+        raw_fens, norm_fens = _load_batch_shared_scope(db, batch.handle)
+    except RetiredScoreHandle:
+        # The marker retired under us, so this batch's stored scope proves nothing
+        # about the generation now current. Fail CLOSED (stale) — a genuinely
+        # empty scope still reads as today's empty lists, not as retirement.
+        return False
     if shared_scope_digest(db, raw_fens, norm_fens) == batch.scoped_shared_digest:
         _best_effort_rearm(db, batch.id, epoch)
         return True
@@ -819,32 +826,30 @@ def list_cached_opening_scores(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[UserOpeningScore]]:
-    batch = get_latest_opening_score_batch(db, user_id, player_color)
-    if batch is None:
-        return None, []
-    rows = (
-        db.query(UserOpeningScore)
-        .filter(
-            UserOpeningScore.batch_id == batch.id,
-            UserOpeningScore.user_id == user_id,
-            UserOpeningScore.player_color == player_color,
-        )
-        .order_by(
-            UserOpeningScore.opening_family.asc(),
-            UserOpeningScore.opening_name.asc(),
-            UserOpeningScore.opening_key.asc(),
-        )
-        .all()
+) -> tuple[BatchView | None, list[CachedOpeningScoreRow]]:
+    """Latest named-root rows for (user, color), in either storage format.
+
+    ONE statement (reader shape A): the newest marker is resolved inside it and
+    its roots are outer-joined to it, so the batch and the rows can never come
+    from two different generations and there is nothing to fence. Display order is
+    ``family, name, key`` exactly as before.
+    """
+    _validate_player_color(player_color)
+    view, rows = read_latest_group(
+        db,
+        user_id,
+        player_color,
+        "roots",
+        order_by=("opening_family", "opening_name", "opening_key"),
     )
-    return batch, rows
+    return view, _snapshot_cached_rows(rows)
 
 
 def load_cached_rows(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow]]:
+) -> tuple[BatchView | None, list[CachedOpeningScoreRow]]:
     """Stale-while-revalidate reader for the /opening read endpoints.
 
     WARM (a batch exists): serve the currently-cached batch immediately and
@@ -882,14 +887,14 @@ def load_cached_rows(
             player_color,
             source=OpeningScoreTrigger.CACHED_SCORE_READER_WARM,
         )
-    return batch, _snapshot_cached_rows(rows)
+    return batch, rows
 
 
 def load_cached_rows_nonblocking(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow], bool]:
+) -> tuple[BatchView | None, list[CachedOpeningScoreRow], bool]:
     """Non-blocking sibling of ``load_cached_rows`` for latency-sensitive readers.
 
     Returns ``(batch, rows, scores_pending)``. ``scores_pending`` is True ONLY
@@ -942,13 +947,13 @@ def load_cached_rows_nonblocking(
     request_recompute(
         user_id, player_color, source=OpeningScoreTrigger.SESSION_LINEAGE_WARM
     )
-    return batch, _snapshot_cached_rows(rows), False
+    return batch, rows, False
 
 
 def _is_batch_fresh(
     db: Session,
-    batch: OpeningScoreBatch,
-    rows: list[UserOpeningScore],
+    batch: BatchView,
+    rows: list[CachedOpeningScoreRow],
 ) -> bool:
     """Freshness predicate for an ALREADY-FETCHED batch + its rows — CHEAP (g-jact).
 
@@ -996,7 +1001,7 @@ def proven_fresh_opening_scores(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[UserOpeningScore], bool]:
+) -> tuple[BatchView | None, list[CachedOpeningScoreRow], bool]:
     """Non-blocking freshness verdict for the latest cached batch — NEVER touches
     the scheduler (no ``refresh_now``, no ``request_recompute``, no enqueue, no wait).
 
@@ -1020,23 +1025,13 @@ def list_position_scores(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[OpeningPositionScore]]:
+) -> tuple[BatchView | None, list[CachedPositionScoreRow]]:
     """All direct position rows for the latest batch of (user_id, player_color)."""
     _validate_player_color(player_color)
-    batch = get_latest_opening_score_batch(db, user_id, player_color)
-    if batch is None:
-        return None, []
-    rows = (
-        db.query(OpeningPositionScore)
-        .filter(
-            OpeningPositionScore.batch_id == batch.id,
-            OpeningPositionScore.user_id == user_id,
-            OpeningPositionScore.player_color == player_color,
-        )
-        .order_by(OpeningPositionScore.normalized_fen.asc())
-        .all()
+    view, rows = read_latest_group(
+        db, user_id, player_color, "positions", order_by=("normalized_fen",)
     )
-    return batch, rows
+    return view, _snapshot_position_rows(rows)
 
 
 def lookup_position_scores(
@@ -1063,19 +1058,15 @@ def lookup_position_scores(
     normalized = {_normalize_lookup_fen(fen) for fen in fens}
     if not normalized:
         return get_latest_opening_score_batch(db, user_id, player_color), {}
-    batch = get_latest_opening_score_batch(db, user_id, player_color)
-    if batch is None:
-        return None, {}
-    rows = (
-        db.query(OpeningPositionScore)
-        .filter(
-            OpeningPositionScore.batch_id == batch.id,
-            OpeningPositionScore.normalized_fen.in_(normalized),
-        )
-        .all()
+    view, rows = read_latest_group(
+        db,
+        user_id,
+        player_color,
+        "positions",
+        on=lambda table: table.c.normalized_fen.in_(normalized),
     )
     snapshots = _snapshot_position_rows(rows)
-    return batch, {snapshot.normalized_fen: snapshot for snapshot in snapshots}
+    return view, {snapshot.normalized_fen: snapshot for snapshot in snapshots}
 
 
 def ensure_tree_cache(
@@ -1084,7 +1075,7 @@ def ensure_tree_cache(
     player_color: PlayerColor,
     graph: OpeningGraph,
     roots: OpeningRoots,
-) -> tuple[int | None, datetime | None, str]:
+) -> tuple[int | None, datetime | None, str, str]:
     """Resolve the batch the ``/api/openings/tree`` read path will serve from, and
     fire the single stale-while-revalidate trigger for that request.
 
@@ -1105,9 +1096,13 @@ def ensure_tree_cache(
         edges. ``refresh_now`` is serialized through the scheduler's single writer
         thread, so the recompute never runs on this request thread.
 
-    Returns the resolved ``(batch_id, batch_computed_at, cache_state)`` where the two
-    scalars are captured BEFORE the caller's ``db.rollback()`` (which expires every
-    ORM instance), so the builder never reads an ORM batch field after the rollback.
+    Returns ``(batch_id, batch_computed_at, cache_state, current_registry)``.
+    ``batch_id`` / ``batch_computed_at`` are a HINT: a publication committing right
+    after this call retires that marker, so the route resolves its own fresh handle
+    and anchors every payload read to it rather than trusting these scalars.
+    ``current_registry`` is the registry fingerprint computed here, returned so the
+    route can relabel ``cache_state`` against the marker it actually served without
+    paying a second fingerprint pass.
     ``cache_state`` is diagnostic for the route timing log: ``"warm_fresh"`` (served
     cached, background revalidate), ``"bootstrapped"`` (blocked on a recompute that
     left a current-registry batch — cold-with-evidence or registry/schema drift,
@@ -1179,10 +1174,9 @@ def ensure_tree_cache(
             cache_state = "book_only"
         else:
             cache_state = "bootstrap_timeout"
-    # Snapshot scalars BEFORE the caller rolls back and expires the ORM row.
     if batch is None:
-        return None, None, cache_state
-    return batch.id, batch.computed_at, cache_state
+        return None, None, cache_state, current_registry
+    return batch.id, batch.computed_at, cache_state, current_registry
 
 
 def resolve_tree_cache_state(
@@ -1245,34 +1239,34 @@ def resolve_tree_cache_state(
 
 def lookup_position_scores_for_batch(
     db: Session,
-    batch_id: int,
+    handle: ScoreHandle,
     fens: Iterable[str],
 ) -> dict[str, CachedPositionScoreRow]:
-    """Look up direct position rows for ``fens`` within a specific batch.
+    """Look up direct position rows for ``fens`` within one exact marker.
 
-    Like ``lookup_position_scores`` but takes the already-resolved ``batch_id`` (the
-    tree route resolves it once via ``ensure_tree_cache``) instead of re-querying the
-    latest batch, so it neither re-triggers the scheduler nor touches the ORM batch
-    row after the route's ``db.rollback()``. Every incoming FEN is normalized to the
-    4-field read-model key before lookup. The returned map is keyed by normalized FEN
-    and contains only FENs that have a persisted row.
+    Like ``lookup_position_scores`` but takes the already-resolved ``ScoreHandle``
+    (the tree route resolves it once per attempt) instead of re-querying the latest
+    batch, so it neither re-triggers the scheduler nor touches an ORM batch row
+    after the route's ``db.rollback()``. Marker identity is joined into the SAME
+    statement, so raising ``RetiredScoreHandle`` here is the reader's proof that a
+    publication landed mid-read — never an empty result. Every incoming FEN is
+    normalized to the 4-field read-model key before lookup; the returned map is
+    keyed by normalized FEN and contains only FENs that have a persisted row.
     """
     normalized = {_normalize_lookup_fen(fen) for fen in fens}
     if not normalized:
         return {}
-    rows = (
-        db.query(OpeningPositionScore)
-        .filter(
-            OpeningPositionScore.batch_id == batch_id,
-            OpeningPositionScore.normalized_fen.in_(normalized),
-        )
-        .all()
+    rows = read_group(
+        db,
+        handle,
+        "positions",
+        on=lambda table: table.c.normalized_fen.in_(normalized),
     )
     snapshots = _snapshot_position_rows(rows)
     return {snapshot.normalized_fen: snapshot for snapshot in snapshots}
 
 
-def _edge_evidence_from_row(row: OpeningPositionEdge) -> EdgeEvidence:
+def _edge_evidence_from_row(row) -> EdgeEvidence:
     """Reconstruct an ``EdgeEvidence`` from one persisted edge row.
 
     The tree never reads quality, so the reconstructed ``EdgeEvidence`` carries
@@ -1294,33 +1288,32 @@ def _edge_evidence_from_row(row: OpeningPositionEdge) -> EdgeEvidence:
 
 def lookup_observed_edges_for_parent(
     db: Session,
-    batch_id: int,
+    handle: ScoreHandle,
     parent_fen: str,
 ) -> list[EdgeEvidence]:
-    """Observed edges out of ``parent_fen`` for one batch, as ``EdgeEvidence``.
+    """Observed edges out of ``parent_fen`` for one exact marker, as ``EdgeEvidence``.
 
-    Reads via the unique index backing
-    ``uq_opening_position_edges_batch_parent_child``: its ``(batch_id, parent_fen)``
-    left prefix matches this lookup, and ``parent_fen`` is the normalized 4-field key
-    the edges were stored under, matching the builder's ``norm_fen``, so no
-    renormalization.
+    Reads via the identity index of whichever format the marker names — the legacy
+    ``(batch_id, parent_fen)`` prefix or the current ``(user_id, player_color,
+    parent_fen)`` prefix. ``parent_fen`` is the normalized 4-field key the edges
+    were stored under, matching the builder's ``norm_fen``, so no renormalization.
+    Raises ``RetiredScoreHandle`` if the marker retired mid-read.
     """
-    rows = (
-        db.query(OpeningPositionEdge)
-        .filter(
-            OpeningPositionEdge.batch_id == batch_id,
-            OpeningPositionEdge.parent_fen == parent_fen,
-        )
-        .all()
+    rows = read_group(
+        db, handle, "edges", on=lambda table: table.c.parent_fen == parent_fen
     )
     return [_edge_evidence_from_row(row) for row in rows]
 
 
 # Max parents per ``parent_fen IN (...)`` chunk. The visible node set is small by
 # construction (~tens), so a wave is normally a single chunk; this only splits the
-# rare pathological wave to stay under SQLite's ~999-bound-parameter cap (tests run on
-# SQLite; Postgres is unaffected). Exported so the tree builder can count the actual
-# number of chunked SELECTs a wave issues (each chunk is one DB round-trip).
+# rare pathological wave, for SQLite's bound-parameter cap (tests run on SQLite;
+# Postgres is unaffected). The marker-rooted read binds each chunk TWICE, once per
+# format's ON clause, so a full chunk is ~1800 parameters: far under the 500k this
+# SQLite is built with, but twice the headroom this number was originally chosen
+# for against the historical 999 default. Exported so the tree builder can count
+# the actual number of chunked SELECTs a wave issues (each chunk is one DB
+# round-trip).
 OBSERVED_EDGE_PARENT_CHUNK_SIZE = 900
 
 
@@ -1341,7 +1334,7 @@ def observed_edge_parent_chunk_count(n_parents: int) -> int:
 
 def lookup_observed_edges_for_parents(
     db: Session,
-    batch_id: int,
+    handle: ScoreHandle,
     parent_fens: Iterable[str],
 ) -> dict[str, list[EdgeEvidence]]:
     """Observed edges for a SPECIFIC set of parents in one batch, indexed by
@@ -1366,13 +1359,8 @@ def lookup_observed_edges_for_parents(
     # chunk; chunk defensively for SQLite's ~999-bound-parameter cap (see
     # OBSERVED_EDGE_PARENT_CHUNK_SIZE; tests run on SQLite, Postgres is unaffected).
     for chunk in _chunked(sorted(fens), OBSERVED_EDGE_PARENT_CHUNK_SIZE):
-        rows = (
-            db.query(OpeningPositionEdge)
-            .filter(
-                OpeningPositionEdge.batch_id == batch_id,
-                OpeningPositionEdge.parent_fen.in_(chunk),
-            )
-            .all()
+        rows = read_group(
+            db, handle, "edges", on=lambda table: table.c.parent_fen.in_(chunk)
         )
         for row in rows:
             edges_by_parent.setdefault(row.parent_fen, []).append(
@@ -1465,7 +1453,7 @@ def recompute_opening_scores(
     user_id: int,
     player_color: PlayerColor,
     *,
-    storage_format: StorageFormat = StorageFormat.LEGACY,
+    storage_format: StorageFormat | None = None,
     overlay: EvidenceOverlay | None = None,
     freshness: FreshnessSnapshot | None = None,
     computed_at: datetime | None = None,
@@ -1480,6 +1468,10 @@ def recompute_opening_scores(
     new one. A generation with zero score rows is valid and current.
     """
     _validate_player_color(player_color)
+    # Resolved in the BODY, not as a def-time default: a def-time default is bound
+    # at import and no test fixture could reach it.
+    if storage_format is None:
+        storage_format = default_storage_format()
     if overlay is not None and freshness is None:
         # A prebuilt overlay reflects a specific raw-input snapshot. Deriving the
         # freshness bundle here — after the overlay was built elsewhere — could
@@ -1629,7 +1621,7 @@ def ensure_opening_scores(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-) -> tuple[OpeningScoreBatch | None, list[UserOpeningScore]]:
+) -> tuple[BatchView | None, list[CachedOpeningScoreRow]]:
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     if batch is not None:
         return batch, rows
@@ -1698,7 +1690,7 @@ class OpeningScoreRecomputeResult:
     """
 
     disposition: RecomputeDisposition
-    batch: OpeningScoreBatch | None
+    batch: BatchView | None
     reason: RecomputeReason | None = None
     row_isolation: RowIsolationSummary | None = None
 
@@ -1795,11 +1787,13 @@ def _emit_opening_scores_recomputed(
         logger.debug("opening_scores_recomputed timing snapshot failed", exc_info=True)
         timing = None
     try:
-        batch_size = (
-            db.query(func.count(UserOpeningScore.id))
-            .filter(UserOpeningScore.batch_id == batch.id)
-            .scalar()
-        )
+        # Marker-anchored, so the count belongs to THIS generation in either
+        # storage format. Materializing the rows instead of COUNT(*) is deliberate:
+        # the named-root set is bounded by the opening registry, this runs on the
+        # serialized worker off the request path, and it keeps one reader shape.
+        # A retired marker raises and is swallowed below, exactly like a failed
+        # count was before.
+        batch_size = len(read_group(db, ScoreHandle.from_batch(batch), "roots"))
     except Exception:
         logger.debug("opening_scores_recomputed batch_size query failed", exc_info=True)
         batch_size = None
@@ -1897,7 +1891,8 @@ def recompute_opening_scores_if_needed(
             )
         except PublicationSuperseded as exc:
             return OpeningScoreRecomputeResult(
-                disposition=RecomputeDisposition.SUPERSEDED, batch=exc.batch
+                disposition=RecomputeDisposition.SUPERSEDED,
+                batch=BatchView.from_batch(exc.batch),
             )
         isolation_summary = row_isolation.snapshot()
         _emit_opening_scores_recomputed(
@@ -1918,7 +1913,7 @@ def recompute_opening_scores_if_needed(
         )
         return OpeningScoreRecomputeResult(
             disposition=RecomputeDisposition.REBUILT,
-            batch=result,
+            batch=BatchView.from_batch(result),
             reason="cache_miss",
             row_isolation=isolation_summary,
         )
@@ -1985,7 +1980,8 @@ def recompute_opening_scores_if_needed(
         )
     except PublicationSuperseded as exc:
         return OpeningScoreRecomputeResult(
-            disposition=RecomputeDisposition.SUPERSEDED, batch=exc.batch
+            disposition=RecomputeDisposition.SUPERSEDED,
+            batch=BatchView.from_batch(exc.batch),
         )
     isolation_summary = row_isolation.snapshot()
     _emit_opening_scores_recomputed(
@@ -2006,7 +2002,7 @@ def recompute_opening_scores_if_needed(
     )
     return OpeningScoreRecomputeResult(
         disposition=RecomputeDisposition.REBUILT,
-        batch=result,
+        batch=BatchView.from_batch(result),
         reason=reason,
         row_isolation=isolation_summary,
     )

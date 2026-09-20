@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.models import OpeningPositionScore, UserOpeningScore
-
 
 @dataclass(frozen=True)
 class CachedPositionScoreRow:
@@ -34,9 +32,13 @@ class CachedPositionScoreRow:
     last_practiced_at: datetime | None
 
 
-def _snapshot_position_rows(
-    rows: list[OpeningPositionScore],
-) -> list[CachedPositionScoreRow]:
+def _snapshot_position_rows(rows) -> list[CachedPositionScoreRow]:
+    """Detach position rows read by attribute.
+
+    Accepts either ORM ``OpeningPositionScore`` instances (the writer paths) or the
+    repository's labelled ``Row``s, which carry the same attribute names in either
+    storage format.
+    """
     return [
         CachedPositionScoreRow(
             normalized_fen=row.normalized_fen,
@@ -57,6 +59,10 @@ def _snapshot_position_rows(
 
 @dataclass(frozen=True)
 class CachedOpeningScoreRow:
+    # Mirrors the persisted named-root read model. ``player_color`` comes from the
+    # batch marker (the current-format root table keeps it out of the semantic
+    # column set), so a reader row is self-describing for the stats surface.
+    player_color: str
     opening_key: str
     opening_name: str
     opening_family: str
@@ -89,9 +95,7 @@ def _weakest_root(rows: list[CachedOpeningScoreRow]) -> CachedOpeningScoreRow:
     return min(rows, key=lambda r: (r.opening_score, r.opening_key))
 
 
-def _batch_has_stale_branch_keys(
-    rows: list[UserOpeningScore | CachedOpeningScoreRow],
-) -> bool:
+def _batch_has_stale_branch_keys(rows: list[CachedOpeningScoreRow]) -> bool:
     """Detect cache batches written before branch key columns existed."""
     return any(
         (row.strongest_branch_name and not row.strongest_branch_key)
@@ -101,9 +105,11 @@ def _batch_has_stale_branch_keys(
     )
 
 
-def _snapshot_cached_rows(rows: list[UserOpeningScore]) -> list[CachedOpeningScoreRow]:
+def _snapshot_cached_rows(rows) -> list[CachedOpeningScoreRow]:
+    """Detach named-root rows read by attribute (ORM rows or repository ``Row``s)."""
     return [
         CachedOpeningScoreRow(
+            player_color=row.player_color,
             opening_key=row.opening_key,
             opening_name=row.opening_name,
             opening_family=row.opening_family,

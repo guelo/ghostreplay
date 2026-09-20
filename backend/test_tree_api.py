@@ -24,6 +24,8 @@ from app.fen import normalize_fen
 from app.opening_score_scheduler import OpeningScoreTrigger
 from app.models import (
     AnalysisCache,
+    CurrentOpeningEdge,
+    CurrentOpeningPosition,
     OpeningPositionEdge,
     OpeningPositionScore,
     OpeningScoreBatch,
@@ -34,6 +36,7 @@ from app.opening_densify import DensifiedEdges, RoutingView
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_score_storage import BatchView, ScoreHandle, StorageFormat
 from app.opening_transposition_artifact import EMPTY_DENSIFIED_EDGES
 from app.tree_eval import MoveEval
 
@@ -195,6 +198,63 @@ def _pos_row(fen: str, *, score=None, confidence=None, coverage=None,
     )
 
 
+_REGISTRY_FP = "registry-fingerprint"
+
+
+def _handle(batch_id, computed_at=None, *, player_color="white", user_id=123):
+    """A legacy-format ``ScoreHandle`` standing in for a resolved marker."""
+    if batch_id is None:
+        return None
+    return ScoreHandle(
+        batch_id, user_id, player_color, 1, StorageFormat.LEGACY, computed_at
+    )
+
+
+def _batch_view(batch_id, computed_at=None, *, player_color="white",
+                registry=_REGISTRY_FP, user_id=123):
+    """A detached marker view standing in for a persisted batch row."""
+    if batch_id is None:
+        return None
+    return BatchView(
+        id=batch_id,
+        user_id=user_id,
+        player_color=player_color,
+        generation=1,
+        registry_fingerprint=registry,
+        inputs_fingerprint=None,
+        evidence_seq=None,
+        cache_epoch=None,
+        scoped_shared_digest=None,
+        computed_at=computed_at,
+        storage_format=StorageFormat.LEGACY.value,
+    )
+
+
+def _marker_patches(batch_id, computed_at=None, *, player_color="white",
+                    registry=_REGISTRY_FP, user_id=123, live=True):
+    """Patch the route's marker resolution + fence seam for in-memory fixtures.
+
+    The route resolves its OWN handle per attempt and fences it afterwards, so a
+    fixture that only stubs ``ensure_tree_cache`` would be served a book-only tree.
+    """
+    view = _batch_view(batch_id, computed_at, player_color=player_color,
+                       registry=registry, user_id=user_id)
+    return [
+        patch("app.api.openings.latest_batch_view", return_value=view),
+        patch("app.api.openings.handle_is_live", return_value=live),
+        patch("app.api.openings.pair_has_no_batch", return_value=batch_id is None),
+    ]
+
+
+@contextlib.contextmanager
+def _marker_seam(batch_id, computed_at=None, **kwargs):
+    """``_marker_patches`` as one context manager, for parenthesized ``with`` blocks."""
+    with contextlib.ExitStack() as stack:
+        for cm in _marker_patches(batch_id, computed_at, **kwargs):
+            stack.enter_context(cm)
+        yield
+
+
 def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
           batch=None, position_rows=None, move_evals=None, root_eval=None,
           mid_fens=None, user_id=123, routing=None, routing_error=None):
@@ -226,7 +286,7 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     cache_state = "book_only" if batch_id is None else "warm_fresh"
 
     def _ensure(db, uid, color, g, r):
-        return batch_id, batch_computed_at, cache_state
+        return batch_id, batch_computed_at, cache_state, _REGISTRY_FP
 
     def _loep(db, b_id, parent_fens):
         wanted = set(parent_fens)
@@ -260,6 +320,16 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
         patch("app.api.openings.lookup_position_scores_for_batch", side_effect=_lpsfb),
         patch("app.api.openings.lookup_move_evals", side_effect=_lme),
         patch("app.api.openings.lookup_root_eval", side_effect=_lre),
+        *_marker_patches(
+            batch_id,
+            batch_computed_at,
+            player_color=(
+                params.get("player_color", "white")
+                if isinstance(params, dict)
+                else "white"
+            ),
+            user_id=user_id,
+        ),
     ]
     if mid_fens is not None:
         cms.append(patch("app.api.openings.is_middlegame_position",
@@ -294,7 +364,12 @@ def _make_builder(graph, roots, overlay, player_color="white", *, batch_id=1,
         return list(by_parent.get(parent_fen, []))
 
     builder = _OpeningTreeBuilder(
-        None, graph, roots, batch_id, batch_computed_at, player_color, user_id
+        None,
+        graph,
+        roots,
+        _handle(batch_id, batch_computed_at, player_color=player_color, user_id=user_id),
+        player_color,
+        user_id,
     )
     patch_cm = patch(
         "app.api.openings.lookup_observed_edges_for_parent", side_effect=_loep
@@ -328,7 +403,13 @@ def _run_build(graph, roots, overlay, moves, *, player_color="white", batch_id=1
         return {p: list(es) for p, es in store.items() if p in wanted}
 
     builder = _OpeningTreeBuilder(
-        None, graph, roots, batch_id, None, player_color, 123, routing=routing
+        None,
+        graph,
+        roots,
+        _handle(batch_id, player_color=player_color),
+        player_color,
+        123,
+        routing=routing,
     )
     with contextlib.ExitStack() as stack:
         for cm in (
@@ -1090,11 +1171,15 @@ def test_structural_children_parity_with_scorer(client, auth_headers):
 
 # --- end-to-end: real position-row + eval lookups against a seeded DB ---------
 
-def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
+@pytest.mark.parametrize(
+    "fmt", [StorageFormat.LEGACY, StorageFormat.CURRENT], ids=["legacy", "current"]
+)
+def test_tree_end_to_end_real_lookups(client, auth_headers, db_session, fmt):
     """Exercise the real ensure_tree_cache + lookup_observed_edges_for_parents +
     lookup_position_scores_for_batch + analysis_cache eval lookups against a seeded
     batch (only the graph/roots and the scheduler are stubbed). The request path must
-    NOT rebuild overlay_evidence."""
+    NOT rebuild overlay_evidence, and must serve EITHER storage format identically —
+    including the route's own marker resolution and final fence."""
     graph = _make_graph()
     roots = _make_roots()
     start_full = chess.Board().fen()
@@ -1105,24 +1190,38 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
         user_id=123, player_color="white", generation=1,
         registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
         computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+        storage_format=fmt.value,
     )
     db_session.add(batch)
     db_session.flush()
-    db_session.add(OpeningPositionScore(
-        batch_id=batch.id, user_id=123, player_color="white",
-        normalized_fen=E4E5, in_book=True, has_evidence=True,
-        opening_score=64.0, confidence=0.5, coverage=0.4, weighted_depth=2.0,
-        sample_size=7, game_count=2,
-        computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
-    ))
-    # A persisted observed edge for the in-book 1...e5 reply, read by the real
-    # bounded prefetch lookup_observed_edges_for_parents (no overlay rebuild).
-    db_session.add(OpeningPositionEdge(
-        batch_id=batch.id, user_id=123, player_color="white",
-        parent_fen=E4, child_fen=E4E5, uci="e7e5",
-        traversal_count=6, live_attempts=2, live_passes=1, live_fails=1,
-        computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
-    ))
+    if fmt is StorageFormat.CURRENT:
+        db_session.add(CurrentOpeningPosition(
+            user_id=123, player_color="white",
+            normalized_fen=E4E5, in_book=True, has_evidence=True,
+            opening_score=64.0, confidence=0.5, coverage=0.4, weighted_depth=2.0,
+            sample_size=7, game_count=2,
+        ))
+        db_session.add(CurrentOpeningEdge(
+            user_id=123, player_color="white",
+            parent_fen=E4, child_fen=E4E5, uci="e7e5",
+            traversal_count=6, live_attempts=2, live_passes=1, live_fails=1,
+        ))
+    else:
+        db_session.add(OpeningPositionScore(
+            batch_id=batch.id, user_id=123, player_color="white",
+            normalized_fen=E4E5, in_book=True, has_evidence=True,
+            opening_score=64.0, confidence=0.5, coverage=0.4, weighted_depth=2.0,
+            sample_size=7, game_count=2,
+            computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+        ))
+        # A persisted observed edge for the in-book 1...e5 reply, read by the real
+        # bounded prefetch lookup_observed_edges_for_parents (no overlay rebuild).
+        db_session.add(OpeningPositionEdge(
+            batch_id=batch.id, user_id=123, player_color="white",
+            parent_fen=E4, child_fen=E4E5, uci="e7e5",
+            traversal_count=6, live_attempts=2, live_passes=1, live_fails=1,
+            computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+        ))
     # Eval rows: a played eval for 1.e4 and a best eval at the start position. The
     # Phase-4 lookups apply the move/position trust gate, so this row carries full
     # canonical identity + the legacy resolver-complete-v2 contract (otherwise an
@@ -1188,13 +1287,15 @@ def test_tree_warm_read_no_overlay_rebuild_and_bounded_edge_queries(client, auth
     with (
         patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
         patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
-        patch("app.api.openings.ensure_tree_cache", return_value=(1, None, "warm_fresh")),
+        patch("app.api.openings.ensure_tree_cache",
+              return_value=(1, None, "warm_fresh", _REGISTRY_FP)),
         patch("app.api.openings.lookup_observed_edges_for_parents", loep),
         patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
         patch("app.api.openings.lookup_move_evals",
               side_effect=lambda db, reqs: {r: None for r in reqs}),
         patch("app.api.openings.lookup_root_eval", return_value=None),
         patch("app.api.openings.overlay_evidence") as overlay_spy,
+        _marker_seam(1),
     ):
         resp = client.get(TREE_URL,
                           params={"player_color": "white", "move": ["e2e4", "e7e5"]},
@@ -1207,27 +1308,28 @@ def test_tree_warm_read_no_overlay_rebuild_and_bounded_edge_queries(client, auth
     # Exactly TWO observed-edge queries per request (one per wave), regardless of
     # node/column count.
     assert loep.call_count == 2
-    # Each is a bounded prefetch: (db, batch_id, parent_fens) — never a whole-batch read.
+    # Each is a bounded prefetch: (db, handle, parent_fens) — never a whole-batch read.
     for call in loep.call_args_list:
         assert len(call.args) == 3
-        assert call.args[1] == 1  # batch_id
+        assert call.args[1].batch_id == 1
 
 
 def test_tree_cold_no_evidence_issues_zero_edge_queries(client, auth_headers):
     """A cold / no-evidence user (batch_id is None) yields a book-only tree and never
     touches the observed-edge read model (g-a6k2/g-0qe6 acceptance)."""
-    loep = MagicMock(side_effect=lambda db, b_id, parent_fens: {})
+    loep = MagicMock(side_effect=lambda db, handle, parent_fens: {})
 
     with (
         patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
         patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
         patch("app.api.openings.ensure_tree_cache",
-              return_value=(None, None, "book_only")),
+              return_value=(None, None, "book_only", _REGISTRY_FP)),
         patch("app.api.openings.lookup_observed_edges_for_parents", loep),
         patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
         patch("app.api.openings.lookup_move_evals",
               side_effect=lambda db, reqs: {r: None for r in reqs}),
         patch("app.api.openings.lookup_root_eval", return_value=None),
+        _marker_seam(None),
     ):
         resp = client.get(TREE_URL,
                           params={"player_color": "white", "move": ["e2e4"]},
@@ -1307,7 +1409,7 @@ def test_load_observed_counts_chunked_selects_not_waves():
     from app.api.openings import _OpeningTreeBuilder
     from app.opening_cache import OBSERVED_EDGE_PARENT_CHUNK_SIZE as CAP
 
-    builder = _OpeningTreeBuilder(None, _make_graph(), _make_roots(), 1, None,
+    builder = _OpeningTreeBuilder(None, _make_graph(), _make_roots(), _handle(1),
                                   "white", 123)
     # A single _load_observed call with > CAP distinct (synthetic) parents.
     fens = {f"chunk-fen-{i} w - -" for i in range(CAP + 5)}
@@ -1320,19 +1422,19 @@ def test_load_observed_counts_chunked_selects_not_waves():
     assert builder._observed_edge_query_count == 2
 
 
-def test_tree_builder_holds_scalars_not_orm_batch(client, auth_headers):
-    """Finding #2: the builder must hold only the (batch_id, batch_computed_at)
-    scalars the route captured before db.rollback() — never an ORM batch/overlay that
-    could fire a surprise refresh SELECT after the rollback."""
+def test_tree_builder_holds_a_handle_not_an_orm_batch(client, auth_headers):
+    """Finding #2: the builder must hold only the immutable ``ScoreHandle`` the route
+    resolved — never an ORM batch/overlay that could fire a surprise refresh SELECT
+    after the rollback, and never a row that a publication could retire mid-build."""
     batch = _batch(datetime(2026, 6, 9, tzinfo=timezone.utc))
     resp = _call(client, auth_headers, batch=batch,
                  params={"player_color": "white", "move": ["e2e4"]})
-    # The pre-rollback scalar flows straight through to the response.
+    # The resolved marker's stamp flows straight through to the response.
     assert "2026-06-09" in resp.json()["batch_computed_at"]
 
     builder, _ = _make_builder(_make_graph(), _make_roots(), _overlay("white"),
                                batch_id=batch.id, batch_computed_at=batch.computed_at)
-    assert builder.batch_id == batch.id
+    assert builder.handle.batch_id == batch.id
     assert builder.batch_computed_at == batch.computed_at
     # No ORM batch / overlay retained on the builder.
     assert not hasattr(builder, "overlay")
@@ -1519,18 +1621,76 @@ def test_tree_response_carries_cache_state(client, auth_headers):
         patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
         patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
         patch("app.api.openings.ensure_tree_cache",
-              return_value=(None, None, "bootstrap_timeout")),
+              return_value=(None, None, "bootstrap_timeout", _REGISTRY_FP)),
         patch("app.api.openings.lookup_observed_edges_for_parents",
               return_value={}),
         patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
         patch("app.api.openings.lookup_move_evals",
               side_effect=lambda db, reqs: {r: None for r in reqs}),
         patch("app.api.openings.lookup_root_eval", return_value=None),
+        _marker_seam(None),
     ):
         resp = client.get(TREE_URL, params={"player_color": "white"},
                           headers=auth_headers())
     assert resp.status_code == 200
     assert resp.json()["cache_state"] == "bootstrap_timeout"
+
+
+@pytest.mark.parametrize(
+    "bootstrap_state,served_registry,expected",
+    [
+        ("warm_fresh", _REGISTRY_FP, "warm_fresh"),
+        ("bootstrapped", _REGISTRY_FP, "bootstrapped"),
+        # The upgrade: the hint said the bootstrap timed out, but a fresh
+        # publication overtook it and IS what got served.
+        ("bootstrap_timeout", _REGISTRY_FP, "bootstrapped"),
+        ("book_only", _REGISTRY_FP, "bootstrapped"),
+        # Nothing current-registry was served: only a request that blocked on the
+        # bootstrap reports the degraded timeout state.
+        ("bootstrap_timeout", "stale", "bootstrap_timeout"),
+        ("bootstrapped", None, "bootstrap_timeout"),
+        ("book_only", None, "book_only"),
+        ("warm_fresh", None, "book_only"),
+    ],
+)
+def test_cache_state_is_labelled_by_the_marker_actually_served(
+    bootstrap_state, served_registry, expected
+):
+    """``cache_state`` is load-bearing, not diagnostic: useOpeningsTree discards the
+    whole response on ``bootstrap_timeout``, so labelling by the pre-read hint would
+    throw away a good tree whenever a retry (or a late publication) served a
+    different marker than the bootstrap resolved."""
+    from app.api.openings import _served_cache_state
+
+    served = (
+        None
+        if served_registry is None
+        else _batch_view(1, registry=served_registry)
+    )
+    assert _served_cache_state(bootstrap_state, served, _REGISTRY_FP) == expected
+
+
+def test_tree_reports_bootstrapped_when_a_publication_overtakes_a_timeout(
+    client, auth_headers
+):
+    """End-to-end for the upgrade case: the bootstrap timed out, the response was
+    built from a current-registry marker, and the client keeps the tree."""
+    with (
+        patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
+        patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
+        patch("app.api.openings.ensure_tree_cache",
+              return_value=(None, None, "bootstrap_timeout", _REGISTRY_FP)),
+        patch("app.api.openings.lookup_observed_edges_for_parents", return_value={}),
+        patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
+        patch("app.api.openings.lookup_move_evals",
+              side_effect=lambda db, reqs: {r: None for r in reqs}),
+        patch("app.api.openings.lookup_root_eval", return_value=None),
+        _marker_seam(7),
+    ):
+        resp = client.get(TREE_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["cache_state"] == "bootstrapped"
 
 
 # --- transposition cards (g-openings-transpose) -------------------------------
@@ -1866,7 +2026,7 @@ def test_overlay_never_widens_the_scorer_structural_domain(client, auth_headers)
     fingerprint_before = graph.fingerprint
     routing = _english_routing(graph)
     builder = _OpeningTreeBuilder(
-        None, graph, OpeningRoots({}, {}), None, None, "white", 123, routing=routing
+        None, graph, OpeningRoots({}, {}), None, "white", 123, routing=routing
     )
     with patch("app.api.openings.is_middlegame_position", return_value=False):
         structural = builder._structural_children(ENGLISH_NC3)

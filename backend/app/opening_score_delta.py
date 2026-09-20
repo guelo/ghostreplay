@@ -41,7 +41,7 @@ from enum import Enum
 from typing import Callable
 
 from pydantic import BaseModel
-from sqlalchemy import case, func, literal, select, update
+from sqlalchemy import case, collate, func, literal, select, update
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
@@ -51,6 +51,7 @@ from app.game_phase import (
     prove_complete_standard_line,
 )
 from app.models import (
+    CurrentOpeningScope,
     EvidenceEpoch,
     GameSession,
     OpeningScoreBatch,
@@ -59,8 +60,8 @@ from app.models import (
     SessionMove,
     SharedEvidenceScopeInvalidation,
     SharedEvidenceScopeVersion,
-    UserOpeningScore,
 )
+from app.opening_aggregate import CachedOpeningScoreRow, _snapshot_cached_rows
 from app.opening_cache import (
     SCORE_MODEL_VERSION,
     _is_batch_fresh,
@@ -69,6 +70,13 @@ from app.opening_cache import (
     has_opening_evidence,
     list_cached_opening_scores,
     opening_score_inputs_fingerprint,
+)
+from app.opening_score_storage import (
+    BatchView,
+    RetiredScoreHandle,
+    ScoreHandle,
+    StorageFormat,
+    read_group,
 )
 from app.opening_evidence import (
     EvidenceOverlay,
@@ -192,7 +200,7 @@ def _serialize_baseline(
     )
 
 
-def _has_baseline_relevant_root(rows: list[UserOpeningScore]) -> bool:
+def _has_baseline_relevant_root(rows: list[CachedOpeningScoreRow]) -> bool:
     """Whether a persisted batch has a root that a played-opening chain can use."""
 
     return any(
@@ -206,7 +214,7 @@ def _is_evidence_backed_empty_baseline(
     db: Session,
     user_id: int,
     player_color: str,
-    rows: list[UserOpeningScore],
+    rows: list[CachedOpeningScoreRow],
 ) -> bool:
     """Infer the persisted shape that is unsafe to snapshot as an empty baseline.
 
@@ -1296,12 +1304,147 @@ def _safe_baseline_terminal_classification(
         return "classification_failed"
 
 
+def _shared_probe(scope_column, shared_column, dialect_name: str):
+    """A scope key rendered for comparison against a SHARED-evidence key.
+
+    ``opening_current_scope`` keys are ``MACHINE_KEY`` (``C``); the global
+    ``shared_evidence_*`` keys carry the database default. PostgreSQL resolves a
+    comparison of the two to the non-default ``C``, and it will only use an index
+    whose own collation matches the clause's — so the derived ``C`` disqualifies
+    ``shared_evidence_scope_versions_pkey`` and proof 2 silently degrades from one
+    index probe per scope row to a sequential scan of GLOBAL shared evidence,
+    linear in a table this owner's batch has no relation to.
+
+    Naming the shared side's collation restores the bounded probe. Equality under
+    a deterministic collation is byte equality, so this changes the plan and never
+    the answer. The legacy scope table is already default-collated, and SQLite has
+    one effective collation here, so both are left alone.
+    """
+    if dialect_name == "sqlite":
+        return scope_column
+    if getattr(scope_column.type, "collation", None) == getattr(
+        shared_column.type, "collation", None
+    ):
+        return scope_column
+    return collate(scope_column, "default")
+
+
+def _scope_marker(db: Session, handle: ScoreHandle):
+    """The exact marker as a derived table, plus its format's scope table + join.
+
+    ``probe`` renders a scope key for comparison against the shared-evidence
+    tables; see :func:`_shared_probe`.
+    """
+    marker = (
+        select(OpeningScoreBatch.__table__)
+        .where(
+            OpeningScoreBatch.id == handle.batch_id,
+            OpeningScoreBatch.user_id == handle.user_id,
+            OpeningScoreBatch.player_color == handle.player_color,
+            OpeningScoreBatch.generation == handle.generation,
+            OpeningScoreBatch.storage_format == handle.storage_format.value,
+        )
+        .subquery("marker")
+    )
+    if handle.storage_format is StorageFormat.CURRENT:
+        scope = CurrentOpeningScope.__table__
+        owned = (scope.c.user_id == marker.c.user_id) & (
+            scope.c.player_color == marker.c.player_color
+        )
+    else:
+        scope = OpeningScoreBatchSharedScope.__table__
+        owned = scope.c.batch_id == marker.c.id
+    dialect_name = db.get_bind().dialect.name
+
+    def probe(column, shared_column):
+        return _shared_probe(column, shared_column, dialect_name)
+
+    return marker, scope, owned, probe
+
+
+def _marker_rooted_change(db: Session, handle: ScoreHandle, statement) -> bool:
+    """Run one marker-rooted scope existence check built by the helpers below.
+
+    These two checks cannot go through :func:`read_group`: one joins the scope to
+    ``SharedEvidenceScopeVersion`` and the other feeds a ``DISTINCT kind``
+    subquery, and both are existence checks where zero rows means "no change". So
+    the marker drives the statement and the boolean rides on it: zero rows means
+    the marker retired, one row means the boolean is authoritative for it.
+    """
+    row = db.execute(statement).first()
+    if row is None:
+        raise RetiredScoreHandle(handle.batch_id)
+    return bool(row.changed)
+
+
+def _rooted_exists(marker, inner):
+    return select(inner.exists().label("changed")).select_from(marker)
+
+
+def _shared_scope_change_statement(db: Session, handle: ScoreHandle, epoch: int):
+    """Proof 2, check 1: did any shared FEN in this batch's scope change after ``epoch``?
+
+    Bounded by the batch's own scope: one index probe per scope row into
+    ``shared_evidence_scope_versions``, never a scan of that global table. The
+    ``probe`` collation is what keeps it that way — see :func:`_shared_probe`.
+    """
+    marker, scope, owned, probe = _scope_marker(db, handle)
+    inner = (
+        select(literal(1))
+        .select_from(
+            scope.join(
+                SharedEvidenceScopeVersion.__table__,
+                (
+                    SharedEvidenceScopeVersion.kind
+                    == probe(scope.c.kind, SharedEvidenceScopeVersion.kind)
+                )
+                & (
+                    SharedEvidenceScopeVersion.fen
+                    == probe(scope.c.fen, SharedEvidenceScopeVersion.fen)
+                ),
+            )
+        )
+        .where(owned, SharedEvidenceScopeVersion.last_changed_epoch > epoch)
+        .correlate(marker)
+    )
+    return _rooted_exists(marker, inner)
+
+
+def _shared_invalidation_statement(db: Session, handle: ScoreHandle, epoch: int):
+    """Proof 2, check 2: was a whole scope KIND invalidated after ``epoch``?
+
+    Its own marker alias, so the two checks never share a correlated construct.
+    No collation probe: the invalidation table holds one row per kind, so this
+    scan is bounded at two rows whatever collation the ``IN`` resolves to.
+    """
+    marker, scope, owned, _ = _scope_marker(db, handle)
+    scoped_kinds = select(scope.c.kind).where(owned).distinct().correlate(marker)
+    inner = (
+        select(literal(1))
+        .select_from(SharedEvidenceScopeInvalidation.__table__)
+        .where(
+            SharedEvidenceScopeInvalidation.kind.in_(scoped_kinds),
+            SharedEvidenceScopeInvalidation.last_changed_epoch > epoch,
+        )
+        .correlate(marker)
+    )
+    return _rooted_exists(marker, inner)
+
+
 def _batch_start_mismatch(
     db: Session,
-    batch: OpeningScoreBatch,
+    batch: BatchView,
     session: GameSession,
 ) -> BaselineWatermarkMismatch | None:
-    """Proof 2: does current batch-relevant state still equal session start?"""
+    """Proof 2: does current batch-relevant state still equal session start?
+
+    Raises :class:`RetiredScoreHandle` — never a mismatch value — when the batch's
+    marker retires mid-proof. Retirement is RETRYABLE: routing it through a
+    ``BaselineWatermarkMismatch`` would land on ``WATERMARK_MISMATCH``, which is
+    terminal, and permanently drop a session's baseline whenever a rebuild happens
+    to publish between proof 1 and proof 2. Callers map it to a stale/skip outcome
+    instead.
+    """
     watermark = _baseline_watermark(session)
     if watermark is None:
         return BaselineWatermarkMismatch.EPOCH_CORRUPTION
@@ -1319,44 +1462,14 @@ def _batch_start_mismatch(
     if live_epoch == watermark_epoch:
         return None
 
-    exact_change = db.execute(
-        select(literal(1))
-        .select_from(OpeningScoreBatchSharedScope)
-        .join(
-            SharedEvidenceScopeVersion,
-            (
-                SharedEvidenceScopeVersion.kind
-                == OpeningScoreBatchSharedScope.kind
-            )
-            & (
-                SharedEvidenceScopeVersion.fen
-                == OpeningScoreBatchSharedScope.fen
-            ),
-        )
-        .where(
-            OpeningScoreBatchSharedScope.batch_id == batch.id,
-            SharedEvidenceScopeVersion.last_changed_epoch > watermark_epoch,
-        )
-        .limit(1)
-    ).first()
-    if exact_change is not None:
+    handle = batch.handle
+    if _marker_rooted_change(
+        db, handle, _shared_scope_change_statement(db, handle, watermark_epoch)
+    ):
         return BaselineWatermarkMismatch.SHARED_SCOPE
-
-    scoped_kinds = (
-        select(OpeningScoreBatchSharedScope.kind)
-        .where(OpeningScoreBatchSharedScope.batch_id == batch.id)
-        .distinct()
-    )
-    invalidated = db.execute(
-        select(literal(1))
-        .select_from(SharedEvidenceScopeInvalidation)
-        .where(
-            SharedEvidenceScopeInvalidation.kind.in_(scoped_kinds),
-            SharedEvidenceScopeInvalidation.last_changed_epoch > watermark_epoch,
-        )
-        .limit(1)
-    ).first()
-    if invalidated is not None:
+    if _marker_rooted_change(
+        db, handle, _shared_invalidation_statement(db, handle, watermark_epoch)
+    ):
         return BaselineWatermarkMismatch.SHARED_INVALIDATION
     return None
 
@@ -1474,10 +1587,17 @@ def run_baseline_snapshot_job(
         else:
             # Proof 1 is mandatory even when the batch stamps equal the watermark:
             # both counters are lower bounds sampled before the evidence read.
-            if not _is_batch_fresh(db, batch, rows):
+            try:
+                if not _is_batch_fresh(db, batch, rows):
+                    source = BaselineSnapshotSource.SKIPPED_STALE.value
+                    return source
+                mismatch_reason = _batch_start_mismatch(db, batch, session)
+            except RetiredScoreHandle:
+                # A rebuild published between the two proofs. That is a RETRYABLE
+                # miss, not a watermark mismatch: this session's baseline is still
+                # captured on the next attempt against the new batch.
                 source = BaselineSnapshotSource.SKIPPED_STALE.value
                 return source
-            mismatch_reason = _batch_start_mismatch(db, batch, session)
             terminal_session_classification = _safe_baseline_terminal_classification(
                 session, mismatch_reason
             )
@@ -1535,26 +1655,24 @@ def fill_opening_baselines_for_batch(
     *,
     session_factory: Callable[[], Session] = SessionLocal,
 ) -> int:
-    """Best-effort push-fill of active session baselines for one durable batch."""
+    """Best-effort push-fill of active session baselines for one durable batch.
+
+    Independent of the publication that produced ``batch_id``: finding that marker
+    already retired is HARMLESS, not an error. Those sessions are picked up by the
+    ordinary baseline job, so this run simply discards its work and returns 0.
+    """
     db = session_factory()
     try:
-        batch = (
+        orm_batch = (
             db.query(OpeningScoreBatch)
             .filter(OpeningScoreBatch.id == batch_id)
             .populate_existing()
             .one_or_none()
         )
-        if batch is None:
+        if orm_batch is None:
             return 0
-        rows = (
-            db.query(UserOpeningScore)
-            .filter(
-                UserOpeningScore.batch_id == batch.id,
-                UserOpeningScore.user_id == batch.user_id,
-                UserOpeningScore.player_color == batch.player_color,
-            )
-            .all()
-        )
+        batch = BatchView.from_batch(orm_batch)
+        rows = _snapshot_cached_rows(read_group(db, batch.handle, "roots"))
         # Proof 1 runs once for the exact durable batch. The scoped re-arm it may
         # perform writes only cache_epoch through an independent session and does
         # not change either historical proof.
@@ -1607,6 +1725,15 @@ def fill_opening_baselines_for_batch(
             if session is not None:
                 enqueue_opening_boundary_delta(db, session)
         return filled
+    except RetiredScoreHandle:
+        # Retirement can land partway through the candidate loop, after earlier
+        # uncommitted conditional writes. Discard them wholesale — the ordinary
+        # baseline job retries those sessions against the new batch.
+        db.rollback()
+        logger.info(
+            "opening baseline push-fill skipped retired batch_id=%s", batch_id
+        )
+        return 0
     except Exception:  # noqa: BLE001 - optional scheduler side effect
         db.rollback()
         logger.warning(
@@ -2041,8 +2168,8 @@ def _delta_items_from_cache(
     db: Session, session: GameSession
 ) -> tuple[
     list[OpeningScoreDeltaItem],
-    OpeningScoreBatch | None,
-    list[UserOpeningScore],
+    BatchView | None,
+    list[CachedOpeningScoreRow],
     str,
 ]:
     """Build the played-chain delta from the latest cached batch — CHEAP.

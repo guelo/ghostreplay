@@ -150,9 +150,14 @@ generations are published atomically; a materially invalid derived coverage row
 is isolated as honest no-data while valid score rows and observed navigation
 edges still converge in the same current generation. Publishers serialize by
 owner and color. An inactive current-row storage implementation applies exact
-changes and retires the previous publication marker in the same transaction;
-legacy readers explicitly reject current-format markers; legacy snapshots remain
-the production default pending compatible readers and release qualification. Storage conversion preserves scoring and evidence identity.
+changes and retires the previous publication marker in the same transaction.
+Every opening-score consumer serves either storage format: a reader anchors each
+payload query to an exact publication marker in the same statement, so a
+retirement is reported as such instead of being served as an empty result, and
+the multi-statement tree read fences its marker after its bounded reads, discards
+and retries an invalidated attempt, and falls back to one short read-only
+snapshot. Legacy snapshots remain the production default pending release
+qualification. Storage conversion preserves scoring and evidence identity.
 The exact relational
 schema, constraints, and migration history remain authoritative in the backend
 model and migration layer, not in this overview.

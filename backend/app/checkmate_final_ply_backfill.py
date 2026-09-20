@@ -77,6 +77,7 @@ from app.accuracy import (
 from app.fen import normalize_fen
 from app.models import GameSession, SessionMove
 from app.opening_cache import bump_evidence_seq
+from app.readonly_snapshot import begin_readonly_snapshot
 from app.row_locks import for_no_key_update
 
 log = logging.getLogger("checkmate_final_ply_backfill")
@@ -204,34 +205,12 @@ def _verify_checkmate(fen_before: str | None, move_san: str, fen_after: str) -> 
 # ---------------------------------------------------------------------------
 # Phase A — read: sizing measurement + candidate selection.
 # ---------------------------------------------------------------------------
-def begin_readonly_snapshot(session: Session) -> None:
-    """On PostgreSQL, start Phase A as a REPEATABLE READ read-only transaction so the
-    multi-statement sizing forecast reflects ONE consistent snapshot.
-
-    PostgreSQL's default READ COMMITTED would let the final-ply selection, the cohort
-    count, and the per-session PGN / move reads each see different committed data — a
-    concurrent ``/moves`` upload could then produce a forecast that corresponds to no
-    single snapshot. REPEATABLE READ pins them to one snapshot; ``READ ONLY`` documents
-    and enforces that Phase A never writes. Must run before the first statement (setting
-    the isolation level mid-transaction raises). A no-op on SQLite, whose single
-    StaticPool connection already reads consistently within the transaction and which
-    does not support the REPEATABLE READ isolation level.
-
-    Public because the sibling draw backfill (:mod:`app.draw_final_ply_backfill`, g-c60b)
-    needs the identical Phase A snapshot semantics.
-    """
-    bind = session.get_bind()
-    if bind is not None and bind.dialect.name == "postgresql":
-        session.connection(
-            execution_options={
-                "isolation_level": "REPEATABLE READ",
-                "postgresql_readonly": True,
-            }
-        )
-
-
-# Retained so this module's own Phase A call site and its committed tests keep the
-# name they were written against; the public name is the shared seam.
+# ``begin_readonly_snapshot`` now lives in its own leaf module
+# (:mod:`app.readonly_snapshot`) so a scorer-attested caller can start the same
+# transaction without pulling this backfill's whole import closure into the source
+# binding manifest. Imported above and aliased below, because this module's Phase A
+# call site, the sibling draw backfill (g-c60b) and their committed tests were all
+# written against these two names.
 _begin_readonly_snapshot = begin_readonly_snapshot
 
 

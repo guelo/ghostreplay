@@ -34,6 +34,14 @@ from app.opening_cache import (
     observed_edge_parent_chunk_count,
     resolve_tree_cache_state,
 )
+from app.opening_score_storage import (
+    RetiredScoreHandle,
+    ScoreHandle,
+    handle_is_live,
+    latest_batch_view,
+    pair_has_no_batch,
+    score_snapshot,
+)
 from app.opening_densify import RoutingView, routing_view
 from app.opening_transposition_artifact import (
     coverage_structural_edge_is_eligible,
@@ -108,6 +116,39 @@ def _slow_tree_threshold_ms() -> float:
         return float(raw)
     except ValueError:
         return SLOW_OPENING_TREE_LOG_MS
+
+
+def _served_cache_state(
+    bootstrap_state: str, served, current_registry: str
+) -> str:
+    """Relabel ``cache_state`` against the marker the response was actually built from.
+
+    ``ensure_tree_cache`` labels the batch it resolved BEFORE the read; a retry (or a
+    bootstrap that timed out and was then overtaken by a fresh publication) can serve
+    a different one. This is not merely diagnostic: ``useOpeningsTree`` discards the
+    whole response on ``"bootstrap_timeout"``, so a stale label throws away a good
+    tree. A served marker whose registry matches therefore keeps ``warm_fresh`` /
+    ``bootstrapped`` and UPGRADES ``book_only`` / ``bootstrap_timeout`` to
+    ``bootstrapped`` — a deliberate behavior change from labelling by the hint.
+    Otherwise the request reports ``bootstrap_timeout`` only if it actually blocked on
+    the bootstrap; a no-evidence (or wrote-no-batch) user stays ``book_only``.
+
+    One consequence is diagnostic-only: a ``book_only`` request overtaken by a
+    first publication is relabelled ``bootstrapped`` even though it never blocked.
+    The client branches on ``bootstrap_timeout`` alone, so that costs nothing, and
+    the label does describe the tree the response carries.
+    """
+    if served is not None and served.registry_fingerprint == current_registry:
+        return (
+            bootstrap_state
+            if bootstrap_state in {"warm_fresh", "bootstrapped"}
+            else "bootstrapped"
+        )
+    return (
+        "bootstrap_timeout"
+        if bootstrap_state in {"bootstrapped", "bootstrap_timeout"}
+        else "book_only"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -707,15 +748,18 @@ class _OpeningTreeBuilder:
     Observed edges come from the persisted ``opening_position_edges`` read model via a
     BOUNDED 2-wave prefetch (``_prefetch_observed_edges``) issued inside ``build`` as
     the timed ``observed_prefetch_ms`` stage, indexed by parent FEN in memory: the
-    builder holds only the scalar ``batch_id`` / ``batch_computed_at`` the route
-    resolved BEFORE its ``db.rollback()``, never an ORM batch row, so no surprise
-    refresh SELECT can fire after the rollback. The prefetch loads edges for ONLY the
+    builder holds only the immutable ``ScoreHandle`` the route resolved AFTER its
+    ``db.rollback()``, never an ORM batch row, so no surprise refresh SELECT can fire.
+    Every payload read joins that exact marker in its own statement, so a publication
+    landing mid-build raises ``RetiredScoreHandle`` out of the builder and the route
+    discards the whole attempt instead of splicing two generations into one response.
+    The prefetch loads edges for ONLY the
     parents the build will visit — line positions (wave 1) then their column
     children/frontier (wave 2) — in 2 ``parent_fen IN (...)`` queries independent of
     node count, fetching ~tens of rows instead of a high-history user's whole edge
     history (g-0qe6 Option B, superseding the g-a6k2 whole-batch eager load). It covers
     the terminal-probe frontier; a parent the prefetch missed falls back to a single
-    point query and is counted (``_observed_straggler_count``, expected 0). ``batch_id
+    point query and is counted (``_observed_straggler_count``, expected 0). ``handle
     is None`` (cold / no-evidence user) yields a book-only structural tree with zero
     edge queries.
     """
@@ -725,8 +769,7 @@ class _OpeningTreeBuilder:
         db: Session,
         graph: OpeningGraph,
         roots: OpeningRoots,
-        batch_id: int | None,
-        batch_computed_at: datetime | None,
+        handle: ScoreHandle | None,
         player_color: str,
         user_id: int,
         routing: RoutingView | None = None,
@@ -738,8 +781,8 @@ class _OpeningTreeBuilder:
         # exactly today's base/observed tree.
         self.routing = routing if routing is not None else RoutingView(graph)
         self.roots = roots
-        self.batch_id = batch_id
-        self.batch_computed_at = batch_computed_at
+        self.handle = handle
+        self.batch_computed_at = handle.computed_at if handle is not None else None
         self.player_color = player_color
         self.user_id = user_id
 
@@ -778,12 +821,12 @@ class _OpeningTreeBuilder:
         The complete set of parents for which ``_observed_children`` is ever read in
         one request is line positions ∪ their column children (the structural pass and
         the terminal-reason probe go exactly two levels deep, no further), so these two
-        waves fully cover it. ``batch_id is None`` (cold / no-evidence user) is a no-op
+        waves fully cover it. ``handle is None`` (cold / no-evidence user) is a no-op
         ⇒ empty cache ⇒ book-only tree. Called from ``build`` inside the timed
         ``observed_prefetch_ms`` stage so the DB round-trip is always accounted for in
         the route timing log (never an unattributed gap in ``total_ms``).
         """
-        if self.batch_id is None:
+        if self.handle is None:
             return
         # Wave 1: line positions pos_norm[0..k].
         line_fens = set(pos_norm[: k + 1])
@@ -815,7 +858,7 @@ class _OpeningTreeBuilder:
         missing = {f for f in fens if f not in self._observed_cache}
         if not missing:
             return
-        loaded = lookup_observed_edges_for_parents(self.db, self.batch_id, missing)
+        loaded = lookup_observed_edges_for_parents(self.db, self.handle, missing)
         for f in missing:
             edges = loaded.get(f, [])
             self._observed_cache[f] = edges
@@ -830,14 +873,14 @@ class _OpeningTreeBuilder:
         renormalization. The 2-wave prefetch should cover every parent the build
         visits; a cache miss means it under-collected, so fall back to a single point
         query (keeping the tree correct) and count the straggler so the regression is
-        observable (and asserted zero in tests). ``batch_id is None`` ⇒ ``[]``.
+        observable (and asserted zero in tests). ``handle is None`` ⇒ ``[]``.
         """
         hit = self._observed_cache.get(norm_fen)
         if hit is None:
-            if self.batch_id is None:
+            if self.handle is None:
                 hit = []
             else:
-                hit = lookup_observed_edges_for_parent(self.db, self.batch_id, norm_fen)
+                hit = lookup_observed_edges_for_parent(self.db, self.handle, norm_fen)
                 self._observed_straggler_count += 1
                 self._observed_edge_query_count += 1
                 self._observed_edge_row_count += len(hit)
@@ -1294,13 +1337,13 @@ class _OpeningTreeBuilder:
         # scheduler re-trigger, no ORM batch row): one metric load, one eval batch.
         stage_started = time.perf_counter()
         position_rows = (
-            lookup_position_scores_for_batch(self.db, self.batch_id, position_fens)
-            if self.batch_id is not None
+            lookup_position_scores_for_batch(self.db, self.handle, position_fens)
+            if self.handle is not None
             else {}
         )
         _record_timing(timings, "position_rows_ms", stage_started)
         if timings is not None:
-            timings["batch_present"] = self.batch_id is not None
+            timings["batch_present"] = self.handle is not None
             timings["position_row_count"] = len(position_rows)
 
         stage_started = time.perf_counter()
@@ -1592,15 +1635,15 @@ def get_opening_tree(
     # prefetch over only the visible parents from the persisted opening_position_edges
     # read model — no overlay rebuild on this path.
     stage_started = time.perf_counter()
-    batch_id, batch_computed_at, cache_state = ensure_tree_cache(
-        db, user.user_id, player_color, graph, roots
+    _batch_hint, _computed_at_hint, bootstrap_state, current_registry = (
+        ensure_tree_cache(db, user.user_id, player_color, graph, roots)
     )
     _record_timing(timings, "ensure_cache_ms", stage_started)
-    timings["cache_state"] = cache_state
 
     # Release the checked-out connection before the (read-only) structural pass
-    # and batched lookups, mirroring /score (openings.py). Scalars above were
-    # captured pre-rollback so no ORM batch field is read afterward.
+    # and batched lookups, mirroring /score (openings.py). The bootstrap's batch
+    # scalars are only a hint from here on: the attempt loop below resolves its own
+    # fresh marker, so no ORM batch field is read after this rollback.
     stage_started = time.perf_counter()
     db.rollback()
     _record_timing(timings, "rollback_ms", stage_started)
@@ -1609,7 +1652,8 @@ def get_opening_tree(
     # degrades to an empty overlay (and logs) when the artifact is missing or
     # stale; the guard here covers anything it does NOT catch, so a browsing
     # nicety can never take /openings down — worst case the tree is the base +
-    # observed one, exactly as before transposition cards existed.
+    # observed one, exactly as before transposition cards existed. Loaded BEFORE
+    # any snapshot work so the fallback transaction stays short.
     try:
         routing = routing_view(graph)
     except Exception:
@@ -1618,17 +1662,80 @@ def get_opening_tree(
             "transposition cards"
         )
         routing = None
-    builder = _OpeningTreeBuilder(
-        db,
-        graph,
-        roots,
-        batch_id,
-        batch_computed_at,
-        player_color,
-        user.user_id,
-        routing=routing,
-    )
-    response = builder.build(move, opening, timings=timings)
+
+    def _attempt(view):
+        """One complete marker-anchored build, with its own timings.
+
+        A fresh builder and a fresh timings dict per attempt is what discards ALL
+        partially built data on invalidation — rows, the canonicalized line, the
+        cached edges and the attempted metrics. Nothing crosses an attempt.
+        """
+        builder = _OpeningTreeBuilder(
+            db,
+            graph,
+            roots,
+            view.handle if view is not None else None,
+            player_color,
+            user.user_id,
+            routing=routing,
+        )
+        attempt_timings: TreeTiming = {}
+        response = builder.build(move, opening, timings=attempt_timings)
+        return response, builder, attempt_timings
+
+    # Optimistic marker-anchored reads. Every payload query joins the exact marker,
+    # so the only way to splice two generations is a publication committing BETWEEN
+    # two of them; the final SQL fence (never an ORM identity-map hit) proves that
+    # did not happen. One retry, and no second scheduler enqueue.
+    served = None
+    response = None
+    builder = None
+    attempt_timings: TreeTiming = {}
+    attempts = 0
+    read_mode = "optimistic"
+    for attempts in (1, 2):
+        view = latest_batch_view(db, user.user_id, player_color)
+        try:
+            response, builder, attempt_timings = _attempt(view)
+            if view is None:
+                # Book-only attempt: prove the pair STILL has no marker at all.
+                if not pair_has_no_batch(db, user.user_id, player_color):
+                    raise RetiredScoreHandle(None)
+            elif not handle_is_live(db, view.handle):
+                raise RetiredScoreHandle(view.handle.batch_id)
+        except RetiredScoreHandle:
+            response = builder = None
+            attempt_timings = {}
+            db.rollback()
+            continue
+        served = view
+        break
+    else:
+        # Both optimistic attempts lost a race. Finish inside one short read-only
+        # REPEATABLE READ snapshot: nothing published during it can become visible,
+        # so the read needs no fence. Bootstrap, graph and routing are already
+        # loaded, and no scorer/refresh_now or whole-edge-graph fetch runs in here.
+        # The response is a detached Pydantic model before score_snapshot's finally
+        # rolls back and returns the pooled connection READ COMMITTED.
+        read_mode = "snapshot"
+        with score_snapshot(db):
+            served = latest_batch_view(db, user.user_id, player_color)
+            response, builder, attempt_timings = _attempt(served)
+    # Only the SERVED attempt's timings reach the log; an invalidated attempt's
+    # measurements describe work that was thrown away. ``score_read_attempts``
+    # counts optimistic attempts, so the fallback reports 2 with mode "snapshot".
+    # A discarded attempt's time is therefore inside ``total_ms`` but attributed
+    # to no stage; ``score_read_attempts`` > 1 is what accounts for the gap.
+    timings.update(attempt_timings)
+    timings["score_read_attempts"] = attempts
+    timings["score_read_mode"] = read_mode
+
+    # Label the cache state against the marker actually SERVED, not the bootstrap
+    # hint: after a retry (or a bootstrap that timed out and then got a fresh
+    # publication) they can disagree, and useOpeningsTree discards the whole
+    # response on "bootstrap_timeout".
+    cache_state = _served_cache_state(bootstrap_state, served, current_registry)
+    timings["cache_state"] = cache_state
     response.cache_state = cache_state
     timings["observed_edge_query_count"] = builder._observed_edge_query_count
     timings["observed_edge_row_count"] = builder._observed_edge_row_count
@@ -1641,7 +1748,7 @@ def get_opening_tree(
             "opening_tree timing user_id=%s player_color=%s total_ms=%.3f "
             "move_count=%d has_opening_param=%s canonical_ply=%d graph_ms=%.3f "
             "roots_ms=%.3f ensure_cache_ms=%.3f cache_state=%s rollback_ms=%.3f "
-            "resolve_line_ms=%.3f "
+            "score_read_attempts=%d score_read_mode=%s resolve_line_ms=%.3f "
             "replay_line_ms=%.3f line_names_ms=%.3f observed_prefetch_ms=%.3f "
             "structural_columns_ms=%.3f "
             "position_rows_ms=%.3f move_evals_ms=%.3f root_eval_ms=%.3f "
@@ -1662,6 +1769,8 @@ def get_opening_tree(
             _timing_ms(timings, "ensure_cache_ms"),
             timings.get("cache_state"),
             _timing_ms(timings, "rollback_ms"),
+            _timing_count(timings, "score_read_attempts"),
+            timings.get("score_read_mode"),
             _timing_ms(timings, "resolve_line_ms"),
             _timing_ms(timings, "replay_line_ms"),
             _timing_ms(timings, "line_names_ms"),

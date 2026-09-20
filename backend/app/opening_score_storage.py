@@ -10,13 +10,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Iterator, Mapping, Sequence
 
-from sqlalchemy import bindparam, delete, insert, select, text, update
+from sqlalchemy import (
+    bindparam, collate, delete, func, insert, literal, select, text, update,
+)
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -30,6 +33,7 @@ from app.models import (
     OpeningScoreBatchSharedScope,
     UserOpeningScore,
 )
+from app.readonly_snapshot import begin_readonly_snapshot
 
 OPENING_SCORE_LOCK_CLASSID = 0x47525343
 CHUNK_SIZE = 500
@@ -70,6 +74,8 @@ _GROUPS = (
 )
 Scalar = str | int | float | bool | datetime | None
 Row = Mapping[str, Scalar]
+
+_MARKER = OpeningScoreBatch.__table__
 
 
 def _semantic_columns(table):
@@ -127,6 +133,10 @@ class ScoreHandle:
     player_color: str
     generation: int
     storage_format: StorageFormat
+    # Carried for response stamping only. Deliberately NOT part of the fence
+    # predicate: naive-vs-aware round-trips differ between SQLite and PostgreSQL,
+    # and marker identity is already total on (id, generation).
+    computed_at: datetime | None = None
 
     @classmethod
     def from_batch(cls, batch: OpeningScoreBatch):
@@ -136,15 +146,56 @@ class ScoreHandle:
             batch.player_color,
             batch.generation,
             StorageFormat(batch.storage_format),
+            batch.computed_at,
         )
+
+
+@dataclass(frozen=True)
+class BatchView:
+    """Detached snapshot of one ``opening_score_batches`` row.
+
+    Readers hand callers this instead of a live ORM ``OpeningScoreBatch``: an ORM
+    row expires on rollback, so a later attribute read would re-SELECT a marker a
+    concurrent publication may already have retired (``ObjectDeletedError``), and
+    the value it returned would belong to no single generation. Mirrors every
+    column, so ``from_batch`` fails loudly if a column is added without updating
+    this view.
+    """
+
+    id: int
+    user_id: int
+    player_color: str
+    generation: int
+    registry_fingerprint: str | None
+    inputs_fingerprint: str | None
+    evidence_seq: int | None
+    cache_epoch: int | None
+    scoped_shared_digest: str | None
+    computed_at: datetime
+    storage_format: str
+
+    @property
+    def handle(self) -> ScoreHandle:
+        return ScoreHandle(
+            self.id,
+            self.user_id,
+            self.player_color,
+            self.generation,
+            StorageFormat(self.storage_format),
+            self.computed_at,
+        )
+
+    @classmethod
+    def from_batch(cls, batch: OpeningScoreBatch) -> "BatchView":
+        return cls(**{c.name: getattr(batch, c.name) for c in _MARKER.columns})
+
+    @classmethod
+    def from_row(cls, row) -> "BatchView":
+        return cls(**{c.name: getattr(row, c.name) for c in _MARKER.columns})
 
 
 class RetiredScoreHandle(LookupError):
     """An exact marker no longer exists; never substitute the current payload."""
-
-
-class UnsupportedScoreStorage(RuntimeError):
-    """Legacy readers cannot serve this marker until reader integration lands."""
 
 
 class PublicationSuperseded(Exception):
@@ -433,43 +484,271 @@ def _publish_scores(
     return batch
 
 
-def payload_query(handle: ScoreHandle, group: str):
-    """Repository SELECT for sibling readers; add bounded FEN/parent predicates.
-
-    Result columns retain legacy row shape (including captured computed_at).
-    Exact marker identity is joined into every current query. Consumers must still
-    fence after all queries to distinguish a valid empty result from retirement.
-    """
+def _group_spec(group: str):
     spec = next((g for g in _GROUPS if g[0] == group), None)
     if spec is None:
         raise ValueError("unknown opening payload group")
+    return spec
+
+
+def _machine_collation(dialect_name: str) -> str:
+    return "BINARY" if dialect_name == "sqlite" else "C"
+
+
+def _ordering(expression, current_column, legacy_column, dialect_name: str):
+    """Order-by expression for one coalesced semantic column.
+
+    A current MACHINE_KEY column collates ``C``/``BINARY`` while its legacy twin
+    carries the database default. PostgreSQL resolves that coalesce on its own —
+    a non-default implicit collation beats the default, so the result is ``C``,
+    and only two DIFFERENT non-default collations are indeterminate. Naming the
+    machine collation is therefore belt-and-braces, not a fix: it pins the sort
+    to one collation by construction instead of leaving both formats' ordering
+    riding on which column happens to carry a collation today.
+
+    Either way the natural-key tie-break sorts in byte order for both formats;
+    ``opening_family`` / ``opening_name`` are default-collated on both sides and
+    dominate the root display ordering.
+    """
+    if getattr(current_column.type, "collation", None) == getattr(
+        legacy_column.type, "collation", None
+    ):
+        return expression
+    return collate(expression, _machine_collation(dialect_name))
+
+
+def _payload_join(marker, spec, on: Callable | None):
+    """Outer-join both payload tables to ``marker`` under format-guarded ON clauses.
+
+    The marker drives the join, so zero rows means the marker itself is gone
+    (retired or never existed) and one row with a NULL natural key means a live
+    marker with no payload. ``on`` — a bounded ``IN``/equality predicate — goes
+    into BOTH ON clauses and never into WHERE: in WHERE it would filter the
+    metadata root away and turn "no matching FEN" back into zero rows.
+    """
     _, current, legacy, _ = spec
-    marker = OpeningScoreBatch.__table__
-    identity = (
-        (marker.c.id == handle.batch_id)
-        & (marker.c.user_id == handle.user_id)
-        & (marker.c.player_color == handle.player_color)
-        & (marker.c.generation == handle.generation)
-        & (marker.c.storage_format == handle.storage_format.value)
+    fmt = marker.c.storage_format
+    current_on = (
+        (current.c.user_id == marker.c.user_id)
+        & (current.c.player_color == marker.c.player_color)
+        & (fmt == StorageFormat.CURRENT.value)
     )
-    if handle.storage_format is StorageFormat.LEGACY:
-        return (
-            select(legacy)
-            .join(marker, legacy.c.batch_id == marker.c.id)
-            .where(identity)
+    legacy_on = (legacy.c.batch_id == marker.c.id) & (
+        fmt == StorageFormat.LEGACY.value
+    )
+    if "user_id" in legacy.c:
+        # Owner-scoped like today's legacy readers; the shared-scope table is
+        # batch-scoped only and has no owner columns.
+        legacy_on &= (legacy.c.user_id == marker.c.user_id) & (
+            legacy.c.player_color == marker.c.player_color
         )
-    columns = list(current.c) + [marker.c.id.label("batch_id"), marker.c.computed_at]
-    return (
-        select(*columns)
-        .select_from(
-            current.join(
-                marker,
-                (current.c.user_id == marker.c.user_id)
-                & (current.c.player_color == marker.c.player_color),
+    if on is not None:
+        current_on &= on(current)
+        legacy_on &= on(legacy)
+    return marker.outerjoin(current, current_on).outerjoin(legacy, legacy_on)
+
+
+def _payload_select(marker, spec, *, on, order_by, dialect_name):
+    _, current, legacy, _ = spec
+    names = [c.name for c in _semantic_columns(current)]
+    semantic = {
+        name: func.coalesce(current.c[name], legacy.c[name]) for name in names
+    }
+    columns = [marker.c[c.name] for c in _MARKER.columns]
+    # Legacy rows carry their own batch_id/computed_at copies; both come from the
+    # marker instead so every returned row belongs to exactly one generation.
+    columns.append(marker.c.id.label("batch_id"))
+    columns.extend(expression.label(name) for name, expression in semantic.items())
+    statement = select(*columns).select_from(_payload_join(marker, spec, on))
+    if order_by:
+        statement = statement.order_by(
+            *(
+                _ordering(
+                    semantic[name], current.c[name], legacy.c[name], dialect_name
+                )
+                for name in order_by
             )
         )
-        .where(identity)
+    return statement
+
+
+def payload_query(
+    handle: ScoreHandle,
+    group: str,
+    *,
+    on: Callable | None = None,
+    order_by: Sequence[str] = (),
+    dialect_name: str = "postgresql",
+):
+    """Exact-marker payload SELECT (reader shape B), for a caller holding a handle.
+
+    Result columns keep the legacy row shape under their original names, so
+    ``_snapshot_cached_rows`` / ``_snapshot_position_rows`` / ``_edge_evidence_from_row``
+    read them by attribute unchanged. Marker identity is joined into the same
+    statement, so a caller that gets rows back is reading one generation; zero rows
+    means the exact marker retired (see :func:`read_group`).
+    """
+    spec = _group_spec(group)
+    marker = (
+        select(_MARKER)
+        .where(
+            _MARKER.c.id == handle.batch_id,
+            _MARKER.c.user_id == handle.user_id,
+            _MARKER.c.player_color == handle.player_color,
+            _MARKER.c.generation == handle.generation,
+            _MARKER.c.storage_format == handle.storage_format.value,
+        )
+        .subquery("marker")
     )
+    return _payload_select(
+        marker, spec, on=on, order_by=order_by, dialect_name=dialect_name
+    )
+
+
+def latest_marker_query(
+    user_id: int,
+    player_color: str,
+    group: str,
+    *,
+    on: Callable | None = None,
+    order_by: Sequence[str] = (),
+    dialect_name: str = "postgresql",
+):
+    """Latest-marker payload SELECT (reader shape A) — one statement, no fence.
+
+    The newest marker is resolved INSIDE the statement and its payload is read in
+    the same snapshot, so a single-statement reader has no retirement to observe,
+    nothing to retry and nothing to fence: whatever marker it saw was the latest
+    at that instant, and the rows beside it are that marker's own.
+    """
+    spec = _group_spec(group)
+    marker = (
+        select(_MARKER)
+        .where(
+            _MARKER.c.user_id == user_id,
+            _MARKER.c.player_color == player_color,
+        )
+        .order_by(_MARKER.c.generation.desc())
+        .limit(1)
+        .subquery("marker")
+    )
+    return _payload_select(
+        marker, spec, on=on, order_by=order_by, dialect_name=dialect_name
+    )
+
+
+def _drop_empty(rows, spec):
+    """Strip the single all-NULL-key row a live marker with no payload produces."""
+    key = spec[3][0]
+    if len(rows) == 1 and getattr(rows[0], key) is None:
+        return []
+    return list(rows)
+
+
+def read_group(
+    db: Session,
+    handle: ScoreHandle,
+    group: str,
+    *,
+    on: Callable | None = None,
+    order_by: Sequence[str] = (),
+):
+    """Execute reader shape B; raise :class:`RetiredScoreHandle` when the marker is gone.
+
+    The single chokepoint that distinguishes *retired* (zero rows) from
+    *valid-empty* (one row, NULL natural key) from a *legitimate NULL no-data*
+    column (``has_evidence`` false rows keep their NULL metrics). Under B50 there
+    is no separate narrow confidence table: confidence is a column of the same
+    wide row, so an unselected-D value is never mistaken for missing work.
+    """
+    spec = _group_spec(group)
+    rows = db.execute(
+        payload_query(
+            handle,
+            group,
+            on=on,
+            order_by=order_by,
+            dialect_name=db.get_bind().dialect.name,
+        )
+    ).all()
+    if not rows:
+        raise RetiredScoreHandle(handle.batch_id)
+    return _drop_empty(rows, spec)
+
+
+def read_latest_group(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    group: str,
+    *,
+    on: Callable | None = None,
+    order_by: Sequence[str] = (),
+) -> tuple[BatchView | None, list]:
+    """Execute reader shape A: the latest marker and its payload, atomically."""
+    spec = _group_spec(group)
+    rows = db.execute(
+        latest_marker_query(
+            user_id,
+            player_color,
+            group,
+            on=on,
+            order_by=order_by,
+            dialect_name=db.get_bind().dialect.name,
+        )
+    ).all()
+    if not rows:
+        return None, []
+    return BatchView.from_row(rows[0]), _drop_empty(rows, spec)
+
+
+def latest_batch_view(
+    db: Session, user_id: int, player_color: str
+) -> BatchView | None:
+    """The newest marker as a detached view; ``view.handle`` is its exact handle."""
+    batch = latest_batch(db, user_id, player_color)
+    return None if batch is None else BatchView.from_batch(batch)
+
+
+def pair_has_no_batch(db: Session, user_id: int, player_color: str) -> bool:
+    """SQL proof that (user, color) still has no marker at all.
+
+    The fence for a book-only tree attempt: ``db.get`` would answer from the ORM
+    identity map, which proves nothing about what committed during the read.
+    """
+    return (
+        db.execute(
+            select(literal(1))
+            .select_from(_MARKER)
+            .where(
+                _MARKER.c.user_id == user_id,
+                _MARKER.c.player_color == player_color,
+            )
+            .limit(1)
+        ).first()
+        is None
+    )
+
+
+@contextmanager
+def score_snapshot(db: Session) -> Iterator[None]:
+    """Short read-only REPEATABLE READ snapshot for the multi-statement tree read.
+
+    The last-resort fallback after both optimistic attempts were invalidated: a
+    snapshot needs no fence because no publication can become visible inside it.
+    ``begin_readonly_snapshot`` must be the FIRST statement of a transaction —
+    mid-transaction SQLAlchemy only warns that the execution options were ignored
+    and silently leaves READ COMMITTED — so entering with an open transaction is a
+    ``ValueError`` (not a bare ``assert``, which ``python -O`` would strip).
+    """
+    if db.in_transaction():
+        raise ValueError("score snapshot requires a fresh transaction")
+    begin_readonly_snapshot(db)
+    try:
+        yield
+    finally:
+        # Return the pooled connection READ COMMITTED and read-write.
+        db.rollback()
 
 
 def publish_scores(

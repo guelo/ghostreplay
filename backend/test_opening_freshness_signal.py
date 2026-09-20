@@ -43,6 +43,7 @@ from app.api.blunder import (
 )
 from app.fen import active_color
 from app.models import Blunder, GameSession, OpeningScoreBatch, Position, SessionMove
+from app.opening_score_storage import ScoreHandle
 from app.opening_cache import (
     _is_batch_fresh,
     bump_evidence_seq,
@@ -330,7 +331,9 @@ def test_writer_stamps_signal_and_scope(db_session):
     assert batch.cache_epoch == current_cache_epoch(db_session)
     assert batch.inputs_fingerprint is None
     assert batch.scoped_shared_digest is not None
-    raw_fens, norm_fens = oc._load_batch_shared_scope(db_session, batch.id)
+    raw_fens, norm_fens = oc._load_batch_shared_scope(
+        db_session, ScoreHandle.from_batch(batch)
+    )
     assert START_FULL in raw_fens
     assert START_FEN in norm_fens
 
@@ -905,7 +908,7 @@ def test_operational_scope_ignores_broad_only_candidate_without_score_change(
     _build_batch(db_session)
 
     raw_fens, _ = oc._load_batch_shared_scope(
-        db_session, list_cached_opening_scores(db_session, USER, "white")[0].id
+        db_session, list_cached_opening_scores(db_session, USER, "white")[0].handle
     )
     assert BROKEN_CHAIN_FULL not in raw_fens
 
@@ -925,7 +928,9 @@ def test_direct_snapshot_retains_broad_scope_for_same_candidate(db_session):
     )
     batch = _build_direct_batch(db_session)
 
-    raw_fens, _ = oc._load_batch_shared_scope(db_session, batch.id)
+    raw_fens, _ = oc._load_batch_shared_scope(
+        db_session, ScoreHandle.from_batch(batch)
+    )
     assert BROKEN_CHAIN_FULL in raw_fens
 
     digest = raw_evidence_inputs_digest(db_session, USER, "white")
@@ -997,9 +1002,11 @@ def test_unstamped_batch_is_stale_not_error(db_session):
     _build_batch(db_session)
     batch, rows = list_cached_opening_scores(db_session, USER, "white")
 
-    # Pre-migration / corrupt batch: NULL signal -> not provable.
-    batch.evidence_seq = None
+    # Pre-migration / corrupt batch: NULL signal -> not provable. A reader view is
+    # a snapshot, not a write handle, so the simulation goes through the live row.
+    db_session.get(OpeningScoreBatch, batch.id).evidence_seq = None
     db_session.commit()
+    batch, rows = list_cached_opening_scores(db_session, USER, "white")
     assert _is_batch_fresh(db_session, batch, rows) is False
 
 

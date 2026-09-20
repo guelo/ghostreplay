@@ -170,6 +170,25 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opening_score_storage_pg.py::test_pg_publication_serialization_supersession_and_evidence_order",
     "test_opening_score_storage_pg.py::test_pg_lock_namespaces_colors_and_collision_isolation",
     "test_opening_score_storage_pg.py::test_pg_exact_diff_ids_collation_and_snapshot_rollback",
+
+    # Reader publication boundaries (g-score-store-readers). Each one needs a
+    # SECOND committing connection (SQLite's StaticPool has none) or the
+    # REPEATABLE READ level the snapshot fallback falls back to, so none of them
+    # can be stood in for by the SQLite suite.
+    "test_opening_score_reader_pg.py::test_pg_a_publication_between_bounded_reads_is_retried_not_spliced",
+    "test_opening_score_reader_pg.py::test_pg_a_retirement_before_the_first_query_is_retried",
+    "test_opening_score_reader_pg.py::test_pg_a_publication_after_the_fence_is_served_as_read",
+    "test_opening_score_reader_pg.py::test_pg_a_first_publication_invalidates_the_book_only_attempt",
+    "test_opening_score_reader_pg.py::test_pg_a_retry_resets_every_attempt_and_never_re_enqueues",
+    "test_opening_score_reader_pg.py::test_pg_a_neighbours_publication_never_invalidates_this_read",
+    "test_opening_score_reader_pg.py::test_pg_a_cold_bootstrap_timeout_with_no_batch_stays_book_only",
+    "test_opening_score_reader_pg.py::test_pg_two_invalidated_attempts_fall_back_to_a_coherent_snapshot",
+    "test_opening_score_reader_pg.py::test_pg_the_snapshot_fallback_returns_the_connection_clean",
+    "test_opening_score_reader_pg.py::test_pg_an_exact_retired_marker_never_resolves_current_rows",
+    "test_opening_score_reader_pg.py::test_pg_mixed_format_pairs_read_side_by_side",
+    "test_opening_score_reader_pg.py::test_pg_bounded_reads_never_scan_the_unmatched_table",
+    "test_opening_score_reader_pg.py::test_pg_the_tree_read_takes_no_advisory_locks_and_waits_on_none",
+    "test_opening_score_reader_pg.py::test_pg_the_session_start_proof_never_scans_global_shared_evidence",
     "test_drill_route_mode_migration.py::test_pg_route_mode_migration_constraints",
     # Compact decision targeting: migration, counter parity and snapshot/upsert races.
     "test_opponent_decision_retention_migration.py::test_pg_backfill_command_refuses_initialized_deadlines",
@@ -516,6 +535,16 @@ REQUIRED_PG_GATE_TESTS = frozenset({
 # the matrix (e.g. the both-FOR-UPDATE deadlock case) fails the gate rather than
 # quietly shrinking it.
 REQUIRED_PG_GATE_PARAM_CASES = frozenset({
+    # Both builder seams are distinct publication windows: the edge case splices
+    # wave 1 into wave 2, the position case races the final fence. And the
+    # bounded-read plan has to hold for the marker format that does NOT own the
+    # table being probed, in both directions.
+    "test_opening_score_reader_pg.py::test_pg_a_publication_between_bounded_reads_is_retried_not_spliced[lookup_observed_edges_for_parents]",
+    "test_opening_score_reader_pg.py::test_pg_a_publication_between_bounded_reads_is_retried_not_spliced[lookup_position_scores_for_batch]",
+    "test_opening_score_reader_pg.py::test_pg_bounded_reads_never_scan_the_unmatched_table[legacy]",
+    "test_opening_score_reader_pg.py::test_pg_bounded_reads_never_scan_the_unmatched_table[current]",
+    "test_opening_score_reader_pg.py::test_pg_the_session_start_proof_never_scans_global_shared_evidence[legacy]",
+    "test_opening_score_reader_pg.py::test_pg_the_session_start_proof_never_scans_global_shared_evidence[current]",
     # Each marker combination is its own case: half a marker set must be no
     # marker at all, so "mode only" and "owner only" have to be named, not
     # summarized by a single happy-path entry.

@@ -1505,9 +1505,11 @@ def test_family_drill_lazy_enrichment_does_not_reload_expired_cache_rows(
         event.remove(engine, "before_cursor_execute", _capture_cache_selects)
 
     assert resp.status_code == 200
-    assert len(cache_selects) == 2
-    assert any(" from opening_score_batches " in statement for statement in cache_selects)
-    assert any(" from user_opening_scores " in statement for statement in cache_selects)
+    # ONE statement: the marker-rooted reader resolves the latest batch and its roots
+    # together, so the two can never come from different generations.
+    assert len(cache_selects) == 1
+    assert " from opening_score_batches " in cache_selects[0]
+    assert " user_opening_scores " in cache_selects[0]
 
 
 def test_family_drill_underexposed_branch_uses_value_field(client, auth_headers):

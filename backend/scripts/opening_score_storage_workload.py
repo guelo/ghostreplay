@@ -28,6 +28,7 @@ from app.models import (
     SessionMove,
     OpeningPositionScore,
     OpeningPositionEdge,
+    OpeningScoreBatch,
     OpeningScoreBatchSharedScope,
     UserOpeningScore,
 )
@@ -343,7 +344,11 @@ def build_timeline(engine, *, sessions=64, repetitions=20):
             old_epoch = previous.cache_epoch if previous else None
             result = oc.recompute_opening_scores_if_needed(db, OWNER, COLOR)
             if result.batch is not None:
-                db.refresh(result.batch)  # best-effort re-arm bypasses ORM state
+                # The best-effort re-arm commits from an independent session, so
+                # re-read the marker rather than trusting the returned snapshot.
+                result = replace(
+                    result, batch=oc.get_latest_opening_score_batch(db, OWNER, COLOR)
+                )
             event = {
                 "at": clock["now"].isoformat(),
                 "cause": cause,
@@ -450,7 +455,11 @@ def build_timeline(engine, *, sessions=64, repetitions=20):
             request("unrelated_epoch", "idle" if idle else "active")
         # Real priority branches, kept outside steady-state denominators.
         batch = oc.get_latest_opening_score_batch(db, OWNER, COLOR)
-        batch.registry_fingerprint = "synthetic-registry-transition"
+        db.execute(
+            update(OpeningScoreBatch)
+            .where(OpeningScoreBatch.id == batch.id)
+            .values(registry_fingerprint="synthetic-registry-transition")
+        )
         db.commit()
         request("registry_transition", "forced_control")
         batch = oc.get_latest_opening_score_batch(db, OWNER, COLOR)

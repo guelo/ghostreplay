@@ -18,8 +18,8 @@ from app.models import (
     GameSession,
     RatingHistory,
     SessionMove,
-    UserOpeningScore,
 )
+from app.opening_aggregate import CachedOpeningScoreRow
 from app.opening_cache import list_cached_opening_scores
 from app.rating import DEFAULT_RATING
 from app.rating_scores import latest_rating_order, scores_for_row
@@ -145,7 +145,7 @@ def _score_pct(wins: int, losses: int, draws: int) -> float | None:
     return _round1((wins + 0.5 * draws) * 100.0 / decided)
 
 
-def _opening_stat(row: UserOpeningScore) -> OpeningStat:
+def _opening_stat(row: CachedOpeningScoreRow) -> OpeningStat:
     return OpeningStat(
         opening_name=row.opening_name,
         opening_family=row.opening_family,
