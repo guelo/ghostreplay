@@ -19,6 +19,22 @@ An image rollback is eligible only when the target artifact contains the
 database's current migration revision and is schema-compatible. In practice,
 treat it as a pure-code rollback between artifacts with the same Alembic head.
 
+## Known pure-code rollback caveats
+
+A schema-compatible rollback can still change a response shape, because stored
+payloads are replayed through the artifact's current response models.
+
+- **Broad rolling SRS counters (removed in `15854a1`, g-srs-api-counters).**
+  That release removed `opportunities_30d` and `reached_30d` from
+  `TargetBlunderSrs` and `BlunderListItem`. The prior release declares both on
+  `TargetBlunderSrs` with `Field(0, ...)` defaults, so rolling back to it makes
+  opponent decisions recorded under the newer release replay with
+  `opportunities_30d: 0` and `reached_30d: 0`. Those zeros are Pydantic
+  defaults, not historical measurements. This was accepted at release sign-off:
+  no stored payload is rewritten and no compatibility shim exists. Treat the
+  two fields as absent rather than zero when reading a replayed decision after
+  such a rollback.
+
 ## Forward-revert artifact
 
 A valid forward-revert artifact is a new commit and deployment with these

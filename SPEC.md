@@ -187,6 +187,9 @@ evidence and the targeted-session reach rate. The response contract lives in
 [`backend/app/api/game.py`](backend/app/api/game.py) and
 [`backend/app/api/blunder.py`](backend/app/api/blunder.py); replay preservation is
 covered by [`backend/test_opponent_decision_record.py`](backend/test_opponent_decision_record.py).
+Rolling back across that field removal reintroduces the retired fields as zero
+defaults on replayed decisions; that caveat is recorded in
+[`docs/migration-deploy-runbook.md`](docs/migration-deploy-runbook.md).
 
 Optional SRS write observations distinguish committed evidence mutations from
 worker/repair failures and use a post-commit database clock bound. Private
