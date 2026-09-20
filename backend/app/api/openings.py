@@ -1539,8 +1539,9 @@ def get_opening_score_delta(
     Terminal callers may converge from a warm batch or freshness-bound scoped
     result. Active callers must supply the durable marker's opaque token and are
     served only the matching private-prefix publication. A scoped miss may
-    best-effort re-enqueue that exact token, but the request never waits for or
-    invokes the whole-graph scheduler.
+    best-effort re-enqueue — an active miss that exact token, a terminal miss a
+    bounded replacement run — but the request never waits for or invokes the
+    whole-graph scheduler.
     """
     session = db.query(GameSession).filter(GameSession.id == session_id).first()
     if session is None:

@@ -336,6 +336,37 @@ SCOPED_DELTA_GENERATION_CAPACITY = 256
 SCOPED_DELTA_SOURCE_TERMINAL = "terminal"
 SCOPED_DELTA_SOURCE_OPENING_BOUNDARY = "opening_boundary"
 BOUNDARY_DELTA_RECOVERY_COOLDOWN_SECONDS = 10.0
+# Separate from the boundary cooldown on purpose: the two recovery paths bound
+# different work. A boundary re-run rescores one proven prefix; a terminal re-run
+# rebuilds the whole historical overlay.
+TERMINAL_DELTA_RECOVERY_COOLDOWN_SECONDS = 10.0
+# Inside that cooldown a PROVEN input change buys another attempt, because a
+# terminal miss does not prove the writes that caused it have finished.
+#
+# The floor is deliberately BELOW the client's ~1.5 s poll cadence. It is not what
+# bounds the work — the attempt cap and the movement requirement are — it only stops
+# two concurrent polls (a second tab) from firing back to back when the counters move
+# between them. Setting it above the cadence would burn a whole poll cycle after every
+# attempt: the next poll would always land inside the floor and be refused, delaying
+# convergence by ~1.5 s for nothing, since a miss plus moved counters already proves
+# the previous run is dead and the in-flight probe already covers one still running.
+TERMINAL_DELTA_RECOVERY_MIN_INTERVAL_SECONDS = 1.0
+TERMINAL_DELTA_RECOVERY_MAX_ATTEMPTS = 3
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalRecoveryAttempt:
+    """One terminal recovery re-enqueue, with the counters it was launched against.
+
+    ``cache_epoch`` is optional because ``current_cache_epoch`` returns None on the
+    legacy/partial state readers fail closed on; None compares equal to None, so an
+    unreadable epoch simply never counts as movement.
+    """
+
+    at: float
+    evidence_seq: int
+    cache_epoch: int | None
+    attempts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,6 +643,191 @@ def enqueue_opening_boundary_delta(
     return token
 
 
+def _terminal_delta_request_scheduled(session: GameSession) -> bool:
+    """Whether a terminal lane request for ``session`` is pending or in flight.
+
+    Sampled by the reader BEFORE its scoped validation read, which is what makes the
+    read's verdict durable: with nothing scheduled beforehand, no worker can publish
+    while the read runs, so an absent publication stays absent and recovery cannot
+    supersede one that lands in between. Sampling it afterwards would leave exactly
+    that window open. Best-effort; an unreadable lane reads as "nothing scheduled".
+    """
+    try:
+        from app.opening_score_delta_lane import is_scoped_delta_scheduled
+
+        return is_scoped_delta_scheduled(
+            session.user_id,
+            session.player_color,
+            session.id,
+            source=SCOPED_DELTA_SOURCE_TERMINAL,
+            reconciliation_token=None,
+        )
+    except Exception:
+        logger.warning(
+            "terminal opening delta scheduled probe failed session_id=%s",
+            getattr(session, "id", None),
+            exc_info=True,
+        )
+        return False
+
+
+def enqueue_terminal_delta_recovery(
+    db: Session,
+    session: GameSession,
+    *,
+    already_scheduled: bool,
+) -> bool:
+    """Bounded recovery re-enqueue after a TERMINAL scoped miss (g-delta-stale-publish).
+
+    The terminal publication and its own session's deferred ``/moves`` pipeline race.
+    When the lane wins, the deferred analysis-cache write lands afterwards at a
+    position this session scored: the global cache epoch advances, the publication's
+    own scoped shared digest changes, and ``_validated_scoped_score_map`` rejects it —
+    correctly, because that row is shared evidence the score depends on. When the lane
+    loses the same race it finishes ``counter_drift`` and publishes nothing at all, and
+    ``ScopedDeltaLane._run_one`` requeues only from its ``except`` block, so a normal
+    return is terminal. Both shapes leave the poll with no scoped result and no way to
+    ask for another, stranding it on the stale batch until the whole-graph worker lands
+    — the ~12 s waits captured for g-6qwoj behind sub-second lane publications.
+
+    ONE ATTEMPT IS NOT ENOUGH, and the two shapes are why. An invalidated publication
+    proves the write that killed it has already landed, so its replacement sees the
+    settled inputs. A ``counter_drift`` miss proves nothing of the kind: no publication
+    exists, the client's first poll fires about when the deferred worker's 1.5 s quiet
+    window expires, and a replacement launched then is invalidated by the very write it
+    was racing. A pure time cooldown as long as the stall it shortens would spend the
+    session's only attempt too early and hold until the whole-graph worker made it
+    moot. So an attempt is also allowed when ``evidence_seq`` or ``cache_epoch`` has
+    MOVED since the last one — the proof that a new run can reach a different verdict —
+    floored above the poll cadence and capped per cooldown window so churn cannot turn
+    every poll into a lane run.
+
+    Nothing about freshness changes: the reader still serves only what it can prove,
+    and this only shortens how long the proof is unavailable. Fully swallowing — the
+    poll must never raise.
+
+    Returns whether a lane request was actually submitted; a suppressed re-enqueue is
+    an ordinary bounded outcome, not a failure.
+    """
+    outcome = "failed"
+    attempts = 0
+    try:
+        # The publisher drops a terminal candidate that is not evidence-eligible, so
+        # without this gate an ineligible session would burn one lane run per cooldown
+        # for its whole poll window and never produce a publication.
+        if not session_is_evidence_eligible(session):
+            outcome = "ineligible"
+            return False
+        # A pending/in-flight run IS the answer the next poll will read. Requesting
+        # another would only supersede its generation and discard work in flight.
+        if already_scheduled:
+            outcome = "scheduled"
+            return False
+
+        from app.opening_score_delta_lane import (
+            DeltaLaneEnqueueOutcome,
+            enqueue_scoped_delta,
+        )
+
+        # Sampled BEFORE the enqueue, so it is a lower bound on the inputs the run it
+        # launches will read — the same discipline the publisher stamps with.
+        evidence_seq = current_evidence_seq(
+            db, session.user_id, session.player_color
+        )
+        cache_epoch = current_cache_epoch(db)
+        now = time.monotonic()
+        recovery_key = str(session.id)
+
+        # Claim the slot and stamp it under ONE lock hold. Checking and stamping
+        # separately lets two concurrent polls both pass; a terminal reservation always
+        # mints a new generation, so the second would supersede the first's run.
+        with _scoped_delta_lock:
+            previous = _terminal_delta_recovery_attempts.get(recovery_key)
+            spent = 0 if previous is None else previous.attempts
+            # The logged count always means "attempts spent in this window AFTER this
+            # call". Suppressed branches leave it at what was already spent; the launch
+            # paths below overwrite it with the attempt they are about to make.
+            attempts = spent
+            if (
+                previous is not None
+                and now - previous.at < TERMINAL_DELTA_RECOVERY_COOLDOWN_SECONDS
+            ):
+                elapsed = now - previous.at
+                if elapsed < TERMINAL_DELTA_RECOVERY_MIN_INTERVAL_SECONDS:
+                    _terminal_delta_recovery_attempts.move_to_end(recovery_key)
+                    outcome = "min_interval"
+                    return False
+                if (previous.evidence_seq, previous.cache_epoch) == (
+                    evidence_seq,
+                    cache_epoch,
+                ):
+                    _terminal_delta_recovery_attempts.move_to_end(recovery_key)
+                    outcome = "cooldown"
+                    return False
+                if spent >= TERMINAL_DELTA_RECOVERY_MAX_ATTEMPTS:
+                    _terminal_delta_recovery_attempts.move_to_end(recovery_key)
+                    outcome = "attempts_exhausted"
+                    return False
+                attempts = spent + 1
+            else:
+                # No prior attempt, or the cooldown elapsed and the budget resets.
+                attempts = 1
+            _terminal_delta_recovery_attempts[recovery_key] = _TerminalRecoveryAttempt(
+                at=now,
+                evidence_seq=evidence_seq,
+                cache_epoch=cache_epoch,
+                attempts=attempts,
+            )
+            _terminal_delta_recovery_attempts.move_to_end(recovery_key)
+            while (
+                len(_terminal_delta_recovery_attempts)
+                > SCOPED_DELTA_GENERATION_CAPACITY
+            ):
+                _terminal_delta_recovery_attempts.popitem(last=False)
+
+        lane_outcome = enqueue_scoped_delta(
+            session.user_id,
+            session.player_color,
+            session.id,
+        )
+        if lane_outcome not in {
+            DeltaLaneEnqueueOutcome.ENQUEUED,
+            DeltaLaneEnqueueOutcome.COALESCED,
+        }:
+            # The claim bought nothing, so release it rather than silently spending
+            # this session's budget on a request the lane refused.
+            with _scoped_delta_lock:
+                if previous is None:
+                    _terminal_delta_recovery_attempts.pop(recovery_key, None)
+                else:
+                    _terminal_delta_recovery_attempts[recovery_key] = previous
+                    _terminal_delta_recovery_attempts.move_to_end(recovery_key)
+            attempts = spent
+            outcome = "not_enqueued"
+            return False
+        outcome = "enqueued"
+        return True
+    except Exception:
+        outcome = "failed"
+        logger.warning(
+            "terminal opening delta recovery enqueue failed session_id=%s",
+            getattr(session, "id", None),
+            exc_info=True,
+        )
+        return False
+    finally:
+        # Fields go IN THE MESSAGE: the root formatter prints %(message)s only. Without
+        # this line a recovery run is indistinguishable from the original in the lane's
+        # own logs, which carry user and colour but no session — and the next g-6qwoj
+        # capture could not measure whether recovery fired, or why it did not.
+        logger.info(
+            "terminal_delta_recovery outcome=%s session_id=%s attempt=%s",
+            outcome,
+            getattr(session, "id", None),
+            attempts,
+        )
+
+
 def refresh_opening_boundary_publication_state(
     db: Session,
     session: GameSession,
@@ -769,6 +985,13 @@ _active_prefix_tokens_by_session: OrderedDict[
     tuple[tuple[int, int, str], str],
 ] = OrderedDict()
 _boundary_delta_enqueue_times: OrderedDict[tuple[str, str], float] = OrderedDict()
+# Keyed by session id alone — a terminal request carries no reconciliation token,
+# unlike the boundary map's (session, token) key. Carries the counters the last
+# attempt was launched against, so a later poll can tell "nothing has moved, another
+# run would reach the same verdict" from "the inputs changed, try again".
+_terminal_delta_recovery_attempts: OrderedDict[
+    str, "_TerminalRecoveryAttempt"
+] = OrderedDict()
 _scoped_delta_generation_counter = itertools.count(1)
 
 
@@ -868,6 +1091,7 @@ def reset_scoped_delta_cache() -> None:
         _active_prefix_proof_cache.clear()
         _active_prefix_tokens_by_session.clear()
         _boundary_delta_enqueue_times.clear()
+        _terminal_delta_recovery_attempts.clear()
 
 
 def _capture_baseline_json(
@@ -2015,8 +2239,9 @@ def read_opening_score_delta(
     Scheduler pending/in-flight state is deliberately absent from this decision:
     the evidence proof decides freshness, so a scoped result can become visible
     while the independent whole-graph worker remains blocked. The reader never
-    waits; an active scoped miss only re-enqueues the same token best-effort.
-    Any failure degrades to ``([], False)``.
+    waits; a scoped miss only re-enqueues best-effort — an active miss re-enqueues
+    its own token, a terminal miss asks for one bounded replacement run
+    (:func:`enqueue_terminal_delta_recovery`). Any failure degrades to ``([], False)``.
     """
     try:
         authoritative = db.get(GameSession, session.id, populate_existing=True)
@@ -2070,6 +2295,10 @@ def read_opening_score_delta(
             )
             return items, True
 
+        # Sampled BEFORE the read below, not only after: with no lane request pending
+        # or in flight beforehand, nothing can publish while the read runs, so a miss
+        # here cannot be a publication that landed a thread-switch too late.
+        scheduled_before_read = _terminal_delta_request_scheduled(authoritative)
         scoped_scores = _validated_scoped_score_map(
             db,
             authoritative,
@@ -2081,6 +2310,23 @@ def read_opening_score_delta(
                 authoritative, chain, scoped_scores
             )
             return items, True
+
+        # Reached only with no provably-fresh batch AND no usable publication, so
+        # recovery can never fire while a fresh batch is serving. Bounded and
+        # best-effort; the fallback below is returned either way.
+        enqueue_terminal_delta_recovery(
+            db,
+            authoritative,
+            # Both samples, because the window is two-sided. The pre-read one covers a
+            # run that finishes DURING the read; this one covers a request that arrives
+            # during it — a terminal POST for this same session can enqueue mid-read,
+            # and recovery would otherwise mint a newer generation and supersede it.
+            # Short-circuited, so the second probe is skipped when the first said yes.
+            already_scheduled=(
+                scheduled_before_read
+                or _terminal_delta_request_scheduled(authoritative)
+            ),
+        )
 
         if batch is not None:
             items, _ = _delta_items_from_score_map(
