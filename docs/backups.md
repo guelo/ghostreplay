@@ -17,3 +17,8 @@ pg_restore \
 --no-acl \
 -d "$TARGET_DATABASE_URL" \
 /tmp/ghostreplay-restore.dump
+
+Volume headroom for that same database has its own read-only check: see
+`backend/scripts/MONITOR_PG_VOLUME.md` for the daily volume/top-file check that
+belongs on this host next to the dump job. It is not installed yet — the cron
+entry and its alert are tracked by `g-volume-alert-cron`.

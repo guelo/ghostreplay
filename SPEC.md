@@ -437,4 +437,7 @@ implementation authorities named in the engineering map.
   OpenAPI from the running service.
 - **Operational runbooks:** [Release A](docs/release_a_runbook.md) and
   [Release B](docs/release_b_runbook.md). These are deployment records, not
-  product or API specifications.
+  product or API specifications. Production database volume headroom and its
+  known bloat paths have a read-only
+  [volume check](backend/scripts/MONITOR_PG_VOLUME.md) whose runbook carries its
+  thresholds and its scheduling, alongside [backups](docs/backups.md).
