@@ -179,6 +179,20 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opponent_decision_retention_migration.py::test_pg_backfill_cannot_overwrite_concurrent_winning_fact",
     "test_opponent_decision_retention_migration.py::test_pg_target_fact_reached_join_has_one_snapshot",
     "test_srs_opportunity.py::test_pg_target_fact_counters_match_raw_decisions",
+    # Bounded decision cleanup (g-decision-cleanup). Every one of these is a
+    # PostgreSQL-only guarantee: SKIP LOCKED, row-level FOR UPDATE OF that
+    # deliberately excludes the parent, clock_timestamp() advancing inside a
+    # transaction where now() cannot, a fact upsert racing its own deletion, and
+    # the access paths that keep the sweep off the session history. SQLite
+    # compiles the locking away and has no second committing connection.
+    "test_opponent_decision_retention.py::test_pg_a_locked_envelope_is_skipped_and_taken_on_the_next_run",
+    "test_opponent_decision_retention.py::test_pg_cleanup_never_locks_the_parent_session",
+    "test_opponent_decision_retention.py::"
+    "test_pg_deletion_authorizes_on_the_statement_clock_not_transaction_start",
+    "test_opponent_decision_retention.py::test_pg_an_advancing_fact_upsert_survives_the_deleting_batch",
+    "test_opponent_decision_retention.py::test_pg_targeted_counters_keep_one_snapshot_while_cleanup_deletes",
+    "test_opponent_decision_retention.py::test_pg_replay_and_drill_proof_still_fail_closed_after_pruning",
+    "test_opponent_decision_retention.py::test_pg_the_sweep_plans_never_scan_the_session_history",
 
     # SRS opportunity retention lifecycle (g-srs-retention-state). Every one of
     # these proves a PostgreSQL-only guarantee — a trigger, a transaction-local
@@ -522,6 +536,26 @@ REQUIRED_PG_GATE_PARAM_CASES = frozenset({
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[off_route]",
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[observed_root]",
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[serve]",
+    # Three interleavings of a fact upsert against its own deleting batch: an
+    # advance that already committed must keep the fact, one still holding its
+    # row lock must be skipped rather than waited on, and a delete that wins must
+    # still let a genuinely new decision reinsert. Summarizing them as one case
+    # would lose whichever direction stopped being collected — and the middle one
+    # is the only case where both connections are open at the same instant.
+    "test_opponent_decision_retention.py::"
+    "test_pg_an_advancing_fact_upsert_survives_the_deleting_batch[committed_upsert_first]",
+    "test_opponent_decision_retention.py::"
+    "test_pg_an_advancing_fact_upsert_survives_the_deleting_batch[uncommitted_upsert_during]",
+    "test_opponent_decision_retention.py::"
+    "test_pg_an_advancing_fact_upsert_survives_the_deleting_batch[delete_first]",
+    # The first-run backlog and the steady-state remainder plan differently
+    # enough to be worth pinning apart: the shape this design refuses is a scan
+    # of every historical expired session, once per page. Both cases EXPLAIN the
+    # sweep's own statement builders, so neither can pass against a lookalike.
+    "test_opponent_decision_retention.py::"
+    "test_pg_the_sweep_plans_never_scan_the_session_history[backlog]",
+    "test_opponent_decision_retention.py::"
+    "test_pg_the_sweep_plans_never_scan_the_session_history[steady_state]",
 
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_for_update]",
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_nku]",

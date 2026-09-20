@@ -72,7 +72,12 @@ remount retries and manual Retry are suppressed. Existing new-drill and abandon
 actions remain available. The recovery flag lives with the in-memory session and
 resets when a new session begins; stale responses cannot stop a replacement game.
 Ordinary network failures keep their existing Retry behavior. Converted games
-retain normal local-engine fallback. See [opponent retention](opponent-retention.md).
+retain normal local-engine fallback. Once the maintenance job prunes an expired
+session's envelopes, a confirmed boundary keeps its stored
+`drill_root_reached_ply`: the durable proof result outlives the decisions that
+produced it, and route checks on that session still answer `410` rather than
+losing or inventing the arrival. See
+[opponent retention](opponent-retention.md).
 
 Pre-root moves are guided route play. At the current evidence boundary, observations at or
 after it seed downstream opportunity discovery, but only observations strictly after it

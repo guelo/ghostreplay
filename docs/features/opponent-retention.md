@@ -54,5 +54,46 @@ History, finalization, uploads and earned reviews keep their existing contracts.
 `backend/test_opponent_session_expiry.py` covers deterministic deletion barriers,
 actual PostgreSQL mutation-lock waits, unlocked replay/record, and fresh database
 time. These tests are registered in the required PostgreSQL gate. SQLite tests
-cover functional behavior only. The cleanup child owns the maintenance job,
-deletion margin, release qualification and operational runbook.
+cover functional behavior only.
+
+## Pruning
+
+`backend/app/opponent_cleanup.py` removes envelopes strictly after
+`opponent_decisions_expires_at + D` and targeting facts strictly after
+`last_served_at + 30 days + D`, with `D = 1 hour`. Exact equality retains. `D`
+covers routine delay and the app-versus-database clock difference under the
+`S + B < D` assumption for the single Railway PostgreSQL instance; it is not a
+request-lifetime guarantee.
+
+Candidate sessions are paged as `DISTINCT session_id` over the remaining
+envelopes, so cleanup never walks the history of expired sessions and needs no
+deadline index; each candidate's deadline is read by a correlated scalar
+subquery, which the planner resolves as a single `game_sessions_pkey` probe
+rather than a hash over the whole session table. Each batch is one short
+transaction that locks only envelope rows
+(`FOR UPDATE OF opponent_decisions ... SKIP LOCKED`), re-reads
+`clock_timestamp()` — the statement clock, which advances inside the transaction
+where `now()` would not — and deletes only the ids it locked, reporting the
+rows and bytes the `DELETE` itself returned. Parent sessions are never locked. Facts are a separate keyed pass whose timestamp is
+re-evaluated under its lock, so an advancing upsert survives; cleanup writes no
+facts, so an old envelope can never restore an expired one. Cursors are
+in-memory only: restarts, partial sessions, skipped rows and rows inserted behind
+the cursor are simply revisited on the next run.
+
+`OPPONENT_DECISION_CLEANUP_ENABLED` defaults to `0` and
+`OPPONENT_DECISION_CLEANUP_NOT_BEFORE` is unset, so `--apply` is refused —
+never downgraded to a silent no-op — until the rollout records activation + 7
+days. It is refused equally while `OPPONENT_TARGET_SOURCE` is still `decisions`:
+pruning under the envelope reader would quietly drop attempts out of the
+`targeted_30d` denominator with nothing to alert on. An unreadable switch is a
+refusal too, so a typo exits with the job's "nothing ran" status rather than its
+"ran and is alerting" one. A policy-enabled session with no deadline is skipped
+and alerted, never treated as expired.
+
+`backend/scripts/retain_opponent_decisions.py` is the operator entry point and
+`backend/scripts/RETAIN_OPPONENT_DECISIONS.md` is the authoritative runbook,
+including census and R selection, the activation record, the seven-day
+no-deletion interval, the hourly Railway job, monitoring and the post-pruning
+rollback limits. `backend/test_opponent_decision_retention.py` covers the
+contract, with its PostgreSQL locking, clock and plan cases in the required
+gate.

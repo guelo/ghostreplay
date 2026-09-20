@@ -231,6 +231,25 @@ envelopes remain the default reader source; expiry and deletion are inactive.
 The source handoff and verification procedure lives in
 [`backend/scripts/RETAIN_OPPONENT_DECISIONS.md`](backend/scripts/RETAIN_OPPONENT_DECISIONS.md).
 
+A bounded maintenance job can prune replay envelopes past their session deadline
+and targeting facts past the counter window, both with an insurance margin and
+both retaining at the exact boundary. It is driven by the envelopes that are
+still stored rather than by the history of expired sessions, so an emptied
+session stops costing anything, and it works in short locked batches that skip
+rows a live request holds and never lock a parent session. Deletion is disabled
+by default and additionally refused until the counter reader has been switched
+off the rows being deleted and an operator records an activation instant that the
+database clock has passed; the default run is read-only and reports the backlog
+it would remove. Facts survive their own envelopes by the
+whole counter window, and cleanup never writes one, so pruning cannot resurrect
+expired targeting. The job lives in
+[`backend/app/opponent_cleanup.py`](backend/app/opponent_cleanup.py) with the
+operator entry point
+[`backend/scripts/retain_opponent_decisions.py`](backend/scripts/retain_opponent_decisions.py);
+its contract is covered by
+[`backend/test_opponent_decision_retention.py`](backend/test_opponent_decision_retention.py),
+and the rollout, activation and rollback limits are in the runbook above.
+
 The browser's analysis coordinator evaluates player moves for two decisions:
 whether the first eligible early-game mistake becomes a target, and whether an
 armed target review passes or fails. Automatic capture stores the pre-move
