@@ -39,6 +39,8 @@ from app.opening_rootcalc import (
     NodeDebug,
     RootCalcConfig,
     RootScore,
+    _SharedCalculator,
+    _normalized,
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -460,13 +462,15 @@ class TestMainNoWriteDefault:
 
 _ALT_AS_OF = datetime(2030, 6, 1, tzinfo=timezone.utc)
 
-_SIX_AXES = {
+_CELL_AXES = {
     "lcb_z",
     "coverage_fold",
     "coverage_live_threshold",
     "report_fold_p",
     "report_fold_scope",
     "report_self_term",
+    "branch_norm",
+    "branch_share",
 }
 
 
@@ -526,6 +530,7 @@ class TestArmGrid:
             cal.CURRENT_SM_V2_3_CELL,
             *cal.arm1_cells(),
             *cal.arm2_cells(),
+            *cal.arm3_cells(),
             cal.B1_CELL,
         }
         assert set(cells) == expected
@@ -560,6 +565,152 @@ class TestArmGrid:
             report_self_term="keep",
         )
         assert alt == cal.CURRENT_SM_V2_3_CELL
+
+    def test_grid_cell_canonicalizes_inert_branch_share(self):
+        # The mirror of test_inert_axis_dedupe for branch_share. Under "sums" the share
+        # changes nothing, so two cells differing only in it must NOT become two
+        # fingerprints, two grid cells and two behaviour keys for byte-identical scores.
+        plain = cal.GridCell(1.0, "gate")
+        inert = cal.GridCell(1.0, "gate", branch_share=0.6)
+        assert inert.branch_share is None
+        assert inert == plain and hash(inert) == hash(plain)
+        assert len({inert, plain}) == 1
+        assert cal._cfg_fp(inert) == cal._cfg_fp(plain)
+        # RootCalcConfig is the STRICT boundary and rejects what the cell canonicalizes,
+        # so .config can never be handed the rejected combination.
+        with pytest.raises(ValueError):
+            RootCalcConfig(branch_norm="sums", branch_share=0.6)
+        assert inert.config.branch_share is None
+
+    def test_grid_cell_canonicalizes_the_inherited_branch_share(self):
+        # The grid does not sweep gamma, so an explicit share equal to gamma/(1+gamma)
+        # is the same behaviour as omitting it and must collapse to the one canonical
+        # spelling -- keeping GridCell's canonical form and RootCalcConfig's in step.
+        omitted = cal.GridCell(1.0, "gate", branch_norm="ratio")
+        explicit = cal.GridCell(
+            1.0, "gate", branch_norm="ratio", branch_share=cal.INHERITED_BRANCH_SHARE
+        )
+        assert explicit.branch_share is None
+        assert explicit == omitted and hash(explicit) == hash(omitted)
+        assert cal._cfg_fp(explicit) == cal._cfg_fp(omitted)
+        # A share that is NOT the inherited one stays its own cell.
+        other = cal.GridCell(1.0, "gate", branch_norm="ratio", branch_share=0.75)
+        assert other != omitted and cal._cfg_fp(other) != cal._cfg_fp(omitted)
+
+    def test_branch_norm_cells_do_not_collide(self):
+        sums = cal.GridCell(1.0, "gate")
+        ratio = cal.GridCell(1.0, "gate", branch_norm="ratio")
+        assert sums != ratio and len({sums, ratio}) == 2
+        shares = {cell for cell in cal.arm3_cells()}
+        assert len(shares) == len(cal.BRANCH_SHARE_GRID)
+        axes = [cal._cell_axes(cell) for cell in cal.arm3_cells()]
+        assert all(a["branch_norm"] == "ratio" for a in axes)
+        assert [a["branch_share"] for a in axes] == [
+            None, *cal.BRANCH_SHARE_GRID[1:]
+        ]
+        # The scoring maps key on the cell, so the arm must not collapse there either.
+        scored = {cell: i for i, cell in enumerate(cal.arm3_cells())}
+        assert len(scored) == len(cal.BRANCH_SHARE_GRID)
+
+    def test_arm3_first_point_is_the_inherited_share(self):
+        # Exactly one cell isolates the NORMALISATION from a lambda re-pick, and it is
+        # the one the non-vacuity assertion is written against. A rounded 0.444 literal
+        # would be a different cell and would leave the arm with no such point.
+        first = cal.arm3_cells()[0]
+        assert first.branch_share is None
+        assert first.config.branch_lambda == pytest.approx(cal.INHERITED_BRANCH_SHARE)
+        assert cal.SM_V2_7_CANDIDATE_CELL == first
+        # The remaining points are the exact gamma/(1+gamma) quotients, not 3-decimal
+        # literals, so the DESIGN's measured tables reproduce.
+        assert cal.BRANCH_SHARE_GRID[1:] == (
+            1.4 / 2.4,
+            2.0 / 3.0,
+            3.0 / 4.0,
+            4.0 / 5.0,
+        )
+        # ...and arm 3 is built on the sm-v2-6 defaults, so its ONE-AXIS comparator is
+        # the arm-2 p=0.5 cell, not CURRENT (which also differs in the report fold).
+        assert cal.arm2_cells()[1] == cal.SM_V2_6_DEFAULT_CELL
+        assert dataclasses.replace(first, branch_norm="sums") == cal.SM_V2_6_DEFAULT_CELL
+
+    def test_arm3_is_in_the_report_grid_and_joins_the_graded_aggregate(self):
+        grid = cal.build_arm_grid()
+        arm3 = cal.arm3_cells()
+        assert set(arm3) <= set(grid.cells)
+        for cell in arm3:
+            assert grid.roles_by_cell[cell] == ("arm3",)
+            assert cal._is_eligible(cell, ())
+            # _graded_for makes every eligible non-B1 cell a SELECTION cell, so arm-3
+            # rows contribute to each diagnostic's aggregate `passed`. That aggregate is
+            # RENDERED for the approver; nothing consumes it mechanically, and arm 3 is
+            # not on the selector path at all (see the selector_required_cells tests).
+            assert cal._graded_for(cell, ()) == "selection"
+        # ROLE_ORDER must carry "arm3" or _canonical_roles raises a bare KeyError.
+        assert "arm3" in cal.ROLE_ORDER
+        assert cal._canonical_roles(("arm3",)) == ("arm3",)
+        assert cal._canonical_roles(("arm3", "current")) == ("current", "arm3")
+
+    def test_selector_required_cells_is_the_release_set_in_grid_order(self):
+        sel = cal.selector_required_cells()
+        assert frozenset(sel) == cal._required_cells(cal.RELEASE_ARMS)
+        assert len(sel) == len(set(sel))
+        # Grid ORDER, not set iteration order -- the per-pair grids and fingerprint maps
+        # are built from this, so it must not depend on PYTHONHASHSEED.
+        assert list(sel) == [c for c in cal.build_arm_grid().cells if c in frozenset(sel)]
+        # ARM-3 is in the report grid and NOT on the selector path.
+        assert set(cal.arm3_cells()) <= set(cal.build_arm_grid().cells)
+        assert not (set(cal.arm3_cells()) & set(sel))
+
+    def test_selector_required_cells_refuses_to_silently_drop_a_release_cell(
+        self, monkeypatch
+    ):
+        # Unreachable while Arm pins its p-sweep to REPORT_FOLD_P_GRID, but the whole
+        # point of the helper is that a release cell the grid stops emitting fails LOUDLY
+        # instead of returning a short tuple the selector then rejects with "!= cells
+        # derived from RELEASE_ARMS" and no clue which cell went missing.
+        full = cal.build_arm_grid()
+        thinned = cal.ArmGrid(
+            cells=tuple(c for c in full.cells if c != cal.B1_CELL),
+            roles_by_cell={c: r for c, r in full.roles_by_cell.items() if c != cal.B1_CELL},
+        )
+        monkeypatch.setattr(cal, "build_arm_grid", lambda *a, **k: thinned)
+        with pytest.raises(ValueError, match="does not emit"):
+            cal.selector_required_cells()
+
+    def test_arm3_comparator_cell_is_scored_under_any_report_fold_grid(self):
+        # ARM-3 is built on SM_V2_6_DEFAULT_CELL's axes whatever p_grid is given, so its
+        # one-axis comparator has to be IN the grid even when the p-sweep skips p=0.5 --
+        # otherwise the arm is emitted with no cell to read it against.
+        for p_grid in ((0.25, 0.5, 0.75, 1.0), (0.25, 0.75), (1.0,)):
+            grid = cal.build_arm_grid(p_grid)
+            assert cal.SM_V2_6_DEFAULT_CELL in grid.cells
+            assert set(cal.arm3_cells()) <= set(grid.cells)
+            assert len(grid.cells) == len(set(grid.cells))
+        # At the default p_grid the pin dedupes onto the existing ARM-2 cell: same cells,
+        # same order, same single "arm2" role label.
+        default = cal.build_arm_grid()
+        assert default.roles_by_cell[cal.SM_V2_6_DEFAULT_CELL] == ("arm2",)
+        assert default.cells.count(cal.SM_V2_6_DEFAULT_CELL) == 1
+
+    def test_branch_axes_reach_both_behavior_keys(self):
+        # These are TRAVERSAL axes, not report-stage transforms: they change the
+        # recursion at every node, so unlike a scope="user" fold they reach opponent
+        # rows. Without them the arm-3 cells share CURRENT's key and every applicable()
+        # filter skips the arm entirely.
+        candidate = cal.SM_V2_7_CANDIDATE_CELL
+        assert cal._opp_behavior_key(candidate) != cal._opp_behavior_key(
+            cal.CURRENT_SM_V2_3_CELL
+        )
+        assert cal._opp_behavior_key(candidate) != cal._opp_behavior_key(
+            cal.SM_V2_6_DEFAULT_CELL
+        )
+        assert cal._user_behavior_key(candidate) != cal._user_behavior_key(
+            cal.SM_V2_6_DEFAULT_CELL
+        )
+        # Two lambdas differ from each other too, or the sweep would grade one cell.
+        assert cal._opp_behavior_key(cal.arm3_cells()[1]) != cal._opp_behavior_key(
+            cal.arm3_cells()[2]
+        )
 
     def test_role_wrapper_merged_label(self):
         # builder-only p=0 path (CLI rejects 0): ARM-2 at p=0 canonicalizes onto CURRENT
@@ -605,6 +756,12 @@ class TestGridCellConfig:
         assert cfg.report_fold_p == 0.5
         assert cfg.report_fold_scope == "user"
         assert cfg.report_self_term == "drop_user"
+        assert cal._cfg_fp(cell) == root_calc_config_fingerprint(cell.config)
+
+    def test_branch_axes_map_through_config(self):
+        cell = cal.GridCell(1.0, "gate", branch_norm="ratio", branch_share=0.75)
+        assert cell.config.branch_norm == "ratio"
+        assert cell.config.branch_share == 0.75
         assert cal._cfg_fp(cell) == root_calc_config_fingerprint(cell.config)
 
     def test_canonical_scope_reaches_config(self):
@@ -747,9 +904,9 @@ class TestGridReport:
         rows = report["cells"]
         assert len(rows) == len(cells)
         for r in rows:
-            assert set(r["cell"].keys()) == _SIX_AXES
+            assert set(r["cell"].keys()) == _CELL_AXES
         identities = [
-            tuple(r["cell"][axis] for axis in sorted(_SIX_AXES)) for r in rows
+            tuple(r["cell"][axis] for axis in sorted(_CELL_AXES)) for r in rows
         ]
         # The four ARM-1 p-cells and four ARM-2 p-cells each serialize DISTINCTLY,
         # and B1 is distinguishable from CURRENT/ARM-2 on report_self_term.
@@ -936,7 +1093,7 @@ class TestDiagnostics:
         assert by_roles[("original",)]["graded_for"] == "none"
         assert by_roles[("current",)]["graded_for"] == "none"
         arm_rows = [r for r in diag["rows"] if r["graded_for"] == "selection"]
-        assert len(arm_rows) == 8  # 4 arm1 + 4 arm2
+        assert len(arm_rows) == 13  # 4 arm1 + 4 arm2 + 5 arm3
         assert not all(
             cal.grade_rank(cal.fixed_band(r["user_tp_score"])) >= cal.grade_rank("C")
             for r in arm_rows
@@ -991,7 +1148,9 @@ class TestDiagnostics:
         selection = [
             r for r in diag["rows"] if r["graded_for"] == "selection" and r["applicable"]
         ]
-        assert all(r["roles"] in {("arm1",), ("arm2",)} for r in selection)
+        assert all(
+            r["roles"] in {("arm1",), ("arm2",), ("arm3",)} for r in selection
+        )
         b1 = next(r for r in diag["rows"] if r["roles"] == ("b1",))
         assert b1 not in selection
         expected = cal.fixed_band(diag["reference"]["user_tp_score"]) == "A" and all(
@@ -1007,11 +1166,168 @@ class TestDiagnostics:
         by_roles_applicable = {}
         for row in diag["rows"]:
             by_roles_applicable.setdefault(row["roles"], []).append(row["applicable"])
-            assert {"broad_guard_opp_score", "specialist_pre_fold_quality"} <= set(row)
-        # only ARM-1 (gate off) is applicable on the opponent turn
+            assert {
+                "broad_guard_opp_score",
+                "deep_guard_opp_score",
+                "deep_guard_unprepared_tail_opp_score",
+                "specialist_pre_fold_quality",
+            } <= set(row)
+        # ARM-1 (gate off) and ARM-3 (a traversal axis) are applicable on the opponent
+        # turn; a scope="user" report fold and drop_user never reach opponent reports.
         assert all(by_roles_applicable[("arm1",)])
+        assert all(by_roles_applicable[("arm3",)])
         assert not any(by_roles_applicable[("arm2",)])
         assert not any(by_roles_applicable[("b1",)])
+
+    def test_deep_guard_scenario_is_not_structurally_blind(self):
+        """The topology self-check for _deep_guard_scenario.
+
+        The broad-guard, specialist and cliff scenarios are two plies -- an opponent
+        root over user LEAVES -- and the leaf arm has no continuation term, so no
+        branch_norm or branch_share can move them. Wiring the axes into the behaviour
+        keys without a scenario that can SEE them would turn "skipped" into GUARANTEED
+        PASS. This names WHY a scenario went blind rather than only that a delta
+        vanished: the overlay must admit real children at the user nodes.
+        """
+        graph, overlay, roots, target = cal._deep_guard_scenario()
+        calc = _SharedCalculator(
+            "white", graph, overlay, roots,
+            cal.SM_V2_6_DEFAULT_CELL.config, cal.SYNTHETIC_AS_OF,
+        )
+        user_non_leaves = [
+            fen
+            for fen in calc._score_reachable(_normalized(target))
+            if calc._is_user_turn(fen) and calc._get_weights(fen)
+        ]
+        # The 6-ply and 4-ply lines each contribute user non-leaves; the 2-ply reply is
+        # a user LEAF on purpose, and that contrast is the leaf-credit asymmetry.
+        assert len(user_non_leaves) >= 3
+        # Unequal PERFECT MASS across the root's three replies is what depth alone does
+        # not buy: a uniform four-ply shape gives every user node a perfect mass of
+        # exactly 1 + gamma, where sums and ratio coincide node-for-node.
+        masses = sorted(
+            calc._calc(child, True)[0]
+            for child in calc._get_weights(_normalized(target))
+        )
+        assert len(masses) == 3
+        assert len(set(round(m, 9) for m in masses)) == 3
+        gamma = cal.SM_V2_6_DEFAULT_CELL.config.gamma
+        assert masses == pytest.approx(
+            [1.0, 1.0 + gamma, 1.0 + gamma + gamma**2]
+        )
+        # And it must not have collapsed back onto the blind two-ply number.
+        opp_score = cal.run_deep_guard_diagnostic(cal.SM_V2_6_DEFAULT_CELL)
+        assert opp_score != pytest.approx(
+            cal.run_broad_guard_diagnostic(cal.SM_V2_6_DEFAULT_CELL)
+        )
+
+    def test_deep_guard_non_vacuity_is_asserted_one_axis_apart(self):
+        """The arm-3 inherited-share cell and SM_V2_6_DEFAULT_CELL differ in
+        branch_norm and NOTHING else, so a difference between them is the
+        normalisation. Against CURRENT_SM_V2_3_CELL the pair also differs in the report
+        fold, and against a share-shifted arm-3 cell the assertion would pass on the
+        share alone and leave the blindness in place.
+        """
+        candidate = cal.SM_V2_7_CANDIDATE_CELL
+        assert dataclasses.replace(candidate, branch_norm="sums") == (
+            cal.SM_V2_6_DEFAULT_CELL
+        )
+        deep_sums = cal.run_deep_guard_diagnostic(cal.SM_V2_6_DEFAULT_CELL)
+        deep_ratio = cal.run_deep_guard_diagnostic(candidate)
+        assert deep_ratio != pytest.approx(deep_sums)
+
+        # The NEGATIVE CONTROL: on the two-ply broad guard those same two cells score
+        # IDENTICALLY, which is why the deep scenario had to be added at all.
+        assert cal.run_broad_guard_diagnostic(candidate) == pytest.approx(
+            cal.run_broad_guard_diagnostic(cal.SM_V2_6_DEFAULT_CELL), abs=1e-12
+        )
+
+    def test_deep_guard_grades_the_prepared_overlay_and_only_reports_the_tail(self):
+        """The guard operand is the FULLY PREPARED overlay: a drop there means the
+        candidate punishes a genuinely prepared player. The unprepared-tail variant
+        measures the frontier-expansion drag owned by g-ratio-frontier-drag and is
+        reported without ever reaching _opp_guard_fires, so the release aggregate
+        cannot silently adjudicate a decision that bead exists to make.
+        """
+        diag = cal.run_opponent_guard_diagnostic(cal.build_arm_grid())
+        reference_deep = diag["reference"]["deep_guard_opp_score"]
+        arm3_rows = [r for r in diag["rows"] if r["roles"] == ("arm3",)]
+        assert len(arm3_rows) == len(cal.BRANCH_SHARE_GRID)
+        for row in arm3_rows:
+            assert row["graded_for"] == "selection" and row["applicable"]
+            # Measured fire pattern: no arm-3 cell fires on the prepared overlay and
+            # every cell stays in band B, so the lambda range is NOT cut.
+            assert cal._opp_guard_fires(row["deep_guard_opp_score"], reference_deep) is False
+            assert cal.fixed_band(row["deep_guard_opp_score"]) == "B"
+            assert cal._leak_fires(
+                row["specialist_pre_fold_quality"],
+                diag["reference"]["specialist_pre_fold_quality"],
+            ) is False
+            # The tail row is strictly worse and is NOT what was graded.
+            assert (
+                row["deep_guard_unprepared_tail_opp_score"]
+                < row["deep_guard_opp_score"]
+            )
+        # MEASURED: graded against its own reference (36.4453) no tail row fires -- they
+        # span 27.52 to 41.56, and the largest drop is 8.93pts against a 12pt limit. The
+        # exclusion is therefore STRUCTURAL, not a threshold the numbers happen to clear,
+        # so pin it structurally: no tail operand ever reaches _opp_guard_fires.
+        tails = [r["deep_guard_unprepared_tail_opp_score"] for r in arm3_rows]
+        reference_tail = diag["reference"]["deep_guard_unprepared_tail_opp_score"]
+        assert not any(cal._opp_guard_fires(tail, reference_tail) for tail in tails)
+        assert min(tails) < reference_tail < max(tails)
+        # The aggregate's only failure remains ARM-1's leak (see the test below).
+        assert diag["passed"] is False
+
+    def test_the_unprepared_tail_operand_never_reaches_the_guard(self, monkeypatch):
+        """The tail row measures the frontier-expansion drag that g-ratio-frontier-drag
+        exists to decide. It must be REPORTED and never graded, and the only honest way
+        to pin that is to watch every value the guard predicate is asked about.
+
+        Graded on the grid with the ARM-1 cells REMOVED, and that is what makes the
+        watch exhaustive rather than decorative. On the FULL grid the aggregate's
+        ``all(...)`` short-circuits on the first ARM-1 row -- its leak guard fires --
+        after exactly 2 predicate calls against 9 graded rows, and no arm-3 row is ever
+        reached: a tail check added to arm 3 would sail straight through a spy run
+        there. With ARM-1 gone nothing fires, the generator is consumed to the end, and
+        every graded operand of every remaining row passes under the spy.
+        """
+        full = cal.build_arm_grid()
+        arm1 = set(cal.arm1_cells())
+        grid = cal.ArmGrid(
+            cells=tuple(c for c in full.cells if c not in arm1),
+            roles_by_cell={
+                c: r for c, r in full.roles_by_cell.items() if c not in arm1
+            },
+        )
+        seen: list[float] = []
+        real = cal._opp_guard_fires
+
+        def spy(measured, reference):
+            seen.append(measured)
+            return real(measured, reference)
+
+        monkeypatch.setattr(cal, "_opp_guard_fires", spy)
+        diag = cal.run_opponent_guard_diagnostic(grid)
+        # Nothing fires on this grid, so `all(...)` ran to exhaustion. This assertion is
+        # load-bearing: it is what rules out a silent return to the short-circuit that
+        # makes the watch below vacuous.
+        assert diag["passed"] is True
+        graded_rows = cal._selection_rows(diag["rows"])
+        # ARM-2 and B1 share CURRENT's _opp_behavior_key, so with ARM-1 removed the
+        # graded set is exactly ARM-3 -- the rows the tail operand rides on.
+        assert {r["roles"] for r in graded_rows} == {("arm3",)}
+        assert len(graded_rows) == len(cal.arm3_cells())
+        # TWO calls per graded row and no more: the broad operand and the deep one.
+        # A third check on any row -- the tail among them -- breaks this count.
+        assert len(seen) == 2 * len(graded_rows)
+        tails = {r["deep_guard_unprepared_tail_opp_score"] for r in graded_rows}
+        deep = {r["deep_guard_opp_score"] for r in graded_rows}
+        broad = {r["broad_guard_opp_score"] for r in graded_rows}
+        # EVERY value the predicate was asked about is a graded operand (equality now,
+        # not a subset), and no tail value is among them.
+        assert set(seen) == (deep | broad)
+        assert tails and not (tails & set(seen))
 
     def test_leak_operand_unmasked(self):
         # ARM-1's ungated pre_fold_quality is STRICTLY GREATER than its reported opp
@@ -1052,11 +1368,11 @@ class TestDiagnostics:
         assert ref_rows[2]["thin_score"] == pytest.approx(0.0)
         assert ref_rows[2]["reviewed_score"] > 0.0
         assert ref_rows[1]["thin_score"] == pytest.approx(ref_rows[1]["reviewed_score"])
-        # cliff rows carry the new six-axis cell identity
-        assert set(diag["rows"][0]["cell"].keys()) == _SIX_AXES
+        # cliff rows carry the new eight-axis cell identity
+        assert set(diag["rows"][0]["cell"].keys()) == _CELL_AXES
 
     def test_cliff_rows_cell_axes_match_effective_threshold(self):
-        # The serialized six-axis identity must reflect the threshold actually scored,
+        # The serialized eight-axis identity must reflect the threshold actually scored,
         # not the base cell's threshold (else a threshold-2 row's cell says threshold 1).
         diag = cal.run_cliff_diagnostic(cal.build_arm_grid())
         seen_thresholds = set()
@@ -1081,7 +1397,7 @@ class TestDiagnostics:
 
     def test_diagnostic_rows_json_primitive_no_default_str(self):
         # Every user14/opponent_guard row json.dumps WITHOUT default=str (a stray
-        # dataclass/datetime would raise), row["cell"] is a six-axis dict, and the
+        # dataclass/datetime would raise), row["cell"] is an eight-axis dict, and the
         # NAMED *_pre_fold_quality operands are float-or-None with no generic key.
         diag = cal.run_diagnostics(cal.build_arm_grid())
         checks = {
@@ -1094,7 +1410,7 @@ class TestDiagnostics:
         for key, named_ops in checks.items():
             for row in diag[key]["rows"]:
                 json.dumps(row)  # no default=str
-                assert set(row["cell"].keys()) == _SIX_AXES
+                assert set(row["cell"].keys()) == _CELL_AXES
                 assert "pre_fold_quality" not in row
                 for op in named_ops:
                     assert row[op] is None or isinstance(row[op], float)
@@ -1312,7 +1628,7 @@ class TestMainEndToEnd:
         for key, ops in named.items():
             for row in report["diagnostics"][key]["rows"]:
                 json.dumps(row)  # NO default=str
-                assert set(row["cell"].keys()) == _SIX_AXES
+                assert set(row["cell"].keys()) == _CELL_AXES
                 assert "pre_fold_quality" not in row
                 for op in ops:
                     assert row[op] is None or isinstance(row[op], float)
@@ -3280,7 +3596,12 @@ class TestBuildSelectionInputs:
     def test_scores_required_cells_and_diagnostics_over_required_plus_demo(self, tmp_path):
         graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
         si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        required = set(cal.build_arm_grid().cells)
+        # The SELECTOR's set, not the reporting grid: the grid also carries ARM-3, which
+        # no release arm claims, and _check_required_cells demands exact equality.
+        required = set(cal.selector_required_cells())
+        assert required == cal._required_cells(cal.RELEASE_ARMS)
+        assert required < set(cal.build_arm_grid().cells)
+        assert not (set(cal.arm3_cells()) & required)
         assert si.cohort.required_cells == frozenset(required)
         assert set(si.cohort.config_fingerprints) == required
         for p in si.cohort.pairs:
@@ -3291,6 +3612,29 @@ class TestBuildSelectionInputs:
         for cell in required:
             assert (si.cohort.config_fingerprints[cell]
                     == si.diagnostics.config_fingerprints[cell] == cal._cfg_fp(cell))
+
+    def test_producer_output_satisfies_the_selector_cell_check(self, tmp_path):
+        # The two halves of select-candidates, JOINED. Every other test here checks one
+        # half against its own idea of the cell set -- the producer against
+        # build_arm_grid, the selector against _required_cells(RELEASE_ARMS) -- so a cell
+        # added to the grid and not to an arm passes both halves and still makes the real
+        # command refuse every artifact with SelectionBindingError (exit 4).
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert cal._check_required_cells(si, cal.RELEASE_ARMS) == cal._required_cells(
+            cal.RELEASE_ARMS
+        )
+
+    def test_producer_scoring_the_report_grid_would_fail_the_selector(
+        self, tmp_path, monkeypatch
+    ):
+        # The NEGATIVE control for the test above: this is exactly what scoring
+        # build_arm_grid().cells does once the grid holds a cell no release arm claims.
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(cal, "selector_required_cells", lambda: cal.build_arm_grid().cells)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        with pytest.raises(cal.SelectionBindingError, match="required_cells"):
+            cal._check_required_cells(si, cal.RELEASE_ARMS)
 
     def test_stamps_runtime_and_provenance_record_binding(self, tmp_path):
         import platform
@@ -3436,7 +3780,7 @@ class TestGridCellKeying:
     def test_the_release_wrappers_key_by_cell_not_label(self, tmp_path):
         graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
         si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
-        n = len(cal.build_arm_grid().cells)
+        n = len(cal.selector_required_cells())  # the SELECTOR's set, not the report grid
         assert len(si.cohort.config_fingerprints) == n
         assert all(len(p.grid) == n for p in si.cohort.pairs)
         assert len(si.diagnostics.cells) == n + len(cal.DEMO_CELLS)
@@ -3472,13 +3816,13 @@ class TestClockDeterminism:
         b = _run()
 
         # EVERY per-cell result below is keyed by _cfg_fp(cell), NOT cell.label. The label
-        # folds only 2 of the 6 behavioral axes, so it collapses the 11 required cells into
+        # folds only 2 of the 8 behavioral axes, so it collapses the 11 required cells into
         # 3 keys — label-keyed dicts silently overwrote 8 of them, and the "all cells agree
         # under two clocks" claim actually covered a quarter of the grid. Each assertion
         # below therefore also checks its dict is the FULL size, which is what makes a
         # regression to lossy keying fail loudly instead of passing quietly.
         n_required = len(a.cohort.required_cells)
-        assert n_required == len(cal.build_arm_grid().cells)
+        assert n_required == len(cal.selector_required_cells())
 
         def _pair_maps(si):
             # Scores AND confidences: confidence is the clock-sensitive surface (see

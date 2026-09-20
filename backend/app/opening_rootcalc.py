@@ -34,6 +34,16 @@ SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 # coverage channel (the double-counting arm kept only for the calibration grid).
 COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 
+# Recognised RootCalcConfig.branch_norm modes (g-branch-ratio-norm). "sums" is the
+# historical normalisation: every node's score channel is an un-normalised MASS and
+# the ratio to perfect is formed once, at the root. A reply's influence is then
+# proportional to its perfect-score mass, so deepening a branch makes it vote louder
+# and can lower an ancestor with no change in how anything is played. "ratio"
+# divides each user non-leaf by its own perfect value, making every node's score
+# channel a ratio in [0, 1] whose perfect pass is exactly 1.0; a reply's influence is
+# then its weight alone. Dormant: "sums" remains the default until g-sm-v2-7-release.
+BRANCH_NORM_MODES = frozenset({"sums", "ratio"})
+
 # Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). The identity
 # values (report_fold_p=0.0, report_fold_scope="all", report_self_term="keep")
 # remain available for historical comparison and keep their pre-Phase-1
@@ -253,6 +263,32 @@ class RootCalcConfig:
     report_fold_p: float = 0.5
     report_fold_scope: str = "user"
     report_self_term: str = "keep"
+    # Score-channel normalisation (g-branch-ratio-norm; see BRANCH_NORM_MODES).
+    #   - branch_norm: "sums" == the historical ratio-of-sums taken at the root;
+    #     "ratio" == per-node normalisation, where every node's score channel is
+    #     already a ratio and a reply's influence is its weight alone.
+    #   - branch_share: lambda, the share of a user non-leaf's score carried by its
+    #     continuation (the remaining 1 - lambda is the node's own mastery). ``None``
+    #     inherits gamma / (1 + gamma), which makes "ratio" the exact per-node
+    #     rewrite of "sums" at the same depth sensitivity. It is the SCORE channel's
+    #     own parameter precisely so the grid can move depth sensitivity without
+    #     touching gamma, which also drives the served weighted_depth field.
+    #     INERT under "sums" (rejected there; see __post_init__).
+    branch_norm: str = "sums"
+    branch_share: float | None = None
+
+    @property
+    def branch_lambda(self) -> float:
+        """Continuation share used by the "ratio" score channel.
+
+        ``branch_share`` when set, else the gamma-derived share ``gamma / (1 + gamma)``
+        that makes "ratio" the exact per-node rewrite of "sums". ``None`` is the
+        load-bearing "omitted" spelling — the only path to the inherited share — so it
+        is canonical and never replaced by its own float value (see __post_init__).
+        """
+        if self.branch_share is not None:
+            return self.branch_share
+        return self.gamma / (1.0 + self.gamma)
 
     def __post_init__(self) -> None:
         # Fail fast on a bad mode rather than letting the _calc opponent branch
@@ -328,6 +364,51 @@ class RootCalcConfig:
                 f"got {canonical_decay!r}"
             )
         object.__setattr__(self, "coverage_depth_decay", canonical_decay)
+        # branch_norm / branch_share (g-branch-ratio-norm). Same fail-fast shape as
+        # coverage_fold: an unknown mode must not silently read as "sums".
+        if self.branch_norm not in BRANCH_NORM_MODES:
+            raise ValueError(
+                f"branch_norm must be one of {sorted(BRANCH_NORM_MODES)}; "
+                f"got {self.branch_norm!r}"
+            )
+        share = self.branch_share
+        if share is not None:
+            if isinstance(share, bool):
+                raise TypeError(
+                    f"branch_share must be a real number or None, not bool; got {share!r}"
+                )
+            if not isinstance(share, (int, float)):
+                raise TypeError(
+                    "branch_share must be a real number or None; "
+                    f"got {type(share).__name__}"
+                )
+            try:
+                share = float(share)
+            except OverflowError:
+                raise ValueError(
+                    f"branch_share must be finite; got out-of-range int {self.branch_share!r}"
+                ) from None
+            if not math.isfinite(share):
+                raise ValueError(f"branch_share must be finite; got {share!r}")
+            if not 0.0 <= share <= 1.0:
+                raise ValueError(
+                    f"branch_share must satisfy 0 <= share <= 1; got {share!r}"
+                )
+            if self.branch_norm == "sums":
+                # lambda is INERT under "sums" — the sums arm reads gamma, never the
+                # share. Reject rather than drop it: a silently-ignored value looks
+                # swept but is not, and it would otherwise give two fingerprints, two
+                # grid cells and two behaviour keys for byte-identical scores.
+                raise ValueError(
+                    "branch_share is inert under branch_norm='sums'; pass "
+                    f"branch_norm='ratio' or leave branch_share=None (got {share!r})"
+                )
+            # An explicit share equal to the inherited gamma/(1+gamma) is behaviourally
+            # identical to omitting it, so collapse the duplicate spelling to the
+            # canonical None (the pattern coverage_depth_decay uses above).
+            if share == self.gamma / (1.0 + self.gamma):
+                share = None
+            object.__setattr__(self, "branch_share", share)
 
 
 # The report-fold axes are appended to the fingerprint payload ONLY when active, so
@@ -338,6 +419,8 @@ _COMPATIBILITY_FIELD_NAMES = (
     "report_fold_p",
     "report_fold_scope",
     "report_self_term",
+    "branch_norm",
+    "branch_share",
 )
 
 
@@ -354,6 +437,15 @@ def _report_fold_fingerprint_tokens(config: RootCalcConfig) -> list[str]:
       scope at p == 0 must share a fingerprint.
     - ``report_self_term``: an orthogonal pre-fold quality choice that applies even
       at p == 0, so it is emitted whenever it is not the ``"keep"`` identity.
+    - ``branch_norm`` / ``branch_share``: appended LAST, in that order, so every
+      currently-active non-identity fingerprint (including the served sm-v2-6 default
+      at report_fold_p=0.5) stays byte-stable. ``branch_norm`` is emitted when it is
+      not the ``"sums"`` identity. ``branch_share`` is emitted ONLY under ``"ratio"``
+      and only when not ``None`` — the same inert-axis rule report_fold_scope obeys at
+      p == 0. RootCalcConfig.__post_init__ already rejects a share under ``"sums"``
+      and canonicalizes the gamma-derived duplicate to ``None``, so both conditions
+      are unreachable by construction here; they remain as the defensive statement of
+      the invariant.
     """
     tokens: list[str] = []
     if config.coverage_depth_decay != RootCalcConfig.coverage_depth_decay:
@@ -367,6 +459,10 @@ def _report_fold_fingerprint_tokens(config: RootCalcConfig) -> list[str]:
         tokens.append(f"report_fold_scope={config.report_fold_scope!r}")
     if config.report_self_term != "keep":
         tokens.append(f"report_self_term={config.report_self_term!r}")
+    if config.branch_norm != "sums":
+        tokens.append(f"branch_norm={config.branch_norm!r}")
+        if config.branch_share is not None:
+            tokens.append(f"branch_share={config.branch_share!r}")
     return tokens
 
 
@@ -1245,6 +1341,41 @@ class _SharedCalculator:
     def _calc(
         self, fen: str, perfect: bool = False
     ) -> tuple[float, float, float, float]:
+        """Memoized ``(score, confidence, coverage, weighted_depth)`` for one FEN.
+
+        The SCORE channel's normalisation is selected by ``config.branch_norm``
+        (g-branch-ratio-norm):
+
+        - ``"sums"`` (default, served): each node's score channel is an un-normalised
+          MASS, ``p_n * (1 + gamma * sum(w * child))`` at a user non-leaf, and the
+          ratio to perfect is formed once at the root. An opponent reply's influence
+          is therefore proportional to its perfect-score mass, not its weight —
+          deepening a branch grows its mass, so it votes louder, and a branch whose
+          own ratio is below its siblings' pulls an ancestor down with no change in
+          how anything is played.
+        - ``"ratio"``: the user non-leaf arm is divided by its own perfect value
+          ``(1 + gamma)``, written as ``p_n * ((1 - lam) + lam * sum(w * child))``
+          with ``lam = config.branch_lambda``. Every node's score channel is then a
+          ratio in [0, 1] whose perfect pass is exactly 1.0, so a reply's influence is
+          its weight alone. The opponent arm and the leaf arms are unchanged code.
+
+        Two asymmetries are deliberate and worth knowing before reading a delta:
+
+        - **The depth channel always reads gamma**, never ``branch_share``.
+          ``weighted_depth`` is a served API field, so it is byte-identical across the
+          whole lambda sweep and across both normalisation modes.
+        - **Leaf credit.** A user LEAF returns its mastery with no continuation term,
+          and its perfect pass returns 1.0 — it is credited as if its continuation
+          were perfect. The moment the same node admits a prepared child it is scored
+          ``p * ((1 - lam) + lam * child_ratio)`` while its perfect pass stays pinned
+          at 1.0, so under ``"ratio"`` every ADMISSION charges the node for
+          continuation it has not yet earned, and keeps charging for as long as the
+          prepared frontier expands. That residual is a leaf-credit semantics
+          decision owned by g-ratio-frontier-drag, not a tuning knob; the readiness
+          gate below cannot bound it (``coverage_fold="off"`` is the CEILING of any
+          gate design -- a real ramp lowers branch_cov for thin branches and moves the
+          wrong way -- and it recovers under a fifth of the measured decline).
+        """
         fen = _normalized(fen)
         key = (fen, perfect)
         cached = self._metrics.get(key)
@@ -1281,10 +1412,27 @@ class _SharedCalculator:
                     score_sum += weight * child_score
                     confidence_sum += weight * child_conf
                     depth_sum += weight * child_depth
+                if self.config.branch_norm == "ratio":
+                    # Per-node normalisation (g-branch-ratio-norm): divide the score
+                    # channel by its own perfect value (1 + gamma), written as the
+                    # equivalent convex combination of the node's own mastery and its
+                    # continuation with lambda = gamma / (1 + gamma). By induction
+                    # every node's score channel is a ratio in [0, 1] and the perfect
+                    # pass returns exactly 1.0 (leaf -> 1.0; user -> (1-lam) + lam;
+                    # opponent -> sum of weights). The opponent arm needs no edit —
+                    # its children simply stop being masses.
+                    lam = self.config.branch_lambda
+                    node_score = mastery * ((1.0 - lam) + lam * score_sum)
+                else:
+                    node_score = mastery * (1.0 + self.config.gamma * score_sum)
                 result = (
-                    mastery * (1.0 + self.config.gamma * score_sum),
+                    node_score,
                     confidence * confidence_sum,
                     coverage,
+                    # The DEPTH channel always reads gamma, never branch_share:
+                    # weighted_depth is a served API field documented as expected
+                    # comfortable depth in user decisions, so it stays byte-identical
+                    # across the whole lambda sweep.
                     mastery * (1.0 + self.config.gamma * depth_sum),
                 )
         else:

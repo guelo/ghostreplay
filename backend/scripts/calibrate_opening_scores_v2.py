@@ -735,20 +735,28 @@ def score_pair(
 # ---------------------------------------------------------------------------
 
 
+# The branch_share (lambda) a "ratio" cell inherits when the axis is OMITTED: the
+# gamma-derived share that makes "ratio" the exact per-node rewrite of "sums". The grid
+# never sweeps gamma, so this is a constant here and the ONE value that must collapse
+# to the canonical None spelling (see GridCell.__post_init__).
+INHERITED_BRANCH_SHARE = RootCalcConfig.gamma / (1.0 + RootCalcConfig.gamma)
+
+
 @dataclass(frozen=True)
 class GridCell:
     """One point of the readiness-fold calibration grid.
 
-    Six behavioral axes. The two existing positional fields (lcb_z, coverage_fold)
+    Eight behavioral axes. The two existing positional fields (lcb_z, coverage_fold)
     stay first so every current 2-arg ``GridCell(lcb_z, coverage_fold)`` call keeps
-    compiling; the four additions default to their identity values, so a bare 2-arg
-    cell is a no-fold cell (threshold=1, p=0, keep). ``__post_init__`` canonicalizes
-    the INERT report_fold_scope axis (inert when report_fold_p == 0) so GridCell's
-    native ``eq``/``hash`` IS the behavioral key — ``set[GridCell]`` dedupe and
+    compiling; the six additions default to their identity values, so a bare 2-arg
+    cell is a no-fold cell (threshold=1, p=0, keep, sums). ``__post_init__``
+    canonicalizes the INERT axes — report_fold_scope (inert when report_fold_p == 0)
+    and branch_share (inert under branch_norm == "sums") — so GridCell's native
+    ``eq``/``hash`` IS the behavioral key: ``set[GridCell]`` dedupe and
     ``dict[GridCell, PairScore]`` scoring maps collapse behaviorally-equal cells with
     zero call-site discipline. report_self_term IS a genuine behavioral axis
     ("drop_user" changes the number) and is NEVER normalized; lcb_z / coverage_fold /
-    coverage_live_threshold are always behavioral and NEVER normalized.
+    coverage_live_threshold / branch_norm are always behavioral and NEVER normalized.
     """
 
     lcb_z: float
@@ -757,6 +765,8 @@ class GridCell:
     report_fold_p: float = 0.0
     report_fold_scope: str = "all"
     report_self_term: str = "keep"
+    branch_norm: str = "sums"
+    branch_share: float | None = None
 
     def __post_init__(self) -> None:
         # Inert-axis canonicalization: with no report fold (p == 0) the scope selects
@@ -765,6 +775,20 @@ class GridCell:
         # scope, so no scoring map can key on a raw (behaviorally-inert) scope literal.
         if self.report_fold_p == 0.0 and self.report_fold_scope != "all":
             object.__setattr__(self, "report_fold_scope", "all")
+        # The SAME rule for branch_share (g-branch-ratio-norm), at the cell boundary:
+        #   - under "sums" the score channel reads gamma and never the share, so an
+        #     explicit share is inert and collapses to None. RootCalcConfig REJECTS
+        #     that combination outright; the cell canonicalizes where the config
+        #     rejects, so ``.config`` can never be handed the rejected pair.
+        #   - the grid does not sweep gamma, so an explicit share equal to the
+        #     inherited RootCalcConfig.gamma/(1+gamma) is the same behavior as
+        #     omitting it and collapses too, keeping GridCell's canonical form and
+        #     RootCalcConfig's in step.
+        if self.branch_share is not None and (
+            self.branch_norm == "sums"
+            or self.branch_share == INHERITED_BRANCH_SHARE
+        ):
+            object.__setattr__(self, "branch_share", None)
 
     @property
     def config(self) -> RootCalcConfig:
@@ -775,6 +799,8 @@ class GridCell:
             report_fold_p=self.report_fold_p,
             report_fold_scope=self.report_fold_scope,
             report_self_term=self.report_self_term,
+            branch_norm=self.branch_norm,
+            branch_share=self.branch_share,
         )
 
     @property
@@ -827,10 +853,10 @@ ORIGINAL_CELL = GridCell(
 
 
 def _cell_axes(cell: GridCell) -> dict[str, object]:
-    """The SIX behavioral axes as JSON primitives (never a raw GridCell).
+    """The EIGHT behavioral axes as JSON primitives (never a raw GridCell).
 
     The single module-level helper both the cohort grid report rows and the diagnostic
-    CellRows use, so every serialized row identifies its cell by all six axes and no
+    CellRows use, so every serialized row identifies its cell by all eight axes and no
     two swept cells collide. Reports are emitted via ``json.dumps(..., default=str)``,
     under which a raw GridCell would serialize as its dataclass repr STRING and hide
     the axes; ``_cell_axes`` makes the axes survive that (``default=str`` becomes only
@@ -843,6 +869,8 @@ def _cell_axes(cell: GridCell) -> dict[str, object]:
         "report_fold_p": cell.report_fold_p,
         "report_fold_scope": cell.report_fold_scope,
         "report_self_term": cell.report_self_term,
+        "branch_norm": cell.branch_norm,
+        "branch_share": cell.branch_share,
     }
 
 
@@ -872,7 +900,7 @@ def _cfg_fp(cell_or_config: "GridCell | RootCalcConfig") -> str:
 # demo — matching the anchor-first cells order) and sort + dedupe every merged tuple by
 # it at the ONE point roles_by_cell is built, so every downstream read is already
 # stable. An unknown label raises KeyError (fail-closed, like grade_rank).
-ROLE_ORDER = ("original", "current", "arm1", "arm2", "b1", "demo")
+ROLE_ORDER = ("original", "current", "arm1", "arm2", "arm3", "b1", "demo")
 _ROLE_RANK = {role: i for i, role in enumerate(ROLE_ORDER)}
 
 
@@ -963,6 +991,90 @@ def arm2_cells(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> tuple[GridCell
     )
 
 
+# ARM-3 — "per-node normalisation" (g-branch-ratio-norm): the sm-v2-6 defaults with the
+# score channel normalised at EVERY node instead of once at the root, swept over the
+# continuation share lambda. Built on SM_V2_6_DEFAULT_CELL's axes, so its ONE-AXIS
+# comparator is the arm-2 cell at p=0.5 (which IS SM_V2_6_DEFAULT_CELL) and NOT
+# CURRENT_SM_V2_3_CELL, whose report fold also differs. Any USER-turn comparison —
+# user14, the de-inflation band — must use that arm-2 p=0.5 cell, or it confounds the
+# normalisation with the report fold. (Opponent-turn rows ignore a scope="user" fold, so
+# the guard operands are unaffected either way.)
+#
+# _graded_for makes every eligible non-B1 cell a SELECTION cell, so arm 3 joins each
+# diagnostic's aggregate `passed` automatically. That is intended and recorded here
+# rather than left implicit. Scope of "aggregate": it is RENDERED in the release report
+# for the approver to read — no exit code, gate or selector check consumes it. Arm 3
+# cannot gate anything mechanically, because it is not in RELEASE_ARMS and so is not on
+# the selector path at all (see selector_required_cells).
+#
+# The FIRST point must be None — the INHERITED share itself, not a rounded 0.444
+# literal, which would be a different cell and would leave the arm with no point that
+# isolates the normalisation from a lambda re-pick. The remaining points are written as
+# exact gamma/(1+gamma) quotients at gamma = 1.4/2.0/3.0/4.0, spanning the measured
+# C1-vs-depth trade: below the inherited share the score channel is depth-blind, above
+# 0.8 the C1 defect comes back.
+BRANCH_SHARE_GRID: tuple[float | None, ...] = (
+    None,
+    1.4 / 2.4,
+    2.0 / 3.0,
+    3.0 / 4.0,
+    4.0 / 5.0,
+)
+
+
+def arm3_cells(
+    share_grid: tuple[float | None, ...] = BRANCH_SHARE_GRID,
+) -> tuple[GridCell, ...]:
+    """The sm-v2-6 defaults under per-node normalisation, swept over lambda.
+
+    Its ONE-AXIS comparator is ``SM_V2_6_DEFAULT_CELL`` (== ``arm2_cells()`` at
+    p=0.5), NOT ``CURRENT_SM_V2_3_CELL``, which is at report_fold_p=0.0 / scope="all"
+    and so differs in the report fold as well as the normalisation. Every USER-turn
+    comparison -- user14, the de-inflation band -- must use the arm-2 p=0.5 cell, or
+    it confounds the two. Opponent-turn rows ignore a scope="user" fold (measured
+    43.2238 under both cells with sums), so the guard operands are unaffected either
+    way.
+
+    That comparator is a READING RULE, not a report column: ``build_cell_report`` emits
+    ``deltas_vs_current`` for every non-reference cell and nothing else, exactly as it
+    does for arms 1 and 2, so the one-axis comparison is taken between the two cells'
+    ``named_score_distribution`` rows. ``build_arm_grid`` pins the comparator cell into
+    the grid so it is always SCORED, whatever ``--report-fold-grid`` is given. Emitting
+    a per-arm comparator column is flip-time work (g-sm-v2-7-release).
+
+    ``_graded_for`` classifies every eligible non-B1 cell as "selection", so this arm
+    joins each diagnostic's aggregate ``passed``. That aggregate is rendered in the
+    release report for the approver; nothing consumes it mechanically.
+
+    It is NOT a selector :class:`Arm`, and ``RELEASE_ARMS`` is deliberately unchanged.
+    An ``Arm`` is defined by a report-fold p-sweep -- its validator pins role to
+    arm1|arm2, ties scope to the role, and requires the cells' p values to BE
+    ``REPORT_FOLD_P_GRID`` -- while arm 3 sweeps lambda at a FIXED p. So arm 3 is scored
+    and graded by the grid and the diagnostics, and becomes a selector candidate only at
+    the flip, where ``SM_V2_7_CANDIDATE_CELL`` is re-pinned to the chosen lambda
+    (g-sm-v2-7-release).
+    """
+    return tuple(
+        GridCell(
+            lcb_z=SM_V2_6_DEFAULT_CELL.lcb_z,
+            coverage_fold=SM_V2_6_DEFAULT_CELL.coverage_fold,
+            coverage_live_threshold=SM_V2_6_DEFAULT_CELL.coverage_live_threshold,
+            report_fold_p=SM_V2_6_DEFAULT_CELL.report_fold_p,
+            report_fold_scope=SM_V2_6_DEFAULT_CELL.report_fold_scope,
+            report_self_term=SM_V2_6_DEFAULT_CELL.report_self_term,
+            branch_norm="ratio",
+            branch_share=share,
+        )
+        for share in share_grid
+    )
+
+
+# The sm-v2-7 candidate is the arm-3 member at the chosen lambda — never a free
+# constant. Until the grid picks one it is the inherited-share cell, the only arm-3
+# point that isolates the normalisation from a lambda re-pick.
+SM_V2_7_CANDIDATE_CELL = arm3_cells()[0]
+
+
 # B1 — "drop_user self-term": keep the gate, NO fold (fold+drop_user is disqualified),
 # drop the user self-mastery term. A single literal — never swept over the p-grid.
 B1_CELL = GridCell(
@@ -1002,7 +1114,8 @@ def build_arm_grid(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> ArmGrid:
     """Build the fixed anchor-first grid, parameterized ONLY by the report-fold p-grid.
 
     Emits exactly ``{ORIGINAL_CELL, CURRENT_SM_V2_3_CELL, ARM-1×p_grid, ARM-2×p_grid,
-    B1}``, deduped by native identity (inert-axis canonicalization collapses any
+    SM_V2_6_DEFAULT_CELL (ARM-3's comparator; already an ARM-2 cell at the default
+    p_grid), ARM-3×BRANCH_SHARE_GRID, B1}``, deduped by native identity (inert-axis canonicalization collapses any
     accidental p=0 / scope overlap onto an anchor), ordered anchors-first. role is
     carried OUTSIDE the cell in ``roles_by_cell``: when one deduped cell earns more than
     one role (an anchor value that also lands in an arm's p-sweep — only reachable via a
@@ -1014,6 +1127,13 @@ def build_arm_grid(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> ArmGrid:
         (CURRENT_SM_V2_3_CELL, "current"),
         *[(cell, "arm1") for cell in arm1_cells(p_grid)],
         *[(cell, "arm2") for cell in arm2_cells(p_grid)],
+        # ARM-3's ONE-AXIS comparator, pinned INTO the grid. ARM-3 is built on
+        # SM_V2_6_DEFAULT_CELL's axes whatever p_grid is, so without this a custom
+        # --report-fold-grid that omits 0.5 would emit arm-3 rows with no cell to read
+        # them against. At the default p_grid this cell is already in arm2_cells, so the
+        # entry dedupes onto it and changes nothing (roles are set-deduped).
+        (SM_V2_6_DEFAULT_CELL, "arm2"),
+        *[(cell, "arm3") for cell in arm3_cells()],
         (B1_CELL, "b1"),
     ]
     cells: list[GridCell] = []
@@ -1283,7 +1403,7 @@ def build_cell_report(
     REFERENCE cell (CURRENT_SM_V2_3_CELL) omits deltas — deltas against itself are all
     zero and carry no signal; ORIGINAL_CELL now EMITS deltas like any non-reference
     cell, so its continuity column carries a real delta-vs-current. Each row's cell
-    identity is the full SIX-axis ``_cell_axes(cell)`` dict, not a flat two-field pair
+    identity is the full EIGHT-axis ``_cell_axes(cell)`` dict, not a flat two-field pair
     (which would collide across the arm p-cells and B1), plus explicit ``is_original``
     / ``is_reference`` booleans so a consumer can identify each anchor unambiguously.
     """
@@ -2883,6 +3003,82 @@ def _broad_guard_scenario() -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots
     return graph, overlay, _diag_roots(opp), opp
 
 
+# The deep guard's three lines off 1.e4, at 6 / 4 / 2 plies. UNEQUAL depth is not
+# enough on its own — a UNIFORM four-ply shape gives every user node grandchildren that
+# are leaves, so its perfect mass is exactly 1 + gamma, sums' denominator is already
+# (1 + gamma), and the two normalisations coincide node-for-node. These depths make the
+# root's three replies carry perfect masses 1+g+g^2 / 1+g / 1, so the scenario exercises
+# mass weighting ACROSS the replies, the own-mastery reweighting INSIDE a user non-leaf,
+# and the leaf-credit asymmetry of the 2-ply reply, all at once.
+_DEEP_GUARD_LINES = (
+    ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6"],
+    ["e2e4", "c7c5", "g1f3", "d7d6"],
+    ["e2e4", "e7e6"],
+)
+
+
+def _deep_guard_scenario(
+    *, prepared_tail: bool = True
+) -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots, str]:
+    """Broadly-prepared player on a shape that can SEE the branch-normalisation axes.
+
+    The broad-guard, specialist and cliff scenarios are all two plies — an opponent root
+    over user LEAVES. The leaf arm has no continuation term, so branch_norm and
+    branch_share cannot move them at all; wiring the axes into the behavior keys without
+    a scenario like this one would turn "skipped" into GUARANTEED PASS, which is worse
+    than skipping.
+
+    The OVERLAY is as load-bearing as the shape, and the edges that matter are the
+    USER->OPPONENT ones. ``_prepared_children`` admits a child only when the edge keyed
+    (user_fen, child) — the user's OWN move — has live_attempts >= 2 or live_passes >= 1.
+    Seeding only the opponent->user edges (what ``_broad_guard_scenario`` does) leaves
+    every user node a LEAF and rebuilds the blind two-ply scenario at a different depth.
+    So every user->opponent edge along each path carries live_attempts >= 2. The
+    opponent->user edges are kept for parity with the broad guard and for the coverage
+    channel; they change nothing here.
+
+    ``prepared_tail=False`` is the REPORTED-ONLY variant: evidence is withheld from the
+    deepest user node of the 6-ply and 4-ply lines, leaving those continuations unmet
+    while the 2-ply reply stays prepared. That row measures the frontier-expansion drag
+    owned by g-ratio-frontier-drag and must NEVER be fed to ``_opp_guard_fires`` — the
+    release aggregate must not silently adjudicate a decision that bead exists to make.
+    """
+    opp = _diag_positions(["e2e4"])[1]
+    graph = _diag_graph([list(line) for line in _DEEP_GUARD_LINES])
+    overlay = EvidenceOverlay(0, "white")
+    for line in _DEEP_GUARD_LINES:
+        fens = _diag_positions(list(line))
+        # Every line has even length, so its LAST position is a user node with no
+        # outgoing edge — a user LEAF. It is a user node of the line like any other and
+        # gets evidence too; leaving it out is exactly the all-three-withheld row, not
+        # the prepared one.
+        withheld = (
+            fens[len(line)] if not prepared_tail and len(line) > 2 else None
+        )
+        for ply in range(0, len(line) + 1, 2):
+            if fens[ply] == withheld:
+                # Withhold the deepest user node's evidence on the two DEEP lines only.
+                # The 2-ply reply's deepest user node is its ONLY one, and withholding
+                # there is a materially different row: it would drop the leaf-credit
+                # contrast this shape exists to hold.
+                continue
+            overlay.nodes[fens[ply]] = NodeEvidence(
+                fen=fens[ply], quality_sum=4.0, quality_count=4, live_attempts=4
+            )
+        for ply, uci in enumerate(line):
+            parent, child = fens[ply], fens[ply + 1]
+            is_user_move = ply % 2 == 0
+            overlay.edges[(parent, child)] = EdgeEvidence(
+                parent,
+                child,
+                uci,
+                traversal_count=4,
+                live_attempts=4 if is_user_move else 0,
+                live_passes=4 if is_user_move else 0,
+            )
+    return graph, overlay, _diag_roots(opp), opp
+
+
 def _cliff_scenario(
     *, reviewed: bool
 ) -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots, str]:
@@ -3301,8 +3497,19 @@ def _opp_behavior_key(cell: GridCell) -> tuple[object, ...]:
     # Axes that determine an OPPONENT node's reported score: LCB + gate (+ threshold)
     # + the report fold ONLY when it reaches opponent reports (scope="all"). A
     # scope="user" fold and drop_user never touch opponent reports -> excluded here.
+    # branch_norm/branch_share are TRAVERSAL axes, not report-stage transforms: they
+    # change the recursion at EVERY node, so unlike a scope="user" report fold they do
+    # reach opponent rows and belong in this key. Without them an arm-3 cell would
+    # share CURRENT's key and be skipped by the applicable() filters entirely.
     opp_fold_p = cell.report_fold_p if cell.report_fold_scope == "all" else 0.0
-    return (cell.lcb_z, cell.coverage_fold, cell.coverage_live_threshold, opp_fold_p)
+    return (
+        cell.lcb_z,
+        cell.coverage_fold,
+        cell.coverage_live_threshold,
+        opp_fold_p,
+        cell.branch_norm,
+        cell.branch_share,
+    )
 
 
 def _user_behavior_key(cell: GridCell) -> tuple[object, ...]:
@@ -3314,6 +3521,8 @@ def _user_behavior_key(cell: GridCell) -> tuple[object, ...]:
         cell.coverage_live_threshold,
         cell.report_fold_p,
         cell.report_self_term,
+        cell.branch_norm,
+        cell.branch_share,
     )
 
 
@@ -3356,7 +3565,7 @@ def _diagnostic_rows(
 
     ``operands(cell)`` returns the per-cell operand fields (mapped 1:1 into
     DiagnosticCellResult downstream); ``applicable(cell)`` is Filter 2 on the
-    diagnostic's RELEVANT turn. CellRow["cell"] is the six-axis primitive dict (never a
+    diagnostic's RELEVANT turn. CellRow["cell"] is the eight-axis primitive dict (never a
     raw GridCell), so every operand survives ``json.dumps`` WITHOUT relying on
     ``default=str``.
     """
@@ -3510,6 +3719,22 @@ def run_broad_guard_diagnostic(
     return _score_target(target, graph, overlay, roots, cell.config, now=as_of)
 
 
+def run_deep_guard_diagnostic(
+    cell: GridCell, *, prepared_tail: bool = True, as_of: datetime = SYNTHETIC_AS_OF
+) -> float:
+    """Deep-guard OPERAND producer (opponent-turn score on a shape that sees the norm).
+
+    Same question as the broad guard — does the candidate punish a genuinely prepared
+    player? — asked on the 6/4/2-ply unequal-mass shape, because the broad guard's own
+    two-ply shape is structurally blind to branch_norm and branch_share.
+
+    ``prepared_tail=False`` produces the REPORTED-ONLY row, which measures the
+    frontier-expansion drag owned by g-ratio-frontier-drag and is never graded.
+    """
+    graph, overlay, roots, target = _deep_guard_scenario(prepared_tail=prepared_tail)
+    return _score_target(target, graph, overlay, roots, cell.config, now=as_of)
+
+
 def run_specialist_diagnostic(
     cell: GridCell, *, as_of: datetime = SYNTHETIC_AS_OF
 ) -> float:
@@ -3528,19 +3753,31 @@ def run_specialist_diagnostic(
 def run_opponent_guard_diagnostic(
     grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
 ) -> dict[str, object]:
-    """Opponent regression guard + unprepared-branch leak.
+    """Opponent regression guard (TWO shapes) + unprepared-branch leak.
 
-    Calls the re-wired broad-guard (NOT-crater operand) and specialist (leak operand)
-    producers under debug=True. AGGREGATE passed: True iff for every graded-for-selection
-    arm row with opponent_moves_vs_current BOTH the opponent-drop guard and the leak guard
-    hold. ARM-2 and B1 share CURRENT's _opp_behavior_key, so only the ARM-1 p-cells are
-    applicable here; without this pair the grid could select a p that fixes Black roots
-    while silently making White/opponent cards unusably low.
+    Calls the re-wired broad-guard (NOT-crater operand), the DEEP guard (the same
+    question on a shape that can see the branch-normalisation axes) and the specialist
+    (leak operand) producers under debug=True. AGGREGATE passed: True iff for every
+    graded-for-selection arm row with opponent_moves_vs_current, BOTH opponent-drop
+    guards and the leak guard hold. ARM-2 and B1 share CURRENT's _opp_behavior_key, so
+    only the ARM-1 p-cells and the ARM-3 lambda cells are applicable here; without these
+    guards the grid could select a cell that fixes Black roots while silently making
+    White/opponent cards unusably low.
+
+    The deep guard is graded on the FULLY PREPARED overlay only. Its unprepared-tail
+    variant is reported beside it and never reaches ``_opp_guard_fires``: that row
+    measures the frontier-expansion drag, a leaf-credit semantics decision owned by
+    g-ratio-frontier-drag, and the release aggregate must not silently adjudicate it.
     """
 
     def operands(cell: GridCell) -> dict[str, object]:
         return {
             "broad_guard_opp_score": run_broad_guard_diagnostic(cell, as_of=as_of),
+            "deep_guard_opp_score": run_deep_guard_diagnostic(cell, as_of=as_of),
+            # REPORTED ONLY — never graded. See the docstring.
+            "deep_guard_unprepared_tail_opp_score": run_deep_guard_diagnostic(
+                cell, prepared_tail=False, as_of=as_of
+            ),
             "specialist_pre_fold_quality": run_specialist_diagnostic(cell, as_of=as_of),
         }
 
@@ -3549,6 +3786,7 @@ def run_opponent_guard_diagnostic(
 
     rows, reference = _diagnostic_rows(grid, demo_cells, operands, applicable)
     reference_opp_score = reference["broad_guard_opp_score"]
+    reference_deep_opp_score = reference["deep_guard_opp_score"]
     reference_gated_quality = reference["specialist_pre_fold_quality"]
     selection = _selection_rows(rows)
     passed: bool | None
@@ -3557,13 +3795,16 @@ def run_opponent_guard_diagnostic(
     else:
         passed = all(
             not _opp_guard_fires(r["broad_guard_opp_score"], reference_opp_score)
+            and not _opp_guard_fires(
+                r["deep_guard_opp_score"], reference_deep_opp_score
+            )
             and not _leak_fires(
                 r["specialist_pre_fold_quality"], reference_gated_quality
             )
             for r in selection
         )
     return {
-        "name": "opponent regression guard + unprepared-branch leak",
+        "name": "opponent regression guards (broad + deep) + unprepared-branch leak",
         "reference": reference,
         "rows": rows,
         "passed": passed,
@@ -3587,7 +3828,7 @@ def run_cliff_diagnostic(
     for cell in grid.cells:
         for threshold in thresholds:
             # Serialize the PROBE cell (the base cell at the swept threshold) so the
-            # six-axis identity matches the config actually scored — otherwise a
+            # eight-axis identity matches the config actually scored — otherwise a
             # threshold-2 row would carry cell.coverage_live_threshold == 1, an identity
             # that contradicts its own coverage_live_threshold field. is_reference stays
             # keyed off the BASE cell (a threshold-independent probe tag): the probe is
@@ -4300,8 +4541,10 @@ def _build_selection_inputs(
     as_of = header.as_of  # the ONLY clock source on this path
 
     # Score cohort pairs over EXACTLY required_cells at now=as_of. required_cells is the
-    # default arm grid (both anchors, ARM-1×P_GRID, ARM-2×P_GRID, B1); NO demos.
-    required_cells = build_arm_grid().cells
+    # SELECTOR's set (both anchors, ARM-1×P_GRID, ARM-2×P_GRID, B1); NO demos, and NOT
+    # the reporting grid — that also carries ARM-3, which no release arm claims, and the
+    # selector's _check_required_cells demands exact equality. See selector_required_cells.
+    required_cells = selector_required_cells()
     scored_pairs: list[ScoredPair] = []
     for lp in loaded.pairs:
         cell_grid = {
@@ -4476,7 +4719,10 @@ def validate_capture_candidate(
     header = loaded.header
     as_of = header.as_of  # the ONLY clock source on this path
 
-    required_cells = build_arm_grid().cells
+    # The SAME set the selector will demand — see selector_required_cells. Validating the
+    # wider reporting grid here would make capture stricter than the contract this
+    # self-check exists to mirror.
+    required_cells = selector_required_cells()
     scored_pairs: list[ScoredPair] = []
     for lp in loaded.pairs:
         cell_grid = {
@@ -6044,6 +6290,10 @@ ARM1 = Arm(role="arm1", scope="all", cells=arm1_cells(REPORT_FOLD_P_GRID), fold_
 ARM2 = Arm(role="arm2", scope="user", cells=arm2_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=5)
 # The pinned release policy. NOT caller-controlled: the arm sequence sets BOTH the
 # enumeration order (ARM-1 preferred; ARM-2 the lazy fallback) AND the required-cell set.
+# ARM-3 (branch_norm/branch_share, g-branch-ratio-norm) is intentionally absent: an Arm
+# is a report-fold p-sweep by construction, and arm 3 sweeps lambda at a fixed p. It is
+# scored and graded through build_arm_grid and the diagnostics; it enters the selector
+# only at the flip. See arm3_cells.
 RELEASE_ARMS: tuple[Arm, ...] = (ARM1, ARM2)
 
 
@@ -6054,6 +6304,35 @@ def _required_cells(arms: tuple[Arm, ...]) -> frozenset[GridCell]:
     for arm in arms:
         cells.update(arm.cells)
     return frozenset(cells)
+
+
+def selector_required_cells() -> tuple[GridCell, ...]:
+    """The cells every SELECTOR-PATH producer scores, in grid order.
+
+    The reporting grid and the selector's required-cell set are NOT the same thing.
+    ``build_arm_grid().cells`` is the REPORTING grid and may carry cells no release arm
+    claims — today ARM-3, which is graded in the report but deliberately absent from
+    ``RELEASE_ARMS``. ``_check_required_cells`` demands EXACT equality with
+    ``_required_cells(RELEASE_ARMS)``, so a producer that scores the grid instead makes
+    select-candidates refuse every artifact with a binding error (exit 4). Both producers
+    on that path — ``_build_selection_inputs`` and the capture self-check — call THIS.
+
+    Returned in ``build_arm_grid`` order (anchors first) rather than as the frozenset, so
+    the per-pair grids and the fingerprint maps are built in a deterministic order that
+    does not depend on set iteration.
+    """
+    required = _required_cells(RELEASE_ARMS)
+    ordered = tuple(cell for cell in build_arm_grid().cells if cell in required)
+    if frozenset(ordered) != required:
+        # A release arm sweeping a cell the grid does not emit would be silently dropped
+        # here and then fail the selector's equality check with no explanation.
+        # GridCell.label folds only two axes, so name the missing cells by their full
+        # _cell_axes identity -- a label here could collapse two distinct cells into one.
+        missing = sorted(repr(_cell_axes(cell)) for cell in required - frozenset(ordered))
+        raise ValueError(
+            f"RELEASE_ARMS require cells build_arm_grid() does not emit: {missing}"
+        )
+    return ordered
 
 
 @dataclass(frozen=True)
@@ -7414,10 +7693,11 @@ def render_text(report: dict[str, object]) -> str:
 
 
 def _cell_label(entry: dict[str, object]) -> str:
-    """Compact six-axis label from a report/diagnostic row's nested ``cell`` dict.
+    """Compact eight-axis label from a report/diagnostic row's nested ``cell`` dict.
 
-    Reads ``entry["cell"]`` (the ``_cell_axes`` primitive dict) so the four arm p-cells
-    that share lcb_z/coverage_fold are distinguishable in text, not only in --json.
+    Reads ``entry["cell"]`` (the ``_cell_axes`` primitive dict) so the arm p-cells and
+    the arm-3 lambda cells that share lcb_z/coverage_fold are distinguishable in text,
+    not only in --json. ``GridCell.label`` stays the two-axis short form.
     """
     cell = entry["cell"]
     label = f"lcb_z={cell['lcb_z']:g},cov={cell['coverage_fold']}"
@@ -7427,6 +7707,10 @@ def _cell_label(entry: dict[str, object]) -> str:
         label += f",p={cell['report_fold_p']:g}/{cell['report_fold_scope']}"
     if cell["report_self_term"] != "keep":
         label += f",self={cell['report_self_term']}"
+    if cell["branch_norm"] != "sums":
+        label += f",norm={cell['branch_norm']}"
+    if cell["branch_share"] is not None:
+        label += f",lam={cell['branch_share']:g}"
     return label
 
 

@@ -443,7 +443,7 @@ This is the key final choice:
 
 ### Perfect normalization
 
-Compute `PerfectS(root)` on the same rooted tree with:
+Compute `PerfectS(n)` on the same rooted tree with:
 
 - every user mastery term set to `1`
 - the same opponent weights
@@ -462,6 +462,102 @@ Using the same prepared-child set in the denominator preserves the intended sema
 - the score judges how well the user knows the repertoire they have actually trained
 - `Coverage` remains a separate diagnostic for how much of the important
   opponent tree they have faced
+
+**Where the ratio is formed is itself a choice**, and it is the
+`RootCalcConfig.branch_norm` axis (`backend/app/opening_rootcalc.py`, `_calc`).
+
+#### `branch_norm = "sums"` — a ratio of sums at the root (served)
+
+Every node's score channel is an un-normalised **mass** and the division happens once,
+at the root. That makes an opponent reply's influence proportional to its perfect-score
+mass rather than to its weight:
+
+```text
+S_opp / P_opp = sum_j w_j S_j / sum_j w_j P_j
+              = sum_j [ w_j P_j / sum w P ] * (S_j / P_j)
+                 \______ effective weight ______/
+```
+
+Deepening a branch grows `P_j`, so the branch votes louder. If its own ratio is below
+its siblings', an ancestor row **falls with no change in how anything is played** —
+measured at -6.2 points for deepening a branch nobody played worse
+(`backend/scripts/sign_test_opening_score.py mass`). This is the P1 defect recorded as
+`g-branch-ratio-norm`.
+
+#### `branch_norm = "ratio"` — per-node normalization
+
+Divide each user non-leaf by its own perfect value `(1 + gamma)`. Equivalently, and this
+is the form the code uses:
+
+```text
+S_user(n) = p_n * ( (1 - lambda) + lambda * sum over prepared children e of w_e * S(child_e) )
+S_opp(n)  = sum over known children j of w_j * branch_cov_j * S(child_j)     # unchanged
+
+lambda = branch_share, defaulting to gamma / (1 + gamma)
+```
+
+a convex combination of the node's own mastery and its continuation. By induction every
+node's score channel is a ratio in `[0, 1]`, and
+
+```text
+PerfectS(n) = 1  at every node
+```
+
+(leaf -> `1`; user -> `(1 - lambda) + lambda = 1`; opponent -> `sum w = 1`). A reply's
+influence is then its **weight alone**, and the opponent arm needs no edit — its
+children simply stop being masses.
+
+`branch_share` is the score channel's **own** depth-sensitivity parameter, deliberately
+separate from `gamma`: see *Weighted depth* below.
+
+#### The leaf-credit asymmetry
+
+A user **leaf** returns its mastery with no continuation term, and its perfect pass
+returns `1.0` — it is credited **as if its continuation were perfect**. The moment the
+same node admits a prepared child it is scored `p * ((1 - lambda) + lambda * r)` while
+its perfect pass stays pinned at `1.0`. At the served `gamma = 0.8`
+(`lambda = 0.444`), with `r` the mean ratio of the newly reachable territory:
+
+| newly reachable territory | `r` | admission factor `(1 - lambda) + lambda * r` |
+| --- | --- | --- |
+| gated unready replies (`coverage_fold` gates them to 0) | 0.000 | **0.5556** |
+| ungated, evidence-free replies | ~0.098 | **0.5991** |
+| fully prepared, perfectly played | 1.000 | 1.0000 |
+
+Two consequences:
+
+1. Every **admission** costs — a new prepared move and a leaf -> non-leaf flip are the
+   same event.
+2. The cost is **not** a one-step charge. The `live_attempts + rho` weight mix keeps
+   growing the new move's weight as the user drills it correctly, and each prepared ply
+   lengthens the yardstick again, so the decline continues for as long as the prepared
+   frontier expands.
+
+The readiness gate is a minor term here: `branch_cov` is in `[0, 1]`, so
+`coverage_fold="off"` is the **ceiling** of any gate-smoothing design and recovers under
+a fifth of the effect (`sign_test_opening_score.py mix --coverage-fold off`). What is
+left is a semantics decision about leaf credit, owned by `g-ratio-frontier-drag`.
+
+The claim above — **unprepared self-lines do not drag the score down** — still holds
+under both modes, since unprepared children stay out of the weight set entirely. The
+caveat is the frontier one: once a self-line **is** prepared, its own unmet
+continuations do count against it.
+
+#### Status
+
+`branch_norm` and `branch_share` are landed **dormant**: `"sums"` remains the default,
+every served number and every config fingerprint is unchanged, and the axes exist so the
+calibration grid's arm 3 can score and grade the candidate. The flip to `"ratio"` is
+`g-sm-v2-7-release`.
+
+Arm 3 lives in the **reporting** grid only. It is deliberately absent from
+`RELEASE_ARMS`, so it is never on the selector path: the two producers there score
+`selector_required_cells()`, and `_check_required_cells` demands exactly that set.
+Keeping it out is not bookkeeping — the selector's `_opp_guard` reads only
+`broad_guard_opp_score`, and `DiagnosticCellResult` carries no deep-guard operand, so a
+cell on the selector path today would pass the opponent guard on a shape that cannot see
+the branch-normalisation axes at all. Generalising the arm descriptor and giving the
+release path the deep-guard operand are flip-time work.
 
 ## Confidence Model
 
@@ -725,6 +821,15 @@ D_user(n) = p_n * (1 + gamma * sum over prepared children e of r_e * D(child_e))
 ```
 
 This is easier to reason about than the raw score alone.
+
+**The depth channel is driven by `gamma` alone.** It is deliberately left
+un-normalized, and `branch_share` never reaches it, so `weighted_depth` is
+byte-identical under both `branch_norm` modes and across the whole `branch_share`
+sweep. That separation is why the score channel got its own parameter: `weighted_depth`
+is a served API field, and sweeping `gamma` to move the score's depth sensitivity would
+compare calibration cells that disagree about a reported depth number (an 8-ply line
+drilled 12x per node moves `weighted_depth` from 1.50 to 1548 across
+`gamma = 0.8 ... 4.0`).
 
 ## Implementation Plan
 

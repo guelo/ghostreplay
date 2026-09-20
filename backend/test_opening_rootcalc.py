@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from app.opening_densify import RoutingView
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_rootcalc import (
+    BRANCH_NORM_MODES,
     REPORT_FOLD_SCOPES,
     REPORT_SCORER_CONTRACT_ID,
     REPORT_SELF_TERM_MODES,
@@ -33,6 +35,7 @@ from app.opening_rootcalc import (
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots
+import scripts.sign_test_opening_score as sign_test
 from app.opening_transposition_artifact import DensificationError, DensifiedEdges
 
 
@@ -3296,4 +3299,487 @@ def test_checked_in_user14_fixture_matches_sm_v2_6_and_behavior():
     )
     assert checked_in["white_root_score"] == pytest.approx(
         historical["white_root_score"], abs=1e-12
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-node score normalisation (g-branch-ratio-norm).
+#
+# The score channel's historical normalisation is a RATIO OF SUMS taken once at the
+# root, so an opponent reply's influence is proportional to its perfect-score MASS and
+# deepening a branch makes it vote louder. branch_norm="ratio" divides each user
+# non-leaf by its own perfect value, making every node's score channel a ratio whose
+# perfect pass is exactly 1.0 and a reply's influence its weight alone.
+#
+# The axes land DORMANT: "sums" stays the default until g-sm-v2-7-release, so the
+# whole suite must be green unchanged. The fixtures below are the ported probes from
+# scripts/sign_test_opening_score.py, so the bands asserted here are the ones that
+# script measures rather than literals with no instrument behind them.
+# ---------------------------------------------------------------------------
+
+_BRANCH_SHARE_GRID = (None, 1.4 / 2.4, 2.0 / 3.0, 3.0 / 4.0, 4.0 / 5.0)
+_INHERITED_SHARE = RootCalcConfig.gamma / (1.0 + RootCalcConfig.gamma)
+
+
+def _ratio_probe_config(**overrides) -> RootCalcConfig:
+    """The sign-test script's axes: served sm-v2-6 with the report fold held OFF."""
+    values = dict(
+        lcb_z=1.0,
+        coverage_fold="gate",
+        coverage_live_threshold=1,
+        report_fold_p=0.0,
+        report_fold_scope="user",
+    )
+    values.update(overrides)
+    return RootCalcConfig(**values)
+
+
+def _branch_norm_fixture():
+    """A graph with user NON-LEAVES at several depths and unequal per-reply mass.
+
+    Two branches off 1.e4 (a deep mature line and a 1...e5 line), and at the 1.e4 e5
+    user node TWO prepared children -- the shape a path-only fixture cannot produce
+    and the only one that exercises the live_attempts + rho user weight mix.
+    """
+    graph = sign_test._build_graph(
+        sign_test.MATURE_SANS, sign_test.MIX_BASE_SANS, sign_test.MIX_NEW_SANS
+    )
+    overlay = sign_test._build_overlay(
+        [
+            (sign_test.MATURE_SANS, sign_test.MATURE_SESSIONS, "mature"),
+            (sign_test.MIX_BASE_SANS, sign_test.MATURE_SESSIONS, "base"),
+            (sign_test.MIX_NEW_SANS[:9], 4, "new"),
+        ]
+    )
+    base_fens, _ = sign_test._path(sign_test.MIX_BASE_SANS)
+    rows = [base_fens[0], base_fens[1], base_fens[2]]
+    return graph, overlay, sign_test._roots_for(rows), rows
+
+
+def _branch_norm_calculator(config: RootCalcConfig) -> _SharedCalculator:
+    graph, overlay, roots, rows = _branch_norm_fixture()
+    calc = _SharedCalculator(
+        "white", graph, overlay, roots, config, sign_test.NOW
+    )
+    for row in rows:
+        calc._calc(_normalized(row), False)
+        calc._calc(_normalized(row), True)
+    return calc
+
+
+# --- 1. dormancy: landing moves no served number and no fingerprint ---------
+
+
+def test_branch_norm_axes_land_dormant():
+    config = RootCalcConfig()
+    assert config.branch_norm == "sums"
+    assert config.branch_share is None
+    assert BRANCH_NORM_MODES == frozenset({"sums", "ratio"})
+    # The served/comparator fingerprints are byte-identical to the pre-landing ones.
+    assert root_calc_config_fingerprint(config) == GOLDEN
+    assert root_calc_config_fingerprint(_sm_v2_3_config()) == SM_V2_3_GOLDEN
+    assert (
+        root_calc_config_fingerprint(
+            _sm_v2_3_config(lcb_z=0.0, coverage_fold="off")
+        )
+        == BASELINE_GOLDEN
+    )
+    # ...and turning the axis on DOES move it, so the dormancy above is a real
+    # no-op rather than an axis the fingerprint cannot see.
+    assert root_calc_config_fingerprint(RootCalcConfig(branch_norm="ratio")) != GOLDEN
+
+
+# --- 2. validation ---------------------------------------------------------
+
+
+def test_config_rejects_unknown_branch_norm():
+    with pytest.raises(ValueError):
+        RootCalcConfig(branch_norm="per_node")
+
+
+@pytest.mark.parametrize("bad_share", [-0.1, 1.5, float("nan"), float("inf")])
+def test_config_rejects_out_of_domain_branch_share(bad_share):
+    with pytest.raises(ValueError):
+        RootCalcConfig(branch_norm="ratio", branch_share=bad_share)
+
+
+@pytest.mark.parametrize("bad_share", [True, False, "0.5", 1j, [0.5]])
+def test_config_rejects_non_real_branch_share(bad_share):
+    with pytest.raises(TypeError):
+        RootCalcConfig(branch_norm="ratio", branch_share=bad_share)
+
+
+def test_config_rejects_branch_share_under_sums():
+    # lambda is INERT under "sums": the sums arm reads gamma and never the share. A
+    # silently-dropped value is the worse failure here, because the value would look
+    # swept while changing nothing.
+    with pytest.raises(ValueError):
+        RootCalcConfig(branch_norm="sums", branch_share=0.5)
+    # The omitted spelling is of course fine.
+    assert RootCalcConfig(branch_norm="sums", branch_share=None).branch_share is None
+
+
+# --- 3. lambda identity and its canonical form ------------------------------
+
+
+def test_branch_lambda_defaults_to_the_gamma_derived_share():
+    assert RootCalcConfig().branch_lambda == pytest.approx(_INHERITED_SHARE)
+    assert RootCalcConfig(branch_norm="ratio").branch_lambda == pytest.approx(
+        _INHERITED_SHARE
+    )
+    assert RootCalcConfig(branch_norm="ratio", branch_share=0.75).branch_lambda == 0.75
+
+
+def test_explicit_inherited_share_canonicalizes_to_none_and_shares_a_fingerprint():
+    # An explicit lambda equal to gamma/(1+gamma) is behaviourally identical to
+    # omitting it, so the two spellings must collapse to ONE fingerprint rather than
+    # merely score alike -- the property report_fold_scope already holds at p == 0.
+    explicit = RootCalcConfig(branch_norm="ratio", branch_share=_INHERITED_SHARE)
+    omitted = RootCalcConfig(branch_norm="ratio")
+    assert explicit.branch_share is None
+    assert root_calc_config_fingerprint(explicit) == root_calc_config_fingerprint(
+        omitted
+    )
+    # A share that is NOT the inherited one keeps its own fingerprint.
+    assert root_calc_config_fingerprint(
+        RootCalcConfig(branch_norm="ratio", branch_share=0.75)
+    ) != root_calc_config_fingerprint(omitted)
+
+
+# --- 4. ratio bounds -------------------------------------------------------
+
+
+@pytest.mark.parametrize("share", _BRANCH_SHARE_GRID)
+def test_ratio_perfect_channel_is_exactly_one_and_scores_are_bounded(share):
+    calc = _branch_norm_calculator(
+        _ratio_probe_config(branch_norm="ratio", branch_share=share)
+    )
+    natural = [v for (_, perfect), v in calc._metrics.items() if not perfect]
+    idealized = [v for (_, perfect), v in calc._metrics.items() if perfect]
+    assert natural and idealized
+    for score, *_ in idealized:
+        # 1.0 by induction: leaf -> 1.0; user -> (1-lam) + lam; opponent -> sum of
+        # weights. That identity is what makes the score channel a ratio at every node.
+        # The tolerance is for the last step only: the child weights are normalised
+        # floats, so their sum is 1.0 in exact arithmetic but need not be bit-exact.
+        # (On this fixture every idealized node measures exactly 1.0; the grid of shares
+        # below is swept precisely because that is not something to rely on.)
+        assert score == pytest.approx(1.0, abs=1e-12)
+    for score, *_ in natural:
+        assert 0.0 <= score <= 1.0
+
+
+# --- 5. channel parity + the gamma/depth coupling regression ---------------
+
+
+def test_confidence_coverage_and_depth_are_identical_between_norms():
+    sums = _branch_norm_calculator(_ratio_probe_config())
+    ratio = _branch_norm_calculator(_ratio_probe_config(branch_norm="ratio"))
+    assert set(sums._metrics) == set(ratio._metrics)
+    for key, (_, conf, cov, depth) in sums._metrics.items():
+        _, r_conf, r_cov, r_depth = ratio._metrics[key]
+        assert r_conf == conf
+        assert r_cov == cov
+        assert r_depth == depth
+
+
+def test_weighted_depth_is_invariant_across_the_whole_lambda_sweep():
+    # The regression test for the gamma/depth coupling: weighted_depth is a served API
+    # field driven by gamma ALONE, so branch_share must never reach it. Sweeping gamma
+    # to move depth sensitivity would compare cells that disagree about a reported
+    # depth number; that is why the score channel got its own parameter.
+    baseline = _branch_norm_calculator(_ratio_probe_config())._metrics
+    for share in _BRANCH_SHARE_GRID:
+        swept = _branch_norm_calculator(
+            _ratio_probe_config(branch_norm="ratio", branch_share=share)
+        )._metrics
+        for key, (_, _, _, depth) in baseline.items():
+            assert swept[key][3] == depth, (key, share)
+
+
+# --- 6. equal reply importance ---------------------------------------------
+
+
+def _mass_row_and_branch_mass(depth: int, config: RootCalcConfig) -> tuple[float, float]:
+    fresh = sign_test.FRESH_SANS[: 2 * depth]
+    graph = sign_test._build_graph(sign_test.MATURE_SANS, fresh)
+    mature_fens, _ = sign_test._path(sign_test.MATURE_SANS)
+    fresh_fens, _ = sign_test._path(fresh)
+    root, head = mature_fens[1], fresh_fens[2]
+    roots = sign_test._roots_for([root, head])
+    overlay = sign_test._overlay(
+        sign_test.MATURE_SANS, fresh, sign_test.FRESH_SESSIONS
+    )
+    rows = sign_test._prefold_rows(graph, overlay, roots, [root], config)
+    mass = sign_test._perfect_mass(graph, overlay, roots, head, config)
+    return rows[root], mass
+
+
+def test_reply_influence_is_its_weight_not_its_perfect_mass():
+    """Only the fresh branch's DEPTH varies; play quality is held fixed throughout.
+
+    Under "sums" the root FALLS as the branch deepens, because the branch's perfect
+    mass -- and so its effective vote -- grows while its own ratio stays below its
+    sibling's. Under "ratio" the mass is flat at 1.0 and the row is monotone.
+    """
+    sums = _ratio_probe_config()
+    ratio = _ratio_probe_config(branch_norm="ratio")
+    sums_rows = {d: _mass_row_and_branch_mass(d, sums) for d in range(1, 9)}
+    ratio_rows = {d: _mass_row_and_branch_mass(d, ratio) for d in range(1, 9)}
+
+    # The defect, asserted directly rather than xfailed: deepening a branch nobody
+    # played worse costs the root real points under "sums".
+    assert sums_rows[8][0] < sums_rows[3][0] - 5.0
+    assert sums_rows[8][1] > sums_rows[3][1] > 1.0
+
+    # Depth 1 is EXCLUDED from the monotonicity claim: it is the readiness gate
+    # zeroing an unvisited branch, not a depth effect.
+    for depth in range(3, 9):
+        assert ratio_rows[depth][0] >= ratio_rows[depth - 1][0] - 1e-9, depth
+    for depth in range(1, 9):
+        assert ratio_rows[depth][1] == pytest.approx(1.0, abs=1e-12)
+
+
+# --- 7. C1 fail-then-strong admission, swept on every axis ------------------
+
+
+_RATIO_AXES = sign_test.Axes(branch_norm="ratio")
+_FLIP_CONTINUATIONS = (0, sign_test.CONTINUATION_SESSIONS)
+_FLIP_MAX_DEPTH = 5
+
+
+def _flip_grid():
+    """Every (continuation, fail quality, sibling arm, replies, depth) point, with the
+    SHAPE of the sweep pinned to the full cross-product.
+
+    ``_flip_points`` drops any point whose overlay fails coverage validation --
+    ``except OpeningCoverageValidationError: continue`` -- silently, and one point at a
+    time. Every claim the tests below make is universally quantified over whatever comes
+    back, so a sweep that quietly shrank to a handful of easy points would still pass
+    them all. The expected set is therefore rebuilt here from the script's own
+    constants, not written down as a count: adding a sibling line or a fail quality
+    widens it automatically, while a point going missing fails loudly and names itself.
+    """
+    expected = {
+        (continuation, fail_quality, arm, extra + 1, depth)
+        for continuation in _FLIP_CONTINUATIONS
+        for fail_quality in sign_test.FAIL_QUALITIES
+        for extra in range(0, len(sign_test.SIBLING_SANS) + 1)
+        # At replies == 1 there are no siblings, so the drilling axis is vacuous and
+        # _flip_points labels the single point "none" rather than splitting it in two.
+        for arm in (("none",) if extra == 0 else ("drilled 40x", "undrilled"))
+        for depth in range(2, _FLIP_MAX_DEPTH + 1)
+    }
+    points = []
+    for continuation in _FLIP_CONTINUATIONS:
+        for fail_quality in sign_test.FAIL_QUALITIES:
+            for point in sign_test._flip_points(
+                fail_quality, continuation, _FLIP_MAX_DEPTH, axes=_RATIO_AXES
+            ):
+                # Carry the two sweep coordinates _flip_points does not record, so the
+                # identity below is the whole grid point and a failure names it.
+                points.append(
+                    dict(point, continuation=continuation, fail_quality=fail_quality)
+                )
+    got = {
+        (p["continuation"], p["fail_quality"], p["arm"], p["replies"], p["depth"])
+        for p in points
+    }
+    assert got == expected, sorted(expected - got)
+    # No duplicates either: the identity is unique per point, so equal sets plus equal
+    # lengths means the sweep is exactly the cross-product.
+    assert len(points) == len(expected)
+    return points
+
+
+def test_flip_ancestor_rows_improve_and_are_bounded_under_ratio():
+    points = list(_flip_grid())
+    assert points
+    worst = 0.0
+    for point in points:
+        for idx in (0, 1):  # the two ANCESTOR rows, never the flipping head row
+            sums_delta, ratio_delta = point["sums"][idx], point["sel"][idx]
+            assert ratio_delta >= sums_delta - 1e-9, point
+            assert ratio_delta >= min(0.0, sums_delta) / 2.0 - 1e-9, point
+            worst = min(worst, ratio_delta)
+    # A BOUND, not a sign contract: the worst measured ancestor delta is -1.417, and
+    # it is reachable only with undrilled siblings -- with drilled siblings every
+    # ancestor delta is positive at all three fail qualities.
+    assert worst >= -2.0
+    assert worst < 0.0, "the undrilled-sibling axis must actually be exercised"
+
+
+def test_flip_head_row_equality_is_exactly_the_perfect_mass_one_case():
+    """The flipping row is not a uniform story, and ratio >= sums is the real claim.
+
+    Where the admitted subtree's perfect mass is 1 -- nothing below the head is a user
+    non-leaf -- sums' denominator is already (1 + gamma) and the two normalisations
+    coincide ALGEBRAICALLY. The case is selected from the reported perfect mass, never
+    from a depth literal: with the continuation unprepared, mass is 1 at EVERY depth.
+    """
+    points = list(_flip_grid())
+    equal = [p for p in points if p["sel"][2] == pytest.approx(p["sums"][2], abs=1e-9)]
+    unequal = [p for p in points if p not in equal]
+    assert equal and unequal
+    for point in points:
+        assert point["sel"][2] >= point["sums"][2] - 1e-9, point
+    for point in equal:
+        assert point["mass"] == pytest.approx(1.0, abs=1e-9), point
+    for point in unequal:
+        assert point["mass"] > 1.0, point
+
+
+# --- 8. the property the normalisation buys --------------------------------
+
+
+def test_raising_quality_never_lowers_a_row_with_children_and_mix_held_fixed():
+    """With the ADMITTED-CHILD SET *and the weight mix* held fixed, every node's ratio
+    is a multilinear form in the node masteries with non-negative coefficients, so
+    raising any mastery can never lower any row. Today's scorer has no such property,
+    because its denominator moves too.
+
+    Both clauses are load-bearing: the violation surface does not vanish, it collapses
+    to the two structural moves this fixture deliberately does NOT make -- a weight
+    shift and a child admission.
+    """
+    graph, base_overlay, roots, rows = _branch_norm_fixture()
+    config = _ratio_probe_config(branch_norm="ratio")
+    before = sign_test._prefold_rows(graph, base_overlay, roots, rows, config)
+    improvable = sorted(
+        fen
+        for fen, node in base_overlay.nodes.items()
+        if node.quality_count > 0
+    )
+    assert improvable
+    for fen in improvable:
+        overlay = copy.deepcopy(base_overlay)
+        node = overlay.nodes[fen]
+        # Raise QUALITY only. Attempt counts drive both the weight mix and the
+        # admitted-child set, so touching them would change the shape, not the play.
+        node.quality_sum = float(node.quality_count)
+        after = sign_test._prefold_rows(graph, overlay, roots, rows, config)
+        for row in rows:
+            assert after[row] >= before[row] - 1e-9, (fen, row)
+
+
+# --- 9. drop_user under ratio ----------------------------------------------
+
+
+def test_drop_user_under_ratio_is_the_weighted_mean_of_child_ratios():
+    # The drop_user arm needs no code change: child_perfect_sum degenerates to the
+    # weight sum (~1), so the child ratio becomes 100 * sum(w * child_ratio).
+    config = _ratio_probe_config(branch_norm="ratio", report_self_term="drop_user")
+    graph, overlay, roots, rows = _branch_norm_fixture()
+    calc = _SharedCalculator("white", graph, overlay, roots, config, sign_test.NOW)
+    mix_node = _normalized(rows[2])
+    weights = calc._get_weights(mix_node)
+    assert len(weights) >= 2, "the mix node must have two prepared children"
+    node_score, *_ = calc._calc(mix_node, False)
+    node_perfect, *_ = calc._calc(mix_node, True)
+    quality, effective = calc._prefold_quality(mix_node, node_score, node_perfect)
+    assert effective == "drop_user"
+    expected = 100.0 * sum(
+        weight * calc._calc(child, False)[0] for child, weight in weights.items()
+    )
+    assert quality == pytest.approx(expected)
+    assert sum(
+        weight * calc._calc(child, True)[0] for child, weight in weights.items()
+    ) == pytest.approx(1.0)
+
+
+# --- 10. the frontier-expansion drag, pinned as a KNOWN LIMIT ---------------
+
+
+def test_frontier_expansion_drag_is_a_known_cumulative_limit_not_one_step():
+    """A well-drilled user node admits a second child whose subtree is UNPREPARED.
+
+    Under "ratio" that admission charges the node -- the leaf-credit yardstick
+    lengthens while the perfect pass stays pinned at 1.0 -- and the charge is NOT a
+    one-step event: the live_attempts + rho mix keeps growing the new move's weight as
+    the user drills it correctly, so the row declines at EVERY step. A test pinning
+    only the admission step would let that drift through.
+
+    This is a KNOWN LIMIT, not a contract: the leaf-credit semantics decision is owned
+    by g-ratio-frontier-drag, and the flip is blocked on it. The band below is what
+    `sign_test_opening_score.py phase` measures, not a guess.
+    """
+    shape = sign_test.MIX_SHAPES["new move only"]
+    ratio = sign_test._mix_series(
+        shape, _ratio_probe_config(branch_norm="ratio"), 16
+    )
+    sums = sign_test._mix_series(shape, _ratio_probe_config(), 16)
+    assert ratio is not None and sums is not None
+    base_fens, _ = sign_test._path(sign_test.MIX_BASE_SANS)
+    mix_node = base_fens[2]
+    ratio_row, sums_row = ratio[mix_node], sums[mix_node]
+
+    # Every one of the fifteen post-admission drills LOWERS the row.
+    steps = [ratio_row[n] - ratio_row[n - 1] for n in range(2, 17)]
+    assert all(step < 0 for step in steps)
+    cumulative = ratio_row[16] - ratio_row[1]
+    assert -6.0 <= cumulative <= -2.5, cumulative
+    # Same magnitude as the mass defect this bead fixes, and worse than "sums".
+    assert cumulative < sums_row[16] - sums_row[1]
+
+    # The readiness gate cannot bound it. coverage_fold="off" is the CEILING of any
+    # C3 design -- a real ramp LOWERS branch_cov for thin branches and moves the wrong
+    # way -- and it still leaves most of the decline in place.
+    ungated = sign_test._mix_series(
+        shape, _ratio_probe_config(branch_norm="ratio", coverage_fold="off"), 16
+    )
+    assert ungated is not None
+    ungated_cumulative = ungated[mix_node][16] - ungated[mix_node][1]
+    assert ungated_cumulative < 0.0
+    assert ungated_cumulative < cumulative / 2.0
+
+    # The negative control: a new move whose BOOK ENDS is an opponent leaf credited at
+    # 1.0, so it measures the opposite. A fixture that accidentally stops the book
+    # reads as reassurance instead of a drag.
+    ends = sign_test._mix_series(
+        sign_test.MIX_SHAPES["new move, book ends"],
+        _ratio_probe_config(branch_norm="ratio"),
+        16,
+    )
+    assert ends is not None
+    assert ends[mix_node][16] - ends[mix_node][1] > 0.0
+
+
+# --- 11. what lambda reads as -----------------------------------------------
+
+
+def test_lambda_is_the_continuation_share_of_a_user_non_leaf():
+    """A child's delta reaches an ancestor multiplied by p_n * w_e * w_j * bc_j * lam.
+
+    The bare lambda holds only for the direct parent of a SINGLE-child user node, which
+    is what this three-ply fixture is. The gate is held off so bc_j == 1 and the
+    reading is exactly p_n * lam.
+    """
+    fens = _positions(["e2e4", "e7e5", "g1f3"])
+    graph = _graph([["e2e4", "e7e5", "g1f3"]])
+    user, opponent, deep_user = fens[0], fens[1], fens[2]
+    share = 0.75
+    config = _ratio_probe_config(
+        branch_norm="ratio", branch_share=share, coverage_fold="off", lcb_z=0.0
+    )
+    roots = _roots(_root(user))
+
+    def row(deep_quality: float) -> tuple[float, float]:
+        overlay = EvidenceOverlay(1, "white")
+        overlay.nodes[user] = _quality(user, 0.8, 4, at=sign_test.NOW)
+        overlay.nodes[deep_user] = _quality(deep_user, deep_quality, 4, at=sign_test.NOW)
+        _prepared(overlay, user, opponent, "e2e4", attempts=4)
+        _prepared(overlay, opponent, deep_user, "e7e5", attempts=4)
+        calc = _SharedCalculator(
+            "white", graph, overlay, roots, config, sign_test.NOW
+        )
+        return (
+            calc._calc(_normalized(user), False)[0],
+            calc._calc(_normalized(deep_user), False)[0],
+        )
+
+    low_root, low_child = row(0.4 * 4)
+    high_root, high_child = row(0.9 * 4)
+    p_user = low_root / ((1.0 - share) + share * low_child)
+    assert high_root - low_root == pytest.approx(
+        p_user * share * (high_child - low_child)
     )

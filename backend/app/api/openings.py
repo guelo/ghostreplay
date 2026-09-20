@@ -187,6 +187,9 @@ class NodeDebugResponse(BaseModel):
     subtree_review_attempts: int
     # Historical wire name: score-readiness gate, not visited-node Coverage.
     covered_locally: bool
+    # Un-normalized score CHANNEL, whose meaning follows RootCalcConfig.branch_norm:
+    # a perfect-score MASS under the served "sums", a [0, 1] ratio under "ratio"
+    # (g-branch-ratio-norm). Still a float either way; no schema change.
     raw_score: float
     raw_confidence: float
     raw_coverage: float  # New visited-node fraction before conversion to 0-100.
