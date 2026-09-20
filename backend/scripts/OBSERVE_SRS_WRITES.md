@@ -1,10 +1,39 @@
 # SRS write observations and retention census
 
-Authority: `g-srs-write-telemetry` and its parent `g-compact-srs-events`.
-This tooling does not select M, freeze evidence, prune opportunity rows, or
-approve a release. A code review/commit completes the implementation stage only.
-Deployment verification, a current census, approximately 30 representative days,
-a longer historical repair audit, and the product decision remain separate stages.
+Authority: `g-srs-observe-window` and its parent `g-compact-srs-events`.
+Implementation and the baseline-ready census were completed under the closed
+`g-srs-write-telemetry`. This tooling does not select M, freeze evidence, prune
+opportunity rows, or approve a release. A code review/commit completes the
+implementation stage only. Deployment verification, a current census,
+approximately 30 representative days, a longer historical repair audit, and the
+product decision remain separate stages.
+
+> **Status 2026-09-20 — collection is intentionally OFF, and the observation
+> track is closed.** The instrumentation is deployed and live, but
+> `GHOSTREPLAY_SRS_TELEMETRY_DIR` is unset, so nothing is collected. That is a
+> decision, not a misconfiguration.
+>
+> The census measured one active user over the trailing 30 days. On an
+> unreleased, effectively single-user app, a 30-day window would have measured
+> the operator's own play, so it could never be the *representative* observation
+> Gate B requires. Rather than run a window that licenses nothing, the owner
+> chose a conservative retention horizon directly from the census and dropped
+> the measurement track as over-engineering for this stage.
+>
+> **Decision: M = 60 days, G = 1 hour**, accepting the unmeasured late-write
+> tail explicitly. At the 2026-09-20 census that folds 77.3% of rows (418,615 of
+> 541,878) against Gate A's 50% floor, and costs about 18 MiB more than M = 30
+> would. Target pins held back nothing at any horizon tested (30/45/60/90 days:
+> zero old-session pins, zero extra residence), so the horizon trades storage
+> against late-write safety and nothing else. Authority for the number is
+> `g-compact-srs-events`.
+>
+> **Do not enable collection or start an observation clock to "finish" this.**
+> The tooling stays in the tree, tested and ready, for if this app gets real
+> users and an M shorter than 60 days ever becomes worth evidencing. Two things
+> would need solving first: the service has no volume, and a Railway volume
+> binds to one service, so the independent hourly expiry job below cannot simply
+> be a second service sharing the spool.
 
 ## Private collection
 
