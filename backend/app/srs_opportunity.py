@@ -10,8 +10,19 @@ from sqlalchemy.orm import Session
 
 from app.centipawn_loss import centipawn_loss
 from app.fen import normalize_fen
-from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
+from app.models import (
+    Blunder,
+    BlunderOpportunityEvent,
+    BlunderOpportunitySummary,
+    BlunderReview,
+)
 from app.opponent_target_facts import TargetSource, current_target_pairs
+from app.opportunity_retention import (
+    RetentionInvariantError,
+    load_policy,
+    require_targeted_window,
+)
+from app.opportunity_store import session_evidence_frozen
 from app.opening_roots import get_opening_roots
 from app.srs_math import (
     OPPORTUNITY_POWER,
@@ -158,6 +169,33 @@ def opening_weight(blunder_family: str | None, current_family: str | None) -> fl
     return 1.0 if blunder_family == current_family else 0.1
 
 
+def _require_summary_integrity(rows, *, readiness: bool) -> None:
+    """After readiness, every blunder must have a summary agreeing on its basis.
+
+    Before readiness this is a no-op: the eager backfill may still be running,
+    so a missing summary is an expected rollout gap that a review is allowed to
+    initialize. Readiness is precisely the moment that stops being true.
+
+    The basis check is not redundant with presence. A summary whose
+    ``latest_review_id`` lags the live latest review means a review landed
+    WITHOUT resetting the folded since-review counters, so those counters are
+    being attributed to the wrong review window.
+    """
+    if not readiness:
+        return
+    for row in rows:
+        if not row.summary_present:
+            raise RetentionInvariantError(
+                f"blunder {row.blunder_id} has no opportunity summary after readiness"
+            )
+        if row.folded_review_id != row.live_review_id:
+            raise RetentionInvariantError(
+                f"blunder {row.blunder_id} folded review basis "
+                f"{row.folded_review_id} disagrees with latest review "
+                f"{row.live_review_id}"
+            )
+
+
 def load_opportunity_counters(
     db: Session,
     blunder_ids: list[int],
@@ -188,10 +226,26 @@ def load_opportunity_counters(
     now_utc = as_utc(now or datetime.now(timezone.utc))
     cutoff = now_utc - timedelta(days=30)
     counters = {blunder_id: OpportunityCounters() for blunder_id in unique_blunder_ids}
+    policy = load_policy(db)
+
+    # An exclusion can only ever suppress RAW rows, so a frozen session cannot
+    # be excluded: its share of the counters may already have been folded into
+    # the summary, where subtracting it is not possible. Answering anyway would
+    # quietly return a number that still contains the session the caller asked
+    # to remove. Refused, not degraded — the one live caller passes the session
+    # it is steering right now, which is never past the boundary.
+    if exclude_session_id is not None and session_evidence_frozen(
+        db, session_id=exclude_session_id, user_id=user_id, policy=policy
+    ):
+        raise RetentionInvariantError(
+            f"session {exclude_session_id} cannot be excluded from opportunity "
+            f"counters for user {user_id}: its evidence is frozen"
+        )
 
     ranked_reviews = (
         db.query(
             BlunderReview.blunder_id.label("blunder_id"),
+            BlunderReview.id.label("id"),
             BlunderReview.session_id.label("session_id"),
             BlunderReview.reviewed_at.label("reviewed_at"),
             func.row_number()
@@ -207,6 +261,7 @@ def load_opportunity_counters(
     latest_review = (
         db.query(
             ranked_reviews.c.blunder_id,
+            ranked_reviews.c.id,
             ranked_reviews.c.session_id,
             ranked_reviews.c.reviewed_at,
         )
@@ -240,9 +295,33 @@ def load_opportunity_counters(
     opportunity_since_review = and_(eligible_broad, since_review)
     reached_since_review = and_(eligible_reached, since_review)
 
+    # Exclusion moves into the JOIN condition rather than a WHERE filter. As a
+    # filter it would drop the whole blunder when the excluded session owns its
+    # only raw row, taking the RETAINED half of that blunder's counters down
+    # with it. Exclusions are a live-evidence concept: a current session cannot
+    # have been folded, so it can only ever suppress raw rows.
+    event_join = Blunder.id == BlunderOpportunityEvent.blunder_id
+    if exclude_session_id is not None:
+        event_join = and_(
+            event_join, BlunderOpportunityEvent.session_id != exclude_session_id
+        )
+
+    summary = BlunderOpportunitySummary
+    # ONE statement, ONE snapshot. Live raw rows and the folded summary are two
+    # halves of the same number; reading them in separate statements would let a
+    # concurrent fold delete raw rows between the two reads and lose the
+    # difference, or count it twice. Driving the FROM off ``blunders`` (rather
+    # than off the event rows, as before folding existed) also keeps a blunder
+    # whose raw evidence is entirely folded away in the result set.
+    folded_eligible = func.coalesce(summary.folded_eligible_count, 0)
+    folded_opportunities = func.coalesce(summary.folded_opportunities_since_review, 0)
+    folded_reached = func.coalesce(summary.folded_reached_since_review, 0)
     rows_query = (
         db.query(
-            BlunderOpportunityEvent.blunder_id.label("blunder_id"),
+            Blunder.id.label("blunder_id"),
+            summary.blunder_id.isnot(None).label("summary_present"),
+            summary.latest_review_id.label("folded_review_id"),
+            latest_review.c.id.label("live_review_id"),
             # ALIGNED with ``eligible_broad``, not a raw row count. ``event_count`` is
             # the routing switch in ``opportunity_priority`` /
             # ``practice_priority_score``: >0 means "opportunity evidence exists, score
@@ -251,22 +330,46 @@ def load_opportunity_counters(
             # dated before the blunder existed — routed a blunder into the dueness
             # branch with an ``opportunities_since_review`` of 0, i.e. a priority of 0,
             # permanently not-due. The counter and the gate now read the same rows.
-            func.coalesce(func.sum(case((eligible_broad, 1), else_=0)), 0).label("event_count"),
-            func.coalesce(func.sum(case((opportunity_since_review, 1), else_=0)), 0).label(
-                "opportunities_since_review"
-            ),
-            func.coalesce(func.sum(case((reached_since_review, 1), else_=0)), 0).label(
-                "reached_since_review"
-            ),
+            # The folded term keeps that routing stable across a fold: evidence
+            # that existed does not stop existing because its rows were deleted.
+            (
+                folded_eligible
+                + func.coalesce(func.sum(case((eligible_broad, 1), else_=0)), 0)
+            ).label("event_count"),
+            (
+                folded_opportunities
+                + func.coalesce(
+                    func.sum(case((opportunity_since_review, 1), else_=0)), 0
+                )
+            ).label("opportunities_since_review"),
+            (
+                folded_reached
+                + func.coalesce(func.sum(case((reached_since_review, 1), else_=0)), 0)
+            ).label("reached_since_review"),
         )
-        .outerjoin(latest_review, BlunderOpportunityEvent.blunder_id == latest_review.c.blunder_id)
-        .join(Blunder, Blunder.id == BlunderOpportunityEvent.blunder_id)
-        .filter(BlunderOpportunityEvent.blunder_id.in_(unique_blunder_ids))
+        .select_from(Blunder)
+        .outerjoin(summary, summary.blunder_id == Blunder.id)
+        .outerjoin(latest_review, latest_review.c.blunder_id == Blunder.id)
+        .outerjoin(BlunderOpportunityEvent, event_join)
+        .filter(Blunder.id.in_(unique_blunder_ids))
+        .group_by(
+            Blunder.id,
+            Blunder.created_at,
+            summary.blunder_id,
+            summary.folded_eligible_count,
+            summary.folded_opportunities_since_review,
+            summary.folded_reached_since_review,
+            summary.latest_review_id,
+            latest_review.c.id,
+        )
     )
-    if exclude_session_id is not None:
-        rows_query = rows_query.filter(BlunderOpportunityEvent.session_id != exclude_session_id)
-    rows = rows_query.group_by(BlunderOpportunityEvent.blunder_id).all()
+    rows = rows_query.all()
+    _require_summary_integrity(rows, readiness=policy.readiness)
 
+    # Targeted history is available ONLY where the pinned rows still exist.
+    # Checked before the aggregate runs, so a window that reaches into discarded
+    # history is refused rather than answered with a silently smaller count.
+    require_targeted_window(db, user_id=user_id, cutoff=cutoff)
     targeted = _load_targeted_counters(
         db,
         unique_blunder_ids,
@@ -285,8 +388,11 @@ def load_opportunity_counters(
             targeted_reached_30d=targeted_reached_30d,
         )
     # A blunder can be targeted with no broad event at all — that is the failed
-    # steer whose whole point is to survive the session never uploading — so the
-    # targeted-only remainder still has to land in the result.
+    # steer whose whole point is to survive the session never uploading. Since
+    # the broad query above is driven off ``blunders``, such a blunder already
+    # arrived in ``rows`` and was merged there; this remainder now only catches
+    # a targeted id whose ``blunders`` row vanished mid-read. Dropping it would
+    # silently discard measured targeting, so it still lands in the result.
     for blunder_id, (targeted_30d, targeted_reached_30d) in targeted.items():
         counters[blunder_id] = OpportunityCounters(
             targeted_30d=targeted_30d,

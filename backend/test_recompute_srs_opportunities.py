@@ -634,3 +634,143 @@ def test_each_recompute_cli_mode_executes_and_preserves_targeted_counters(
     assert "targeted_reached_30d" in output_fields
     assert "opportunities_30d" not in output_fields
     assert "reached_30d" not in output_fields
+
+
+def _freeze_user_evidence(db_session, *, user_id: int, through) -> None:
+    """Put this user's whole history behind a permanent fold prefix.
+
+    The prefix arm needs no policy switch, which is exactly the point: a fold
+    prefix freezes evidence even with freezing and cleanup turned off, because
+    the raw rows it covers no longer exist.
+    """
+    from app.models import User, UserOpportunityRetentionState
+    from app.opportunity_store import ensure_retention_state
+
+    if db_session.get(User, user_id) is None:
+        db_session.add(User(id=user_id, username=None, is_anonymous=True))
+        db_session.flush()
+    ensure_retention_state(db_session, user_id)
+    state = db_session.get(UserOpportunityRetentionState, user_id)
+    state.folded_through_started_at = through
+    db_session.flush()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["blunder-id", "all-blunders", "session-id", "all-sessions"],
+)
+def test_every_repair_mode_refuses_to_rewrite_frozen_evidence(
+    db_session, capsys, mode
+):
+    """All four modes, guarded before any delete or upsert.
+
+    Recompute is full replacement. Letting a frozen session through would DELETE
+    rows a per-blunder summary has already absorbed and then recreate them, so a
+    refusal has to happen before the write, not be detected after it.
+    """
+    user_id, game_session, blunders = _boundary_case(db_session, session_int=400)
+    blunder_id = blunders["downstream"].id
+    session_id = game_session.id
+
+    def stored_events():
+        return {
+            (event.session_id, event.blunder_id, event.opportunity, event.reached)
+            for event in db_session.query(BlunderOpportunityEvent).all()
+        }
+
+    # Establish the unfrozen result first, so the frozen run is compared against
+    # a real rewrite rather than against an empty table.
+    assert main(
+        ["--all-sessions", "--user-id", str(user_id), "--started-before",
+         datetime.now(timezone.utc).isoformat(), "--progress-every", "0"],
+        session_factory=lambda: db_session,
+    ) == 0
+    before = stored_events()
+    assert before, "expected the unfrozen repair to write evidence"
+
+    _freeze_user_evidence(
+        db_session, user_id=user_id, through=datetime.now(timezone.utc)
+    )
+    # Remove one row so an unguarded rerun would visibly recreate it.
+    db_session.query(BlunderOpportunityEvent).filter(
+        BlunderOpportunityEvent.blunder_id == blunder_id
+    ).delete(synchronize_session=False)
+    db_session.flush()
+    after_removal = stored_events()
+    assert after_removal != before
+
+    argv = {
+        "blunder-id": ["--blunder-id", str(blunder_id)],
+        "all-blunders": ["--all-blunders", "--user-id", str(user_id)],
+        "session-id": ["--session-id", str(session_id)],
+        "all-sessions": [
+            "--all-sessions", "--user-id", str(user_id),
+            "--started-before", datetime.now(timezone.utc).isoformat(),
+        ],
+    }[mode]
+    assert main([*argv, "--progress-every", "0"], session_factory=lambda: db_session) == 0
+
+    assert stored_events() == after_removal
+    if mode in ("session-id", "all-sessions"):
+        assert "frozen_sessions=1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["blunder-id", "all-blunders", "session-id", "all-sessions"],
+)
+def test_every_repair_mode_checks_the_freeze_behind_the_user_lock(
+    db_session, monkeypatch, mode
+):
+    """The freeze check is only sound while the per-user graph write lock is held.
+
+    The event guards cover DELETE alone, so an unserialized repair can pass the
+    freeze check and then have a fold commit underneath it before its upsert —
+    recreating rows a summary has already absorbed. Upload and the deferred
+    worker already hold this lock; the repair modes were the hole.
+    """
+    import scripts.recompute_srs_opportunities as script
+
+    user_id, game_session, blunders = _boundary_case(db_session, session_int=401)
+    trace: list[tuple[str, int | None]] = []
+
+    def record_lock(db, *, user_id, dialect_name):
+        trace.append(("lock", user_id))
+
+    real_frozen = script.frozen_session_ids
+    real_compute = script._compute_blunder_opportunity_events
+
+    def record_frozen(db, *, user_id, session_ids):
+        trace.append(("freeze_check", user_id))
+        return real_frozen(db, user_id=user_id, session_ids=session_ids)
+
+    def record_compute(db, *, session_id, user_id, player_color):
+        trace.append(("freeze_check", user_id))
+        return real_compute(
+            db, session_id=session_id, user_id=user_id, player_color=player_color
+        )
+
+    monkeypatch.setattr(script, "acquire_graph_write_lock", record_lock)
+    monkeypatch.setattr(script, "frozen_session_ids", record_frozen)
+    monkeypatch.setattr(script, "_compute_blunder_opportunity_events", record_compute)
+
+    argv = {
+        "blunder-id": ["--blunder-id", str(blunders["downstream"].id)],
+        "all-blunders": ["--all-blunders", "--user-id", str(user_id)],
+        "session-id": ["--session-id", str(game_session.id)],
+        "all-sessions": [
+            "--all-sessions", "--user-id", str(user_id),
+            "--started-before", datetime.now(timezone.utc).isoformat(),
+        ],
+    }[mode]
+    assert script.main(
+        [*argv, "--progress-every", "0"], session_factory=lambda: db_session
+    ) == 0
+
+    assert ("freeze_check", user_id) in trace
+    # Ordering, not merely presence: a lock taken after the check protects
+    # nothing. Every freeze check must be preceded by a lock for its own owner.
+    for index, (kind, owner) in enumerate(trace):
+        if kind != "freeze_check":
+            continue
+        assert ("lock", owner) in trace[:index]

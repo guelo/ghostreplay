@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -14,6 +15,8 @@ from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_cache import bump_evidence_seq
 from app.opening_score_scheduler import OpeningScoreTrigger, request_recompute
+from app.opportunity_retention import database_clock, load_policy
+from app.opportunity_store import record_review_basis
 from app.posthog_client import capture
 from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
@@ -153,7 +156,11 @@ def review_blunder(
             # Already applied — echo the original outcome without mutating again.
             return _srs_response_from_review(blunder, existing)
 
-    reviewed_at = datetime.now(timezone.utc)
+    # Database clock, sampled AFTER the blunder lock above. The since-review
+    # window this stamp opens has to be comparable with database-stamped event
+    # times and with the retention boundary, and a request that waited on the
+    # lock must be stamped when it actually won it, not when it arrived.
+    reviewed_at = as_utc(db.execute(select(database_clock(db))).scalar_one())
     blunder.pass_streak = blunder.pass_streak + 1 if request.passed else 0
     blunder.last_reviewed_at = reviewed_at
 
@@ -163,18 +170,17 @@ def review_blunder(
     # value. Emitted normalized to analytics too (no raw at-rest counterpart exists).
     normalized_eval_delta = centipawn_loss(request.eval_delta)
 
-    db.add(
-        BlunderReview(
-            blunder_id=blunder.id,
-            session_id=request.session_id,
-            reviewed_at=reviewed_at,
-            passed=request.passed,
-            move_played_san=request.user_move,
-            eval_delta_cp=normalized_eval_delta,
-            idempotency_key=request.idempotency_key,
-            pass_streak_after=blunder.pass_streak,
-        )
+    review = BlunderReview(
+        blunder_id=blunder.id,
+        session_id=request.session_id,
+        reviewed_at=reviewed_at,
+        passed=request.passed,
+        move_played_san=request.user_move,
+        eval_delta_cp=normalized_eval_delta,
+        idempotency_key=request.idempotency_key,
+        pass_streak_after=blunder.pass_streak,
     )
+    db.add(review)
     # Opening-evidence counter (g-jact): a NEW review row is digest-visible, so
     # bump in the SAME txn as the insert (a rolled-back duplicate rolls back its
     # bump too). Color follows the digest's review scoping via
@@ -185,6 +191,18 @@ def review_blunder(
     # blunder's streak columns.
     try:
         db.flush()
+        # Fold the since-review counters onto the NEW review, under the blunder
+        # lock already held. The idempotent-retry paths above return before
+        # here, so a retry cannot reset a second time. A frozen or very old
+        # request.session_id is irrelevant: reviews are accepted at every age.
+        record_review_basis(
+            db,
+            blunder_id=blunder.id,
+            review_id=review.id,
+            reviewed_at=reviewed_at,
+            session_id=request.session_id,
+            policy=load_policy(db),
+        )
         player_color = _get_blunder_player_color(db, blunder)
         if player_color is not None:
             bump_evidence_seq(db, blunder.user_id, player_color)

@@ -179,6 +179,37 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opponent_decision_retention_migration.py::test_pg_backfill_cannot_overwrite_concurrent_winning_fact",
     "test_opponent_decision_retention_migration.py::test_pg_target_fact_reached_join_has_one_snapshot",
     "test_srs_opportunity.py::test_pg_target_fact_counters_match_raw_decisions",
+
+    # SRS opportunity retention lifecycle (g-srs-retention-state). Every one of
+    # these proves a PostgreSQL-only guarantee — a trigger, a transaction-local
+    # custom setting, a deferred constraint trigger or clock_timestamp() inside
+    # PL/pgSQL — that SQLite cannot stand in for.
+    "test_opportunity_lifecycle_pg.py::test_deleting_a_session_below_the_fold_prefix_is_rejected",
+    "test_opportunity_lifecycle_pg.py::test_the_prefix_guard_survives_turning_the_policy_back_off",
+    "test_opportunity_lifecycle_pg.py::test_an_old_session_is_deletable_until_freezing_is_approved",
+    "test_opportunity_lifecycle_pg.py::test_an_old_session_delete_is_rejected_once_freezing_is_enabled",
+    "test_opportunity_lifecycle_pg.py::test_a_recent_session_delete_still_succeeds_under_freezing",
+    "test_opportunity_lifecycle_pg.py::test_the_session_guard_uses_the_database_clock_not_transaction_start",
+    "test_opportunity_lifecycle_pg.py::test_deleting_a_frozen_event_row_directly_is_rejected",
+    "test_opportunity_lifecycle_pg.py::test_the_fold_transfer_marker_allows_the_controlled_deletion",
+    "test_opportunity_lifecycle_pg.py::test_deleting_the_parent_blunder_cascades_through_the_frozen_guard",
+    "test_opportunity_lifecycle_pg.py::test_purge_deletes_every_piece_of_a_frozen_users_training_state",
+    "test_opportunity_lifecycle_pg.py::test_a_partial_purge_fails_at_commit_and_rolls_back",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_marker_does_not_survive_the_transaction",
+    "test_opportunity_lifecycle_pg.py::test_a_rolled_back_purge_leaves_the_escape_disarmed",
+    "test_opportunity_lifecycle_pg.py::test_purge_rejects_an_unvalidated_owner",
+    "test_opportunity_lifecycle_pg.py::test_a_user_with_no_retention_row_still_gets_the_completeness_check",
+    "test_opportunity_lifecycle_pg.py::test_a_clean_purge_of_a_user_with_no_retention_row_commits",
+    "test_opportunity_lifecycle_pg.py::test_the_guards_take_no_advisory_lock",
+    "test_opportunity_compaction_migration.py::test_retention_storage_migration_backfills_zero_rows",
+    "test_opportunity_compaction_migration.py::test_the_backfill_stamps_the_review_basis_of_already_reviewed_blunders",
+    "test_opportunity_compaction_migration.py::test_the_backfill_never_overwrites_a_concurrent_writers_values",
+    "test_opportunity_compaction_migration.py::test_downgrade_refuses_to_destroy_folded_evidence",
+    "test_opportunity_lifecycle_pg.py::test_a_review_succeeds_while_an_unrelated_evidence_user_lock_is_held",
+    "test_opportunity_lifecycle_pg.py::test_a_review_is_stamped_with_the_database_clock",
+    "test_opportunity_lifecycle_pg.py::test_a_policy_change_commits_while_a_user_lock_is_held",
+    "test_opportunity_lifecycle_pg.py::test_both_m_directions_leave_the_fold_prefix_alone",
     # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
     "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",
@@ -471,6 +502,16 @@ REQUIRED_PG_GATE_TESTS = frozenset({
 # the matrix (e.g. the both-FOR-UPDATE deadlock case) fails the gate rather than
 # quietly shrinking it.
 REQUIRED_PG_GATE_PARAM_CASES = frozenset({
+    # Each marker combination is its own case: half a marker set must be no
+    # marker at all, so "mode only" and "owner only" have to be named, not
+    # summarized by a single happy-path entry.
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match[absent]",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match[mode-only]",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match[owner-only]",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match[wrong-mode]",
+    "test_opportunity_lifecycle_pg.py::test_the_purge_escape_requires_an_exact_mode_and_owner_match[wrong-owner]",
+    "test_opportunity_lifecycle_pg.py::test_both_m_directions_leave_the_fold_prefix_alone[shorten]",
+    "test_opportunity_lifecycle_pg.py::test_both_m_directions_leave_the_fold_prefix_alone[lengthen]",
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[boundary]",
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[terminal_race]",
     "test_opponent_session_expiry.py::test_pg_deleted_root_proof_fails_closed[opponent]",

@@ -191,6 +191,197 @@ class BlunderReview(Base):
     pass_streak_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class OpportunityRetentionPolicy(Base):
+    """The ONE global SRS opportunity retention policy row (g-srs-retention-state).
+
+    M (``mutation_window_days``) and G (``grace_seconds``) are global on purpose.
+    A per-user copy would let two users disagree about which raw rows are
+    foldable while sharing one blunder's summary arithmetic, and a summary is
+    per blunder, not per user. ``version`` increments on every policy change so
+    one fold operation can snapshot exactly one policy version.
+
+    ``readiness`` is the eager-backfill gate, not an activation switch: before
+    it flips, a missing per-blunder summary is a tolerated rollout gap that a
+    review may initialize; after it flips, a missing summary means folded
+    evidence was lost and readers must fail loudly.
+
+    ``freeze_enabled`` and ``cleanup_enabled`` are deliberately SEPARATE
+    switches, not one. Freezing (old sessions stop accepting evidence writes) is
+    the user-visible immutability policy and needs P0-B approval on its own;
+    cleanup (raw rows are physically deleted) needs writers drained behind that
+    freeze first. Both stay false for this bead — g-srs-retain-rollout owns
+    activation — and the check constraints below forbid ever inverting the
+    order. Neither switch governs the fold PREFIX: evidence that was actually
+    folded stays frozen even if both are turned back off, because its raw rows
+    are gone and nothing may recreate them.
+    """
+
+    __tablename__ = "opportunity_retention_policy"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_opportunity_retention_policy_singleton"),
+        CheckConstraint(
+            "mutation_window_days > 0",
+            name="ck_opportunity_retention_policy_window",
+        ),
+        CheckConstraint(
+            "grace_seconds >= 0", name="ck_opportunity_retention_policy_grace"
+        ),
+        CheckConstraint(
+            "version >= 1", name="ck_opportunity_retention_policy_version"
+        ),
+        # Strict ladder: readiness (the backfill is complete) gates freezing
+        # (old sessions stop accepting evidence writes), which gates cleanup
+        # (raw rows are physically deleted). Each step needs its own approval,
+        # and each is useless or unsafe without the one below it — folding
+        # evidence that writers can still rewrite would lose writes, and
+        # freezing before every summary exists would freeze undetectable holes.
+        CheckConstraint(
+            "freeze_enabled = false or readiness = true",
+            name="ck_opportunity_retention_policy_ready_before_freeze",
+        ),
+        CheckConstraint(
+            "cleanup_enabled = false or freeze_enabled = true",
+            name="ck_opportunity_retention_policy_freeze_before_cleanup",
+        ),
+    )
+
+    # No autoincrement: the singleton check constrains the value, and an
+    # identity column would happily hand out a second key that the constraint
+    # then rejects at insert time instead of at design time.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    # M = 60 days, G = 1 hour: the decided horizon, mirrored from
+    # app.opportunity_retention.DEFAULT_MUTATION_WINDOW_DAYS/_GRACE_SECONDS.
+    # Literals, not an import: opportunity_retention imports this module. The
+    # migration test asserts the seeded row equals those constants, so the two
+    # cannot drift silently.
+    mutation_window_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="60"
+    )
+    grace_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="3600"
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    freeze_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    cleanup_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    readiness: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserOpportunityRetentionState(Base):
+    """Per-user fold prefix and operational watermarks. No policy copy lives here.
+
+    ``folded_through_started_at`` is the PERMANENT inclusive freeze boundary:
+    MAX(game_sessions.started_at) over pairs actually folded for this user. It
+    advances atomically with a summary increment plus the matching raw deletion,
+    and a rolled-back fold advances nothing. It is conservative, not a proof
+    that every older pair was folded — targeted and legacy pins leave holes
+    behind it — so it may only ever FORBID mutation, never authorize it.
+
+    ``targeted_discarded_max_served_at`` bounds historical targeted-window
+    availability only; untargeted folding must not advance it.
+    ``sweep_progress_started_at`` is operational progress only. It cannot
+    authorize a mutation and it cannot license skipping old retained pins: a
+    repeated sweep still queries remaining eligible raw rows behind it.
+    """
+
+    __tablename__ = "user_opportunity_retention_state"
+
+    user_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    folded_through_started_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    targeted_discarded_max_served_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    sweep_progress_started_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class BlunderOpportunitySummary(Base):
+    """Exactly what was PHYSICALLY deleted from blunder_opportunity_events.
+
+    One eagerly created row per blunder. Eager creation is what makes loss
+    detectable: lazy creation with COALESCE 0 cannot tell "never folded" from
+    "summary lost after the raw rows were deleted" without another durable
+    marker.
+
+    These are never hypothetical shadow totals. ``folded_eligible_count`` folds
+    the same broad eligibility predicate that ``OpportunityCounters.event_count``
+    counts; the two ``*_since_review`` counters fold the same predicate under the
+    since-review window and reset to zero when a NEW review lands, because every
+    already-folded event necessarily predates that review. The reached counter is
+    required, not optional — it is the surviving broad reach diagnostic after
+    g-srs-api-counters removed the rolling pair.
+
+    ``latest_review_*`` records the review basis the since-review counters were
+    folded against, so a reader can prove the live latest review still agrees.
+    They are plain columns, not foreign keys: the basis is a snapshot of what was
+    folded, and a SET NULL on review deletion would silently erase the evidence
+    that the counters need explaining.
+    """
+
+    __tablename__ = "blunder_opportunity_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            "folded_eligible_count >= 0"
+            " and folded_opportunities_since_review >= 0"
+            " and folded_reached_since_review >= 0",
+            name="ck_blunder_opportunity_summary_nonnegative",
+        ),
+        # reached ⊆ opportunity and since-review ⊆ lifetime, mirroring
+        # ck_blunder_opportunity_reached_implies_opportunity and the broad
+        # predicate nesting on the raw rows these totals replaced.
+        CheckConstraint(
+            "folded_reached_since_review <= folded_opportunities_since_review",
+            name="ck_blunder_opportunity_summary_reached_within_opportunities",
+        ),
+        CheckConstraint(
+            "folded_opportunities_since_review <= folded_eligible_count",
+            name="ck_blunder_opportunity_summary_since_review_within_lifetime",
+        ),
+    )
+
+    blunder_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("blunders.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    folded_eligible_count: Mapped[int] = mapped_column(
+        BIGINT_SQLITE, nullable=False, server_default="0"
+    )
+    folded_opportunities_since_review: Mapped[int] = mapped_column(
+        BIGINT_SQLITE, nullable=False, server_default="0"
+    )
+    folded_reached_since_review: Mapped[int] = mapped_column(
+        BIGINT_SQLITE, nullable=False, server_default="0"
+    )
+    latest_review_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    latest_review_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    latest_review_session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True)
+    )
+    policy_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+
+
 class GameSession(Base):
     __tablename__ = "game_sessions"
     __table_args__ = (

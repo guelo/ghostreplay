@@ -243,6 +243,64 @@ def _create_test_schema(conn) -> None:
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )
     """))
+    # g-srs-retention-state: retention policy, per-user fold prefix and the
+    # per-blunder folded summaries. Mirrors the ORM/Alembic definitions so the
+    # SQLite suite exercises the same shape. Cleanup stays disabled and
+    # readiness stays false here — the freeze/fold behaviour is opt-in per test.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opportunity_retention_policy (
+            id INTEGER PRIMARY KEY,
+            mutation_window_days INTEGER NOT NULL DEFAULT 60,
+            grace_seconds INTEGER NOT NULL DEFAULT 3600,
+            version INTEGER NOT NULL DEFAULT 1,
+            freeze_enabled BOOLEAN NOT NULL DEFAULT false,
+            cleanup_enabled BOOLEAN NOT NULL DEFAULT false,
+            readiness BOOLEAN NOT NULL DEFAULT false,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT ck_opportunity_retention_policy_singleton CHECK (id = 1),
+            CONSTRAINT ck_opportunity_retention_policy_window
+                CHECK (mutation_window_days > 0),
+            CONSTRAINT ck_opportunity_retention_policy_grace CHECK (grace_seconds >= 0),
+            CONSTRAINT ck_opportunity_retention_policy_version CHECK (version >= 1),
+            CONSTRAINT ck_opportunity_retention_policy_ready_before_freeze
+                CHECK (freeze_enabled = false OR readiness = true),
+            CONSTRAINT ck_opportunity_retention_policy_freeze_before_cleanup
+                CHECK (cleanup_enabled = false OR freeze_enabled = true)
+        )
+    """))
+    conn.execute(text(
+        "INSERT OR IGNORE INTO opportunity_retention_policy (id) VALUES (1)"
+    ))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS user_opportunity_retention_state (
+            user_id INTEGER PRIMARY KEY,
+            folded_through_started_at TIMESTAMP,
+            targeted_discarded_max_served_at TIMESTAMP,
+            sweep_progress_started_at TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS blunder_opportunity_summaries (
+            blunder_id INTEGER PRIMARY KEY,
+            folded_eligible_count INTEGER NOT NULL DEFAULT 0,
+            folded_opportunities_since_review INTEGER NOT NULL DEFAULT 0,
+            folded_reached_since_review INTEGER NOT NULL DEFAULT 0,
+            latest_review_id INTEGER,
+            latest_review_at TIMESTAMP,
+            latest_review_session_id TEXT,
+            policy_version INTEGER NOT NULL DEFAULT 1,
+            CONSTRAINT ck_blunder_opportunity_summary_nonnegative
+                CHECK (folded_eligible_count >= 0
+                       AND folded_opportunities_since_review >= 0
+                       AND folded_reached_since_review >= 0),
+            CONSTRAINT ck_blunder_opportunity_summary_reached_within_opportunities
+                CHECK (folded_reached_since_review <= folded_opportunities_since_review),
+            CONSTRAINT ck_blunder_opportunity_summary_since_review_within_lifetime
+                CHECK (folded_opportunities_since_review <= folded_eligible_count),
+            FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE
+        )
+    """))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS moves (
             from_position_id INTEGER NOT NULL,
@@ -661,6 +719,9 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS opponent_target_facts"))
     # Before game_sessions / blunders: opponent_decisions references both.
     conn.execute(text("DROP TABLE IF EXISTS opponent_decisions"))
+    conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_summaries"))
+    conn.execute(text("DROP TABLE IF EXISTS user_opportunity_retention_state"))
+    conn.execute(text("DROP TABLE IF EXISTS opportunity_retention_policy"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_events"))
     conn.execute(text("DROP TABLE IF EXISTS opening_position_edges"))

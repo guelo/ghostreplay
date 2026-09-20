@@ -27,6 +27,7 @@ from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.opening_cache import bump_evidence_seq
 from app.opening_evidence import session_is_evidence_eligible
 from app.posthog_client import capture
+from app.opportunity_store import ensure_summary
 from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
 from app.srs_opportunity import (
@@ -260,6 +261,14 @@ def _upsert_blunder_target(
     )
     db.add(blunder)
     db.flush()
+    # The ONE insertion point, so auto and manual recording share it. Eager
+    # creation here — before the caller's evidence cursor bump, inside the same
+    # transaction — is what lets a later MISSING summary mean "folded evidence
+    # was lost" instead of "this blunder was never folded". The existing-blunder
+    # return above deliberately does not reach this line: re-running it would be
+    # harmless today (insert-if-absent), but routing an existing blunder through
+    # summary creation is exactly the shape that later resets live totals.
+    ensure_summary(db, blunder.id)
     return blunder.id, True
 
 

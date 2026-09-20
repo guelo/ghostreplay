@@ -198,6 +198,32 @@ export aggregates. Collection does not change evidence retention or select a
 mutation deadline. Deployment coverage, expiry and the observation procedure live
 in [`backend/scripts/OBSERVE_SRS_WRITES.md`](backend/scripts/OBSERVE_SRS_WRITES.md).
 
+Practice opportunity evidence has a stable mutability boundary. A global policy
+selects how long a session's broad opportunity evidence stays writable, and each
+user carries a permanent prefix marking how far that evidence has actually been
+folded into per-blunder retained totals. Uploads, the deferred evidence worker
+and every repair mode refuse to rewrite evidence past that boundary, deciding by
+database clock after they hold their locks; lengthening the window cannot reopen
+what the prefix already covers. Retained totals and live rows are read together,
+so a blunder's counters do not change when its rows are folded, and reviews stay
+accepted at every session age. Evidence stops being writable at the window's
+end; a separate grace interval is the drain the compactor waits out on top of
+it, never an extension of writability. Freezing and cleanup are separate,
+disabled switches behind a verified backfill — every blunder carrying both a
+retained-totals row and a current review basis, checked by query rather than
+assumed from the migration — so shipping the storage changes no current
+behavior. Deleting a whole user's training history remains possible under an
+administrative, owner-scoped purge. The storage and guards live in
+[`backend/app/opportunity_retention.py`](backend/app/opportunity_retention.py),
+[`backend/app/opportunity_store.py`](backend/app/opportunity_store.py) and
+[`backend/app/opportunity_purge.py`](backend/app/opportunity_purge.py); the
+lifecycle contract is covered by
+[`backend/test_opportunity_retention.py`](backend/test_opportunity_retention.py)
+and
+[`backend/test_opportunity_lifecycle_pg.py`](backend/test_opportunity_lifecycle_pg.py),
+with the boundary and purge reference in
+[`backend/scripts/RETAIN_SRS_OPPORTUNITIES.md`](backend/scripts/RETAIN_SRS_OPPORTUNITIES.md).
+
 New targeted decisions also atomically preserve each session/target's latest
 served time in compact facts. Targeted counters can read those facts after a
 verified backfill, while reached evidence remains current and mutable. Decision

@@ -30,6 +30,15 @@ Accepted durability risk:
     graceful shutdown. This is a narrow, explicitly-accepted regression vs the old
     synchronous commit, traded for the latency win.
 
+    Every backstop is bounded by the retention mutation boundary. Being enqueued
+    before the deadline does not rescue a job that reaches the database after it:
+    the guard in ``_compute_blunder_opportunity_events`` samples the database
+    clock once it holds the graph lock, so a queued, retried or replayed job for
+    a now-frozen session is SKIPPED, and the offline recompute skips it too.
+    Observe and repair failed evidence BEFORE it freezes; shortening the window
+    is not approved without the lateness/loss audit. See
+    ``app/opportunity_retention.py``.
+
 Coalescing key is ``session_id`` (a session has exactly one user_id +
 player_color). Within a coalesced entry, moves are deduped by
 ``(move_number, color)`` with LAST-WRITE-WINS — matching the
@@ -398,6 +407,8 @@ class SessionEvidenceScheduler:
                 outcome=("not_requested" if not entry.run_opportunity else
                          "worker_finished" if evidence_completed else "worker_failed"),
             )
+            # A frozen session is NOT a failure and never reaches here: the
+            # guard returns cleanly and the run completes with nothing written.
             logger.exception(
                 "session evidence side effects failed",
                 extra={

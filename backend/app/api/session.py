@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app import opportunity_store
 from app import srs_write_telemetry as srs_telemetry
 from app.analysis_cache_policy import (
     BROWSER_ANALYSIS_ACCEPTED_REASONS,
@@ -833,8 +834,12 @@ def _compute_blunder_opportunity_events(
     session_id: uuid.UUID,
     user_id: int,
     player_color: str,
-) -> None:
+) -> bool:
     """Rewrite this session's BROAD opportunity evidence from its stored moves.
+
+    Returns True when the evidence was rewritten and False when the session was
+    explicitly SKIPPED as frozen. The distinction matters to callers: a skip is a
+    policy outcome to report, not a failure to retry.
 
     Scoped to the session's EVIDENCE BOUNDARY (``app.evidence_boundary``). A normal
     game is evidence from ply 0 as it always was; a drill only from its confirmed
@@ -846,7 +851,31 @@ def _compute_blunder_opportunity_events(
     """
     game_session = db.query(GameSession).filter(GameSession.id == session_id).first()
     if game_session is None:
-        return
+        return False
+
+    # The ONE choke point for broad opportunity evidence — the upload path, the
+    # deferred worker and every repair mode reach the delete/upsert below
+    # through here — so the freeze guard belongs here and nowhere else.
+    #
+    # It runs BEFORE any delete or upsert, and AFTER the caller's graph lock, so
+    # the database clock it samples is the clock as of this transaction actually
+    # holding the lock. A transaction that was queued before the deadline and
+    # woke up after it is rejected here rather than being grandfathered in:
+    # ``run_opportunity`` is not finality, and being enqueued early is not a
+    # rescue. Recompute is full replacement, so letting a frozen session through
+    # would DELETE rows a summary has already absorbed and then recreate them.
+    if opportunity_store.session_evidence_frozen(
+        db, session_id=session_id, user_id=user_id
+    ):
+        logger.info(
+            "srs_evidence_frozen_skip session_id=%s user_id=%s", session_id, user_id
+        )
+        # Records the late attempt as outcome="frozen" on its own observation,
+        # so a skip is never read as a successful write. Without it the worker's
+        # own "worker_finished" would be the only trace of this job, which is
+        # true about the job and false about the evidence.
+        srs_telemetry.frozen_attempt(db, game_session)
+        return False
 
     srs_telemetry.observe_session(db, game_session)
     evidence = session_evidence_hashes(db, game_session)
@@ -927,6 +956,7 @@ def _compute_blunder_opportunity_events(
     # is off; ``.delete()`` and ``db.execute()`` issue immediately). Only their
     # durability finalizes at the caller's commit. Direct callers (tests/scripts)
     # must commit.
+    return True
 
 
 def _encoded_browser_provenance(move: SessionMoveInput) -> str | None:

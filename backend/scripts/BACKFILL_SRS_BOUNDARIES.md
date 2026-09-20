@@ -97,6 +97,19 @@ python scripts/recompute_srs_opportunities.py \
   --progress-every 25
 ```
 
+Every page also reports `frozen_sessions`. A nonzero value means the retention
+policy refused those sessions: their broad evidence is past the mutation boundary
+or at/below the owner's permanent fold prefix. They are skipped, never retried —
+behind a fold prefix the raw rows no longer exist, so rewriting the session would
+recreate rows a per-blunder summary has already absorbed. `processed_sessions`
+excludes them, so it is the count of sessions this page actually rewrote.
+
+Run this cleanup BEFORE freezing is enabled. Both retention switches ship
+disabled, so until the rollout enables them only an already-folded prefix can
+produce a skip, and on a database that has never folded `frozen_sessions` is
+always 0. See
+[`RETAIN_SRS_OPPORTUNITIES.md`](RETAIN_SRS_OPPORTUNITIES.md).
+
 Repeat until a page reports `processed_sessions=0 last_session_id=None`. If a process
 stops mid-page, resume after its last printed committed UUID. If no UUID was printed
 since the prior page, rerun that page from the prior checkpoint; upserts and stale-row
@@ -104,7 +117,10 @@ deletes are idempotent.
 
 `--session-id` recomputes one session. `--blunder-id` and `--all-blunders` are also
 boundary-aware, but the production cleanup is session-grained because only a session
-pass naturally retires every invalid row for that session.
+pass naturally retires every invalid row for that session. All four modes honour the
+retention freeze; the blunder-grain modes print
+`blunder=<id> frozen_sessions_skipped=<n>` and subtract those sessions from their
+reported scan count.
 
 The two grains intentionally differ on creation time: blunder-grain repair deletes an
 event when its session evidence predates `blunder.created_at`, while session-grain
