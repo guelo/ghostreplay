@@ -239,7 +239,7 @@ export const useChessGameController = ({
       // Gameplay barrier. Until the applied root-reaching move is confirmed the
       // drill is not root-reached, so no further move may be played onto it. One
       // guard covers drag and click alike — both funnel through here.
-      if (isDrillRootConfirmPending()) {
+      if (isDrillRootConfirmPending() || useGameStore.getState().drillOpponentExpired) {
         return { applied: false };
       }
 

@@ -120,6 +120,8 @@ export type GameState = {
    *  a proof for a move no longer on the board. Single source of truth: the
    *  `player-route` recovery carries no payload of its own. */
   drillPendingRouteMove: AppliedPlayerMove | null;
+  /** Terminal replay expiry, retained with the board across remounts. */
+  drillOpponentExpired: boolean;
   playerRating: number;
   isProvisional: boolean;
   ratingScores: RatingScores;
@@ -137,6 +139,7 @@ export type GameState = {
 };
 
 export type GameActions = {
+  markDrillOpponentExpired: (sessionId: string) => void;
   setLiveFen: (update: SetStateAction<string>) => void;
   setMoveHistory: (update: SetStateAction<MoveRecord[]>) => void;
   setViewIndex: (update: SetStateAction<number | null>) => void;
@@ -243,6 +246,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   drillTerminalReason: null,
   drillRootConfirm: null,
   drillPendingRouteMove: null,
+  drillOpponentExpired: false,
   playerRating: 1200,
   isProvisional: true,
   ratingScores: {
@@ -262,7 +266,14 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   setMoveHistory: (u) =>
     set((s) => ({ moveHistory: resolve(u, s.moveHistory) })),
   setViewIndex: (u) => set((s) => ({ viewIndex: resolve(u, s.viewIndex) })),
-  setSessionId: (u) => set((s) => ({ sessionId: resolve(u, s.sessionId) })),
+  setSessionId: (u) => set((s) => {
+    const sessionId = resolve(u, s.sessionId);
+    return { sessionId, drillOpponentExpired: sessionId === s.sessionId && s.drillOpponentExpired };
+  }),
+  markDrillOpponentExpired: (sessionId) => set((s) =>
+    s.sessionId === sessionId && s.isGameActive && s.drillOpeningKey !== null &&
+    (s.drillState === "active" || s.drillState === "root_reached")
+      ? { drillOpponentExpired: true } : {}),
   setMoveLineRevision: (u) =>
     set((s) => ({ moveLineRevision: resolve(u, s.moveLineRevision) })),
   setIsGameActive: (u) =>
@@ -293,7 +304,13 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     } : null,
   }),
   setDrillState: (u) =>
-    set((s) => ({ drillState: resolve(u, s.drillState) })),
+    set((s) => {
+      const drillState = resolve(u, s.drillState);
+      return {
+        drillState,
+        drillOpponentExpired: drillState !== "converted" && s.drillOpponentExpired,
+      };
+    }),
   setDrillStrictness: (u) =>
     set((s) => ({ drillStrictness: resolve(u, s.drillStrictness) })),
   setDrillStrictnessCp: (u) =>
@@ -431,6 +448,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   beginSession: (sessionId, moveLineRevision = 0) =>
     set(() => ({
       sessionId,
+      drillOpponentExpired: false,
       moveLineRevision,
       openingScoreDelta: null,
     })),

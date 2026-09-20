@@ -9,6 +9,11 @@ import { STARTING_FEN, MAIA_ELO_BINS, MAIA_BOT_NAMES } from "./chess-game/config
 import { setMatchMedia } from "../test/setup";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import type { AnalysisResult } from "../hooks/useMoveAnalysis";
+import { ApiError } from "../utils/api";
+
+const expiryError = () => new ApiError("Request failed", {
+  status: 410, code: "http_410", details: { error_code: "OPPONENT_SESSION_EXPIRED" },
+});
 
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
@@ -1025,6 +1030,41 @@ describe("ChessGame characterization safeguards", () => {
     expect(checkDrillRouteMock).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves an expired opponent root barrier and never retries on remount", async () => {
+    checkDrillRouteMock.mockRejectedValueOnce(expiryError());
+    const view = await serveRootReachingRouteMove();
+    await waitFor(() => expect(useGameStore.getState().drillOpponentExpired).toBe(true));
+    const before = useGameStore.getState();
+    expect(before.drillState).toBe("active");
+    expect(before.drillRootConfirm).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+    view.unmount();
+    render(<ChessGame />);
+    await act(async () => { capturedPieceDrop?.({ sourceSquare: "e7", targetSquare: "e5" }); });
+    expect(useGameStore.getState().moveHistory).toEqual(before.moveHistory);
+    expect(useGameStore.getState().drillRootConfirm).toBe(before.drillRootConfirm);
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(1);
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+  });
+
+  it("ignores an old root expiry after a new session owns the confirmation barrier", async () => {
+    let reject!: (reason: unknown) => void;
+    checkDrillRouteMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    await serveRootReachingRouteMove();
+    const oldBarrier = useGameStore.getState().drillRootConfirm!;
+    const newBarrier = { ...oldBarrier, sessionId: "new-session" };
+    act(() => {
+      useGameStore.getState().beginSession("new-session");
+      useGameStore.getState().setDrillRootConfirm(newBarrier);
+    });
+    await act(async () => { reject(expiryError()); });
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    expect(useGameStore.getState().drillRootConfirm).toBe(newBarrier);
+    expect(useGameStore.getState().drillState).toBe("active");
+  });
+
   it("hides Retry while a retried confirmation is itself in flight", async () => {
     checkDrillRouteMock.mockRejectedValueOnce(new Error("network down"));
     await serveRootReachingRouteMove();
@@ -1188,6 +1228,65 @@ describe("ChessGame characterization safeguards", () => {
     });
     return view;
   };
+
+  it.each(["root", "on-route", "off-route"])("stops an expired %s player route check across remounts", async (arrival) => {
+    checkDrillRouteMock.mockRejectedValueOnce(expiryError());
+    const view = armPlayerArrivalDrill();
+    if (arrival !== "root") {
+      act(() => useGameStore.setState({ drillOpeningKey: "later-root" }));
+    }
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: arrival === "off-route" ? "d2" : "e2",
+        targetSquare: arrival === "off-route" ? "d4" : "e4" });
+    });
+    await waitFor(() => expect(useGameStore.getState().drillOpponentExpired).toBe(true));
+    const before = useGameStore.getState();
+    expect(before.drillState).toBe("active");
+    expect(before.drillPendingRouteMove).not.toBeNull();
+    view.unmount();
+    render(<ChessGame />);
+    await act(async () => { await Promise.resolve(); });
+    expect(useGameStore.getState().moveHistory).toEqual(before.moveHistory);
+    expect(useGameStore.getState().drillPendingRouteMove).toBe(before.drillPendingRouteMove);
+    expect(checkDrillRouteMock).toHaveBeenCalledTimes(1);
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+  });
+
+  it("ignores an old player-route expiry after a replacement session", async () => {
+    let reject!: (reason: unknown) => void;
+    checkDrillRouteMock.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    armPlayerArrivalDrill();
+    await act(async () => { capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" }); });
+    const pending = useGameStore.getState().drillPendingRouteMove!;
+    const newPending = { ...pending, sessionId: "new-session" };
+    act(() => {
+      useGameStore.getState().beginSession("new-session");
+      useGameStore.getState().setDrillPendingRouteMove(newPending);
+    });
+    await act(async () => { reject(expiryError()); });
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    expect(useGameStore.getState().drillPendingRouteMove).toBe(newPending);
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["active", "root_reached"] as const)("stops expired %s opponent requests across remounts", async (state) => {
+    useGameStore.setState({ sessionId: "expired-drill", isGameActive: true,
+      playerColor: "black", boardOrientation: "black", liveFen: STARTING_FEN,
+      drillOpeningKey: E4_FEN, drillState: state });
+    getNextOpponentMoveMock.mockRejectedValueOnce(expiryError());
+    const view = render(<ChessGame />);
+    await waitFor(() => expect(useGameStore.getState().drillOpponentExpired).toBe(true));
+    expect(useGameStore.getState().drillState).toBe(state);
+    expect(useGameStore.getState().moveHistory).toHaveLength(0);
+    view.unmount();
+    render(<ChessGame />);
+    await act(async () => { await Promise.resolve(); });
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^abandon$/i })).toBeInTheDocument();
+  });
 
   it("drops a player-route retry whose move left live history", async () => {
     // Revert-and-replace: e4 reached the root and its check failed, then the player

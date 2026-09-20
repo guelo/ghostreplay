@@ -328,6 +328,11 @@ export class ApiError extends Error {
   }
 }
 
+/** Terminal replay expiry, classified from the actual server envelope. */
+export const isOpponentSessionExpired = (error: unknown): boolean =>
+  error instanceof ApiError && error.status === 410 &&
+  errorCodeOf(error) === 'OPPONENT_SESSION_EXPIRED'
+
 /**
  * Type guard to read a backend `error_code` off an unknown error.
  * Backend conflict responses carry `{ error: { details: { error_code } } }`,

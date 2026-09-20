@@ -63,6 +63,17 @@ same transition when its request already proves that the current position is the
 The client holds play at the root while route-check resolves and retries the same
 confirmation rather than advancing play.
 
+When opponent replay retention is enabled, both opponent requests and route
+checks expire at the session's immutable deadline. A `410` carrying
+`error.details.error_code=OPPONENT_SESSION_EXPIRED` stops active or root-reached
+drills: the applied board and any pending confirmation remain intact, with no
+failure or root stamp inferred from the error. Further moves, automatic retries,
+remount retries and manual Retry are suppressed. Existing new-drill and abandon
+actions remain available. The recovery flag lives with the in-memory session and
+resets when a new session begins; stale responses cannot stop a replacement game.
+Ordinary network failures keep their existing Retry behavior. Converted games
+retain normal local-engine fallback. See [opponent retention](opponent-retention.md).
+
 Pre-root moves are guided route play. At the current evidence boundary, observations at or
 after it seed downstream opportunity discovery, but only observations strictly after it
 count as a reached opportunity; when the boundary is the root, the root is therefore a

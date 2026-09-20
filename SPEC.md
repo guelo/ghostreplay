@@ -292,6 +292,15 @@ If FastAPI cannot provide an opponent decision, the browser may continue with a
 local-engine move labeled as a local fallback. The board remains playable, but
 Ghost steering is not available for that move.
 
+Opponent replay and drill route proofs have a configurable, immutable session
+deadline. Enforcement is disabled until the retention rollout selects and
+initializes the policy. With enforcement enabled, expired normal and converted
+games retain local fallback; active drills preserve their board and stop further
+play and retries, offering existing restart or abandon actions. Expiry does not
+invent a drill failure or root result, or expire history and earned reviews.
+See [opponent retention](docs/features/opponent-retention.md) for activation and
+the [drill contract](docs/features/drill-mode.md) for recovery behavior.
+
 A player who rewinds a rated game first confirms a resignation of that game.
 The board can then continue locally as unrated practice: it does not upload
 moves or create Ghost targets, drill progress, reviews, or rating effects.

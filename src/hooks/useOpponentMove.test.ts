@@ -96,6 +96,44 @@ describe("useOpponentMove", () => {
     getNextOpponentMoveMock.mockReset();
   });
 
+  it.each([true, false])("keeps expiry failures for drills and permits normal fallback=%s", async (fallback) => {
+    const failure = { status: 410, details: { error_code: "OPPONENT_SESSION_EXPIRED" } };
+    getNextOpponentMoveMock.mockReset().mockRejectedValue(failure);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(nonCommit);
+    const onBackendFailure = vi.fn();
+    const { result } = renderHook(() => useOpponentMove({
+      sessionId: "session", onApplyBackendMove: vi.fn(), onApplyLocalFallback,
+      shouldUseLocalFallback: () => fallback, onBackendFailure,
+    }));
+    await act(async () => { await result.current.applyOpponentMove("fen"); });
+    if (fallback) {
+      expect(onApplyLocalFallback).toHaveBeenCalledTimes(1);
+      expect(onBackendFailure).not.toHaveBeenCalled();
+    } else {
+      expect(onApplyLocalFallback).not.toHaveBeenCalled();
+      expect(onBackendFailure).toHaveBeenCalledWith(failure);
+    }
+  });
+
+  it("ignores late errors when the session or position guard rejects the response", async () => {
+    let reject!: (error: unknown) => void;
+    getNextOpponentMoveMock.mockReset().mockReturnValue(new Promise((_, r) => { reject = r; }));
+    const canApplyResult = vi.fn().mockReturnValue(true);
+    const onBackendFailure = vi.fn();
+    const onApplyLocalFallback = vi.fn();
+    const { result } = renderHook(() => useOpponentMove({
+      sessionId: "old", canApplyResult, onApplyBackendMove: vi.fn(),
+      onApplyLocalFallback, shouldUseLocalFallback: () => false, onBackendFailure,
+    }));
+    const pending = result.current.applyOpponentMove("old-fen");
+    canApplyResult.mockReturnValue(false);
+    await act(async () => { reject(new Error("expired")); await pending; });
+    expect(onBackendFailure).not.toHaveBeenCalled();
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
+    await result.current.applyOpponentMove("new-fen");
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+  });
+
   it("initializes with engine presentation", () => {
     const { result } = renderHook(() =>
       useOpponentMove({

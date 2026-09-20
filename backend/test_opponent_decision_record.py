@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import chess
 import pytest
-from sqlalchemy import DateTime, bindparam, text
+from sqlalchemy import DateTime, bindparam, literal, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.schema import CreateTable
@@ -958,8 +958,7 @@ def test_winning_fact_is_monotonic_when_decisions_finish_out_of_order(
     newer = datetime(2026, 9, 18, tzinfo=timezone.utc)
     older = newer - timedelta(microseconds=1)
     for fingerprint, stamp in (("newer", newer), ("older", older), ("latest", newer + timedelta(seconds=1))):
-        with patch("app.api.game.datetime") as clock:
-            clock.now.return_value = stamp
+        with patch("app.opponent_retention.database_clock", return_value=literal(stamp, type_=DateTime(timezone=True))):
             _, replayed = _record_target(db_session, session_id, target, fingerprint)
         assert not replayed
         db_session.expire_all()

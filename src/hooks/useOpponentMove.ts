@@ -34,6 +34,7 @@ export const determineOpponentMove = async (
   sessionId: string,
   fen: string,
   moves: string[] = [],
+  onFailure?: (error: unknown) => void,
 ): Promise<OpponentMoveResult | null> => {
   try {
     const response = await getNextOpponentMove(sessionId, fen, moves);
@@ -49,13 +50,14 @@ export const determineOpponentMove = async (
     };
   } catch (error) {
     console.error("[OpponentMove] Backend unavailable:", error);
+    onFailure?.(error);
     return null;
   }
 };
 
 type UseOpponentMoveOptions = {
   sessionId: string | null;
-  canApplyResult?: (requestSessionId: string | null) => boolean;
+  canApplyResult?: (requestSessionId: string | null, fen?: string) => boolean;
   onApplyBackendMove: (
     sanMove: string,
     decisionSource: Exclude<SessionDecisionSource, "local_fallback">,
@@ -70,7 +72,7 @@ type UseOpponentMoveOptions = {
     onCommitted: OpponentMoveCommittedObserver,
   ) => Promise<ApplyOpponentMoveOutcome>;
   shouldUseLocalFallback?: () => boolean;
-  onBackendFailure?: () => Promise<void>;
+  onBackendFailure?: (error?: unknown) => Promise<void>;
 };
 
 /**
@@ -134,7 +136,7 @@ export const useOpponentMove = ({
       if (!requestSessionId) {
         if (
           canApplyResultRef.current &&
-          !canApplyResultRef.current(requestSessionId)
+          !canApplyResultRef.current(requestSessionId, fen)
         ) {
           return;
         }
@@ -152,11 +154,16 @@ export const useOpponentMove = ({
         return;
       }
 
-      const result = await determineOpponentMove(requestSessionId, fen, moves);
+      // Check before dispatch too: expired drills must not retry on remount.
+      if (canApplyResultRef.current && !canApplyResultRef.current(requestSessionId, fen)) return;
+      let failure: unknown;
+      const result = await determineOpponentMove(requestSessionId, fen, moves, (error) => {
+        failure = error;
+      });
 
       if (
         canApplyResultRef.current &&
-        !canApplyResultRef.current(requestSessionId)
+        !canApplyResultRef.current(requestSessionId, fen)
       ) {
         return;
       }
@@ -198,7 +205,7 @@ export const useOpponentMove = ({
             }),
           );
         } else {
-          await onBackendFailureRef.current?.();
+          await onBackendFailureRef.current?.(failure);
         }
       }
     },

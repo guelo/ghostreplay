@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ApiError,
+  isOpponentSessionExpired,
   errorCodeOf,
   resolveApiBaseUrl,
   resolveApiEndpointBaseUrl,
@@ -837,6 +838,17 @@ describe('getNextOpponentMove', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     mockStore = {}
+  })
+
+  it('classifies the actual expiry envelope and never retries it', async () => {
+    mockResponse({ error: { code: 'http_410', message: 'Request failed',
+      details: { error_code: 'OPPONENT_SESSION_EXPIRED' } } }, false, 'Gone', 410)
+    const error = await getNextOpponentMove('expired-session', 'fen').catch(e => e)
+    expect(isOpponentSessionExpired(error)).toBe(true)
+    expect(error.retryable).toBe(false)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(isOpponentSessionExpired(new ApiError('Gone', { status: 410 }))).toBe(false)
+    expect(isOpponentSessionExpired(new Error('network'))).toBe(false)
   })
 
   it('sends POST request with JSON body', async () => {

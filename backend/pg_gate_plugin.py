@@ -156,6 +156,14 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
+    "test_opponent_session_expiry.py::test_pg_default_start_and_fresh_database_publication",
+    "test_opponent_session_expiry.py::test_pg_enforcement_uses_real_clock_after_transaction_start",
+    "test_opponent_session_expiry.py::test_pg_replay_deleted_before_lookup_cannot_publish_replacement",
+    "test_opponent_session_expiry.py::test_pg_conflict_winner_deleted_before_reselect_returns_503_then_410",
+    "test_opponent_session_expiry.py::test_pg_deleted_root_proof_fails_closed",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock",
+    "test_opponent_session_expiry.py::test_pg_replay_and_normal_record_do_not_wait_for_upload_lock",
+
     "test_opening_score_storage_pg.py::test_pg_current_schema_model_and_migration_parity",
     "test_opening_score_storage_pg.py::test_pg_conversion_retirement_and_downgrade_guard",
     "test_opening_score_storage_pg.py::test_pg_atomic_failure_boundaries_and_commit_recovery",
@@ -463,6 +471,17 @@ REQUIRED_PG_GATE_TESTS = frozenset({
 # the matrix (e.g. the both-FOR-UPDATE deadlock case) fails the gate rather than
 # quietly shrinking it.
 REQUIRED_PG_GATE_PARAM_CASES = frozenset({
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[boundary]",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[terminal_race]",
+    "test_opponent_session_expiry.py::test_pg_deleted_root_proof_fails_closed[opponent]",
+    "test_opponent_session_expiry.py::test_pg_deleted_root_proof_fails_closed[player]",
+    "test_opponent_session_expiry.py::test_pg_enforcement_uses_real_clock_after_transaction_start[admission]",
+    "test_opponent_session_expiry.py::test_pg_enforcement_uses_real_clock_after_transaction_start[publication]",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[root]",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[off_route]",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[observed_root]",
+    "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock[serve]",
+
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_for_update]",
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_nku]",
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[session_fu_blunder_nku]",

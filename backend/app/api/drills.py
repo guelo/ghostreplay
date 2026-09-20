@@ -26,6 +26,7 @@ from app.drill_steering import (
 )
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import GameSession, OpponentDecision, decode_uci_line, encode_uci_line
+from app.opponent_retention import check_deadline, initialize_deadline
 from app.opening_baseline_scheduler import (
     TerminalKind,
     enqueue_baseline_snapshot,
@@ -582,6 +583,7 @@ def start_drill(
         baseline_watermark_fingerprint=watermark_values[2],
     )
     db.add(session)
+    initialize_deadline(db, session)
     db.commit()
     db.refresh(session)
     # Capture the opening-score baseline OFF the request thread (g-mxeo) — mirrors
@@ -688,6 +690,7 @@ def check_drill_route(
         raise HTTPException(status_code=400, detail="Drill route cannot be checked from its current state")
     if (request.previous_fen is None) != (request.played_uci is None):
         raise HTTPException(status_code=400, detail="previous_fen and played_uci must be provided together")
+    check_deadline(db, session_id)
     routing = routing_view(get_opening_graph())
     try:
         route_map = route_map_for_target(
@@ -751,6 +754,7 @@ def check_drill_route(
             route_map,
             boundary_pending=confirmed_ply is not None,
         )
+        check_deadline(db, session_id)
         if guard is not None:
             return guard
         if session.drill_state != "root_reached":
@@ -794,6 +798,7 @@ def check_drill_route(
     # a root-reached or terminal transition committed concurrently is not clobbered.
     session = _get_drill_for_update(db, session_id)
     guard = _refreshed_route_guard(session, current_fen, route_map)
+    check_deadline(db, session_id)
     if guard is not None:
         return guard
     session.drill_state = "failed"

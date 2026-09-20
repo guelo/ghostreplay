@@ -1063,18 +1063,21 @@ def test_concurrent_confirmations_converge_on_one_ply(
     def _confirm(index: int) -> None:
         decision_id, ply = claims[index]
         started = time.perf_counter()
-        results[index] = _route_check(
-            pg_client,
-            auth_headers,
-            str(session_id),
-            user_id=user_id,
-            current_fen=NF3_FEN,
-            current_ply=ply,
-            decision_id=decision_id,
+        results[index] = pg_client.post(
+            f"/api/drills/{session_id}/route-check",
+            headers=auth_headers(user_id=user_id),
+            json={"current_fen": NF3_FEN, "current_ply": ply, "decision_id": decision_id},
         )
         elapsed[index] = time.perf_counter() - started
 
-    with _capture(pg_engine) as stmts:
+    # Patch shared module globals once, outside both workers. Overlapping
+    # context managers in _route_check can restore another worker's mock and
+    # leak its root registry into later tests.
+    with (
+        _capture(pg_engine) as stmts,
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(NF3_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=_graph()),
+    ):
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             gate_future = pool.submit(_gate)
             assert gate_held.wait(timeout=5)

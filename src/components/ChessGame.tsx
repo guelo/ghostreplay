@@ -35,7 +35,7 @@ import {
 import { openingPlyCount } from "../utils/gamePhase";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
-import { checkDrillRoute, failDrill } from "../utils/api";
+import { checkDrillRoute, failDrill, isOpponentSessionExpired } from "../utils/api";
 import { loadOpeningRootFamilies } from "../openings/openingRootsLoader";
 import {
   gameAnalysisStore,
@@ -451,6 +451,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // ⇒ engaged, covering both the in-flight and the failed case: a root-reaching
   // move has been applied but the backend has not confirmed it, so the drill is
   // NOT root-reached and no further gameplay may proceed.
+  const drillOpponentExpired = useGameStore((s) => s.drillOpponentExpired);
+  const stopExpiredDrill = useCallback((requestSessionId: string) => {
+    useGameStore.getState().markDrillOpponentExpired(requestSessionId);
+    setDrillRecovery(null);
+    setEngineMessage("This drill has expired. Start a new drill or abandon this one.");
+  }, [setEngineMessage]);
+  useEffect(() => {
+    if (drillOpponentExpired) {
+      setEngineMessage("This drill has expired. Start a new drill or abandon this one.");
+    }
+  }, [drillOpponentExpired, setEngineMessage]);
   const rootConfirm = useGameStore((s) => s.drillRootConfirm);
   const setRootConfirmBarrier = useGameStore((s) => s.setDrillRootConfirm);
   // Its player-arrival counterpart: the applied move whose route-check has not
@@ -810,6 +821,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
    */
   const confirmDrillRoot = useCallback(
     async (request: DrillRootConfirmRequest): Promise<boolean> => {
+      if (useGameStore.getState().drillOpponentExpired) return false;
       // A fresh object per attempt, so its REFERENCE is this attempt's ownership
       // token for the barrier. Retry and the remount resume both re-submit the
       // same `request`, so an attempt must never treat the request's own identity
@@ -846,6 +858,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         const current = useGameStore.getState();
         return (
           current.sessionId === request.sessionId &&
+          !current.drillOpponentExpired &&
           current.isGameActive &&
           current.drillOpeningKey !== null &&
           current.drillState === "active" &&
@@ -895,6 +908,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           setRootConfirmBarrier(null);
           return false;
         }
+        if (isOpponentSessionExpired(error)) {
+          stopExpiredDrill(request.sessionId);
+          return false;
+        }
         setDrillRecovery({ kind: "root-confirm", request });
         setEngineMessage(
           error instanceof Error && error.name === "TimeoutError"
@@ -904,7 +921,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false;
       }
     },
-    [chess, setEngineMessage, setRootConfirmBarrier],
+    [chess, setEngineMessage, setRootConfirmBarrier, stopExpiredDrill],
   );
 
   const isDrillRootConfirmPending = useCallback(
@@ -973,10 +990,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     resetPresentation: resetOpponentPresentation,
   } = useOpponentMove({
     sessionId,
-    canApplyResult: (requestSessionId) => {
+    canApplyResult: (requestSessionId, requestFen) => {
       const store = useGameStore.getState();
+      // Callers must pass the exact live chess.fen(); normalized/store FENs can fail the pre-dispatch guard.
       return (
         store.isGameActive &&
+        !store.drillOpponentExpired &&
+        (requestFen === undefined || chess.fen() === requestFen) &&
         store.sessionId === requestSessionId &&
         store.drillState !== "failed" &&
         !isRevertPendingRef.current &&
@@ -1007,8 +1027,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const store = useGameStore.getState();
       return !(store.drillOpeningKey && (store.drillState === "active" || store.drillState === "root_reached"));
     },
-    onBackendFailure: async () => {
+    onBackendFailure: async (error) => {
       const store = useGameStore.getState();
+      if (isOpponentSessionExpired(error) && store.sessionId) {
+        stopExpiredDrill(store.sessionId);
+        return;
+      }
       if (store.drillOpeningKey && store.drillState === "root_reached") {
         setDrillRecovery({
           kind: "opponent",
@@ -1042,6 +1066,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const checkPostPlayerDrillRoute = useCallback(
     async (result: Extract<PlayerMoveApplyResult, { applied: true }>) => {
       const store = useGameStore.getState();
+      if (store.drillOpponentExpired) return false;
       if (!store.sessionId || !store.drillOpeningKey || store.drillState !== "active") {
         return true;
       }
@@ -1056,6 +1081,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         const live = current.moveHistory[result.moveIndex];
         return (
           current.sessionId === requestSessionId &&
+          current.isGameActive &&
+          !current.drillOpponentExpired &&
           current.moveHistory.length === result.uciHistory.length &&
           live?.uci === result.moveUci &&
           live?.fen === result.fenAfter &&
@@ -1176,6 +1203,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           releasePending();
           return false;
         }
+        if (isOpponentSessionExpired(error)) {
+          stopExpiredDrill(requestSessionId);
+          return false;
+        }
         // This call can BE a boundary stamp (a player arrival at the root), so a
         // failure must be retryable as itself. Without a recovery the Retry button
         // falls through to applyOpponentMove and the drill advances with the
@@ -1193,7 +1224,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false;
       }
     },
-    [chess, setEngineMessage, setViewIndex],
+    [chess, setEngineMessage, setViewIndex, stopExpiredDrill],
   );
 
   const {
@@ -1792,6 +1823,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (didResumeDrillWorkRef.current) return;
     didResumeDrillWorkRef.current = true;
     const store = useGameStore.getState();
+    if (store.drillOpponentExpired) return;
     if (store.drillRootConfirm) {
       void confirmDrillRoot(store.drillRootConfirm);
       return;
@@ -2458,6 +2490,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [],
   );
   const canRetryDrillSteering =
+    !drillOpponentExpired &&
     Boolean(engineMessage) &&
     drillOpeningKey !== null &&
     isGameActive &&
@@ -2522,6 +2555,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   ]);
 
   const canDragLiveMove =
+    !drillOpponentExpired &&
     isGameActive &&
     isPlayersTurn &&
     !isRevertPending &&

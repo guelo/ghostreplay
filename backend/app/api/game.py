@@ -14,8 +14,6 @@ from typing import NamedTuple, TypeVar
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.accuracy import recompute_session_accuracy
@@ -56,6 +54,7 @@ from app.opening_score_delta import (
 )
 from app.posthog_client import capture
 from app.opponent_target_facts import publish_target_fact
+from app.opponent_retention import check_deadline, initialize_deadline, insert_decision
 from app.row_locks import for_no_key_update
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
@@ -804,6 +803,7 @@ def start_game(
     )
 
     db.add(session)
+    initialize_deadline(db, session)
     db.commit()
     db.refresh(session)
 
@@ -1239,7 +1239,6 @@ def _record_decision(
         "request_fen_hash": request_fen_hash,
         "uci_history": uci_history,
         "ply_before": ply_before,
-        "served_at": datetime.now(timezone.utc),
         "response_payload": stamped.model_dump_json(),
         "target_blunder_id": stamped.target_blunder_id,
         "resulting_fen": resulting_fen,
@@ -1254,21 +1253,8 @@ def _record_decision(
         ),
     }
 
-    insert = sqlite_insert if dialect_name == "sqlite" else postgresql_insert
-    stmt = (
-        insert(OpponentDecision)
-        .values(**values)
-        .on_conflict_do_nothing(
-            index_elements=[
-                OpponentDecision.session_id,
-                OpponentDecision.request_fingerprint,
-            ]
-        )
-        .returning(OpponentDecision.served_at)
-    )
-    inserted = db.execute(stmt).first()
-    won = inserted is not None
-    served_at = inserted.served_at if won else None
+    served_at = insert_decision(db, values)
+    won = served_at is not None
 
     if not won:
         # Lost. Commit to release whatever this transaction still holds — the route
@@ -1277,9 +1263,10 @@ def _record_decision(
         db.commit()
         winner = _replay_decision(db, session_id, request_fingerprint)
         if winner is None:
-            # Unreachable on Postgres: ON CONFLICT DO NOTHING blocks on a speculative
+            # ON CONFLICT DO NOTHING blocks on a speculative
             # insert and only reports a conflict once the winner COMMITTED (an aborted
-            # winner lets our insert proceed). Fail closed rather than serve a move
+            # winner lets our insert proceed). Cleanup can delete it before reselect.
+            # Fail closed rather than serve a move
             # that no decision records.
             logger.error(
                 "opponent decision insert lost but no winner row is visible "
@@ -1437,6 +1424,7 @@ def get_next_opponent_move(
     # same target_blunder_srs snapshot — instead of recomputing. The retry must serve
     # the move the stored decision records, because that row is what a later root
     # confirmation validates the applied position against.
+    check_deadline(db, request.session_id)
     replayed = _replay_decision(db, request.session_id, request_fingerprint)
     if replayed is not None:
         return _serve(replayed, True)
@@ -1463,6 +1451,8 @@ def get_next_opponent_move(
         if session.drill_state in {"failed", "abandoned"}:
             # A terminal transition raced ahead: the existing entry 400.
             raise HTTPException(status_code=400, detail="Opponent moves are unavailable for this drill state")
+
+        check_deadline(db, request.session_id)
 
         if session.drill_state != "active":
             # Converted sessions resume the normal path; root-reached sessions may

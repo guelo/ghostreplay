@@ -1,5 +1,36 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./useGameStore";
+
+describe("useGameStore drill expiry", () => {
+  beforeEach(() => {
+    useGameStore.setState(useGameStore.getInitialState(), true);
+  });
+
+  afterEach(() => {
+    useGameStore.setState(useGameStore.getInitialState(), true);
+  });
+
+  it("retains expiry for its session, rejects stale owners, and resets on a new session", () => {
+    useGameStore.setState({ sessionId: "old", isGameActive: true,
+      drillOpeningKey: "root", drillState: "active", drillOpponentExpired: false });
+    useGameStore.getState().markDrillOpponentExpired("stale");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    useGameStore.getState().markDrillOpponentExpired("old");
+    useGameStore.getState().setSessionId("old");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(true);
+    expect(useGameStore.getState().drillState).toBe("active");
+    useGameStore.getState().setSessionId("new");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    useGameStore.getState().markDrillOpponentExpired("old");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    useGameStore.getState().markDrillOpponentExpired("new");
+    useGameStore.getState().beginSession("fresh");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+    useGameStore.getState().markDrillOpponentExpired("fresh");
+    useGameStore.getState().setDrillState("converted");
+    expect(useGameStore.getState().drillOpponentExpired).toBe(false);
+  });
+});
 
 describe("useGameStore sound settings", () => {
   beforeEach(() => {
