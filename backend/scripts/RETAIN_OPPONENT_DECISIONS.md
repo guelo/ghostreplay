@@ -1,7 +1,7 @@
 # Opponent decision retention runbook
 
 The authoritative operator procedure for bounding opponent replay history: the
-targeting expansion first, then census and R selection, activation, the
+targeting expansion first, then the census against a decided R, activation, the
 seven-day no-deletion interval, the hourly cleanup job and its rollback limits.
 
 ## Expansion and targeting handoff
@@ -194,17 +194,61 @@ Under an enabled policy a session with a NULL deadline is an **invariant
 violation**, never an expiry: it is skipped, counted in
 `missing_deadline_sessions`, and alerts.
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `OPPONENT_DECISION_RETENTION_ENABLED` | `0` | Expiry enforcement. Deletion is refused while off. |
-| `OPPONENT_DECISION_RETENTION_SECONDS` | unset | R for newly created sessions. Existing deadlines never move. |
-| `OPPONENT_TARGET_SOURCE` | `decisions` | Counter reader. `--apply` is refused until this is `facts`. |
-| `OPPONENT_DECISION_CLEANUP_ENABLED` | `0` | The maintenance switch. `--apply` is refused while off. |
-| `OPPONENT_DECISION_CLEANUP_NOT_BEFORE` | unset | Offset-carrying ISO instant = recorded activation + 7 days. |
+| Setting | Default | Read by | Meaning |
+| --- | --- | --- | --- |
+| `OPPONENT_DECISION_RETENTION_ENABLED` | `0` | API **and** job | Expiry enforcement. Deletion is refused while off. |
+| `OPPONENT_DECISION_RETENTION_SECONDS` | unset | API **and** job | R for newly created sessions. Existing deadlines never move. |
+| `OPPONENT_TARGET_SOURCE` | `decisions` | API **and** job | Counter reader. `--apply` is refused until this is `facts`. |
+| `OPPONENT_DECISION_CLEANUP_ENABLED` | `0` | job only | The maintenance switch. `--apply` is refused while off. |
+| `OPPONENT_DECISION_CLEANUP_NOT_BEFORE` | unset | job only | Offset-carrying ISO instant = recorded activation + 7 days. |
 
 Unreadable values fail rather than falling back to "off". `--apply` is refused —
 never silently degraded to a dry run — unless all five are satisfied and the
 fresh database clock has reached the not-before instant.
+
+### Which service reads what
+
+Nothing under `backend/app/` imports `app.opponent_cleanup`; only
+`scripts/retain_opponent_decisions.py` and the sizing harness do. The two
+`CLEANUP_*` switches are therefore read **only by the cleanup job's process**,
+and setting them on the API service does nothing at all. Conversely all three
+of the others are read by the API (`check_deadline`, `initialize_deadline`,
+`current_target_pairs`) **and** by the job, which is why they must be **one
+definition** — a Railway project shared variable, or a `${{<api-service>.VAR}}`
+reference on the cleanup service — never two independently edited copies. The
+reason is the pruning guard in `authorize_deletion`: it refuses to delete while
+`OPPONENT_TARGET_SOURCE` is `decisions`, but it can only see the job's own copy.
+With two copies, reverting the API to `decisions` while the job's copy still
+reads `facts` leaves the guard silent and deletes exactly the attempts the
+counters are still reading — the `p_reach` inflation the guard exists to prevent.
+
+`OPPONENT_DECISION_RETENTION_SECONDS` is on that shared list for a
+non-obvious reason: `check_configuration()` runs at the top of every sweep and
+calls `retention_enabled()`, which raises when enforcement is on and no duration
+is set. A cleanup service that resolves `RETENTION_ENABLED=1` without also
+resolving `RETENTION_SECONDS` refuses with exit `2` on every hourly run — dry
+runs included.
+
+**A variable change is not live until it is deployed.** Railway stages variable
+edits as changes you must review and deploy; a dashboard edit left staged
+changes nothing about the running process. `railway variable set` triggers a
+deploy unless `--skip-deploys` is passed. The rule for every switch change in
+this runbook is therefore change → deploy the staged changes on every affected
+service → read the value back per service
+(`railway variable list --kv --service <name>`) and record it. A read-back
+showing a literal `${{` has proved only that the reference exists, not what it
+resolves to; get the effective value with
+`railway run --service <name> printenv OPPONENT_TARGET_SOURCE`.
+
+A read-back is evidence about the service's **configuration**, not about the
+process currently running: `--skip-deploys` commits a value no deployment has
+picked up and the read-back still shows it. Only the change → deploy → read-back
+order makes it evidence about the running process. Two of the three shared
+switches also have a behavioural confirmation — the pause's next execution
+exiting `2` (section 7) and activation's 410 (section 4). The reader switch in
+section 2 step 4 has none and can have none: while parity holds, `facts` and
+`decisions` return the same numbers, so record the variable-change time and the
+deploy's creation time and check that the deploy is the later of the two.
 
 `OPPONENT_TARGET_SOURCE=facts` is an activation control and not merely a step in
 section 2, because skipping it is silent. With R shorter than the 30-day counter
@@ -222,17 +266,30 @@ row lock.
 
 Exit status: `0` healthy, `1` alerting (backlog lag or a missing-deadline
 invariant), `2` refused. The two non-zero statuses mean different things and are
-kept apart deliberately: `1` means a sweep ran and reported something, `2` means
-no sweep happened. An unreadable maintenance variable is a refusal, not a
-traceback and not an alert — every switch is read before the first statement, so
-a typo exits `2` with its reason on stderr and nothing on stdout. The JSON report
-is aggregate-only: no session id, target id, user or payload appears in it.
+kept apart deliberately: `1` **with a JSON report on stdout** means a sweep ran
+and reported something, `2` means no sweep happened. An unreadable maintenance
+variable is a refusal, not a traceback and not an alert — every switch is read
+before the first statement, so a typo exits `2` with its reason on stderr and
+nothing on stdout. The JSON report is aggregate-only: no session id, target id,
+user or payload appears in it.
 
-## 1. Census and R selection
+There is a third shape, and reading it as an alert would be wrong:
+`retain_opponent_decisions.main()` catches only `CleanupRefused`, so anything
+else — a connection failure, a driver error — leaves a traceback on stderr,
+**no JSON on stdout**, and the interpreter's own exit status `1`. Exit `1` with
+no JSON is a crash: nothing was measured, and it is handled like a refusal, not
+like a backlog alert. "A run happened" is the presence of the report, not the
+status.
+
+## 1. Census, against a decided R
+
+**R = 7 days (604800 seconds), decided by the rollout owner on 2026-09-20.**
+The census no longer picks R; it records what that R costs and is the last place
+the choice can be sent back before anything is deployed.
 
 One read-only aggregate on the primary database. Record its output verbatim
-alongside the selected R; the maximum replay age is the number this bead could
-not supply, and the original `served_at` does not reveal later replay time.
+alongside R; the maximum replay age is the number this bead could not supply,
+and the original `served_at` does not reveal later replay time.
 
 ```sql
 WITH d AS (
@@ -255,7 +312,10 @@ SELECT count(*) AS decisions,
        count(*) FILTER (WHERE started_at > clock_timestamp()) AS future_starts,
        count(*) FILTER (WHERE started_at < clock_timestamp() - interval  '7 days') AS eligible_r7,
        count(*) FILTER (WHERE started_at < clock_timestamp() - interval '14 days') AS eligible_r14,
-       count(*) FILTER (WHERE started_at < clock_timestamp() - interval '30 days') AS eligible_r30
+       count(*) FILTER (WHERE started_at < clock_timestamp() - interval '30 days') AS eligible_r30,
+       sum(payload_bytes) FILTER (WHERE started_at < clock_timestamp() - interval  '7 days') AS eligible_r7_bytes,
+       sum(payload_bytes) FILTER (WHERE started_at < clock_timestamp() - interval '14 days') AS eligible_r14_bytes,
+       sum(payload_bytes) FILTER (WHERE started_at < clock_timestamp() - interval '30 days') AS eligible_r30_bytes
 FROM d;
 
 SELECT c.relname,
@@ -267,13 +327,44 @@ LEFT JOIN pg_class t ON t.oid = c.reltoastrelid
 WHERE c.relname IN ('opponent_decisions', 'opponent_target_facts', 'game_sessions');
 ```
 
+The `eligible_r*_bytes` columns are what the R comparison is actually recorded
+in. The row counts alone cannot produce it: a long drill history is orders of
+magnitude larger per envelope than an opening move
+(`app/opponent_cleanup.py:_envelope_batch`), so a share of rows is a poor proxy
+for a share of footprint. Record both.
+
 Compare against the `g-retain-decisions` projection (≈3 MB at R=7d, ≈6 MB at
 R=14d, ≈12 MB at R=30d, from 10,657,792 bytes over at most 26 days). Those are
 linear estimates, not measured steady state. Exceeding every observed replay age
 is **not** a mandatory gate — normal and converted play already falls back to the
 local engine on 410 — but the maximum and the implausible/future-start counts are
-recorded with the choice. Proposed R = 7 days. `R=30d` is growth prevention, not
-a demonstrated reduction from 10.7 MB.
+recorded with the choice. `R=30d` was the alternative and is growth prevention,
+not a demonstrated reduction from 10.7 MB.
+
+Two census results send R = 7 days back for re-decision rather than merely
+getting recorded. The first is `implausible_ages` or `future_starts` above `0`:
+every deadline is `started_at + R`, so a bad `started_at` is a bad deadline, and
+`eligible_r7` is not trustworthy either. The second is a large count from
+section 3's exposure query — the reading that actually matters, and one that can
+be taken here, before any deadline exists, by inlining the cut instead of
+reading a stored deadline:
+
+```sql
+SELECT count(*) AS live_sessions_older_than_r7
+FROM game_sessions s
+WHERE s.session_mode = 'drill' AND s.drill_state IN ('active', 'root_reached')
+  AND s.started_at < clock_timestamp() - interval '7 days'
+  AND EXISTS (SELECT 1 FROM opponent_decisions d
+              WHERE d.session_id = s.id
+                AND d.served_at > clock_timestamp() - interval '1 day');
+```
+
+That is how many in-progress drills would take a 410 on their next opponent
+request the moment enforcement goes on. `eligible_r7` alone overstates it by
+counting sessions nobody is playing. Section 3 runs the same query again against
+the real deadlines, because by then the stored deadline — not `started_at + R` —
+is what expiry reads. Neither number has a threshold this document can set; both
+go in front of the rollout owner before section 2 step 5.
 
 ## 2. Deploy, drain, backfill, verify
 
@@ -294,35 +385,131 @@ Order matters; each step's precondition is the previous step's recorded result.
    `app.srs_opportunity`, and `g-srs-target-publish` / `g-srs-fold-recovery` are
    still open. The rollout owner rechecks the deployed state rather than
    trusting this sentence.
-5. Select R from step 1, then initialize deadlines with
-   `scripts/initialize_opponent_decision_deadlines.sql`, binding the chosen
-   `retention_seconds`. It fills only NULL deadlines and never rewrites a
-   historical `started_at`. Verify both session creation routes stamp a deadline.
-   The backfill command refuses `--apply` once **any** deadline exists, so this
-   step is deliberately after step 2.
-6. Activate expiry (`OPPONENT_DECISION_RETENTION_ENABLED=1`) with every client
-   and server component ready.
+5. Set `OPPONENT_DECISION_RETENTION_SECONDS=604800` (R = 7 days) with
+   `OPPONENT_DECISION_RETENTION_ENABLED` still `0`. Deploy it and wait for
+   healthy. **This is the point of no return for fact coverage:**
+   `initialize_deadline` stamps every new session as soon as this value is set,
+   independently of enforcement, and the backfill refuses `--apply` once **any**
+   deadline exists. So it must not be set until step 2 returned `matches=true`,
+   and it must be set — and deployed — *before* the SQL below, or sessions
+   created in between carry no deadline. Repeat the drain check.
+6. Initialize the historical deadlines in one transaction with
+   `scripts/initialize_opponent_decision_deadlines.sql`, binding
+   `retention_seconds = 604800` from `backend/`:
 
-## 3. Record the activation and set the not-before
+   ```bash
+   psql "$PRIMARY_DATABASE_URL" -X -1 -v ON_ERROR_STOP=1 \
+     -v retention_seconds=604800 \
+     -f scripts/initialize_opponent_decision_deadlines.sql
+   ```
 
-Immediately after activation, record the database clock:
+   `-f` is load-bearing. psql interpolates `:retention_seconds` only when
+   reading a file or stdin, so the same statement pasted after `-c` dies with
+   `syntax error at or near ":"`; dropping `-v` fails the same way rather than
+   substituting something, which is the safe direction. Both checked on psql
+   15.18, where `make_interval(secs => 604800)` renders `168:00:00`.
+
+   It fills only NULL deadlines and never rewrites a historical `started_at`.
+   Record the UPDATE row count. Verify both session
+   creation routes (`POST /api/game/start`, `POST /api/drills/start`) stamp
+   `opponent_decisions_expires_at = started_at + R` on the deployed revision,
+   including the model's server-default `started_at` path.
+7. **Two invariant checks, and they are not the same check.** Both must be `0`.
+
+   ```sql
+   -- (a) Activation gate: EVERY session must have a deadline.
+   SELECT count(*) AS sessions_without_deadline
+   FROM game_sessions WHERE opponent_decisions_expires_at IS NULL;
+
+   -- (b) Sweep invariant: only the sessions the cleanup job can see.
+   SELECT count(DISTINCT d.session_id) AS envelope_sessions_without_deadline
+   FROM opponent_decisions d
+   JOIN game_sessions s ON s.id = d.session_id
+   WHERE s.opponent_decisions_expires_at IS NULL;
+   ```
+
+   (a) is the gate for step 8, because under enforcement a NULL deadline is not
+   a 410: `check_deadline` calls `require_deadline`, which raises `RuntimeError`,
+   so the user gets a **500** instead of the designed fallback on every route
+   that checks (`api/game.py` opponent move and its retry, `api/drills.py` route
+   check, opponent move and root confirmation). A session created by an
+   undrained container after the SQL ran has no envelope yet, passes (b), and
+   fails this way on its first opponent move. (b) is what the sweep reports as
+   `missing_deadline_sessions`. A nonzero result means a container without
+   `RETENTION_SECONDS` created sessions after the SQL ran: confirm the drain,
+   re-run the same idempotent NULL-only SQL, recheck. Re-run both after step 8
+   and again before enabling cleanup.
+8. Activate expiry (`OPPONENT_DECISION_RETENTION_ENABLED=1`) with every client
+   and server component ready, and with check (a) at `0`. Never set it before
+   `RETENTION_SECONDS`: the `app/main.py` lifespan rejects
+   enabled-without-duration at startup, which fails the healthcheck rather than
+   serving traffic — a backstop, not the plan. Section 4 is the go/no-go.
+
+## 3. Size the exposure, record the activation, record the not-before
+
+**Before setting `OPPONENT_DECISION_RETENTION_ENABLED=1`**, size what activation
+does: enforcement expires the entire historical backlog at that instant, so any
+browser tab still holding a session older than R gets a 410 on its next opponent
+request. Deadlines already exist (section 2 step 6), so the count is answerable
+while enforcement is still off, and it needs **both** predicates:
 
 ```sql
-SELECT clock_timestamp() AS activation_at;
+SELECT count(*) FROM game_sessions s
+WHERE s.session_mode = 'drill' AND s.drill_state IN ('active', 'root_reached')
+  AND s.opponent_decisions_expires_at < clock_timestamp()
+  AND EXISTS (SELECT 1 FROM opponent_decisions d
+              WHERE d.session_id = s.id
+                AND d.served_at > clock_timestamp() - interval '1 day');
 ```
 
-Write that instant into the handoff, add seven days, and set
-`OPPONENT_DECISION_CLEANUP_NOT_BEFORE` to the result (offset-carrying ISO 8601,
-e.g. `2026-10-05T18:22:31.418+00:00`). Leave `OPPONENT_DECISION_CLEANUP_ENABLED`
-at `0`. Nothing is deleted during the interval, so ordinary code and read-path
-rollback stay available for the whole window.
+The deadline predicate is what makes it a count of sessions that will 410; the
+activity predicate is what keeps it from counting every drill ever abandoned.
+Drop either one and the answer is meaningless. Pick a low-traffic window; a
+number large enough to matter is a reason to move the window, not to skip the
+step.
+
+Immediately after activation, take the activation instant and the not-before
+from **one** clock reading, so the not-before is neither hand arithmetic nor two
+`clock_timestamp()` calls microseconds apart:
+
+```sql
+SELECT a AS activation_at, a + interval '7 days' AS cleanup_not_before
+FROM (SELECT clock_timestamp() AS a) t;
+```
+
+Record both verbatim (offset-carrying ISO 8601, e.g.
+`2026-10-05T18:22:31.418+00:00`). Copying `psql`'s own rendering works —
+`datetime.fromisoformat` accepts its space separator and two-digit offset
+(`2026-10-05 18:22:31.418+00`) on Python 3.12. What `cleanup_not_before()`
+rejects is a value whose offset was dropped in transcription.
+
+The `OPPONENT_DECISION_CLEANUP_NOT_BEFORE` **variable** is set in section 6, on
+the cleanup service, because that service is the only thing that reads it and it
+does not exist yet. Recording the instant seven days before it has anywhere to
+live is intentional; nothing reads it in the meantime.
+`OPPONENT_DECISION_CLEANUP_ENABLED` stays `0` throughout.
+
+Nothing is deleted during the interval, so ordinary code and read-path rollback
+stay available for the whole window. **Rollback before the first deletion is one
+variable:** `OPPONENT_DECISION_RETENTION_ENABLED=0` (deployed — see *Which
+service reads what*). No code rollback and no data change; expiry simply stops
+being enforced and every envelope is still there. Re-enabling later is a **new
+activation**: new `activation_at`, new not-before, and the seven-day
+no-deletion interval restarts from that instant.
 
 The interval also gives already-expired rows seven days without API use before
 they are pruned. Cohorts that expire later rely on `R + D` alone.
 
-## 4. Exercising expiry without waiting R days
+## 4. The go/no-go client checks, and the daily dry sweep
 
-Short synthetic deadlines, not clock changes:
+Activation and client verification are **one sitting**. The client paths cannot
+be exercised beforehand: `check_deadline` returns early while the policy is
+disabled, so until section 3 there is no 410 to test. The sequence is activate →
+verify immediately → keep, or revert with
+`OPPONENT_DECISION_RETENTION_ENABLED=0`.
+
+Short synthetic deadlines, not clock changes, and **one disposable session per
+path** — a session that has 410'd cannot be reused for the next check:
 
 ```sql
 -- One disposable session you own, in a non-production or clearly marked session.
@@ -330,19 +517,40 @@ UPDATE game_sessions SET opponent_decisions_expires_at = clock_timestamp() - int
 WHERE id = :session_id;
 ```
 
-Confirm on that session: a normal or converted game receives 410
-(`error.details.error_code = OPPONENT_SESSION_EXPIRED`) and keeps playing on the
-local fallback with no server target; an active or root-reached drill stops
-retrying, keeps its board, and offers restart/abandon without a drill failure or
-a root stamp; a completed root result (`drill_root_reached_ply`) survives. Read
-counter parity with `scripts/backfill_opponent_target_facts.py` (read-only).
+Cover all four paths, not just the root arrival:
 
-Run the dry sweep as often as you like during the interval — it never deletes:
+1. A normal or converted game receives 410
+   (`error.details.error_code = OPPONENT_SESSION_EXPIRED`) and keeps playing on
+   the local fallback with one fallback move and no new server target.
+2. An active or root-reached drill's opponent request stops retrying, keeps its
+   board and barrier, and offers restart/abandon — no `drill_state='failed'` and
+   no root stamp.
+3. Opponent-arrival root confirmation.
+4. A pre-root player route check that is **not** at the root, on-route and
+   off-route.
+
+Confirm a completed `drill_root_reached_ply` survives. Read counter parity with
+`scripts/backfill_opponent_target_facts.py` (read-only), then re-run both
+invariant checks from section 2 step 7.
+
+Run the dry sweep as often as you like during the interval — it never deletes.
+Export the **production** values of the three shared switches and the recorded
+not-before, so `check_configuration()` also proves they parse; a dry run with
+the switches unset proves only that the defaults parse:
 
 ```bash
 cd backend && source .venv/bin/activate
-python scripts/retain_opponent_decisions.py
+OPPONENT_DECISION_RETENTION_ENABLED=1 OPPONENT_DECISION_RETENTION_SECONDS=604800 \
+  OPPONENT_TARGET_SOURCE=facts \
+  OPPONENT_DECISION_CLEANUP_NOT_BEFORE='<recorded activation+7d ISO>' \
+  python scripts/retain_opponent_decisions.py
 ```
+
+`sweep()` calls `check_configuration()` before anything else on every run, and
+that parses `cleanup_not_before()` whether or not `--apply` was given — so a
+transcribed instant that has lost its offset surfaces as exit `2` here, seven
+days before it would have blocked the first real run. The dry run still cannot
+delete: `authorize_deletion` is reached only under `--apply`.
 
 **Expect exit `1` from every dry run during the interval.** Sessions that expired
 before the job existed are already weeks past `R + D`, so `lag_seconds` exceeds
@@ -360,15 +568,29 @@ directly into local encryption so no plaintext copy is ever written:
 
 ```bash
 umask 077
+set -o pipefail
 pg_dump -Fc -t public.opponent_decisions "$PRIMARY_DATABASE_URL" \
   | age -p > ~/private/opponent_decisions-$(date -u +%Y%m%dT%H%M%SZ).dump.age
 ```
 
 Use existing approved credentials and whatever encryption tool is already
-approved (`age`, `gpg -c`, …). Keep the file in a private directory outside any
-repository, worktree or cloud-synced folder. Verify the exit status of **both**
-commands and a non-empty output file. Record its location and its deletion date
-in the handoff, then delete it seven days after capture and record that deletion.
+approved (`age`, `gpg -c`, …). Two prerequisites are worth checking before the
+capture, not after it: the workstation's `pg_dump` major version must be at
+least the server's, because `pg_dump` refuses a newer server; and the passphrase
+must have a recorded holder, since an unopenable dump is not a snapshot.
+
+Keep the file in a private directory outside any repository, worktree or
+cloud-synced folder. Verify **both** pipeline exit statuses (`pipefail` or
+`PIPESTATUS`) — and verify the artifact, because a non-empty file proves neither
+that it decrypts nor that it is a valid dump:
+
+```bash
+age -d <file> | pg_restore -l >/dev/null   # decrypts and parses; writes no plaintext, restores nothing
+```
+
+Record its private location, capture date, deletion date (capture + 7 days), the
+accountable owner and who holds the passphrase. Delete it on that date and
+record the deletion; never report it as deleted without verifying.
 
 This is a finite emergency snapshot, not a backup and not a promise to restore
 later writes or deletions. A table-only dump excludes `game_sessions`, `blunders`
@@ -385,18 +607,100 @@ without it, and it must not be reverted afterwards, see section 8), D and the
 `S + B < D` assumption documented, the seven-day interval elapsed, the encrypted
 dump captured, and a dry-run total you are willing to delete.
 
-Then set `OPPONENT_DECISION_CLEANUP_ENABLED=1` and schedule the Railway cron job
-hourly on the same backend image, environment and primary database. In the
-flattened Railway image the deployed path is normally:
+Also recorded before the first deletion: both invariant checks from section 2
+step 7 still `0`; the resolved switch values read back per service after their
+last deploy (*Which service reads what*); and the deployed sibling pin state
+rechecked against the revision deployed **now**, not the one recorded a week ago.
+
+### The first deletion is one bounded manual run
+
+Not a canary program — one run, attended, before anything unattended exists.
+Run it from a clean git worktree checked out at the **deployed** sha, because
+the operator scripts import `app.*` from whatever is on disk and this tree is
+edited concurrently:
 
 ```bash
-python /app/scripts/retain_opponent_decisions.py --apply
+cd backend && source .venv/bin/activate
+OPPONENT_DECISION_RETENTION_ENABLED=1 OPPONENT_DECISION_RETENTION_SECONDS=604800 \
+  OPPONENT_TARGET_SOURCE=facts OPPONENT_DECISION_CLEANUP_ENABLED=1 \
+  OPPONENT_DECISION_CLEANUP_NOT_BEFORE='<recorded activation+7d ISO>' \
+  python scripts/retain_opponent_decisions.py --apply --run-rows 500
 ```
+
+Expected, and not a fault: **exit `1`**, because the remaining backlog still
+exceeds the 24-hour lag window; and `facts_deleted: 0`, because envelopes and
+facts share one run budget and the envelope pass runs first, so a 500-row budget
+is spent before the fact pass starts. What the run proves is that deletion is
+authorized, bounded and atomic. A missing or mistyped switch is a refusal
+(exit `2`), never a silent dry run.
+
+### Scheduling it — the cleanup service
+
+A **new** Railway service in the same project, same repo and branch, same image
+and same primary database, running on a `0 * * * *` cron schedule. It is called
+the *cleanup service* throughout this runbook.
+
+**Configure it in the service's settings, not in a config file.** Railway's
+Config as Code (`railway.toml` / `railway.json`) is deprecated: per Railway's
+Infrastructure as Code documentation, "Config as Code is still read from your
+service repository during deploy for existing (legacy) services … **New services
+cannot opt into Config as Code**", and existing files "stop being read on
+**2026-12-01** (hard cutoff)". So a `railway.cron.toml` pointed at this service
+would never be read, and the root `railway.toml` does not reach it either. The
+project-level replacement is `.railway/railway.ts`, applied by
+`railway config plan` / `railway config apply`; adopting it migrates **every**
+service in the project at once ("A service cannot be managed by both systems at
+the same time"), which is its own change, not part of this rollout.
+
+What must be set on the service, and why each one:
+
+**Custom Start Command** — required, not optional:
+
+```bash
+if [ -d backend ]; then cd backend; fi; /opt/venv/bin/python scripts/retain_opponent_decisions.py --apply
+```
+
+Without an explicit start command the build's own start runs
+(`nixpacks.toml [start]`: `alembic upgrade head && uvicorn …`), which migrates,
+never exits, and so makes Railway skip every later execution.
+
+**Cron Schedule** `0 * * * *`. Railway skips a scheduled execution while the
+previous one is still running, which is safe here: the remaining rows are the
+queue and no state carries between runs.
+
+**Restart Policy** `NEVER`. Exit `1` (alerting) and exit `2` (refused) are
+ordinary outcomes for this job. An on-failure policy would re-run the sweep up
+to its retry count every hour and turn a refusal into a restart loop.
+
+**Healthcheck** none. A short-lived job has nothing to health-check.
+
+`/opt/venv/bin/python` rather than a bare `python`: the interpreter is the
+nixpacks venv, not a `python` on `PATH`. The `cd backend` guard mirrors the API
+service's start command and covers both image layouts (nixpacks normally
+flattens `backend/` into `/app`); the script puts its own parent directory on
+`sys.path`, so it does not depend on the working directory for imports. Confirm
+the actual layout and the command that ran from the deployment logs.
+
+Variables **on this service**: `OPPONENT_DECISION_CLEANUP_ENABLED=1` and
+`OPPONENT_DECISION_CLEANUP_NOT_BEFORE=<recorded instant>` live here and nowhere
+else; all three shared switches — including `RETENTION_SECONDS`, or every run
+refuses — are *referenced*, not copied; and the database URL is the same
+variable reference the API service uses.
+
+Private networking can need a moment to initialize in a freshly started
+container — never an issue for a long-running API, occasionally one for a
+short-lived cron process. If the first run fails to connect, point the
+cleanup service at the public proxy URL rather than adding retry logic.
 
 The job exits at its finite budget (20,000 rows or 600 seconds by default,
 100 rows or 4 MiB per batch) and stores nothing the next run needs. It can be
 killed, redeployed or run twice concurrently without losing work: the remaining
 rows are the queue and every batch is atomic. It takes no exports.
+
+Record the **first successful hourly execution**: timestamp, exit status and the
+full JSON report showing `"applied": true`. A run with no JSON report is not a
+successful execution regardless of its exit status. Record the service,
+schedule and start command actually used, and the first-deletion totals.
 
 ## 7. Monitoring and pausing
 
@@ -409,9 +713,47 @@ deadline. Healthy steady state is `lag_seconds` well under 24 hours with
 `eligible_envelopes` flat or falling across runs; a backlog that grows run over
 run means the hourly budget is too small for the load, not that the job is done.
 
-Pause by setting `OPPONENT_DECISION_CLEANUP_ENABLED=0` — no deployment needed,
-and `--apply` then refuses with exit `2` rather than deleting quietly. Pause on
-any counter-parity or invariant error before investigating.
+Two report shapes are not what they look like. Exit `1` with **no JSON on
+stdout** is a crash, not a backlog alert: nothing was measured, so treat it like
+a refusal. And a 500 on an opponent move under an enabled policy is a NULL
+deadline, not an expiry — re-run both invariant checks from section 2 step 7.
+
+**Parity stops being an oracle at the first deletion.** `compare_target_facts`
+counts a fact with no surviving decision group as an `extra_pair`, and facts
+outlive their envelopes by 30 days by design, so once anything is pruned the
+read-only comparison returns `matches: false` and exit `1` permanently. That is
+the design working. After the first deletion, watch `missing_deadline_sessions`
+staying `0`, `facts_deleted` against `eligible_facts`, and the
+`opponent_target_facts` row-count trend instead.
+
+Pause by setting `OPPONENT_DECISION_CLEANUP_ENABLED=0` **on the cleanup
+service** — the only place that variable is read; setting it on the API service
+changes nothing and deletion continues. No **code** change is needed, but a
+**deploy** is: Railway stages a variable edit until it is reviewed and deployed,
+so a `0` left staged in the dashboard does not stop the next hourly run. Set it,
+deploy the staged change on the cleanup service, read it back
+(`railway variable list --kv --service <cleanup>`), and confirm the next
+execution exits `2` with `{"refused": …}` on stderr. **Until that execution has
+been observed, treat deletion as still running.** Pause on any counter-parity or
+invariant error before investigating.
+
+After the first real deletion, repeat the section 4 client checks once on
+sessions whose envelopes are actually **gone** — section 4's `- interval
+'1 minute'` will not do, because `D` is one hour, so that session 410s with its
+envelopes intact and the check only re-proves section 4. The order matters or
+the assertion passes vacuously:
+
+1. Play a disposable session far enough that it **has** envelopes, and record
+   `SELECT count(*) FROM opponent_decisions WHERE session_id = '<id>'` as `> 0`.
+   A session stamped before its first opponent move has zero rows whether or not
+   anything was deleted, which tests nothing.
+2. Stamp `opponent_decisions_expires_at = clock_timestamp() - interval '2 hours'`.
+3. Let one hourly run pass, then confirm that same count is now `0`.
+4. Only then exercise the path — one disposable session per path, as in
+   section 4.
+
+What this shows, and section 4 cannot, is that removing the rows behind an
+already-unreadable session changes nothing observable.
 
 Report allocated bytes alongside live rows and live payload bytes. An ordinary
 `DELETE` frees reusable space without shrinking the Railway volume; a rewrite or
@@ -420,12 +762,19 @@ Report allocated bytes alongside live rows and live payload bytes. An ordinary
 ## 8. Rollback limits
 
 During the no-deletion interval everything is still present, so code and
-read-path rollback are ordinary. **After the first pruning they are not.** Any
-later rollback must keep writing compact facts and must keep honouring R: a
-revision that stopped writing facts would silently lose the denominator for
-sessions whose envelopes are already gone, and one that ignored R would serve
-replays for sessions the client can no longer rely on. Counters cannot be
-recomputed from envelopes once pruning has started, so
+read-path rollback are ordinary, and the named lever is one variable:
+`OPPONENT_DECISION_RETENTION_ENABLED=0`, deployed (section 3). No code rollback
+and no data change — expiry stops being enforced and every envelope is still
+there. Re-enabling afterwards is a **new activation**: new `activation_at`, new
+not-before, and the seven-day interval restarts. This is the whole rollback
+story before the first deletion; there is no separate post-prune window.
+
+**After the first pruning, rollback is not ordinary.** Any later rollback must
+keep writing compact facts and must keep honouring R: a revision that stopped
+writing facts would silently lose the denominator for sessions whose envelopes
+are already gone, and one that ignored R would serve replays for sessions the
+client can no longer rely on. Counters cannot be recomputed from envelopes once
+pruning has started, so
 `scripts/backfill_opponent_target_facts.py` must not be run and
 `OPPONENT_TARGET_SOURCE` must not revert to `decisions`. This limit is documented
 rather than enforced by a refused-downgrade mechanism: `--apply` refuses to prune
