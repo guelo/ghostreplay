@@ -30,6 +30,7 @@ from app.models import (
     User,
     ensure_evidence_epoch_infrastructure,
 )
+from app.opportunity_retention import ensure_retention_policy_row
 from app.security import hash_password
 
 DEFAULT_DATABASE_URL = "sqlite:///./.tmp/e2e.sqlite3"
@@ -305,6 +306,11 @@ def seed_database(database_url: str, *, reset: bool) -> dict[str, SeedUser]:
         engine,
         assume_new_schema=schema_was_empty,
     )
+    # The same gap, a second singleton (g-srs-target-publish): with no policy
+    # row the SRS interlock refuses to publish any target, so every seeded due
+    # blunder serves an ordinary untargeted move and no review position is ever
+    # offered. That is a seeded-database defect, not a retention decision.
+    ensure_retention_policy_row(engine)
 
     users = _load_seed_users()
     with Session(engine) as db:

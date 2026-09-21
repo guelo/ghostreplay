@@ -1110,17 +1110,15 @@ def _reseed_singletons(engine) -> None:
     database shape no migrated deployment can have.
 
     Re-seeded rather than preserved, because tests legitimately flip its switches
-    and a preserved row would leak ``freeze_enabled`` into the next test. The
-    INSERT supplies only ``id``, so the restored row is exactly what the migration
-    produces: the decided horizon with every switch off.
+    and a preserved row would leak ``freeze_enabled`` into the next test.
+
+    Delegated to the application helper so this gate restores exactly what a
+    create_all deployment installs and a migration seeds — one definition, not a
+    third copy of "what the migration puts there".
     """
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO opportunity_retention_policy (id) VALUES (1) "
-                "ON CONFLICT DO NOTHING"
-            )
-        )
+    from app.opportunity_retention import ensure_retention_policy_row
+
+    ensure_retention_policy_row(engine)
 
 
 def _make_isolated_pg_session_factory(pg_engine):

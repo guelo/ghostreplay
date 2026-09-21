@@ -32,6 +32,7 @@ from app.opportunity_retention import (
     DEFAULT_MUTATION_WINDOW_DAYS,
     RetentionInvariantError,
     RetentionPolicy,
+    ensure_retention_policy_row,
     frozen_by_age,
     load_policy,
     require_targeted_window,
@@ -1189,3 +1190,41 @@ def test_the_reconciler_still_repairs_a_basis_after_readiness(db_session):
         "basis_repaired": 1,
     }
     assert db_session.get(BlunderOpportunitySummary, blunder.id).latest_review_id == review.id
+
+
+def test_a_create_all_database_can_be_given_the_seeded_policy_row():
+    """A model-built database must end up with the row a migration seeds.
+
+    Target publication refuses to pin against a policy it cannot read, so a
+    create_all database without row 1 serves every drill untargeted — which is
+    how the seeded e2e review-position flow broke. The helper closes that gap for
+    the e2e seed database and the PostgreSQL gate's post-TRUNCATE restore, at the
+    decided horizon, without disturbing a row that is already there.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from app.models import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        with Session(engine) as db:
+            assert db.get(OpportunityRetentionPolicy, 1) is None
+
+        ensure_retention_policy_row(engine)
+
+        with Session(engine) as db:
+            # Exactly the fallback load_policy would have returned, which is the
+            # decided horizon with every switch off.
+            assert load_policy(db) == RetentionPolicy()
+            db.get(OpportunityRetentionPolicy, 1).readiness = True
+            db.commit()
+
+        # Idempotent, and not a reset: re-seeding must not reverse an operator's
+        # readiness flip, because the rollout ladder is one-directional.
+        ensure_retention_policy_row(engine)
+        with Session(engine) as db:
+            assert load_policy(db).readiness is True
+    finally:
+        engine.dispose()

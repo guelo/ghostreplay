@@ -188,6 +188,15 @@ only advances over evidence already deleted, so a live session steering behind i
 means the eligibility side let through history that is gone — alarm on it, do not
 merely count it.
 
+`missing_retention_policy` on **every** request, rather than once, is not a
+retention event at all: it means the database was built by
+`Base.metadata.create_all` instead of by the migrations, so row 1 was never
+seeded and no target can ever be published. That is what
+`app.opportunity_retention.ensure_retention_policy_row` is for — the e2e seed
+database and the PostgreSQL gate's post-TRUNCATE restore both call it, and a
+migrated deployment already has the row. Check the alembic revision before
+reaching for anything in this table.
+
 The reasons are **internal telemetry only** (a `retention_suppression` property on
 `opponent_move_served`, plus the log line). No response field, schema value or
 enum carries them: to the client and to root confirmation this is an ordinary

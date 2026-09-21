@@ -44,6 +44,7 @@ from sqlalchemy import (
     DateTime,
     Interval,
     func,
+    insert,
     literal,
     or_,
     select,
@@ -158,6 +159,53 @@ def load_policy(db: Session) -> RetentionPolicy:
         cleanup_enabled=bool(row.cleanup_enabled),
         readiness=bool(row.readiness),
     )
+
+
+def ensure_retention_policy_row(engine) -> None:
+    """Install the singleton policy row that migration ``20260919_04`` seeds.
+
+    ``Base.metadata.create_all`` builds the table and stops, and the two readers
+    disagree about what that means on purpose: :func:`load_policy` tolerates a
+    missing row because an un-migrated database must behave as it did before this
+    epic, while target publication REFUSES to pin a practice target against a
+    policy it cannot read — a defaulted M is a horizon nobody chose. So a
+    create_all database serves every drill untargeted, logging
+    ``missing_retention_policy`` each time, until this row exists. That is what
+    it is for: the e2e seed database and the PostgreSQL gate's post-TRUNCATE
+    restore, which must both match a migrated deployment.
+
+    Every column is written explicitly, from the same defaults
+    :class:`RetentionPolicy` falls back to, rather than left to the table's
+    ``server_default``. Two reasons, and the second is not optional: the values
+    then provably match what ``load_policy`` would have returned, and SQLAlchemy
+    renders a string ``server_default`` as a QUOTED literal, so under SQLite these
+    booleans default to the text ``'false'`` — which is not ``false``, and an
+    id-only INSERT fails the readiness/freeze ladder CHECK.
+
+    An existing row is left alone: this heals a missing singleton, it does not
+    reset a configured one. Takes an Engine, because both callers hold one and
+    the seed belongs in its own committed transaction either way.
+    """
+    defaults = RetentionPolicy()
+    with engine.begin() as conn:
+        present = conn.execute(
+            select(OpportunityRetentionPolicy.id).where(
+                OpportunityRetentionPolicy.id == POLICY_ID
+            )
+        ).first()
+        if present is not None:
+            return
+        conn.execute(
+            insert(OpportunityRetentionPolicy.__table__).values(
+                id=POLICY_ID,
+                mutation_window_days=defaults.mutation_window_days,
+                grace_seconds=defaults.grace_seconds,
+                version=defaults.version,
+                freeze_enabled=defaults.freeze_enabled,
+                cleanup_enabled=defaults.cleanup_enabled,
+                readiness=defaults.readiness,
+            )
+        )
 
 
 def database_clock(db: Session) -> ColumnElement[datetime]:
