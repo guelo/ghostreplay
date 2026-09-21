@@ -370,6 +370,61 @@ go in front of the rollout owner before section 2 step 5.
 
 Order matters; each step's precondition is the previous step's recorded result.
 
+### What "drained" means, and how to see it
+
+A Railway deploy is not a cutover instant. The new container boots, passes its
+healthcheck and starts taking traffic; only then is the old one stopped. For
+that window two revisions write to one database. "Drained" is the statement that
+the old one has stopped writing — a statement about database backends, not about
+the dashboard.
+
+It is written "and their in-flight transactions" because the process
+disappearing is not sufficient on its own. A request that began before the
+cutover can still be inside a transaction, and its INSERT is invisible to your
+snapshot until it commits — which can be after you looked. A reading taken while
+such a transaction is open certifies nothing: it was true when measured and
+false a moment later.
+
+What skipping it costs is specific at each step. At step 2, a writer without the
+dual writer inserts an envelope and no fact, so `matches=true` is stale the
+moment it prints. At step 5, a container that has not picked up
+`RETENTION_SECONDS` stamps NULL deadlines on the sessions it creates; if one is
+created after the initialization SQL has run, that deadline stays NULL, and
+under enforcement its first opponent move is a 500 rather than the designed 410.
+
+Three signals, and the third is the one most often skipped:
+
+1. Railway reports the previous deployment as `REMOVED`
+   (`railway deployment list --service <name> --json`).
+2. The database sees exactly one container. Each Railway container has its own
+   private IPv6 address, so a second `client_addr` is a second revision
+   (`application_name` is empty here, so the address is the only discriminator):
+
+   ```sql
+   SELECT client_addr, count(*) AS conns,
+          min(backend_start) AS oldest_backend_start,
+          max(state_change) AS last_activity,
+          min(xact_start) AS oldest_open_xact
+   FROM pg_stat_activity
+   WHERE datname = current_database() AND client_addr IS NOT NULL
+   GROUP BY client_addr ORDER BY oldest_backend_start;
+   ```
+
+3. `oldest_open_xact` is NULL, or later than the cutover. No transaction opened
+   by the revision you are replacing may still be open.
+
+One row, whose `oldest_backend_start` postdates the deployment's `createdAt`,
+with no open transaction, is a drained deploy; two rows means wait and re-read.
+The connection set is evidence, not proof of absence: SQLAlchemy holds pooled
+connections open (`pool_size` 10 plus `max_overflow` 10 per process,
+`app/db.py`), so a live old container that has served anything will appear, but
+one that has served nothing may not. That is why signal 1 belongs with the other
+two rather than instead of them.
+
+A drained deploy read on the production primary at 2026-09-21T02:18Z looked like
+this: one `client_addr`, one idle connection, `backend_start` 02:17:17Z against a
+deployment created 02:15:58Z, `oldest_open_xact` NULL.
+
 1. Verify the actual Railway deployed revision. Deploy the dual writers
    everywhere and drain old processes **and** their in-flight transactions.
 2. Rerun `python scripts/backfill_opponent_target_facts.py --apply` after the
@@ -569,15 +624,29 @@ directly into local encryption so no plaintext copy is ever written:
 ```bash
 umask 077
 set -o pipefail
-pg_dump -Fc -t public.opponent_decisions "$PRIMARY_DATABASE_URL" \
+PG_DUMP=/opt/homebrew/opt/postgresql@18/bin/pg_dump   # not the one on PATH; see below
+"$PG_DUMP" -Fc -t public.opponent_decisions "$PRIMARY_DATABASE_URL" \
   | age -p > ~/private/opponent_decisions-$(date -u +%Y%m%dT%H%M%SZ).dump.age
 ```
 
 Use existing approved credentials and whatever encryption tool is already
 approved (`age`, `gpg -c`, …). Two prerequisites are worth checking before the
-capture, not after it: the workstation's `pg_dump` major version must be at
-least the server's, because `pg_dump` refuses a newer server; and the passphrase
-must have a recorded holder, since an unopenable dump is not a snapshot.
+capture, not after it, and on this workstation the first one already bites.
+
+`pg_dump` refuses a server whose major version is above its own, and the
+primary is **PostgreSQL 18.6** while the `pg_dump` on `PATH` is 15.18: it aborts
+with `server version mismatch` before writing anything. Measured 2026-09-20, not
+predicted. Homebrew's `postgresql@18` is installed but unlinked, and its
+`pg_dump` (18.4) reads 18.6 correctly — a minor version below the server is
+fine, a major one is not — so the absolute path above is the fix, not an
+install. Check it with `"$PG_DUMP" --version` against the server's
+`SELECT version()`; the failure is loud, but it arrives on the day the snapshot
+is due.
+
+The second is the passphrase, which must have a recorded holder, since an
+unopenable dump is not a snapshot. As of 2026-09-20 neither `age` nor `gpg` is
+on this workstation; install one during the no-deletion interval, not on the day,
+and use that same tool in the verification below.
 
 Keep the file in a private directory outside any repository, worktree or
 cloud-synced folder. Verify **both** pipeline exit statuses (`pipefail` or
