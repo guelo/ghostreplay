@@ -256,6 +256,7 @@ def _create_test_schema(conn) -> None:
             freeze_enabled BOOLEAN NOT NULL DEFAULT false,
             cleanup_enabled BOOLEAN NOT NULL DEFAULT false,
             readiness BOOLEAN NOT NULL DEFAULT false,
+            first_fold_committed_at TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             CONSTRAINT ck_opportunity_retention_policy_singleton CHECK (id = 1),
             CONSTRAINT ck_opportunity_retention_policy_window
@@ -299,6 +300,31 @@ def _create_test_schema(conn) -> None:
             CONSTRAINT ck_blunder_opportunity_summary_since_review_within_lifetime
                 CHECK (folded_opportunities_since_review <= folded_eligible_count),
             FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE
+        )
+    """))
+    # g-srs-fold-recovery: the committed fold manifest. One row per batch that
+    # actually deleted raw rows, holding the verified export's locators and the
+    # per-blunder contributions a restore subtracts back.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opportunity_fold_batches (
+            batch_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            artifact_uri TEXT NOT NULL,
+            artifact_sha256 VARCHAR(64) NOT NULL,
+            rowset_hash VARCHAR(64) NOT NULL,
+            hash_version INTEGER NOT NULL,
+            row_count INTEGER NOT NULL,
+            policy_version INTEGER NOT NULL,
+            committed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            restored_at TIMESTAMP,
+            max_session_started_at TIMESTAMP NOT NULL,
+            targeted_discarded_max_served_at TIMESTAMP,
+            contributions TEXT NOT NULL,
+            CONSTRAINT ck_opportunity_fold_batch_rows CHECK (row_count > 0),
+            CONSTRAINT ck_opportunity_fold_batch_expiry
+                CHECK (expires_at > committed_at),
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
     """))
     conn.execute(text("""
@@ -719,6 +745,7 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS opponent_target_facts"))
     # Before game_sessions / blunders: opponent_decisions references both.
     conn.execute(text("DROP TABLE IF EXISTS opponent_decisions"))
+    conn.execute(text("DROP TABLE IF EXISTS opportunity_fold_batches"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_summaries"))
     conn.execute(text("DROP TABLE IF EXISTS user_opportunity_retention_state"))
     conn.execute(text("DROP TABLE IF EXISTS opportunity_retention_policy"))

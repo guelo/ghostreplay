@@ -443,3 +443,332 @@ def test_downgrade_refuses_to_destroy_folded_evidence(pg_migration_db, monkeypat
         assert remaining.isdisjoint(TABLES)
     finally:
         engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# The fold manifest and the finite recovery window (g-srs-fold-recovery)
+# --------------------------------------------------------------------------
+
+MANIFEST = "20260920_01"
+RECOVERY_TABLES = ("opportunity_fold_batches",)
+FOLD_BATCH_CHECKS = {
+    "ck_opportunity_fold_batch_rows",
+    "ck_opportunity_fold_batch_expiry",
+}
+
+
+def test_the_manifest_model_declares_its_invariants():
+    from app.models import OpportunityFoldBatch
+
+    checks = {
+        constraint.name
+        for constraint in OpportunityFoldBatch.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert FOLD_BATCH_CHECKS <= checks
+
+
+def test_a_fresh_model_driven_schema_creates_the_manifest_and_the_anchor():
+    from app.models import OpportunityRetentionPolicy as Policy
+
+    engine = create_engine("sqlite:///:memory:")
+    try:
+        Base.metadata.create_all(engine)
+        inspector = inspect(engine)
+        assert set(RECOVERY_TABLES) <= set(inspector.get_table_names())
+        columns = {c["name"] for c in inspector.get_columns(Policy.__tablename__)}
+        assert "first_fold_committed_at" in columns
+    finally:
+        engine.dispose()
+
+
+@pg_gate
+def test_the_manifest_migration_is_additive_and_leaves_the_anchor_null(
+    pg_migration_db, monkeypatch
+):
+    """Nothing has been folded on a database that just migrated, and it says so.
+
+    A non-NULL anchor would start the seven-day rollback clock on a deployment
+    that has deleted nothing, which is the one way this column can do harm.
+    """
+    monkeypatch.setenv("DATABASE_URL", pg_migration_db)
+    command.upgrade(config(), MANIFEST)
+    engine = create_engine(pg_migration_db)
+    try:
+        with engine.connect() as conn:
+            inspector = inspect(conn)
+            assert set(RECOVERY_TABLES) <= set(inspector.get_table_names())
+            assert conn.execute(text(
+                "SELECT first_fold_committed_at FROM opportunity_retention_policy "
+                "WHERE id = 1"
+            )).scalar() is None
+            assert conn.execute(text(
+                "SELECT count(*) FROM opportunity_fold_batches"
+            )).scalar_one() == 0
+    finally:
+        engine.dispose()
+
+
+def _pg_history(engine, *, user_id: int, tmp_path):
+    """A migrated PostgreSQL database with real foldable history on it.
+
+    Two blunders, three old sessions each with one raw row, one of which carries
+    a NULL ``occurred_at`` — the legacy shape a restore has to reproduce exactly
+    rather than normalize to ``created_at``.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy.orm import Session as OrmSession
+
+    from app.fen import fen_hash
+    from app.models import (
+        Blunder,
+        BlunderOpportunityEvent,
+        BlunderOpportunitySummary,
+        GameSession,
+        OpportunityRetentionPolicy as Policy,
+        Position,
+        User,
+    )
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=120)
+    fens = ("8/8/8/8/8/8/8/K6k w - - 0 1", "8/8/8/8/8/8/K6k/8 w - - 0 1")
+    with OrmSession(bind=engine) as db:
+        db.add(User(id=user_id, username=None, is_anonymous=True))
+        db.flush()
+        blunder_ids = []
+        for index, fen in enumerate(fens):
+            position = Position(user_id=user_id, fen_hash=fen_hash(fen),
+                                fen_raw=fen, active_color="white")
+            db.add(position)
+            db.flush()
+            blunder = Blunder(
+                user_id=user_id, position_id=position.id, bad_move_san="bad",
+                best_move_san="good", eval_loss_cp=200,
+                created_at=now - timedelta(days=365),
+            )
+            db.add(blunder)
+            db.flush()
+            db.add(BlunderOpportunitySummary(blunder_id=blunder.id))
+            blunder_ids.append(blunder.id)
+            for step in range(3):
+                game_session = GameSession(
+                    id=uuid.uuid4(), user_id=user_id,
+                    started_at=old - timedelta(days=index * 10 + step),
+                    status="completed", engine_elo=1500, player_color="white",
+                )
+                db.add(game_session)
+                db.flush()
+                db.add(BlunderOpportunityEvent(
+                    blunder_id=blunder.id, session_id=game_session.id,
+                    # The last row of each blunder is a legacy NULL.
+                    occurred_at=None if step == 2 else game_session.started_at,
+                    opportunity=True, reached=step == 0,
+                ))
+        policy = db.get(Policy, 1)
+        policy.readiness = True
+        policy.freeze_enabled = True
+        policy.cleanup_enabled = True
+        db.commit()
+    return blunder_ids, now
+
+
+def _raw_rows(engine):
+    """Every raw event row, as plain tuples, on the caller's engine.
+
+    The caller's engine, not a fresh one: an engine built here would keep its own
+    pool alive past the `with`, and the connection in it is only closed when the
+    interpreter gets round to collecting the engine.
+    """
+    with engine.connect() as conn:
+        return {
+            (row.id, str(row.session_id), row.blunder_id, row.occurred_at,
+             row.created_at, row.opportunity, row.reached)
+            for row in conn.execute(text(
+                "SELECT id, session_id, blunder_id, occurred_at, created_at, "
+                "opportunity, reached FROM blunder_opportunity_events"
+            ))
+        }
+
+
+@pg_gate
+def test_a_full_rollback_restores_raw_history_alongside_later_writes(
+    pg_migration_db, monkeypatch, tmp_path
+):
+    """The seven-day rehearsal, end to end, on the real schema and triggers.
+
+    Fold; let the world move on (a later write, a review, a purged blunder);
+    restore; and only then is the schema downgrade allowed to run. Each of those
+    three intervening events is a different way a naive restore goes wrong — by
+    overwriting, by double-subtracting, and by resurrecting.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy.orm import Session as OrmSession
+
+    from app.models import (
+        Blunder,
+        BlunderOpportunityEvent,
+        BlunderOpportunitySummary,
+        BlunderReview,
+        GameSession,
+        OpportunityFoldBatch,
+        OpportunityRetentionPolicy as Policy,
+        UserOpportunityRetentionState,
+    )
+    from app.opportunity_fold import FoldLimits, sweep
+    from app.opportunity_fold_recovery import restore_folded_evidence
+    from app.opportunity_store import load_policy, record_review_basis
+    from app.srs_opportunity import load_opportunity_counters
+
+    monkeypatch.setenv("DATABASE_URL", pg_migration_db)
+    monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path / "exports"))
+    cfg = config()
+    command.upgrade(cfg, MANIFEST)
+    engine = create_engine(pg_migration_db)
+    user_id = 8841
+    try:
+        blunder_ids, now = _pg_history(engine, user_id=user_id, tmp_path=tmp_path)
+        original = _raw_rows(engine)
+        with OrmSession(bind=engine) as db:
+            before = load_opportunity_counters(
+                db, blunder_ids, user_id=user_id, now=now)
+
+        report = sweep(
+            engine, user_ids=[user_id],
+            limits=FoldLimits(transaction_deadline=30.0, user_cooldown=0.0),
+        )
+        assert report.rows_deleted == 6
+        assert _raw_rows(engine) == set()
+
+        with OrmSession(bind=engine) as db:
+            assert db.get(Policy, 1).first_fold_committed_at is not None
+            assert db.get(UserOpportunityRetentionState, user_id).folded_through_started_at
+            # Counters are unchanged by the storage move.
+            assert load_opportunity_counters(
+                db, blunder_ids, user_id=user_id, now=now) == before
+
+            # 1. A later write, in a session young enough to still accept one.
+            recent = GameSession(
+                id=uuid.uuid4(), user_id=user_id,
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                status="completed", engine_elo=1500, player_color="white",
+            )
+            db.add(recent)
+            db.flush()
+            db.add(BlunderOpportunityEvent(
+                blunder_id=blunder_ids[0], session_id=recent.id,
+                occurred_at=recent.started_at, opportunity=True, reached=True,
+            ))
+            # 2. A review, which zeroes that summary's since-review counters and
+            #    moves its basis out from under the manifest.
+            review = BlunderReview(
+                blunder_id=blunder_ids[0], session_id=recent.id,
+                reviewed_at=datetime.now(timezone.utc), passed=True,
+                move_played_san="good", eval_delta_cp=0,
+            )
+            db.add(review)
+            db.flush()
+            record_review_basis(
+                db, blunder_id=blunder_ids[0], review_id=review.id,
+                reviewed_at=review.reviewed_at, session_id=recent.id,
+                policy=load_policy(db),
+            )
+            # 3. A purge. The event guard lets this cascade through because the
+            #    parent blunder is already gone by the time it fires.
+            db.query(Blunder).filter_by(id=blunder_ids[1]).delete()
+            db.get(Policy, 1).cleanup_enabled = False
+            db.commit()
+
+        restored = restore_folded_evidence(engine)
+
+        assert restored.batches >= 1
+        assert restored.rows_restored == 3
+        assert restored.rows_skipped_missing_parent == 3
+        assert restored.since_review_left_alone == 1
+        surviving = {row for row in original if row[2] == blunder_ids[0]}
+        # Exact facts, NULL occurred_at included, plus the later write.
+        assert surviving <= _raw_rows(engine)
+        assert len(_raw_rows(engine)) == 4
+
+        with OrmSession(bind=engine) as db:
+            assert db.get(Blunder, blunder_ids[1]) is None
+            summary = db.get(BlunderOpportunitySummary, blunder_ids[0])
+            assert summary.folded_eligible_count == 0
+            assert summary.folded_opportunities_since_review == 0
+            assert db.get(UserOpportunityRetentionState, user_id).folded_through_started_at is None
+            assert all(batch.restored_at is not None
+                       for batch in db.query(OpportunityFoldBatch))
+            # The id generator was moved past the restored rows: a fresh insert
+            # must not collide with an id that came back from the export.
+            another = GameSession(
+                id=uuid.uuid4(), user_id=user_id,
+                started_at=datetime.now(timezone.utc), status="completed",
+                engine_elo=1500, player_color="white",
+            )
+            db.add(another)
+            db.flush()
+            db.add(BlunderOpportunityEvent(
+                blunder_id=blunder_ids[0], session_id=another.id,
+                occurred_at=another.started_at, opportunity=True, reached=False,
+            ))
+            db.commit()
+
+        # Only now, with nothing unrestored and every total back at zero, may the
+        # schema go back.
+        command.downgrade(cfg, GUARDS)
+        with engine.connect() as conn:
+            assert set(RECOVERY_TABLES).isdisjoint(set(inspect(conn).get_table_names()))
+    finally:
+        engine.dispose()
+
+
+@pg_gate
+def test_the_downgrade_refuses_while_rows_are_deleted_and_after_the_window(
+    pg_migration_db, monkeypatch, tmp_path
+):
+    """Two refusals, and only one of them is temporary.
+
+    While a batch is unrestored the manifest is the only pointer to the export
+    that could refill its rows, so dropping it would strand them. After the
+    window the exports are gone regardless, and a raw-history downgrade stops
+    being a possible rollback target at all.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy.orm import Session as OrmSession
+
+    from app.opportunity_fold import FoldLimits, fold_user_batch
+    from app.opportunity_fold_recovery import RecoveryExpired, restore_folded_evidence
+    from app.models import OpportunityRetentionPolicy as Policy
+
+    monkeypatch.setenv("DATABASE_URL", pg_migration_db)
+    monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path / "exports"))
+    cfg = config()
+    command.upgrade(cfg, MANIFEST)
+    engine = create_engine(pg_migration_db)
+    user_id = 8842
+    try:
+        _pg_history(engine, user_id=user_id, tmp_path=tmp_path)
+        assert fold_user_batch(
+            engine, user_id=user_id,
+            limits=FoldLimits(transaction_deadline=30.0),
+        ).rows_deleted > 0
+
+        with pytest.raises(RuntimeError, match="unrestored SRS fold batches"):
+            command.downgrade(cfg, GUARDS)
+
+        with OrmSession(bind=engine) as db:
+            db.get(Policy, 1).cleanup_enabled = False
+            db.get(Policy, 1).first_fold_committed_at = (
+                datetime.now(timezone.utc) - timedelta(days=8)
+            )
+            db.commit()
+
+        with pytest.raises(RecoveryExpired, match="recovery window closed"):
+            restore_folded_evidence(engine)
+        with pytest.raises(RuntimeError, match="recovery window closed"):
+            command.downgrade(cfg, GUARDS)
+    finally:
+        engine.dispose()

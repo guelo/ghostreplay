@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     SmallInteger,
     String,
     Text,
@@ -270,6 +271,29 @@ class OpportunityRetentionPolicy(Base):
     readiness: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    # When the FIRST batch of raw rows was physically deleted, anywhere, for any
+    # user. Stamped by that fold's own transaction and guarded in the WHERE
+    # (``first_fold_committed_at IS NULL``), so two first folds racing cannot both
+    # write it and no later fold can move it forward.
+    #
+    # Seven days after this instant, a raw-history schema downgrade stops being a
+    # possible rollback target: the exports that could have refilled those rows
+    # are gone. It lives on the singleton rather than being derived from
+    # MIN(committed_at) over the manifests precisely because those rows are
+    # deleted at expiry, and a deadline that recedes as its evidence is cleaned
+    # up is not a deadline.
+    #
+    # It is cleared in exactly one case: a restore INSIDE the window that leaves
+    # no unrestored manifest, which means no raw row is deleted anywhere and
+    # there is nothing left for the deadline to protect. Without that, a rollback
+    # rehearsal would spend the only window the real rollout needs. NULL means
+    # nothing is folded right now — which is why every fold re-stamps this
+    # unconditionally rather than deciding from a value it read earlier: a
+    # restore can clear it mid-fold, and a batch that committed into the gap
+    # would be deleted rows with no deadline at all.
+    first_fold_committed_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -309,6 +333,85 @@ class UserOpportunityRetentionState(Base):
     sweep_progress_started_at: Mapped[DateTime | None] = mapped_column(
         DateTime(timezone=True)
     )
+
+
+class OpportunityFoldBatch(Base):
+    """One committed fold: what it deleted, where the exact facts went, when it expires.
+
+    The manifest is written INSIDE the fold's critical transaction, alongside the
+    summary increments, the raw deletion and the prefix advance. That is what makes
+    "rows were deleted" and "a verified export of exactly those rows exists" a single
+    fact. A batch that was exported and then rolled back leaves no row here at all,
+    and its file on disk is an ORPHAN — cleaned up by the same expiry sweep, on age
+    alone, because nothing else will ever claim it.
+
+    ``contributions`` is the per-blunder ledger of what was ADDED to each summary,
+    with the review basis it was added under. Restoration subtracts it back, and the
+    basis is what makes that exact across an intervening review: a review resets the
+    since-review counters to zero and moves the basis, so a restore that finds a
+    different basis subtracts only the lifetime total, which no review ever resets.
+    Recomputing the deltas from the restored rows instead would be wrong for exactly
+    the same case, and silently so.
+
+    Rows here are operational bookkeeping with a finite life: ``expires_at`` is seven
+    days after the commit, and expiry deletes the row and its artifact together. It
+    is not an archive. A permanent one would be unbounded raw history wearing a
+    different name, which is the thing this epic exists to remove.
+    """
+
+    __tablename__ = "opportunity_fold_batches"
+    __table_args__ = (
+        CheckConstraint("row_count > 0", name="ck_opportunity_fold_batch_rows"),
+        CheckConstraint(
+            "expires_at > committed_at", name="ck_opportunity_fold_batch_expiry"
+        ),
+        # The expiry sweep's only access path, and it runs on a schedule against a
+        # table that is almost entirely unexpired. Ordered by expiry, not by user.
+        Index("idx_opportunity_fold_batches_expiry", "expires_at"),
+        Index("idx_opportunity_fold_batches_user", "user_id", "committed_at"),
+    )
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, autoincrement=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # Where the verified export landed. An opaque locator, resolved by
+    # app.opportunity_fold_export; the row records it so an operator can find the
+    # file from the database rather than by guessing a naming scheme.
+    artifact_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    # sha256 of the artifact BYTES (is this the file we wrote?) and of the canonical
+    # rowset (are these the rows we deleted?). Two different questions: a file can be
+    # intact and describe the wrong batch, or hold the right rows and be truncated.
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    rowset_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Which canonical serialization produced rowset_hash. A future field addition
+    # changes the hash of identical rows, and a restore must refuse a hash it cannot
+    # reproduce rather than compare two incomparable digests.
+    hash_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=statement_timestamp(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # MAX(game_sessions.started_at) over the pairs this batch actually deleted: the
+    # value it advanced the user's prefix to. Kept so a restore can prove which
+    # batch owns a prefix before moving it back.
+    max_session_started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    # NULL unless this batch discarded a pair that had been targeted. Untargeted
+    # folding must not advance the targeted watermark, so the common case stores
+    # nothing rather than a value that would narrow targeted availability for free.
+    targeted_discarded_max_served_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    contributions: Mapped[list] = mapped_column(JSON, nullable=False)
 
 
 class BlunderOpportunitySummary(Base):

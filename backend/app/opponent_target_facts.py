@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import func, literal_column, select
+from sqlalchemy import ColumnElement, func, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -85,7 +85,8 @@ def backfill_target_facts(db: Session) -> int:
 
 
 def current_target_pairs(
-    db: Session, *, cutoff: datetime, source: TargetSource | None = None,
+    db: Session, *, cutoff: datetime | ColumnElement[datetime],
+    source: TargetSource | None = None,
     blunder_ids: list[int] | None = None, user_id: int | None = None,
     exclude_session_id: uuid.UUID | None = None,
 ):
@@ -95,6 +96,10 @@ def current_target_pairs(
     here: a reached pair may need pinning even when its broad event is too old.
     Callers serving a user must supply both user_id and requested blunder_ids;
     the all-owner form is reserved for aggregate migration verification.
+
+    ``cutoff`` may be a plain value or a SQL expression. The compactor passes a
+    database-clock expression, because its pin lookup has to be decided by the
+    same clock as every other retention test, not by the process running it.
 
     Targeting comes from server decisions or their atomic facts, never client
     uploads. A served target with no later upload must remain a FAILED steer in

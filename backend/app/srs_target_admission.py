@@ -473,6 +473,14 @@ def lock_state_for_fold(db: Session, *, user_id: int) -> bool:
     says nothing about that. Without the bound a fold could hang on a publication
     exactly where it is supposed to give way.
 
+    False means 55P03 and ONLY 55P03 — the refusal of a NOWAIT acquisition or a
+    lock wait that hit the ceiling, which is what "a publication holds this row"
+    looks like. A 57014 cancellation is not that: it is the caller's own
+    ``statement_timeout``, i.e. its transaction budget running out, and returning
+    False for it would file a deadline overrun under a routine skip nobody
+    investigates. It propagates, and the compactor maps it to its own deadline
+    outcome.
+
     **On False the caller's transaction is still usable and needs no rollback.**
     That is not free: a lock timeout aborts a PostgreSQL transaction, so the
     acquisition runs inside a SAVEPOINT and the failure is rolled back to it. A
@@ -497,7 +505,11 @@ def lock_state_for_fold(db: Session, *, user_id: int) -> bool:
                 is not None
             )
     except OperationalError as err:
-        if _acquisition_timeout(err) is None:
+        if _acquisition_timeout(err) != "55P03":
+            # A real fault, or a cancellation that belongs to the caller's budget
+            # rather than to this interlock. Either way it is not "skip this
+            # user"; the savepoint above has already been rolled back, so the
+            # caller decides on a healthy transaction.
             raise
         logger.info(
             "user_id=%s retention state is held by a target publication; "

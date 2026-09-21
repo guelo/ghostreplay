@@ -225,8 +225,8 @@ def database_clock(db: Session) -> ColumnElement[datetime]:
     )
 
 
-def mutable_cutoff(db: Session, *, policy: RetentionPolicy) -> ColumnElement[datetime]:
-    """``database_clock - M`` as a SQL expression, per dialect.
+def shifted_clock(db: Session, delta: timedelta) -> ColumnElement[datetime]:
+    """``database_clock - delta`` as a SQL expression, per dialect.
 
     PostgreSQL subtracts a bound INTERVAL. SQLite has no interval arithmetic on
     its TIMESTAMP text, so the shift is pushed into the same ``strftime`` call
@@ -234,14 +234,31 @@ def mutable_cutoff(db: Session, *, policy: RetentionPolicy) -> ColumnElement[dat
     shape as the stored column so the comparison stays a valid ordering.
     """
     if db.get_bind().dialect.name == "postgresql":
-        return database_clock(db) - literal(policy.mutable_age, type_=Interval())
-    seconds = int(policy.mutable_age.total_seconds())
+        return database_clock(db) - literal(delta, type_=Interval())
+    seconds = int(delta.total_seconds())
     return type_coerce(
         func.strftime(
             "%Y-%m-%d %H:%M:%f", "now", f"-{seconds} seconds"
         ).concat("000"),
         DateTime(),
     )
+
+
+def mutable_cutoff(db: Session, *, policy: RetentionPolicy) -> ColumnElement[datetime]:
+    """``database_clock - M``: the instant evidence stops being writable."""
+    return shifted_clock(db, policy.mutable_age)
+
+
+def foldable_cutoff(db: Session, *, policy: RetentionPolicy) -> ColumnElement[datetime]:
+    """``database_clock - (M + G)``: the instant the compactor may touch it.
+
+    Strictly older than :func:`mutable_cutoff`, and that gap IS G. A writer that
+    passed the freeze test has the whole of it to finish and commit before any
+    row it touched becomes foldable. Folding against the mutation cutoff instead
+    would close the gap and put the compactor in a race with an in-flight,
+    already-authorized write — which is the one thing G exists to prevent.
+    """
+    return shifted_clock(db, policy.foldable_age)
 
 
 def frozen_by_age(started_at: datetime, *, now: datetime, policy: RetentionPolicy) -> bool:

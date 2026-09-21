@@ -12,9 +12,14 @@ gets the decided horizon rather than a placeholder. Changing M remains a policy
 change that bumps `version`.
 
 Everything below ships **inert**. `freeze_enabled` and `cleanup_enabled` default
-to false, no fold prefix exists, and no code in this release folds or deletes a
-raw row. A fresh deployment therefore behaves exactly as the previous one: with
-no freeze there is no age arm to evaluate, whatever M says.
+to false and no fold prefix exists, so a fresh deployment behaves exactly as the
+previous one: with no freeze there is no age arm to evaluate, whatever M says.
+
+The compactor that actually performs the transfer — one atomic batch, a verified
+export written before any lock, and a seven-day window in which every deleted row
+can be put back exactly — arrived with `g-srs-fold-recovery` and is documented in
+**[`RECOVER_SRS_FOLD.md`](RECOVER_SRS_FOLD.md)**. It deletes nothing until
+`cleanup_enabled` is set.
 
 ## The three tables
 
@@ -93,8 +98,9 @@ arm of every guard is therefore unconditional.
   `game_sessions`, which also stops the cascade to the event rows.
 * **Individual event delete** — a `BEFORE DELETE` trigger on
   `blunder_opportunity_events`, allowing exactly two legitimate deletions: a
-  bounded fold transfer, and the cascade from deleting the parent blunder (the
-  parent already being gone is the discriminator).
+  bounded fold transfer (which arms `ghostreplay.srs_fold_mode` for the one
+  DELETE statement and clears it again), and the cascade from deleting the parent
+  blunder (the parent already being gone is the discriminator).
 * **Reads** — `load_opportunity_counters` adds the folded totals to the live rows
   in ONE statement. After readiness, a missing summary or a lagging review basis
   raises instead of quietly serving a smaller number.
@@ -295,6 +301,18 @@ prefix.
 
 Lock order is user → retention state → parent rows. No trigger takes a user lock,
 so none can invert it.
+
+It reaches **folded** evidence too. Those raw rows are already deleted, so what
+is left is the `opportunity_fold_batches` manifest that describes them and the
+export it points at — and nothing cascades, because this purge keeps the account
+the manifest hangs off. No transaction can unlink a file, so the manifest is
+**expired in place** rather than deleted: `expires_at` and `restored_at` are set
+to now and the per-blunder ledger is emptied, which leaves a row that still names
+the file for the next `fold_srs_opportunities.py expire` and holds nothing open —
+not the recovery anchor, not the schema downgrade
+(`scripts/RECOVER_SRS_FOLD.md`). Run `expire` after a purge if you need that
+file gone on a deadline rather than on the sweep's schedule; until it runs, the
+tombstone shows up in `status` as a restored batch that is due to expire.
 
 It deletes more than evidence. Four tables reference `blunders` or `game_sessions`
 with no cascade, and all four go first: `session_moves.target_blunder_id` and

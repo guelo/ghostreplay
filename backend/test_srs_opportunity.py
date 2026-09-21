@@ -1969,3 +1969,153 @@ def test_target_source_rejects_unknown_setting(monkeypatch):
     monkeypatch.setenv("OPPONENT_TARGET_SOURCE", "factz")
     with pytest.raises(ValueError, match="must be decisions or facts"):
         target_source()
+
+
+# ---------------------------------------------------------------------------
+# Parity across a fold (g-srs-fold-recovery)
+#
+# The compactor changes where these counters are STORED. Every assertion below
+# is the same one: the numbers, the p_reach and the two scores are identical on
+# both sides of a fold. The raw legacy oracle above is untouched — these cases
+# read the same public loader every caller reads.
+# ---------------------------------------------------------------------------
+
+
+def _fold_ready(db_session, *, blunder: Blunder, mutation_window_days: int = 60) -> None:
+    """Climb the activation ladder with a synthetic M, and seed the summary."""
+    from app.models import BlunderOpportunitySummary, OpportunityRetentionPolicy
+
+    db_session.add(BlunderOpportunitySummary(blunder_id=blunder.id))
+    policy = db_session.get(OpportunityRetentionPolicy, 1)
+    policy.mutation_window_days = mutation_window_days
+    policy.readiness = True
+    policy.freeze_enabled = True
+    policy.cleanup_enabled = True
+    db_session.flush()
+
+
+def test_a_pair_stays_pinned_until_its_last_eligible_target_expires(db_session, tmp_path,
+                                                                    monkeypatch):
+    """An older AND a newer decision on one pair: the newest one decides.
+
+    ``current_target_pairs`` keeps the pair while ANY of its decisions is inside
+    the window, so the older one expiring changes nothing. Once the newer one
+    expires too the pair folds — and because it has left the targeted window,
+    folding it moves no targeted counter at all.
+    """
+    from app.opportunity_fold import FoldLimits, FoldOutcome, fold_user_batch
+    from conftest import engine as test_engine
+
+    monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path))
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    db_session.add(User(id=user_id, username=None, is_anonymous=True))
+    db_session.flush()
+    position = _position(db_session, user_id=user_id,
+                         fen="8/8/8/8/8/8/K7/5k2 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=position)
+    blunder.created_at = now - timedelta(days=400)
+    game_session = _opportunity_event(
+        db_session, user_id=user_id, blunder=blunder, opportunity=True,
+        reached=True, occurred_at=now - timedelta(days=200),
+    )
+    _decision(db_session, session=game_session, blunder=blunder,
+              served_at=now - timedelta(days=60))
+    _decision(db_session, session=game_session, blunder=blunder,
+              served_at=now - timedelta(days=20))
+    _fold_ready(db_session, blunder=blunder)
+    db_session.commit()
+
+    pinned = load_opportunity_counters(
+        db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert pinned.targeted_30d == 1 and pinned.targeted_reached_30d == 1
+    db_session.commit()
+
+    # The OLDER decision has already expired and the pair is still pinned.
+    assert fold_user_batch(
+        test_engine, user_id=user_id, limits=FoldLimits(transaction_deadline=30.0),
+    ).outcome is FoldOutcome.NOTHING_ELIGIBLE
+    db_session.expire_all()
+    assert db_session.query(BlunderOpportunityEvent).count() == 1
+
+    db_session.query(OpponentDecision).update(
+        {OpponentDecision.served_at: now - timedelta(days=90)}
+    )
+    db_session.commit()
+    expired = load_opportunity_counters(
+        db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert expired.targeted_30d == 0
+    db_session.commit()
+
+    assert fold_user_batch(
+        test_engine, user_id=user_id, limits=FoldLimits(transaction_deadline=30.0),
+    ).rows_deleted == 1
+
+    db_session.expire_all()
+    folded = load_opportunity_counters(
+        db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert asdict(folded) == asdict(expired)
+    assert folded.p_reach == expired.p_reach
+
+
+def test_a_never_targeted_frozen_pair_folds_before_day_thirty_unchanged(db_session,
+                                                                       tmp_path,
+                                                                       monkeypatch):
+    """M is not the 30-day targeted window, and nothing ties them together.
+
+    Under a synthetic short M a pair that was never targeted is foldable on day
+    eight, well inside the window ``targeted_30d`` is measured over. The point of
+    the case is that this is not a special case: the pair contributes nothing
+    targeted, so ``reached_since_review``, ``p_reach`` and both scores come out
+    bit-identical, and no targeted watermark moves.
+    """
+    from app.models import UserOpportunityRetentionState
+    from app.opportunity_fold import FoldLimits, fold_user_batch
+    from conftest import engine as test_engine
+
+    monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path))
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    db_session.add(User(id=user_id, username=None, is_anonymous=True))
+    db_session.flush()
+    position = _position(db_session, user_id=user_id,
+                         fen="8/8/8/8/8/K7/8/5k2 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=position)
+    blunder.created_at = now - timedelta(days=30)
+    old = _opportunity_event(
+        db_session, user_id=user_id, blunder=blunder, opportunity=True,
+        reached=True, occurred_at=now - timedelta(days=9),
+    )
+    _opportunity_event(
+        db_session, user_id=user_id, blunder=blunder, opportunity=True,
+        reached=False, occurred_at=now - timedelta(days=1),
+    )
+    _fold_ready(db_session, blunder=blunder, mutation_window_days=7)
+    db_session.commit()
+
+    scoring = dict(pass_streak=1, last_reviewed_at=None,
+                   created_at=blunder.created_at, now=now)
+    before = load_opportunity_counters(
+        db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    before_scores = (
+        srs_priority(counters=before, **scoring),
+        practice_priority_score(counters=before, eval_loss_cp=200, **scoring),
+    )
+    db_session.commit()
+
+    result = fold_user_batch(
+        test_engine, user_id=user_id, limits=FoldLimits(transaction_deadline=30.0))
+
+    assert result.rows_deleted == 1
+    db_session.expire_all()
+    assert db_session.query(BlunderOpportunityEvent).one().session_id != old.id
+    after = load_opportunity_counters(
+        db_session, [blunder.id], user_id=user_id, now=now)[blunder.id]
+    assert asdict(after) == asdict(before)
+    assert after.reached_since_review == before.reached_since_review == 1
+    assert (
+        srs_priority(counters=after, **scoring),
+        practice_priority_score(counters=after, eval_loss_cp=200, **scoring),
+    ) == before_scores
+    state = db_session.get(UserOpportunityRetentionState, user_id)
+    assert state.targeted_discarded_max_served_at is None

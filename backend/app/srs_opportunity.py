@@ -45,6 +45,12 @@ from app.srs_math import (
 SEVERITY_NORMALIZER_CP = 50.0
 P_REACH_FLOOR = 0.03
 P_REACH_MIN_SAMPLE = 30
+# The rolling window both targeted counters are measured over. Named because the
+# compactor reads it too: a pair served inside this window is PINNED and must not
+# be folded, or its reach would leave the numerator while its attempt stayed in
+# the denominator. Two literal 30s in two files would be one edit away from
+# silently deleting measured reaches.
+TARGETED_WINDOW_DAYS = 30
 
 
 @dataclass(frozen=True)
@@ -224,7 +230,7 @@ def load_opportunity_counters(
 
     unique_blunder_ids = list(dict.fromkeys(blunder_ids))
     now_utc = as_utc(now or datetime.now(timezone.utc))
-    cutoff = now_utc - timedelta(days=30)
+    cutoff = now_utc - timedelta(days=TARGETED_WINDOW_DAYS)
     counters = {blunder_id: OpportunityCounters() for blunder_id in unique_blunder_ids}
     policy = load_policy(db)
 

@@ -235,7 +235,9 @@ Do not delete WAL segments by hand.
 
 **Volume fill over 70%** — find out what grew before resizing. `base/` growth is
 real data: check the largest relations (`pg_total_relation_size`), the retention
-jobs (`scripts/retain_opponent_decisions.py`, `RETAIN_SRS_OPPORTUNITIES.md`),
+jobs (`scripts/retain_opponent_decisions.py`, `RETAIN_SRS_OPPORTUNITIES.md`,
+`scripts/fold_srs_opportunities.py` — note its recovery exports are files under
+`GHOSTREPLAY_SRS_FOLD_EXPORT_DIR`, not `base/`, and `expire` prunes them),
 and whether a migration left a bloated table. Resize before any `VACUUM FULL` or
 `REINDEX`: both need free space to run.
 

@@ -264,6 +264,32 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_srs_target_publication_pg.py::test_pg_an_idle_publication_is_terminated_and_frees_the_row",
     "test_srs_target_publication_pg.py::test_pg_publication_does_not_contend_with_a_session_row_lock",
     "test_srs_target_publication_pg.py::test_pg_a_first_publication_creates_the_row_and_a_racing_one_degrades",
+
+    # The compactor itself (g-srs-fold-recovery). Every acquisition is try-/NOWAIT,
+    # every way a batch can end has to leave the user's locks behind it, and a
+    # backend terminated mid-transaction has to give them back. None of that is a
+    # SQLite property: the deterministic suite proves the arithmetic, and these
+    # prove the lock manager agrees.
+    "test_opportunity_compaction_pg.py::test_pg_a_review_holding_the_blunder_row_defers_the_fold_immediately",
+    "test_opportunity_compaction_pg.py::test_pg_a_publication_holding_the_state_row_skips_only_this_user",
+    "test_opportunity_compaction_pg.py::test_pg_an_evidence_writer_holding_the_user_lock_skips_the_fold",
+    "test_opportunity_compaction_pg.py::test_pg_a_batch_that_overruns_its_deadline_rolls_back_and_frees_its_locks",
+    "test_opportunity_compaction_pg.py::test_pg_a_cancelled_statement_rolls_back_and_frees_its_locks",
+    "test_opportunity_compaction_pg.py::test_pg_a_stalled_client_is_terminated_and_its_locks_are_released",
+    "test_opportunity_compaction_pg.py::test_pg_a_connection_whose_rollback_fails_is_discarded_and_frees_its_locks",
+    "test_opportunity_compaction_pg.py::test_pg_only_the_fold_transfer_may_delete_a_frozen_event_row",
+    "test_opportunity_compaction_pg.py::test_pg_a_committed_fold_leaves_a_manifest_and_a_verified_artifact",
+    "test_opportunity_compaction_pg.py::test_pg_restoring_one_batch_leaves_the_generator_for_the_batches_behind_it",
+    "test_opportunity_compaction_pg.py::test_pg_a_generator_behind_the_restored_ids_refuses_instead_of_colliding",
+    "test_opportunity_compaction_pg.py::test_pg_a_cancelled_interlock_acquisition_is_not_a_publication_skip",
+    "test_opportunity_compaction_pg.py::test_pg_a_fold_in_flight_cannot_commit_into_a_window_a_restore_just_cleared",
+    "test_opportunity_compaction_pg.py::test_pg_the_anchor_clear_waits_for_a_manifest_that_has_not_committed",
+    "test_opportunity_compaction_pg.py::test_pg_a_training_history_purge_takes_the_fold_manifest_and_its_export",
+    # The fold manifest, the recovery-window anchor and the seven-day rollback
+    # rehearsal, on the real migrated schema and its delete guards.
+    "test_opportunity_compaction_migration.py::test_the_manifest_migration_is_additive_and_leaves_the_anchor_null",
+    "test_opportunity_compaction_migration.py::test_a_full_rollback_restores_raw_history_alongside_later_writes",
+    "test_opportunity_compaction_migration.py::test_the_downgrade_refuses_while_rows_are_deleted_and_after_the_window",
     # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
     "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",

@@ -21,6 +21,14 @@ Lock order is fixed and stated once: the user row, then that user's retention
 state, then the parent rows. Every trigger involved deliberately takes no user
 lock at all, so no trigger can invert this order behind a parent-row lock.
 
+Folded evidence is included. The raw rows of a folded batch are already deleted,
+so what this has to remove instead is the manifest that describes them — and the
+export file it points at. That file outlives this transaction whatever happens,
+so the manifest is expired in place rather than deleted: it stays as a tombstone
+naming the file, and the next expiry sweep takes the row and the file together.
+A purge that left them behind would keep seven days of exactly the history it was
+asked to delete.
+
 This purge is not evidence-only. It deletes the user's sessions, so it also
 deletes the ``rating_history`` rows earned in them: their Elo and games-played
 chain resets. That follows from what a whole-training-history deletion means,
@@ -34,7 +42,7 @@ whole-user purge would hand it a whole-user escape it has no business holding.
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -45,11 +53,13 @@ from app.models import (
     GameSession,
     OpponentDecision,
     OpponentTargetFact,
+    OpportunityFoldBatch,
     RatingHistory,
     SessionMove,
     User,
     UserOpportunityRetentionState,
 )
+from app.opportunity_retention import database_clock
 from app.opportunity_store import ensure_retention_state
 from app.row_locks import for_no_key_update
 
@@ -204,6 +214,35 @@ def purge_user_training_history(db: Session, *, user_id: int) -> dict[str, int]:
     ).rowcount
     counts["blunders"] = db.execute(
         delete(Blunder).where(Blunder.user_id == user_id)
+    ).rowcount
+    # Fold manifests. Deleting the ACCOUNT cascades these away; deleting only the
+    # training history under it does not, and leaving them alone would keep a
+    # record of which blunders this user had evidence for, plus a restore that
+    # would try to put the deleted rows back.
+    #
+    # Expired in place rather than deleted, because the artifact is a FILE and no
+    # transaction can unlink one: something has to outlive this commit still
+    # naming it. A deleted manifest names nothing, and the sweep cannot infer the
+    # deletion from the missing retention-state row below — a user who keeps
+    # playing gets that row back at their next served target
+    # (:mod:`app.srs_target_admission`), and their export would then age out over
+    # seven days like any orphan. So the row stays, saying three things:
+    #
+    # * ``expires_at`` now, which is what hands the row and its file to the next
+    #   expiry sweep (:mod:`app.opportunity_fold_recovery`), whatever else has
+    #   happened to this user by then;
+    # * ``restored_at`` now, because what that column asserts is true here — the
+    #   rows it describes are no longer deleted-but-recoverable — and leaving it
+    #   NULL would hold the recovery anchor open and refuse a schema downgrade
+    #   over rows nothing may ever put back;
+    # * no contributions, because that ledger is per-blunder and is precisely the
+    #   record of which blunders this user had evidence for.
+    now = db.execute(select(database_clock(db))).scalar_one()
+    counts["fold_batches"] = db.execute(
+        update(OpportunityFoldBatch)
+        .where(OpportunityFoldBatch.user_id == user_id)
+        .values(expires_at=now, restored_at=now, contributions=[])
+        .execution_options(synchronize_session=False)
     ).rowcount
     counts["retention_state"] = db.execute(
         delete(UserOpportunityRetentionState).where(

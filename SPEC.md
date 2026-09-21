@@ -251,6 +251,39 @@ covered by
 and
 [`backend/test_srs_target_publication_pg.py`](backend/test_srs_target_publication_pg.py).
 
+Folding that evidence is one atomic transfer with a finite way back. A bounded
+batch is selected, its exact original facts are exported and verified off disk
+before any lock is taken, and a single short transaction then re-reads policy,
+prefix and database time after its locks, rechecks the batch against the database
+rather than against its own export, adds the retained totals, deletes exactly the
+validated rows, records a manifest and advances the prefix and the targeted
+watermark. Every acquisition is non-blocking, so contention means skipping a user
+rather than waiting; batches are bounded, adapt downward under time pressure and
+are abandoned whole if a whole-transaction deadline expires, with a connection
+discarded rather than returned holding locks. Pairs an eligible current target
+still needs are retained, leaving holes that later sweeps revisit, and a folded
+pair cannot be recreated by any repair path. For a fixed window after the first
+deletion anywhere, a restore puts the exact rows back alongside intervening
+reviews, writes and purges, and a rollback that leaves nothing folded stops that
+clock rather than spending it, so a rehearsal does not consume the window a later
+rollout needs; after the window, both restoring and a raw-history schema
+downgrade refuse, and the exports and manifests expire rather than becoming an
+archive. Recurring scheduling is separate and not yet present, and nothing folds
+until the disabled cleanup switch is turned on. The transfer, its recovery and
+the operator entry point are in
+[`backend/app/opportunity_fold.py`](backend/app/opportunity_fold.py),
+[`backend/app/opportunity_fold_export.py`](backend/app/opportunity_fold_export.py),
+[`backend/app/opportunity_fold_recovery.py`](backend/app/opportunity_fold_recovery.py)
+and
+[`backend/scripts/fold_srs_opportunities.py`](backend/scripts/fold_srs_opportunities.py),
+covered by
+[`backend/test_opportunity_compaction.py`](backend/test_opportunity_compaction.py),
+[`backend/test_opportunity_compaction_pg.py`](backend/test_opportunity_compaction_pg.py)
+and
+[`backend/test_opportunity_compaction_migration.py`](backend/test_opportunity_compaction_migration.py),
+with the fold and recovery reference in
+[`backend/scripts/RECOVER_SRS_FOLD.md`](backend/scripts/RECOVER_SRS_FOLD.md).
+
 New targeted decisions also atomically preserve each session/target's latest
 served time in compact facts. Targeted counters can read those facts after a
 verified backfill, while reached evidence remains current and mutable. Decision

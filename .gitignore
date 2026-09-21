@@ -71,3 +71,9 @@ backend/scripts/fixtures/cohort_provenance.json.tmp-*
 # Resumable corpus captures checkpoint beside their final analysis artifact.
 # The final JSON/JSONL is reviewed and committed; an in-progress checkpoint is not.
 /docs/analysis/.*.checkpoint.json
+
+# SRS fold recovery exports (g-srs-fold-recovery). The default location when
+# GHOSTREPLAY_SRS_FOLD_EXPORT_DIR is unset. These are verified copies of deleted
+# production rows with a seven-day life; they are operational state, never review
+# material, and a deployment points the variable at durable storage instead.
+/backend/.srs_fold_exports/
