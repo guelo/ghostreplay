@@ -23,6 +23,7 @@ self-check's unexpected-failure boundary.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -823,14 +824,35 @@ raise SystemExit(0)
 """
 
 
-def _spawn_lock_probe(env, mode: str):
-    """A REAL second process contending for the same two locks."""
+@contextlib.contextmanager
+def _lock_probe(env, mode: str):
+    """A REAL second process contending for the same two locks.
+
+    Closing stdin is the "parent lets go" signal a holding probe is waiting for, and a
+    probe that is already gone — refused, or SIGKILLed by the test — tolerates the same
+    teardown. Either way the three pipes are closed here: an unclosed Popen surfaces as
+    three ResourceWarnings against whichever test happens to be running when it is
+    collected, which under -W error fails that test instead of this one.
+    """
     script = env.out_dir / f"lock_probe_{mode}.py"
     script.write_text(_LOCK_PROBE.format(backend=str(Path(cal.__file__).resolve().parents[1])))
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         [sys.executable, str(script), str(env.common), str(env.output.resolve()), mode],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
+    try:
+        yield proc
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=60)
+        for pipe in (proc.stdout, proc.stderr):
+            with contextlib.suppress(OSError, ValueError):
+                pipe.close()
 
 
 def _await_line(proc, expected: str, timeout: float = 120.0) -> None:
@@ -857,8 +879,7 @@ def test_a_losing_capture_reads_no_evidence_at_all(capenv, monkeypatch):
     _seed_default_cohort(capenv.session_factory)
     _stub_validate_ok(monkeypatch)
 
-    holder = _spawn_lock_probe(capenv, "hold")
-    try:
+    with _lock_probe(capenv, "hold") as holder:
         _await_line(holder, "ACQUIRED")
 
         reads: list[str] = []
@@ -878,10 +899,6 @@ def test_a_losing_capture_reads_no_evidence_at_all(capenv, monkeypatch):
         assert reads == [], f"the losing capture read evidence before refusing: {reads}"
         assert not capenv.output.exists()
         assert not capenv.provenance.exists()
-    finally:
-        holder.stdin.write("\n")
-        holder.stdin.flush()
-        holder.wait(timeout=60)
 
 
 @pg_required
@@ -928,9 +945,9 @@ def test_the_locks_are_held_across_BOTH_renames(capenv, monkeypatch):
         assert capenv.output.exists()
         assert not capenv.provenance.exists()
 
-        challenger = _spawn_lock_probe(capenv, "try")
-        _await_line(challenger, "REFUSED")
-        assert challenger.wait(timeout=60) == 3
+        with _lock_probe(capenv, "try") as challenger:
+            _await_line(challenger, "REFUSED")
+            assert challenger.wait(timeout=60) == 3
     finally:
         resume.set()
         winner.join(timeout=180)
@@ -947,16 +964,16 @@ def test_a_killed_lock_holder_releases_immediately_with_no_stale_reap(capenv):
     flock dies with the open file description, so a killed holder cannot strand anyone.
     A lock scheme needing a reaper would fail this — and a reaper is exactly the thing that
     lets a live capture be evicted by a nervous operator."""
-    holder = _spawn_lock_probe(capenv, "hold")
-    _await_line(holder, "ACQUIRED")
+    with _lock_probe(capenv, "hold") as holder:
+        _await_line(holder, "ACQUIRED")
 
-    # It really is held: this process cannot take it while the holder lives.
-    with pytest.raises(cal.CaptureLockError):
-        with cal._capture_locks(str(capenv.common), capenv.output.resolve()):
-            pass
+        # It really is held: this process cannot take it while the holder lives.
+        with pytest.raises(cal.CaptureLockError):
+            with cal._capture_locks(str(capenv.common), capenv.output.resolve()):
+                pass
 
-    holder.kill()
-    assert holder.wait(timeout=60) != 0
+        holder.kill()
+        assert holder.wait(timeout=60) != 0
 
     # Immediately reacquirable — no timeout, no PID file, no stale-lock heuristic.
     with cal._capture_locks(str(capenv.common), capenv.output.resolve()):
