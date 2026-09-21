@@ -681,13 +681,20 @@ const drillStopActions = (page: Page) =>
   page.getByRole("region", { name: "Drill stopped — choose next action" });
 
 /**
- * Settle the two things that keep mutating under a stopped/rooted drill: the
- * board notice (rehook, on its own 3s timer) and the live opening-lineage
- * scores. Both would otherwise be free to change between viewport captures.
+ * Settle the three things that keep mutating under a stopped/rooted drill: the
+ * board notice (rehook, on its own 3s timer), the drill-stop fanfare over the
+ * board (~2.85s of hold + shrink), and the live opening-lineage scores. All
+ * would otherwise be free to change between viewport captures.
  */
 const settleDrillSurroundings = async (page: Page): Promise<void> => {
   await page.clock.runFor(3500);
   await expect(page.locator(".board-notice:visible")).toHaveCount(0);
+  // setFixedTime pins Date but leaves timers running live, so the fanfare
+  // clears on its own — poll for it rather than advancing the clock, so no
+  // half-shrunk card leaks into one of the six viewport captures.
+  await expect(page.locator(".end-game-fanfare")).toHaveCount(0, {
+    timeout: 30_000,
+  });
   await expect(page.locator(".tree-node-card__score-loading")).toHaveCount(0, {
     timeout: 30_000,
   });

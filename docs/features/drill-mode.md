@@ -110,6 +110,12 @@ move. A natural game end from either active or root-reached state is also a term
 outcome. The terminal reason records how a failure occurred and is not a substitute for the
 session outcome.
 
+A drill that stops on a bad or off-route move announces itself over the board with the
+same brief, skippable fanfare a finished game uses, then clears to reveal the correction
+arrows; the stop panel keeps an icon-led banner naming the reason for as long as the drill
+stays stopped. A drill-failing move that also ends the game still gets the card, because
+that path records no game result and so never reaches the game-end fanfare.
+
 Stopped drills remain unrated and outside normal game history. The former
 "Continue as normal game" action and its API endpoint have been removed. Historical
 converted sessions retain their stored rating boundary, normal-game visibility, and

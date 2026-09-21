@@ -96,4 +96,60 @@ describe("DrillStopActions", () => {
     render(<DrillStopActions {...baseProps} />);
     expect(screen.queryByText(/continue as normal game/i)).toBeNull();
   });
+
+  it("shows a fail banner with the warning icon for an accuracy stop", () => {
+    const { container } = render(
+      <DrillStopActions {...baseProps} terminalReason="accuracy" />,
+    );
+
+    const banner = container.querySelector(".drill-stop-banner--fail");
+    expect(banner).not.toBeNull();
+    expect(
+      banner?.querySelector(".drill-stop-banner__headline")?.textContent,
+    ).toBe("Bad move");
+    expect(
+      screen.getByText("That move exceeded this drill's centipawn limit"),
+    ).toBeInTheDocument();
+    expect(banner?.querySelector(".warning-triangle-icon")).not.toBeNull();
+  });
+
+  it("shows a fail banner for an off-route stop", () => {
+    const { container } = render(
+      <DrillStopActions {...baseProps} terminalReason="off_route" />,
+    );
+
+    expect(container.querySelector(".drill-stop-banner--fail")).not.toBeNull();
+    expect(
+      container.querySelector(".drill-stop-banner__headline")?.textContent,
+    ).toBe("Off route");
+    expect(
+      screen.getByText("That's not how you get to the opening"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([["natural_end" as const], [null]])(
+    "shows a neutral banner with no icon or detail for %s",
+    (terminalReason) => {
+      const { container } = render(
+        <DrillStopActions {...baseProps} terminalReason={terminalReason} />,
+      );
+
+      const banner = container.querySelector(".drill-stop-banner--neutral");
+      expect(banner).not.toBeNull();
+      expect(
+        banner?.querySelector(".drill-stop-banner__headline")?.textContent,
+      ).toBe("Drill stopped.");
+      expect(banner?.querySelector(".warning-triangle-icon")).toBeNull();
+      expect(container.querySelector(".drill-stop-banner__detail")).toBeNull();
+    },
+  );
+
+  it("keeps the region accessible name the e2e locator depends on", () => {
+    render(<DrillStopActions {...baseProps} />);
+    expect(
+      screen.getByRole("region", {
+        name: "Drill stopped — choose next action",
+      }),
+    ).toBeInTheDocument();
+  });
 });

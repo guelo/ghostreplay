@@ -1666,6 +1666,153 @@ describe("ChessGame characterization safeguards", () => {
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
       expect.objectContaining({ recomputeOpportunity: true }),
     );
+    // g-kfc6w: the stop announces itself over the board with the same card a
+    // finished game uses — a stopped drill has no ended scrim of its own.
+    const fanfare = document.querySelector(".end-game-fanfare--drill-stop");
+    expect(fanfare).not.toBeNull();
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Bad move");
+    expect(document.querySelector(".chessboard-ended-scrim")).toBeNull();
+
+    // The next drill drops the card. showEndedScrim is false throughout this
+    // test (asserted just above), so the pre-existing game-end clear never
+    // re-runs here and this is the drill-stop clear doing the work.
+    act(() => {
+      useGameStore.setState({ drillState: "root_reached" });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".end-game-fanfare")).toBeNull();
+  });
+
+  it("drops the drill-stop card when the repeated-mistake spotlight takes over", async () => {
+    // Reachable by construction: post-root drill opponent moves fall through to
+    // the generic ghost-first path, so they can target a due blunder — and a
+    // re-committed blunder is exactly the move most likely to also bust the
+    // centipawn limit. The spotlight owns the screen (a fixed, clip-path scrim
+    // that leaves the board bright), so the card must be dropped, not deferred:
+    // a hidden-then-restored trigger replays the full 2.85s window.
+    useGameStore.setState({
+      sessionId: "session-srs-drill-stop",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 25,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
+    });
+
+    // Move 1 passes the grade; the ghost reply carries the tracked blunder, so
+    // the SRS review is registered against the player's NEXT move.
+    reviewSrsBlunderMock.mockResolvedValue({
+      blunder_id: 99,
+      pass_streak: 0,
+      priority: 0,
+      next_expected_review: "2026-10-01T00:00:00Z",
+    });
+    failDrillMock.mockClear();
+    failDrillMock.mockResolvedValue({
+      session_id: "session-srs-drill-stop",
+      drill_state: "failed",
+      terminal_reason: "accuracy",
+      opening_score_changes: null,
+    });
+    getNextOpponentMoveMock.mockClear();
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "ghost",
+      move: { uci: "e7e5", san: "e5" },
+      target_blunder_id: 99,
+      target_fen:
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+      decision_source: "ghost_path",
+    });
+    mockCoordinator.waitForDrillGrade.mockResolvedValueOnce({
+      grade: "pass",
+      bestMove: "e2e4",
+      source: "position",
+    });
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().moveHistory.length).toBe(2);
+    });
+
+    // Move 2 re-commits the tracked blunder AND busts the 25cp limit.
+    mockCoordinator.waitForDrillGrade.mockResolvedValueOnce({
+      grade: "fail",
+      bestMove: "g1f3",
+      source: "position",
+    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "srs-fail-during-drill-stop",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: -10,
+            currentPositionEval: -10,
+            playedEvalMate: null,
+            currentPositionEvalMate: null,
+            moveIndex: 2,
+            delta: 50,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+          return "srs-fail-during-drill-stop";
+        }
+      },
+    );
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "b1", targetSquare: "a3" });
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".srs-fail-scrim")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+
+    // The spotlight is up and no card competes with it — not now, and not once
+    // the spotlight finishes either.
+    expect(document.querySelector(".end-game-fanfare")).toBeNull();
+    await act(async () => {
+      fireEvent.click(document.querySelector(".srs-fail-scrim") as HTMLElement);
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".srs-fail-scrim")).not.toBeInTheDocument();
+    });
+    // Let the fanfare's own start effect run: it renders on the commit AFTER
+    // its trigger becomes non-null, so a bare synchronous check here would pass
+    // even against a deferred card.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".end-game-fanfare")).toBeNull();
+    // The durable record of the stop is untouched.
+    expect(
+      screen.getByRole("region", {
+        name: "Drill stopped — choose next action",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("keeps a terminal post-root accuracy failure on the live board", async () => {
@@ -2073,6 +2220,21 @@ describe("ChessGame characterization safeguards", () => {
     });
   };
 
+  it("announces a pre-root off-route stop over the board", async () => {
+    await driveOffRouteFail();
+
+    // g-kfc6w: the card headline is the short verdict; the panel banner carries
+    // the longer explanation, so neither string renders twice.
+    const fanfare = document.querySelector(".end-game-fanfare--drill-stop");
+    expect(fanfare).not.toBeNull();
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Off route");
+    expect(
+      screen.getByText("That's not how you get to the opening"),
+    ).toBeInTheDocument();
+  });
+
   it("replaces drill correction arrows when navigating to an analyzed blunder", async () => {
     await driveOffRouteFail();
     expect(JSON.parse(screen.getByTestId("chessboard").dataset.arrows ?? "[]"))
@@ -2175,6 +2337,14 @@ describe("ChessGame characterization safeguards", () => {
     expect(
       screen.getByText("That's not how you get to the opening"),
     ).toBeInTheDocument();
+    // g-kfc6w: a drill-failing move that also mates records no gameResult, so
+    // there is no game-end fanfare to defer to — the drill-stop card fires and
+    // is purely additive over the preserved terminal board asserted above.
+    const fanfare = document.querySelector(".end-game-fanfare--drill-stop");
+    expect(fanfare).not.toBeNull();
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Off route");
   });
 
   it("keeps a stalemate visible when automatic blunder analysis lands late", async () => {
@@ -3120,6 +3290,11 @@ describe("ChessGame characterization safeguards", () => {
       }),
     );
 
+    // The off-route stop put its card over the board (g-kfc6w).
+    expect(
+      document.querySelector(".end-game-fanfare--drill-stop"),
+    ).not.toBeNull();
+
     const again = await screen.findByRole("button", { name: /^again$/i });
     await act(async () => {
       fireEvent.click(again);
@@ -3131,6 +3306,13 @@ describe("ChessGame characterization safeguards", () => {
       // Exact strictness carried into the restarted drill.
       expect(useGameStore.getState().drillStrictnessCp).toBe(25);
     });
+
+    // ...and the restarted drill starts clean: the card is dropped on the
+    // falling edge of the stop, so it cannot replay over the new drill.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".end-game-fanfare")).toBeNull();
 
     // A post-root move whose eval loss (delta 30) exceeds the 25cp threshold
     // must still fail the restarted drill.

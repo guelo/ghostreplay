@@ -997,6 +997,74 @@
     max-width: 260px;
 }
 
+/* Drill-stop panel (g-kfc6w). Keeps .chess-start-error for its width cap, but
+   overrides the inherited --error-light so the neutral variant is not red. */
+
+.drill-stop-panel {
+    color: var(--text-primary);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+/* Bordered, tinted chip — the .game-status-badge--other recipe, so the reason
+   for the stop stays unmistakable after the board fanfare clears. Fluid: the
+   moves column floors at 180px in the two-column band. */
+
+.drill-stop-banner {
+    max-width: 100%;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid;
+    border-left-width: 4px;
+    border-radius: 0.5rem;
+    animation: blunder-toast-in 250ms ease-out;
+}
+
+.drill-stop-banner--fail {
+    border-color: var(--status-other-border);
+    border-left-color: var(--status-other);
+    background: var(--status-other-bg);
+}
+
+.drill-stop-banner--neutral {
+    border-color: var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.drill-stop-banner__header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+/* The shared icon is intrinsically 48px and would blow out the column. The
+   color override is load-bearing too: the base rule's --warning-dark is only
+   2.59:1 on the cream background. */
+
+.drill-stop-banner__header .warning-triangle-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+    color: var(--status-other);
+}
+
+/* 0.9rem/700 is small text under WCAG, so this stays --text-primary; the
+   border + tint carry the colour signal. */
+
+.drill-stop-banner__headline {
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+}
+
+.drill-stop-banner__detail {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+}
+
 .drill-stop-error {
     margin: 0 0 0.5rem;
     font-size: 0.85rem;
@@ -2693,6 +2761,23 @@
 
 .end-game-fanfare--draw .end-game-fanfare__headline {
     color: var(--text-secondary);
+}
+
+/* Drill stop (g-kfc6w). A stopped drill keeps the game "active", so there is no
+   .chessboard-ended-scrim underneath — the variant supplies its own dimming.
+   --status-other (amber 700) is the only amber that clears 3:1 on the cream
+   background, and it stays distinct from --loss (--eval-blunder red). */
+
+.end-game-fanfare--drill-stop {
+    background: var(--scrim-ended);
+}
+
+.end-game-fanfare--drill-stop .end-game-fanfare__inner {
+    border-top-color: var(--status-other);
+}
+
+.end-game-fanfare--drill-stop .end-game-fanfare__headline {
+    color: var(--status-other);
 }
 
 @media (prefers-reduced-motion: reduce) {

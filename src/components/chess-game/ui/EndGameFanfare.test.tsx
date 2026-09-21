@@ -7,10 +7,22 @@ import EndGameFanfare, {
   type EndGameFanfareTrigger,
 } from "./EndGameFanfare";
 import type { GameResult } from "../domain/status";
+import {
+  deriveDrillStopAnnouncement,
+  deriveEndGameAnnouncement,
+} from "../domain/status";
 
 const trigger = (result: GameResult, id = 1): EndGameFanfareTrigger => ({
   id,
-  result,
+  announcement: deriveEndGameAnnouncement(result),
+});
+
+const drillStopTrigger = (
+  reason: "accuracy" | "off_route",
+  id = 1,
+): EndGameFanfareTrigger => ({
+  id,
+  announcement: deriveDrillStopAnnouncement(reason)!,
 });
 
 describe("EndGameFanfare", () => {
@@ -253,5 +265,55 @@ describe("EndGameFanfare", () => {
     });
     expect(onDone).toHaveBeenCalledWith(2);
     expect(onDone).not.toHaveBeenCalledWith(1);
+  });
+
+  it("renders the drill-stop variant for an accuracy stop", () => {
+    const { container } = render(
+      <EndGameFanfare trigger={drillStopTrigger("accuracy")} onDone={vi.fn()} />,
+    );
+    expect(
+      container.querySelector(".end-game-fanfare--drill-stop"),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Bad move");
+    expect(
+      container.querySelector(".end-game-fanfare__reason")?.textContent,
+    ).toBe("Too inaccurate");
+  });
+
+  it("runs the hold → shrink → onDone window for a drill stop", () => {
+    const onDone = vi.fn();
+    const { container } = render(
+      <EndGameFanfare trigger={drillStopTrigger("off_route", 7)} onDone={onDone} />,
+    );
+    expect(
+      container.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Off route");
+
+    act(() => {
+      vi.advanceTimersByTime(END_GAME_FANFARE_HOLD_MS + 10);
+    });
+    expect(container.querySelector(".end-game-fanfare--shrink")).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(END_GAME_FANFARE_SHRINK_MS + 20);
+    });
+    expect(onDone).toHaveBeenCalledWith(7);
+    expect(container.querySelector(".end-game-fanfare")).toBeNull();
+  });
+
+  it("click-skips a drill-stop card", () => {
+    const onDone = vi.fn();
+    const { container } = render(
+      <EndGameFanfare trigger={drillStopTrigger("accuracy", 3)} onDone={onDone} />,
+    );
+    act(() => {
+      fireEvent.click(container.querySelector(".end-game-fanfare__inner")!);
+    });
+    expect(container.querySelector(".end-game-fanfare--shrink")).not.toBeNull();
+    act(() => {
+      vi.advanceTimersByTime(END_GAME_FANFARE_SHRINK_MS + 20);
+    });
+    expect(onDone).toHaveBeenCalledWith(3);
   });
 });

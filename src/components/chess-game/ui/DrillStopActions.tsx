@@ -1,9 +1,12 @@
 import { memo } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import type { DrillTerminalReason } from "../domain/status";
+import { deriveDrillStopBanner } from "../domain/status";
 import SettingsGearIcon from "./SettingsGearIcon";
+import WarningTriangleIcon from "./WarningTriangleIcon";
 
 type DrillStopActionsProps = {
-  terminalReason: "off_route" | "accuracy" | "natural_end" | null;
+  terminalReason: DrillTerminalReason;
   onAnotherDrill: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   /** Open the setup overlay to change drill settings (gear button). */
   onAnotherDrillSettings: () => void;
@@ -25,16 +28,6 @@ type DrillStopActionsProps = {
   errorMessage?: string | null;
 };
 
-const subtitleFor = (reason: DrillStopActionsProps["terminalReason"]): string => {
-  if (reason === "accuracy") {
-    return "Bad move";
-  }
-  if (reason === "off_route") {
-    return "That's not how you get to the opening";
-  }
-  return "Drill stopped.";
-};
-
 const DrillStopActions = ({
   terminalReason,
   onAnotherDrill,
@@ -47,9 +40,25 @@ const DrillStopActions = ({
   drillAgainPending = false,
   errorMessage,
 }: DrillStopActionsProps) => {
+  // Bordered, icon-led banner so the reason for the stop survives after the
+  // over-the-board fanfare clears (g-kfc6w). No live region here — the
+  // fanfare's role="status" already announces it, and a second one would read
+  // the stop twice.
+  const { variant, headline, detail } = deriveDrillStopBanner(terminalReason);
+
   return (
-    <div className="chess-start-error" role="region" aria-label="Drill stopped — choose next action">
-      <p>{subtitleFor(terminalReason)}</p>
+    <div
+      className="chess-start-error drill-stop-panel"
+      role="region"
+      aria-label="Drill stopped — choose next action"
+    >
+      <div className={`drill-stop-banner drill-stop-banner--${variant}`}>
+        <div className="drill-stop-banner__header">
+          {variant === "fail" && <WarningTriangleIcon />}
+          <span className="drill-stop-banner__headline">{headline}</span>
+        </div>
+        {detail && <p className="drill-stop-banner__detail">{detail}</p>}
+      </div>
       {errorMessage && (
         <p role="alert" className="drill-stop-error">
           {errorMessage}

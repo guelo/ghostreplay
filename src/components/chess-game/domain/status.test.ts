@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   REASON_LABELS,
+  deriveDrillStopAnnouncement,
+  deriveDrillStopBanner,
   deriveEndGameAnnouncement,
+  drillStopEngineMessage,
+  type DrillTerminalReason,
   type GameEndReason,
   type GameResult,
 } from "./status";
@@ -95,5 +99,92 @@ describe("REASON_LABELS", () => {
     }
     // Completeness the other direction: no stray keys beyond the union.
     expect(Object.keys(REASON_LABELS).sort()).toEqual([...reasons].sort());
+  });
+});
+
+describe("deriveDrillStopAnnouncement", () => {
+  it("announces an accuracy stop with the drill-stop tone", () => {
+    expect(deriveDrillStopAnnouncement("accuracy")).toEqual({
+      outcome: "drill-stop",
+      headline: "Bad move",
+      reason: "Too inaccurate",
+    });
+  });
+
+  it("announces an off-route stop", () => {
+    expect(deriveDrillStopAnnouncement("off_route")).toEqual({
+      outcome: "drill-stop",
+      headline: "Off route",
+      reason: "Left the route",
+    });
+  });
+
+  it("announces nothing for a natural end (the real game-end fanfare covers it)", () => {
+    expect(deriveDrillStopAnnouncement("natural_end")).toBeNull();
+  });
+
+  it("announces nothing for an untagged stop", () => {
+    expect(deriveDrillStopAnnouncement(null)).toBeNull();
+  });
+});
+
+describe("deriveDrillStopBanner", () => {
+  it("returns the fail variant with a detail line for an accuracy stop", () => {
+    expect(deriveDrillStopBanner("accuracy")).toEqual({
+      variant: "fail",
+      headline: "Bad move",
+      detail: "That move exceeded this drill's centipawn limit",
+    });
+  });
+
+  it("returns the fail variant with a detail line for an off-route stop", () => {
+    expect(deriveDrillStopBanner("off_route")).toEqual({
+      variant: "fail",
+      headline: "Off route",
+      detail: "That's not how you get to the opening",
+    });
+  });
+
+  it.each<DrillTerminalReason>(["natural_end", null])(
+    "returns the neutral variant with no detail for %s",
+    (reason) => {
+      expect(deriveDrillStopBanner(reason)).toEqual({
+        variant: "neutral",
+        headline: "Drill stopped.",
+        detail: null,
+      });
+    },
+  );
+});
+
+describe("drill stop copy", () => {
+  // The fanfare and the panel banner are on screen at the same time (~2.85s),
+  // so a shared string would make every getByText for it ambiguous.
+  it.each<DrillTerminalReason>(["accuracy", "off_route"])(
+    "never renders the same string on the card and in the panel for %s",
+    (reason) => {
+      const announcement = deriveDrillStopAnnouncement(reason);
+      const banner = deriveDrillStopBanner(reason);
+      expect(announcement).not.toBeNull();
+      expect(announcement!.reason).not.toBe(banner.detail);
+    },
+  );
+
+  it("sources the engine message from the banner detail", () => {
+    expect(drillStopEngineMessage("accuracy")).toBe(
+      deriveDrillStopBanner("accuracy").detail,
+    );
+    expect(drillStopEngineMessage("off_route")).toBe(
+      deriveDrillStopBanner("off_route").detail,
+    );
+  });
+
+  it("falls back to the neutral headline when the stop has no reason", () => {
+    expect(drillStopEngineMessage("natural_end")).toBe(
+      deriveDrillStopBanner("natural_end").headline,
+    );
+    expect(drillStopEngineMessage(null)).toBe(
+      deriveDrillStopBanner(null).headline,
+    );
   });
 });

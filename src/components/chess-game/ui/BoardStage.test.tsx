@@ -4,6 +4,10 @@ import { act, fireEvent, render, screen } from "../../../test/utils";
 import { setMatchMedia } from "../../../test/setup";
 import BoardStage from "./BoardStage";
 import { getOpponentAvatarSrc } from "../config";
+import {
+  deriveDrillStopAnnouncement,
+  deriveEndGameAnnouncement,
+} from "../domain/status";
 
 let boardMountCount = 0;
 let boardUnmountCount = 0;
@@ -538,11 +542,11 @@ describe("BoardStage", () => {
         {...props}
         endGameFanfareTrigger={{
           id: 1,
-          result: {
+          announcement: deriveEndGameAnnouncement({
             type: "checkmate_win",
             message: "Checkmate! You won!",
             reason: "checkmate",
-          },
+          }),
         }}
       />,
     );
@@ -555,6 +559,25 @@ describe("BoardStage", () => {
     expect(
       fanfare?.querySelector(".end-game-fanfare__reason")?.textContent,
     ).toBe("Checkmate");
+  });
+
+  it("renders the drill-stop fanfare variant over the board", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage
+        {...props}
+        endGameFanfareTrigger={{
+          id: 1,
+          announcement: deriveDrillStopAnnouncement("accuracy")!,
+        }}
+      />,
+    );
+
+    const fanfare = container.querySelector(".end-game-fanfare--drill-stop");
+    expect(fanfare).not.toBeNull();
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Bad move");
   });
 
   it("does not render the end-game fanfare without a trigger", () => {

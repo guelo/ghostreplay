@@ -77,8 +77,11 @@ owns any game or drill session, the root shows its Stats dashboard instead.
 
 Automatic blunder, repeated-mistake, and drill-failure presentations yield to
 a completed board position (checkmate or draw), so the terminal board remains
-visible. Explicit post-game history navigation can still show an earlier
-position and its saved annotations.
+visible. A drill stop is still announced by a brief, skippable card centered
+over the board, including when the stopping move also ended the game: the card
+dismisses itself and replaces no position, and the repeated-mistake spotlight
+takes precedence over it. Explicit post-game history navigation can still show
+an earlier position and its saved annotations.
 
 Across live play, drills, and saved-game review, the evaluation graph marks the
 Lichess opening/middlegame boundary with a labeled opening band when the browser

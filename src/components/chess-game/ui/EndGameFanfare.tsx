@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { GameResult } from "../domain/status";
-import { deriveEndGameAnnouncement } from "../domain/status";
+import type { EndGameAnnouncement } from "../domain/status";
 
 // Shared timing constants — also imported by tests so assertions stay in sync
 // with the actual animation timeline. Total lifecycle ≈ HOLD + SHRINK.
@@ -9,7 +8,10 @@ export const END_GAME_FANFARE_SHRINK_MS = 450;
 
 export type EndGameFanfareTrigger = {
   id: number;
-  result: GameResult;
+  // Pre-derived copy. The card serves both genuine game ends
+  // (deriveEndGameAnnouncement) and drill stops (deriveDrillStopAnnouncement),
+  // so the trigger carries finished copy rather than a GameResult (g-kfc6w).
+  announcement: EndGameAnnouncement;
 };
 
 type EndGameFanfareProps = {
@@ -24,10 +26,12 @@ type EndGameFanfareProps = {
 type Phase = "hidden" | "show" | "shrink";
 
 /**
- * Brief, dramatic win/loss/draw card shown centered over the (already-dimmed)
- * board when a game genuinely ends (g-8079). Models SrsFailSpotlight's phase
- * machine — scale-in → hold → shrink-out, click-to-skip — but as a plain
- * board-area overlay (no portal / no clip-path measurement).
+ * Brief, dramatic card shown centered over the board when a game genuinely ends
+ * (g-8079) or a drill stops on a bad/off-route move (g-kfc6w). Models
+ * SrsFailSpotlight's phase machine — scale-in → hold → shrink-out,
+ * click-to-skip — but as a plain board-area overlay (no portal / no clip-path
+ * measurement). The caller decides what the card says; see
+ * deriveEndGameAnnouncement / deriveDrillStopAnnouncement.
  */
 const EndGameFanfare = ({ trigger, onDone }: EndGameFanfareProps) => {
   const [phase, setPhase] = useState<Phase>("hidden");
@@ -77,9 +81,7 @@ const EndGameFanfare = ({ trigger, onDone }: EndGameFanfareProps) => {
     return null;
   }
 
-  const { outcome, headline, reason } = deriveEndGameAnnouncement(
-    trigger.result,
-  );
+  const { outcome, headline, reason } = trigger.announcement;
   const shrinking = phase === "shrink";
   const skip = () => setPhase("shrink");
 

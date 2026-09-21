@@ -64,10 +64,16 @@ import {
 import { hasReviewTargetAtFen } from "./chess-game/domain/reviewState";
 import type { OpponentPresentation } from "./chess-game/domain/opponentPresentation";
 import {
+  deriveDrillStopAnnouncement,
+  deriveEndGameAnnouncement,
   deriveGameStatusBadge,
   deriveStatusText,
+  drillStopEngineMessage,
 } from "./chess-game/domain/status";
-import type { GameResult } from "./chess-game/domain/status";
+import type {
+  DrillTerminalReason,
+  GameResult,
+} from "./chess-game/domain/status";
 import type { EndGameFanfareTrigger } from "./chess-game/ui/EndGameFanfare";
 import {
   MAIA_BOT_NAMES,
@@ -331,6 +337,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveIndex: number;
   } | null>(null);
   const srsFailNonceRef = useRef(0);
+  // Mirrors `srsFailTrigger !== null` for triggerDrillStopFanfare, which runs
+  // inside async move continuations and cannot read the state directly.
+  const srsFailActiveRef = useRef(false);
   // Dramatic win/loss/draw fanfare over the board (g-8079). Nonce trigger set by
   // the lifecycle's single genuine-end choke point (onGameFinished). Defined here
   // (above useChessGameLifecycle) so triggerEndGameFanfare is in scope when passed
@@ -342,8 +351,31 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // single genuine-end choke point (onGameFinished), once per session (g-8079).
   const triggerEndGameFanfare = useCallback((result: GameResult) => {
     endGameFanfareNonceRef.current += 1;
-    setEndGameFanfare({ id: endGameFanfareNonceRef.current, result });
+    setEndGameFanfare({
+      id: endGameFanfareNonceRef.current,
+      announcement: deriveEndGameAnnouncement(result),
+    });
   }, []);
+  // Same card, same single slot, for a drill that stopped on a bad/off-route
+  // move (g-kfc6w). A genuine game end and a drill stop are mutually exclusive
+  // by construction — a drill-failing move that also ends the game records no
+  // gameResult — so one slot keeps "only one card over the board" true by type.
+  const triggerDrillStopFanfare = useCallback(
+    (reason: DrillTerminalReason) => {
+      const announcement = deriveDrillStopAnnouncement(reason);
+      if (!announcement) return;
+      // The repeated-mistake spotlight owns the screen when it is up, and a
+      // re-committed blunder is exactly the move most likely to also bust the
+      // centipawn limit. Drop the card rather than queue it: hiding it via the
+      // render gate would only defer it, because the fanfare restarts whenever
+      // its trigger id goes null -> id, and it would then land seconds after
+      // the stop with the arrows and the panel banner already on screen.
+      if (srsFailActiveRef.current) return;
+      endGameFanfareNonceRef.current += 1;
+      setEndGameFanfare({ id: endGameFanfareNonceRef.current, announcement });
+    },
+    [],
+  );
   const handleEndGameFanfareDone = useCallback((id: number) => {
     setEndGameFanfare((prev) => (prev?.id === id ? null : prev));
   }, []);
@@ -1166,11 +1198,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           // DrillStopActions shows no (stale) delta.
           useGameStore.getState().clearOpeningDelta();
           drillFailedMoveIndexRef.current = result.moveIndex;
-          setEngineMessage(
-            route.failure?.reason === "accuracy"
-              ? "Bad move"
-              : "That's not how you get to the opening.",
-          );
+          setEngineMessage(drillStopEngineMessage(reason));
+          // Announce the stop over the board BEFORE the terminal-board guard: a
+          // drill-failing move that also mates records no gameResult, so there
+          // is no game-end fanfare to defer to and this is the stop that is
+          // hardest to spot (no rewind, no correction arrows).
+          triggerDrillStopFanfare(reason);
           // Preserve the durable drill failure, but do not briefly replace an
           // already-terminal board with its automatic correction presentation.
           if (chess.isGameOver()) {
@@ -1224,7 +1257,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false;
       }
     },
-    [chess, setEngineMessage, setViewIndex, stopExpiredDrill],
+    [
+      chess,
+      setEngineMessage,
+      setViewIndex,
+      stopExpiredDrill,
+      triggerDrillStopFanfare,
+    ],
   );
 
   const {
@@ -1682,8 +1721,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // recompute lands (g-fix-end-latency).
       void pollFreshOpeningDelta(sessionId, "drill_accuracy_fail");
       drillFailedMoveIndexRef.current = result.moveIndex;
-      setEngineMessage("That move exceeds the allowed centipawn loss.");
+      setEngineMessage(drillStopEngineMessage("accuracy"));
       setDrillRecovery(null);
+      // Before the terminal-board guard, for the same reason as the route-check
+      // path above: a mating accuracy failure records no gameResult.
+      triggerDrillStopFanfare("accuracy");
       // Preserve the durable accuracy failure without briefly replacing an
       // already-terminal board with its automatic correction presentation.
       if (chess.isGameOver()) {
@@ -1705,6 +1747,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       uploadFullMoveHistoryBeforeEnd,
       setEngineMessage,
       setViewIndex,
+      triggerDrillStopFanfare,
     ],
   );
 
@@ -2594,6 +2637,33 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (!showEndedScrim) setEndGameFanfare(null);
   }, [showEndedScrim]);
 
+  // Keep the ref above in step, and drop a drill-stop card the moment the
+  // repeated-mistake spotlight takes over. Covers the opposite order to the
+  // triggerDrillStopFanfare guard: the card was already up when the spotlight
+  // started. Clearing the state (not just hiding it) is what stops the card
+  // from replaying in full once the spotlight finishes.
+  useEffect(() => {
+    srsFailActiveRef.current = srsFailTrigger !== null;
+    if (srsFailTrigger !== null) {
+      setEndGameFanfare((prev) =>
+        prev?.announcement.outcome === "drill-stop" ? null : prev,
+      );
+    }
+  }, [srsFailTrigger]);
+
+  // Drill-stop counterpart (g-kfc6w). showEndedScrim stays false across an
+  // entire drill stop, so the effect above never re-runs for one and cannot
+  // clear it. Clear on the falling edge of isStoppedDrill instead — i.e. when
+  // the next drill starts. The outcome check keeps a genuine game-end trigger
+  // (which can coexist with isStoppedDrill flipping false) intact.
+  useEffect(() => {
+    if (!isStoppedDrill) {
+      setEndGameFanfare((prev) =>
+        prev?.announcement.outcome === "drill-stop" ? null : prev,
+      );
+    }
+  }, [isStoppedDrill]);
+
   // Mobile portrait: when below-board content (the analysis graph) first
   // appears, scroll the nav/hamburger header out of view so the graph lands in
   // the viewport. Only on a false→true transition while narrow; seed on first
@@ -2745,7 +2815,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 srsFailTrigger={srsFailTrigger}
                 onSrsFailDone={handleSrsFailDone}
                 endGameFanfareTrigger={
-                  showEndedScrim && !pendingPromotion ? endGameFanfare : null
+                  endGameFanfare &&
+                  !pendingPromotion &&
+                  (endGameFanfare.announcement.outcome === "drill-stop" ||
+                    showEndedScrim)
+                    ? endGameFanfare
+                    : null
                 }
                 onEndGameFanfareDone={handleEndGameFanfareDone}
               />

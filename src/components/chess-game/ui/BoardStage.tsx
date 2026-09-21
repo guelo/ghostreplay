@@ -7,6 +7,7 @@ import { PromotionPicker } from "./PromotionPicker";
 import StartPanel, { type StartDrillDraft } from "./StartPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
+import WarningTriangleIcon from "./WarningTriangleIcon";
 import ReturnToLiveButton from "./ReturnToLiveButton";
 import type { BoardNotice, CopyPositionNotice } from "../types";
 
@@ -87,19 +88,6 @@ type BoardStageProps = {
   endGameFanfareTrigger?: EndGameFanfareTrigger | null;
   onEndGameFanfareDone?: (id: number) => void;
 };
-
-const WarningTriangleIcon = () => (
-  <svg
-    className="warning-triangle-icon"
-    width="48"
-    height="48"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
-  </svg>
-);
 
 const InlineSpinner = () => (
   <span
