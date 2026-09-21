@@ -8,13 +8,32 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Boolean, create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from app.models import Base
 
 
 _BACKEND_DIR = pathlib.Path(__file__).resolve().parent
+
+
+def _boolean_default_storage_classes(connection, inspector) -> dict[str, str]:
+    """SQLite storage class of every boolean column's DDL default.
+
+    ``BOOLEAN`` takes NUMERIC affinity and ``'false'`` does not look like a number,
+    so a quoted default is stored as TEXT and a bare INSERT reads back as ``True``
+    whatever the default said. Declaring the default as ``sa.text("false")`` renders
+    it unquoted, which is what keeps the migrated schema in step with the models.
+    """
+    storage_classes = {}
+    for table in inspector.get_table_names():
+        for column in inspector.get_columns(table):
+            if not isinstance(column["type"], Boolean) or column["default"] is None:
+                continue
+            storage_classes[f"{table}.{column['name']}"] = connection.execute(
+                text(f"SELECT typeof({column['default']})")
+            ).scalar_one()
+    return storage_classes
 
 
 def _alembic_config() -> Config:
@@ -75,6 +94,12 @@ def test_sqlite_full_chain_matches_model_schema_and_downgrades(tmp_path, monkeyp
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one() == heads[0]
+        boolean_defaults = _boolean_default_storage_classes(connection, inspector)
+        assert boolean_defaults
+        quoted = sorted(
+            name for name, storage in boolean_defaults.items() if storage != "integer"
+        )
+        assert not quoted, f"boolean defaults stored as text: {quoted}"
     engine.dispose()
 
     command.downgrade(cfg, "base")

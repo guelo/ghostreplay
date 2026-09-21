@@ -176,11 +176,11 @@ def ensure_retention_policy_row(engine) -> None:
 
     Every column is written explicitly, from the same defaults
     :class:`RetentionPolicy` falls back to, rather than left to the table's
-    ``server_default``. Two reasons, and the second is not optional: the values
-    then provably match what ``load_policy`` would have returned, and SQLAlchemy
-    renders a string ``server_default`` as a QUOTED literal, so under SQLite these
-    booleans default to the text ``'false'`` — which is not ``false``, and an
-    id-only INSERT fails the readiness/freeze ladder CHECK.
+    ``server_default``, so the values provably match what ``load_policy`` would
+    have returned. (Before ``g-bool-default-quote`` the boolean defaults were also
+    stored as the text ``'false'`` under SQLite — which is not ``false`` — and an
+    id-only INSERT failed the readiness/freeze ladder CHECK; a database built
+    before that fix still carries that DDL.)
 
     An existing row is left alone: this heals a missing singleton, it does not
     reset a configured one. Takes an Engine, because both callers hold one and

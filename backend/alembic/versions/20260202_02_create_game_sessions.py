@@ -26,7 +26,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=20), nullable=False),
         sa.Column("result", sa.String(length=20)),
         sa.Column("engine_elo", sa.Integer(), nullable=False),
-        sa.Column("blunder_recorded", sa.Boolean(), nullable=False, server_default="false"),
+        sa.Column("blunder_recorded", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("pgn", sa.Text()),
     )
     op.create_index("idx_game_sessions_user", "game_sessions", ["user_id"])

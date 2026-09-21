@@ -21,7 +21,7 @@ def upgrade() -> None:
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
         sa.Column("username", sa.String(length=50)),
         sa.Column("password_hash", sa.String(length=255)),
-        sa.Column("is_anonymous", sa.Boolean(), nullable=False, server_default="true"),
+        sa.Column("is_anonymous", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
         sa.UniqueConstraint("username", name="uq_users_username"),

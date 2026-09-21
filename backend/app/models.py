@@ -79,7 +79,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
     username: Mapped[str | None] = mapped_column(String(50))
     password_hash: Mapped[str | None] = mapped_column(String(255))
-    is_anonymous: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    is_anonymous: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
@@ -262,13 +262,13 @@ class OpportunityRetentionPolicy(Base):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     freeze_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
+        Boolean, nullable=False, server_default=text("false")
     )
     cleanup_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
+        Boolean, nullable=False, server_default=text("false")
     )
     readiness: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
+        Boolean, nullable=False, server_default=text("false")
     )
     updated_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -511,8 +511,8 @@ class GameSession(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     result: Mapped[str | None] = mapped_column(String(20))
     engine_elo: Mapped[int] = mapped_column(Integer, nullable=False)
-    blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-    is_rated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    is_rated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     player_color: Mapped[str] = mapped_column(String(5), nullable=False, server_default="white")
     pgn: Mapped[str | None] = mapped_column(Text)
     session_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
@@ -999,7 +999,7 @@ class OpponentDecision(Base):
     # resulting_fen check never reads a NULL.
     resulting_fen: Mapped[str | None] = mapped_column(Text)
     reaches_drill_root: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
+        Boolean, nullable=False, server_default=text("false")
     )
 
 
