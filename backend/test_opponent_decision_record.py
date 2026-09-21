@@ -876,7 +876,7 @@ def test_migration_ddl_default_matches_the_model_construct():
 
 
 # Compact facts must participate in the envelope transaction, never in replay.
-def _record_target(db, session_id, blunder_id, fingerprint="target-fingerprint"):
+def _record_target(db, session_id, blunder_id, fingerprint="target-fingerprint", user_id=123):
     from app.api.game import NextOpponentMoveResponse, _record_decision
 
     return _record_decision(
@@ -887,6 +887,9 @@ def _record_target(db, session_id, blunder_id, fingerprint="target-fingerprint")
             target_blunder_id=blunder_id, decision_source="ghost_path",
         ),
         resulting_fen=AFTER_E4_E5_PLAYED_FEN,
+        # Required for every targeted publication: the SRS retention interlock is
+        # per user, and a target with no owner is refused rather than published.
+        user_id=user_id,
     )
 
 
@@ -900,6 +903,76 @@ def test_unsupported_dialect_rejected_before_decision_write():
         _record_target(db, uuid.uuid4(), 42)
     db.execute.assert_not_called()
     db.commit.assert_not_called()
+
+
+def test_a_targeted_decision_without_its_owner_is_refused(client, db_session, create_game_session):
+    """The sink refuses a target it cannot interlock, rather than publishing it.
+
+    The SRS retention interlock is per user (g-srs-target-publish), so a target
+    with no owner cannot be serialized against that user's folding. A new
+    targeting branch that forgets to pass one fails here instead of quietly
+    pinning evidence a fold may already have deleted.
+    """
+    from app.api.game import NextOpponentMoveResponse, _record_decision
+
+    session_id = uuid.UUID(create_game_session(user_id=123))
+    target = _seed_ghost_target(db_session, 123)
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="must name its owner"):
+        _record_decision(
+            db_session, session_id=session_id, request_fingerprint="ownerless",
+            request_fen_hash=fen_hash(AFTER_E4_FEN), uci_history='["e2e4"]', ply_before=1,
+            response=NextOpponentMoveResponse(
+                mode="ghost", move={"uci": "e7e5", "san": "e5"},
+                target_blunder_id=target, decision_source="ghost_path",
+            ),
+            resulting_fen=AFTER_E4_E5_PLAYED_FEN,
+        )
+    assert db_session.query(OpponentDecision).count() == 0
+    assert db_session.query(OpponentTargetFact).count() == 0
+
+
+def test_a_cleared_target_envelope_records_and_replays_with_no_fact(
+    client, db_session, create_game_session,
+):
+    """What a retention-degraded serve leaves behind: an ordinary envelope.
+
+    The fallback is not a special row type. It stores a NULL target, keeps its
+    resulting FEN for root confirmation, publishes no targeting fact, and replays
+    byte-identically like any other decision — which is what makes a retry safe
+    after the target was dropped.
+    """
+    from app.api.game import NextOpponentMoveResponse, _record_decision
+
+    session_id = uuid.UUID(create_game_session(user_id=123))
+    db_session.commit()
+
+    def _fallback(fingerprint="degraded"):
+        return _record_decision(
+            db_session, session_id=session_id, request_fingerprint=fingerprint,
+            request_fen_hash=fen_hash(AFTER_E4_FEN), uci_history='["e2e4"]', ply_before=1,
+            response=NextOpponentMoveResponse(
+                mode="engine", move={"uci": "e7e5", "san": "e5"},
+                target_blunder_id=None, target_blunder_srs=None, target_fen=None,
+                decision_source="backend_engine",
+            ),
+            resulting_fen=AFTER_E4_E5_PLAYED_FEN,
+        )
+
+    served, replayed = _fallback()
+    assert not replayed
+    retried, replayed = _fallback()
+    assert replayed and retried == served
+
+    row = db_session.query(OpponentDecision).one()
+    assert row.target_blunder_id is None
+    assert row.resulting_fen == AFTER_E4_E5_PLAYED_FEN
+    assert db_session.query(OpponentTargetFact).count() == 0
+    stored = json.loads(row.response_payload)
+    assert stored["target_blunder_id"] is None
+    assert stored["target_blunder_srs"] is None
+    assert stored["target_fen"] is None
 
 
 def test_conflicting_target_cannot_publish_or_renew_fact(client, db_session, create_game_session):

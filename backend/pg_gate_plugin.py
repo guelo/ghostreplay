@@ -243,6 +243,27 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opportunity_lifecycle_pg.py::test_a_review_is_stamped_with_the_database_clock",
     "test_opportunity_lifecycle_pg.py::test_a_policy_change_commits_while_a_user_lock_is_held",
     "test_opportunity_lifecycle_pg.py::test_both_m_directions_leave_the_fold_prefix_alone",
+
+    # Target publication against folding (g-srs-target-publish). FOR SHARE /
+    # FOR UPDATE NOWAIT contention, the 750 ms acquisition budget, a clock
+    # sampled after a wait and a transaction a lock timeout has ABORTED: SQLite
+    # renders none of them, so these are the only proof the interlock holds.
+    "test_srs_target_publication_pg.py::test_pg_a_fold_is_skipped_while_a_publication_holds_the_share_lock",
+    "test_srs_target_publication_pg.py::test_pg_a_skipped_fold_leaves_the_sweep_transaction_usable",
+    "test_srs_target_publication_pg.py::test_pg_publication_waits_for_a_short_fold_then_rechecks_the_prefix",
+    "test_srs_target_publication_pg.py::test_pg_a_long_fold_times_the_publication_out_and_leaks_no_lock",
+    "test_srs_target_publication_pg.py::test_pg_the_freeze_check_reads_the_clock_after_the_wait",
+    "test_srs_target_publication_pg.py::test_pg_a_rolled_back_publication_publishes_nothing_and_frees_the_row",
+    "test_srs_target_publication_pg.py::test_pg_a_suppressed_publication_replays_a_committed_targeted_winner",
+    "test_srs_target_publication_pg.py::test_pg_a_suppressed_target_is_refused_before_anything_is_written",
+    "test_srs_target_publication_pg.py::test_pg_two_publications_for_one_user_do_not_block_each_other",
+    "test_srs_target_publication_pg.py::test_pg_the_endpoint_targets_normally_when_nothing_holds_the_row",
+    "test_srs_target_publication_pg.py::test_pg_the_endpoint_serves_a_persisted_legal_move_under_contention",
+    "test_srs_target_publication_pg.py::test_pg_a_contended_insert_is_bounded_and_degrades",
+    "test_srs_target_publication_pg.py::test_pg_a_disconnected_publisher_holds_nothing",
+    "test_srs_target_publication_pg.py::test_pg_an_idle_publication_is_terminated_and_frees_the_row",
+    "test_srs_target_publication_pg.py::test_pg_publication_does_not_contend_with_a_session_row_lock",
+    "test_srs_target_publication_pg.py::test_pg_a_first_publication_creates_the_row_and_a_racing_one_degrades",
     # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
     "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",
@@ -1079,6 +1100,29 @@ def _truncate_all(engine, table_names: str) -> None:
         ) from exc
 
 
+def _reseed_singletons(engine) -> None:
+    """Put back the configuration rows the migrations seed, at their defaults.
+
+    ``opportunity_retention_policy`` is one row that migration ``20260919_04``
+    inserts, and readers are entitled to assume it EXISTS: SRS target publication
+    refuses to pin against a policy it cannot read, because a defaulted M is a
+    horizon nobody chose. Truncating it leaves every PG test running against a
+    database shape no migrated deployment can have.
+
+    Re-seeded rather than preserved, because tests legitimately flip its switches
+    and a preserved row would leak ``freeze_enabled`` into the next test. The
+    INSERT supplies only ``id``, so the restored row is exactly what the migration
+    produces: the decided horizon with every switch off.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO opportunity_retention_policy (id) VALUES (1) "
+                "ON CONFLICT DO NOTHING"
+            )
+        )
+
+
 def _make_isolated_pg_session_factory(pg_engine):
     """Reset the shared schema before constructing one test's Session factory."""
     from app.models import Base
@@ -1095,6 +1139,7 @@ def _make_isolated_pg_session_factory(pg_engine):
         if table.name not in preserved
     )
     _truncate_all(pg_engine, table_names)
+    _reseed_singletons(pg_engine)
     return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
 
 

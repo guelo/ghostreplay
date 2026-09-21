@@ -449,12 +449,16 @@ def test_bare_pg_session_factory_resets_before_each_construction(monkeypatch):
     def fake_truncate(engine, table_names):
         events.append(("reset", engine, table_names))
 
+    def fake_reseed(engine):
+        events.append(("reseed", engine))
+
     def fake_sessionmaker(**kwargs):
         factory = next(factories)
         events.append(("construct", kwargs, factory))
         return factory
 
     monkeypatch.setattr(pg_gate_plugin, "_truncate_all", fake_truncate)
+    monkeypatch.setattr(pg_gate_plugin, "_reseed_singletons", fake_reseed)
     monkeypatch.setattr(pg_gate_plugin, "sessionmaker", fake_sessionmaker)
 
     built = [
@@ -469,14 +473,19 @@ def test_bare_pg_session_factory_resets_before_each_construction(monkeypatch):
         if table.name not in preserved
     )
     assert built == expected_factories
+    # Ordering is the contract: truncate, then restore the migration-seeded
+    # singleton rows, and only then hand out a factory. A test that got its
+    # factory before the reseed would see a database shape no migration produces.
     assert events == [
         ("reset", engines[0], expected_tables),
+        ("reseed", engines[0]),
         (
             "construct",
             {"autocommit": False, "autoflush": False, "bind": engines[0]},
             built[0],
         ),
         ("reset", engines[1], expected_tables),
+        ("reseed", engines[1]),
         (
             "construct",
             {"autocommit": False, "autoflush": False, "bind": engines[1]},

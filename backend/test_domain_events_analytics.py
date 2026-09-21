@@ -196,7 +196,14 @@ def test_opponent_move_served_engine_fallback(client, auth_headers, captured):
     assert r.status_code == 200
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "123"
-    assert props == {"decision_source": "engine", "has_target_blunder": False, "replayed": False}
+    assert props == {
+        "decision_source": "engine",
+        "has_target_blunder": False,
+        "replayed": False,
+        # Additive (g-srs-target-publish): null on every serve that retention did
+        # not degrade, which is every ordinary one.
+        "retention_suppression": None,
+    }
 
 
 def test_opponent_move_served_marks_a_replayed_decision(client, auth_headers, captured):
@@ -226,6 +233,7 @@ def test_opponent_move_served_marks_a_replayed_decision(client, auth_headers, ca
         "decision_source": "engine",
         "has_target_blunder": False,
         "replayed": True,
+        "retention_suppression": None,
     }
 
 
@@ -418,7 +426,12 @@ def test_opponent_move_served_drill_route_ghost(client, auth_headers, captured):
     assert r.json()["mode"] == "ghost"
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "88"
-    assert props == {"decision_source": "ghost", "has_target_blunder": False, "replayed": False}
+    assert props == {
+        "decision_source": "ghost",
+        "has_target_blunder": False,
+        "replayed": False,
+        "retention_suppression": None,
+    }
 
 
 def test_opponent_move_served_ghost_with_target_blunder(
@@ -457,7 +470,12 @@ def test_opponent_move_served_ghost_with_target_blunder(
     assert data["target_blunder_id"] is not None
     did, _event, props = _one(captured, "opponent_move_served")
     assert did == "123"
-    assert props == {"decision_source": "ghost", "has_target_blunder": True, "replayed": False}
+    assert props == {
+        "decision_source": "ghost",
+        "has_target_blunder": True,
+        "replayed": False,
+        "retention_suppression": None,
+    }
 
 
 # --------------------------------------------------------------------------- srs

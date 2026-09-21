@@ -229,6 +229,25 @@ and
 with the boundary and purge reference in
 [`backend/scripts/RETAIN_SRS_OPPORTUNITIES.md`](backend/scripts/RETAIN_SRS_OPPORTUNITIES.md).
 
+Retention can remove a practice target, but it never fails an opponent move.
+Publishing a new target and folding a user's evidence serialize on that user's
+retention state row, so no unlocked check can authorize a target: publication
+holds the row while it re-reads policy, prefix and database time and records its
+decision, and folding gives way rather than waiting. When the interlock, the
+mutation boundary or the counter reader refuses, the request drops the target and
+still serves a recorded legal move — a structural drill move where one exists,
+otherwise the ordinary engine move, with a deterministic local one as the floor if
+the engine cannot answer either — with target fields cleared and retries replaying it
+unchanged. The reason is internal
+diagnostics only; responses carry no new field or state. The interlock is in
+[`backend/app/srs_target_admission.py`](backend/app/srs_target_admission.py) and
+the move floor in
+[`backend/app/opponent_move_controller.py`](backend/app/opponent_move_controller.py),
+covered by
+[`backend/test_srs_target_publication.py`](backend/test_srs_target_publication.py)
+and
+[`backend/test_srs_target_publication_pg.py`](backend/test_srs_target_publication_pg.py).
+
 New targeted decisions also atomically preserve each session/target's latest
 served time in compact facts. Targeted counters can read those facts after a
 verified backfill, while reached evidence remains current and mutable. Decision

@@ -108,18 +108,166 @@ A transaction queued before the deadline that wakes up after it is rejected.
 `run_opportunity` is not finality, and being enqueued early is not a rescue:
 observe and repair failed evidence BEFORE it freezes.
 
-Do **not** set `freeze_enabled` before `g-srs-target-publish` ships, even with
-readiness satisfied. The ghost-move route passes the in-progress session as the
-counter exclusion and checks only that the session is *active*, with no age
-limit. An exclusion of a frozen session is refused — correctly, since its share
-may already be folded — so a game left open longer than M would take a 500 on
-its next move. `g-srs-target-publish` owns the fallback that turns that into
-suppressed targeting and a legal move. The bead dependencies already sequence
-this; the only way to reach it is to flip the switch by hand first.
+A game left open longer than M used to be the sharp edge here: the ghost-move
+route passes the in-progress session as the counter exclusion, an exclusion of a
+frozen session is refused (correctly — its share may already be folded), and the
+refusal reached the player as a 500 on their next move. `g-srs-target-publish`
+closed that: the route now catches every retention refusal, drops the TARGET and
+still serves a recorded legal move. See **Target publication and folding** below
+for what the player gets and what it costs.
 
 Reviews are accepted at **every** session age, take no user advisory lock and
 inherit no graph-lock timeout. A review resets the folded since-review counters
 (every folded event predates it) and retains the lifetime total.
+
+## Target publication and folding
+
+A target pin and a fold are two decisions about the same evidence. A target
+published against a session the compactor has already folded pins history that no
+longer exists, and `targeted_30d` — a *denominator* — then silently shrinks and
+inflates `p_reach`. An unlocked freeze check cannot prevent that, because the fold
+can commit between the check and the INSERT.
+
+So both sides serialize on ONE row, `user_opportunity_retention_state`
+(`app/srs_target_admission.py`):
+
+| side | lock | on contention |
+| --- | --- | --- |
+| publication (`admit_target_publication`) | `FOR SHARE`, waiting up to **750 ms** | suppress the target, serve a move |
+| the compactor (`lock_state_for_fold`) | `FOR UPDATE NOWAIT`, ceiling **500 ms** | skip this user, fold on a later sweep |
+
+SHARE rather than exclusive, so a user's own concurrent moves never queue behind
+each other — only folding conflicts with publication. Both sides create the row
+if it is absent (the migration backfilled only the users that existed then), which
+is what makes the interlock total: whichever transaction inserts first holds it,
+and the other blocks on the primary-key conflict instead of running unserialized.
+**A compactor that locks without creating first is not interlocked at all.**
+
+A user with no row yet serializes on that insert exactly once. The second
+publication blocks only while the first one's insert is uncommitted, which is
+normally a few milliseconds, and is then admitted like any other; it degrades
+only if the creator holds the row past the 750 ms budget. Either way nothing
+unserialized gets through and no move is failed.
+
+After the lock, and never before it, publication re-reads policy, fold prefix,
+session and `clock_timestamp()` in ONE fresh statement, and holds the share lock
+through the decision INSERT and COMMIT. Fresh is load-bearing twice: the
+transaction may have started long before the ghost search finished, and it may
+have just woken from a wait during which the fold committed.
+
+The compactor **must not** read `false` from `lock_state_for_fold` as "nothing to
+fold". It means "a publication holds this user"; a later sweep sees the committed
+pin and folds around it.
+
+`false` also leaves the caller's transaction **usable**, with its own timeouts
+restored. A lock timeout aborts a PostgreSQL transaction, so the acquisition runs
+inside a SAVEPOINT: a sweep over many users can skip one and go straight on to the
+next in the same transaction, which is the only thing that makes a *per-user* skip
+worth having. Pinned by
+`test_pg_a_skipped_fold_leaves_the_sweep_transaction_usable`.
+
+### When a target is suppressed
+
+Every reason below ends the same way: no target, no invented counter, no
+targeting fact, no retention HTTP error — and a legal move, recorded in
+`opponent_decisions`, replayable by a retry.
+
+| internal reason | condition | log level |
+| --- | --- | --- |
+| `targeting_after_fold` | `started_at <= folded_through_started_at` | **ERROR — alarm** |
+| `mutation_window_expired` | `started_at <= clock_timestamp() - M`, under `freeze_enabled` | INFO |
+| `state_lock_timeout` | a fold held the row past 750 ms | WARNING |
+| `publication_timeout` | the bounded INSERT/fact window expired | WARNING |
+| `missing_retention_policy` | policy row 1 is gone; there is no M to hold a target against | ERROR |
+| `missing_retention_state` | the state row could not even be created | ERROR |
+| `session_unavailable` | the session vanished mid-request | WARNING |
+| `retention_counters_unavailable` | `load_opportunity_counters` raised (missing summary, stale review basis, discarded targeted history, frozen exclusion) | ERROR |
+
+`targeting_after_fold` is the one that is not an expected degradation. The prefix
+only advances over evidence already deleted, so a live session steering behind it
+means the eligibility side let through history that is gone — alarm on it, do not
+merely count it.
+
+The reasons are **internal telemetry only** (a `retention_suppression` property on
+`opponent_move_served`, plus the log line). No response field, schema value or
+enum carries them: to the client and to root confirmation this is an ordinary
+non-targeted move.
+
+The served move is a structural drill move where the drill has one, and otherwise
+the ordinary engine move — `choose_move`, exactly as any untargeted request would
+get. A suppressed request loses its *target*, not its opponent: several of these
+reasons do not clear on their own (`retention_counters_unavailable` raises on
+every move of a frozen session, and on every game of a user whose summary needs
+repair), so anything weaker than the engine here would degrade that player's
+opponent for the rest of the game and write those moves into their position graph.
+
+Only when the engine **also** fails does a deterministic local legal move answer
+(`opponent_move_controller.fallback_move`, seeded per user/position/session over
+the sorted legal UCIs). That is the floor that makes the guarantee unconditional,
+and it covers both ways `choose_move` can fail: the remote Maia3 API is allowed to
+be down and answers 503 when it is, and the move it returns is derived from
+`moves` rather than from the request FEN, so it can come back illegal in the
+position actually being played and be rejected as a 400. Neither is the client's
+fault and a legal move demonstrably exists in both, so serving one beats erroring.
+An *ordinary* request still gets that 503 or 400 — nothing about a suppressed
+target makes an engine failure acceptable for everyone else. The one error that
+survives here is a position with no legal move at all (malformed or terminal FEN):
+`fallback_move` reads the FEN and nothing else, so it raises too and the request
+gets its ordinary 400.
+
+The targeted candidate itself is dropped rather than re-served untargeted:
+recording the steer with no target would drop a real attempt out of the `p_reach`
+denominator. Re-deciding may legitimately land on the same move — a post-root
+drill constrains the ghost search to the structural set — and that is fine; what
+must not happen is a choice made *because of* a blunder being kept while the
+target that explains it is not.
+
+### Publication lifetime and cancellation bounds
+
+The share lock is held for exactly one window, and G is a drain gap for in-flight
+writers, so that window has to be finite. It is bounded by transaction-local
+settings, which reset at COMMIT/ROLLBACK — precisely the critical section:
+
+| window | `lock_timeout` | `statement_timeout` |
+| --- | --- | --- |
+| acquisition (`FOR SHARE`) | 750 ms | 5 s |
+| publication: freeze check → INSERT → targeting fact → COMMIT | 2 s | 10 s |
+| the compactor's acquisition | 500 ms | its own |
+
+Those two bound **statements**, not the transaction, so a third is armed for the
+whole publication: `idle_in_transaction_session_timeout` = **5 s**. Without it a
+worker that stalled *between* statements — a blocked thread, a paused process, a
+live connection nobody is driving — would hold the share lock for as long as it
+stayed alive, and TCP keepalives only ever notice a peer that is already gone.
+Every gap in this window is microseconds of Python, so a bound in seconds can
+only fire on a genuine stall; when it does, PostgreSQL terminates that backend,
+which is the only way to get the lock back from one. That last step is the whole
+value of the setting and is tested as such, not merely configured:
+`test_pg_an_idle_publication_is_terminated_and_frees_the_row` drives the ceiling
+down to 500 ms, stalls a real publication holding `FOR SHARE`, and waits for the
+next fold to acquire the row.
+
+The real lifetime is therefore the **sum** over the handful of statements in the
+window, not any single number in the table.
+
+The statement ceiling exceeds the lock budget on purpose: with the two equal, the
+acquisition would be *cancelled* (57014) before `lock_timeout` (55P03) could fire,
+and every contended publication would be indistinguishable from a cancellation.
+
+The 2 s lock bound covers the one wait inside the window that is not ours: a
+concurrent identical request that has speculatively inserted the same
+`(session_id, request_fingerprint)`. Exceeding it degrades to a non-targeted move
+rather than failing one.
+
+Nothing remote runs inside the window. The ghost search and the route BFS complete
+before acquisition; the engine call on a suppressed request happens *after* the
+rollback, with no retention lock held. So an in-flight publication drains in
+**seconds**, three orders of magnitude inside G = 1 hour.
+
+An HTTP or proxy timeout is **not** a substitute for any of this: cancelling the
+request does not roll back a backend still blocked inside the database. The
+request as a whole — ghost search plus a remote Maia call — is not bounded here,
+and does not need to be: it holds no retention lock while it runs.
 
 ## Whole-user purge
 
@@ -154,9 +302,11 @@ its own foreign keys.
 
 ```bash
 cd backend && source .venv/bin/activate
-python -m pytest test_opportunity_retention.py test_opportunity_compaction_migration.py
+python -m pytest test_opportunity_retention.py test_opportunity_compaction_migration.py \
+  test_srs_target_publication.py test_opponent_move_controller.py
 GHOSTREPLAY_TEST_PG_URL=... GHOSTREPLAY_TEST_PG_MAINT_URL=... \
-  python -m pytest test_opportunity_lifecycle_pg.py test_opportunity_compaction_migration.py
+  python -m pytest test_opportunity_lifecycle_pg.py test_opportunity_compaction_migration.py \
+    test_srs_target_publication_pg.py
 ```
 
 The PostgreSQL file is not optional coverage. Triggers, transaction-local custom

@@ -14,6 +14,7 @@ from typing import NamedTuple, TypeVar
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.accuracy import recompute_session_accuracy
@@ -54,6 +55,7 @@ from app.opening_score_delta import (
 )
 from app.posthog_client import capture
 from app.opponent_target_facts import publish_target_fact
+from app.opportunity_retention import RetentionInvariantError
 from app.opponent_retention import check_deadline, initialize_deadline, insert_decision
 from app.row_locks import for_no_key_update
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
@@ -66,6 +68,13 @@ from app.srs_math import (
     calculate_opportunity_overdue,
     calculate_urgency,
     compute_p_reach,
+)
+from app.srs_target_admission import (
+    REASON_COUNTERS_UNAVAILABLE,
+    REASON_PUBLICATION_TIMEOUT,
+    TargetPublicationSuppressed,
+    admit_target_publication,
+    publication_timed_out,
 )
 from app.srs_opportunity import (
     SEVERITY_NORMALIZER_CP,
@@ -1193,6 +1202,7 @@ def _record_decision(
     ply_before: int,
     response: NextOpponentMoveResponse,
     resulting_fen: str | None,
+    user_id: int | None = None,
 ) -> tuple[NextOpponentMoveResponse, bool]:
     """Persist a freshly computed decision and return the response to actually serve.
 
@@ -1221,10 +1231,37 @@ def _record_decision(
     A winning targeted decision and its monotonic targeting fact commit atomically,
     using the envelope's returned served_at. Fact failure rolls back the envelope;
     replay and fingerprint losers never publish or renew a fact.
+
+    ``user_id`` is required only to PUBLISH A TARGET, and every branch that can
+    insert one goes through the SRS retention interlock below before anything is
+    written. The check lives here, in the single decision sink, rather than at each
+    call site: a new targeting branch that forgets it cannot reach the INSERT,
+    because a target with no owner is refused outright instead of published
+    unserialized. Non-targeted branches are untouched — retention has nothing to
+    say about a move that pins no evidence.
     """
     dialect_name = db.get_bind().dialect.name
     if dialect_name not in ("sqlite", "postgresql"):
         raise NotImplementedError(f"Opponent decisions do not support {dialect_name}")
+
+    if response.target_blunder_id is not None:
+        if user_id is None:
+            raise ValueError(
+                "A targeted opponent decision must name its owner: the SRS "
+                "retention interlock is scoped per user"
+            )
+        # Acquired BEFORE the row exists in any form and held through the commit
+        # below, so no fold can slip between the freeze check and the INSERT.
+        reason = admit_target_publication(
+            db, user_id=user_id, session_id=session_id
+        )
+        if reason is not None:
+            # Release the share lock (or clear the transaction a lock timeout
+            # already aborted) BEFORE the caller does anything else. Fallback
+            # selection, logging and telemetry must not run while this
+            # transaction still blocks the compactor.
+            db.rollback()
+            raise TargetPublicationSuppressed(reason)
 
     decision_id = uuid.uuid4()
     # Allocate BEFORE serializing so response_payload carries the decision_id of the
@@ -1253,7 +1290,19 @@ def _record_decision(
         ),
     }
 
-    served_at = insert_decision(db, values)
+    try:
+        served_at = insert_decision(db, values)
+    except OperationalError as err:
+        # Only inside the bounded publication window, and only for the two
+        # contention SQLSTATEs: the wait this can hit is a concurrent identical
+        # request that has speculatively inserted the same fingerprint. Degrading
+        # keeps the move, and the bound keeps the share lock finite, which is what
+        # lets a fold's grace period mean anything. Every other database error
+        # still propagates and still fails closed.
+        if response.target_blunder_id is None or not publication_timed_out(err):
+            raise
+        db.rollback()
+        raise TargetPublicationSuppressed(REASON_PUBLICATION_TIMEOUT) from err
     won = served_at is not None
 
     if not won:
@@ -1286,6 +1335,13 @@ def _record_decision(
                 db, session_id=session_id, blunder_id=stamped.target_blunder_id,
                 served_at=served_at,
             )
+        except OperationalError as err:
+            # Same bounded window, same rule: a contended fact upsert degrades to
+            # a non-targeted move, anything else propagates.
+            db.rollback()
+            if not publication_timed_out(err):
+                raise
+            raise TargetPublicationSuppressed(REASON_PUBLICATION_TIMEOUT) from err
         except Exception:
             # A failed fact must not leave an envelope available to commit/replay.
             db.rollback()
@@ -1338,7 +1394,11 @@ def get_next_opponent_move(
         )
 
     def _emit_served(
-        mode: OpponentMoveMode, has_target_blunder: bool, *, replayed: bool = False
+        mode: OpponentMoveMode,
+        has_target_blunder: bool,
+        *,
+        replayed: bool = False,
+        retention_suppression: str | None = None,
     ) -> None:
         capture(
             str(user.user_id),
@@ -1350,14 +1410,27 @@ def get_next_opponent_move(
                 # counts can now exclude the retry replays that fold three requests
                 # into one decision.
                 "replayed": replayed,
+                # Internal classification of an SRS-retention degradation, null on
+                # every ordinary serve. Additive property rather than a new
+                # decision_source or response field: the client is served an
+                # ordinary non-targeted move and must not branch on why.
+                "retention_suppression": retention_suppression,
             },
         )
 
     def _serve(
-        served: NextOpponentMoveResponse, replayed: bool
+        served: NextOpponentMoveResponse,
+        replayed: bool,
+        *,
+        retention_suppression: str | None = None,
     ) -> NextOpponentMoveResponse:
         has_target = served.target_blunder_id is not None
-        _emit_served(served.mode, has_target, replayed=replayed)
+        _emit_served(
+            served.mode,
+            has_target,
+            replayed=replayed,
+            retention_suppression=retention_suppression,
+        )
         _log_slow(served.mode, served.decision_source, has_target)
         return served
 
@@ -1552,6 +1625,11 @@ def get_next_opponent_move(
             )
             return _serve(served, was_replayed)
 
+    # Set by any SRS-retention condition that forbids publishing a NEW target.
+    # It never fails the request: it routes this request to a target-free move that
+    # is still recorded, and classifies why in internal telemetry.
+    retention_suppression: str | None = None
+
     structural_moves = []
     if should_steer_post_root and drill_opening_key:
         routing = routing_view(get_opening_graph())
@@ -1566,24 +1644,50 @@ def get_next_opponent_move(
     # Ghost pulling the opening away from score-relevant topology.
     # Use shared ghost path traversal logic to find moves toward due blunders
     ghost_search_started = time.perf_counter()
-    (
-        move_san,
-        target_blunder_id,
-        blunder_last_reviewed,
-        blunder_created_at,
-        ghost_counters,
-    ) = find_ghost_move(
-        db=db,
-        user_id=user.user_id,
-        fen=request.fen,
-        player_color=player_color,
-        session_id=request.session_id,
-        allowed_first_move_ucis=(
-            frozenset(move.uci for move in structural_moves)
-            if structural_moves
-            else None
-        ),
-    )
+    try:
+        (
+            move_san,
+            target_blunder_id,
+            blunder_last_reviewed,
+            blunder_created_at,
+            ghost_counters,
+        ) = find_ghost_move(
+            db=db,
+            user_id=user.user_id,
+            fen=request.fen,
+            player_color=player_color,
+            session_id=request.session_id,
+            allowed_first_move_ucis=(
+                frozenset(move.uci for move in structural_moves)
+                if structural_moves
+                else None
+            ),
+        )
+    except RetentionInvariantError as exc:
+        # load_opportunity_counters REFUSES rather than degrading a folded counter
+        # to zeros — a missing summary after readiness, a review basis that lags the
+        # live latest review, a 30-day window reaching discarded targeting history,
+        # or this in-progress session itself being frozen. Every one of those means
+        # the evidence a target would be scored and pinned against cannot be
+        # trusted, and none of them is the player's problem. Rolled back here
+        # because the refusal ends this read transaction's usefulness and no
+        # retention read may stay open across the fallback.
+        db.rollback()
+        logger.error(
+            "srs opportunity counters unavailable for user_id=%s session_id=%s; "
+            "serving a non-targeted move: %s",
+            user.user_id,
+            request.session_id,
+            exc,
+        )
+        retention_suppression = REASON_COUNTERS_UNAVAILABLE
+        (
+            move_san,
+            target_blunder_id,
+            blunder_last_reviewed,
+            blunder_created_at,
+            ghost_counters,
+        ) = NO_GHOST
     ghost_search_ms = _elapsed_ms(ghost_search_started)
 
     # If ghost path exists, convert SAN to both UCI and SAN formats
@@ -1663,17 +1767,50 @@ def get_next_opponent_move(
         # Recorded OUTSIDE the except above on purpose: in there, a serialization or
         # database error would be swallowed as "SAN parsing failed" and fall through
         # to the engine, serving a move no decision records.
-        served, was_replayed = _record_decision(
-            db,
-            session_id=request.session_id,
-            request_fingerprint=request_fingerprint,
-            request_fen_hash=fen_hash(request.fen),
-            uci_history=_encode_uci_history(request.moves),
-            ply_before=len(request.moves),
-            response=ghost_response,
-            resulting_fen=ghost_resulting_fen,
-        )
-        return _serve(served, was_replayed)
+        try:
+            served, was_replayed = _record_decision(
+                db,
+                session_id=request.session_id,
+                request_fingerprint=request_fingerprint,
+                request_fen_hash=fen_hash(request.fen),
+                uci_history=_encode_uci_history(request.moves),
+                ply_before=len(request.moves),
+                response=ghost_response,
+                resulting_fen=ghost_resulting_fen,
+                user_id=user.user_id,
+            )
+        except TargetPublicationSuppressed as exc:
+            # The interlock already rolled back, so no retention lock survives into
+            # the fallback. This candidate is dropped with its target rather than
+            # re-served untargeted: it was CHOSEN because of that blunder, and
+            # recording the steer with no target would drop a real attempt out of
+            # the p_reach denominator — the exact undercount the record exists to
+            # stop. Re-deciding may legitimately land on the same move (a post-root
+            # drill constrained the ghost search to the structural set, so with one
+            # structural move there is only one), which is fine: what must not
+            # happen is a targeted choice being kept while its target is not.
+            logger.warning(
+                "target publication suppressed (%s) for user_id=%s session_id=%s "
+                "blunder_id=%s; serving a non-targeted move",
+                exc.reason,
+                user.user_id,
+                request.session_id,
+                ghost_response.target_blunder_id,
+            )
+            retention_suppression = exc.reason
+        else:
+            return _serve(served, was_replayed)
+
+    if retention_suppression is not None:
+        # A concurrent request may have committed this exact fingerprint while we
+        # were waiting on the interlock. Its envelope is the answer — including any
+        # target it legitimately published — because a replay serves a decision that
+        # already exists and creates no new sample, so it is exempt from this freeze.
+        # Checked before degrading, so a raced duplicate is answered with the real
+        # decision rather than a fallback that would lose the insert anyway.
+        raced = _replay_decision(db, request.session_id, request_fingerprint)
+        if raced is not None:
+            return _serve(raced, True, retention_suppression=retention_suppression)
 
     if structural_moves:
         rng = random.Random(_stable_seed(user.user_id, request.fen, request.session_id))
@@ -1699,9 +1836,20 @@ def get_next_opponent_move(
             ),
             resulting_fen=structural_move.resulting_fen,
         )
-        return _serve(served, was_replayed)
+        return _serve(
+            served, was_replayed, retention_suppression=retention_suppression
+        )
 
     # Step 2: Backend engine fallback — remote Maia3 API
+    #
+    # A retention-suppressed request arrives here too, and takes this path FIRST.
+    # It has already lost its target; making it play a worse move as well would
+    # be a second, unrelated penalty, and `retention_counters_unavailable` does
+    # not clear on its own — a frozen session or an unrepaired summary raises for
+    # every move of that game, so a local floor used eagerly would fill the
+    # player's position graph with junk for the rest of it. Maia is asked exactly
+    # as it would be for any untargeted move; the retention locks were released
+    # before this point, so its latency costs the interlock nothing.
     try:
         from app.maia3_client import Maia3Error
         from app.opponent_move_controller import choose_move
@@ -1720,23 +1868,61 @@ def get_next_opponent_move(
         )
         engine_ms = _elapsed_ms(engine_started)
 
-    except Maia3Error as e:
+    except (Maia3Error, ValueError) as e:
         if "engine_started" in locals():
             engine_ms = _elapsed_ms(engine_started)
-        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
-        raise HTTPException(
-            status_code=503,
-            detail=f"Maia3 API unavailable: {e}",
+        # Two distinct engine failures, and both are the engine's, not the
+        # client's: Maia3Error is the API being down, and ValueError is
+        # `choose_move` rejecting the move Maia returned as illegal in the
+        # requested FEN (Maia derives its position from `moves`, which this path
+        # forwards unvalidated, so the two can disagree).
+        unavailable = isinstance(e, Maia3Error)
+        if retention_suppression is None:
+            _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
+            raise HTTPException(
+                status_code=503 if unavailable else 400,
+                detail=(
+                    f"Maia3 API unavailable: {e}"
+                    if unavailable
+                    else f"Invalid input: {e}"
+                ),
+            )
+        # The local floor, and the only place it is reached: retention
+        # bookkeeping has already removed this request's target, and a guarantee
+        # that it never FAILS the move cannot then rest on a remote dependency
+        # that is allowed to be down (503) or to answer with a move this position
+        # cannot play (400). Either way the position itself is fine and a legal
+        # move exists, so serving one is strictly better than an error. An
+        # ordinary request still gets its 503/400 — nothing about retention makes
+        # an engine outage acceptable in general.
+        from app.opponent_move_controller import fallback_move
+
+        logger.warning(
+            "maia could not answer (%s) for a retention-degraded request "
+            "(%s) user_id=%s session_id=%s; serving a local legal move",
+            e,
+            retention_suppression,
+            user.user_id,
+            request.session_id,
         )
-    except ValueError as e:
-        if "engine_started" in locals():
-            engine_ms = _elapsed_ms(engine_started)
-        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
-        raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
+        try:
+            controller_move = fallback_move(
+                request.fen,
+                seed=_stable_seed(user.user_id, request.fen, request.session_id),
+            )
+        except ValueError as fallback_error:
+            # The position really is unplayable — malformed FEN, or terminal with
+            # no legal move. `fallback_move` reads the FEN and nothing else, so
+            # this is the one case where 400 is the honest answer even here. It
+            # is not a retention condition and is not reported as one.
+            _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
+            raise HTTPException(
+                status_code=400, detail=f"Invalid input: {fallback_error}"
+            ) from fallback_error
 
     # Recorded OUTSIDE the try above on purpose: in there, a database error would be
-    # caught by `except ValueError` or shadowed by the Maia mapping and answered as
-    # 400/503 with a move already chosen. Out here it propagates, so the endpoint
+    # swept up by the engine handler and answered as a 400, or quietly degraded to
+    # the local floor, with a move already chosen. Out here it propagates, so the endpoint
     # fails closed rather than serving a move no decision records.
     import chess
 
@@ -1769,9 +1955,14 @@ def get_next_opponent_move(
                 uci=controller_move.uci,
                 san=controller_move.san,
             ),
+            # Every target-only field is already absent from this branch, and
+            # stays that way for a suppressed request: the decision pins nothing
+            # and must never read back as a steer.
             target_blunder_id=None,
             decision_source=DecisionSource.BACKEND_ENGINE,
         ),
         resulting_fen=engine_resulting_fen,
     )
-    return _serve(served, was_replayed)
+    return _serve(
+        served, was_replayed, retention_suppression=retention_suppression
+    )
