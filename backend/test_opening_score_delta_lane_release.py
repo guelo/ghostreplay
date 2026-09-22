@@ -13,7 +13,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import pathlib
+import platform
 import statistics
+import subprocess
 import threading
 import time
 import uuid
@@ -44,12 +47,22 @@ from app.opening_score_delta import (
     run_baseline_snapshot_job,
 )
 from app.opening_score_delta_lane import OpeningScoreDeltaLane
+from app.opening_score_storage import (
+    StorageFormat,
+    convert_pair,
+    latest_batch_view,
+)
 
-pytestmark = pytest.mark.release_seal
+# NOT a module-level marker. Everything here except the restored-dump gate
+# itself is a pure function over a dict, and a blanket seal kept those cases out
+# of pre-push for no reason: the marker belongs on the one case that reads host
+# state (see AGENTS.md's testing guidance and ``.githooks/pre-push``).
 
 _DATABASE_ENV = "GHOSTREPLAY_DELTA_BENCH_DATABASE_URL"
+_FORMAT_ENV = "GHOSTREPLAY_DELTA_BENCH_STORAGE_FORMAT"
 _PROTECTED_DATABASES = {"postgres", "railway", "gr_snap_base"}
 _P95_LIMIT_MS = 3000.0
+_FORMATS = {"legacy": StorageFormat.LEGACY, "current": StorageFormat.CURRENT}
 
 
 @dataclass
@@ -133,6 +146,89 @@ def _database_url() -> str:
             f"{_DATABASE_ENV} must name a disposable copy, not {url.database!r}"
         )
     return raw
+
+
+def _storage_format() -> StorageFormat:
+    """Which storage format this run publishes in (``legacy`` by default).
+
+    An EXPLICIT knob rather than a patch on ``default_storage_format``: the
+    contending full recompute below runs on its own thread and the qualification
+    harness spawns measurement children, so a patch whose scope lapsed would
+    publish legacy and silently flip a converted pair back mid-measurement.
+    """
+    raw = os.getenv(_FORMAT_ENV, "legacy").strip().lower()
+    if raw not in _FORMATS:
+        pytest.fail(
+            f"{_FORMAT_ENV} must be one of {sorted(_FORMATS)}, not {raw!r}"
+        )
+    return _FORMATS[raw]
+
+
+_REPORT_ENV = "GHOSTREPLAY_DELTA_BENCH_REPORT"
+
+
+def _write_bench_report(summary: dict) -> str | None:
+    """Emit C7's numbers as a FILE when asked, not only as a printed line.
+
+    The gate's own assertion is the release gate, but §4.9's result is also a
+    qualification input, and ``summarize_opening_score_qualification`` cannot
+    read a line of stdout. Without an artifact the evaluator could not tell
+    "C7 ran and passed" from "C7 was never run", and ``required_coverage``
+    exists precisely to stop that from reading as a pass. The path is opt-in, so
+    an ordinary release run is unchanged.
+    """
+    destination = os.getenv(_REPORT_ENV)
+    if not destination:
+        return None
+    path = pathlib.Path(destination)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+    return str(path)
+
+
+def _git_revision() -> str:
+    """The commit the lane was measured at, or ``unknown`` rather than a lie."""
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover - thin
+        return "unknown"
+
+
+def _bench_identity(engine) -> dict:
+    """Revision, host and CLUSTER, so C7 can be shown to belong to the run.
+
+    The summary carried none of the three, so any lane file from any machine at
+    any commit satisfied §4.2's "C7 is a required result". The qualification
+    evaluator compares these against every other input's.
+    """
+    with engine.connect() as conn:
+        cluster = conn.execute(text("SHOW cluster_name")).scalar_one()
+    return {
+        "tested_revision": _git_revision(),
+        "host_platform": platform.platform(),
+        "cluster_name": cluster,
+    }
+
+
+def _assert_marker_format(session_factory, user_id: int, color: str, expected) -> None:
+    """Assert the marker's format after every rep, not once per run.
+
+    Lane deltas follow the handle's format, so a single flipped marker would
+    move the rest of the run onto the other format without any other symptom.
+    """
+    with session_factory() as db:
+        view = latest_batch_view(db, user_id, color)
+        assert view is not None, "no marker after a publication"
+        assert view.storage_format == expected.value, (
+            f"marker is {view.storage_format!r}, expected {expected.value!r}"
+        )
+        db.rollback()
 
 
 def _heavy_pair(db) -> tuple[int, str]:
@@ -285,6 +381,7 @@ def _run_lane_once(
     return record
 
 
+@pytest.mark.release_seal
 def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatch):
     engine = create_engine(_database_url(), pool_pre_ping=True)
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -308,6 +405,16 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
         # Warm the graph/roots and Phase-1 replay cache before timing warm cells.
         overlay_evidence(db, user_id, color, get_opening_graph())
         db.rollback()
+
+    storage_format = _storage_format()
+    if storage_format is StorageFormat.CURRENT:
+        # convert_pair requires a FRESH transaction and raises ValueError
+        # otherwise (opening_score_storage.py:782), so this runs on its own
+        # session before anything else touches the pair.
+        with session_factory() as db:
+            convert_pair(db, user_id, color, StorageFormat.CURRENT)
+            db.commit()
+        _assert_marker_format(session_factory, user_id, color, storage_format)
 
     warm_reps = int(os.getenv("GHOSTREPLAY_DELTA_BENCH_REPS", "10"))
     if warm_reps < 5:
@@ -355,7 +462,12 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
                 def run_full():
                     try:
                         with session_factory() as db:
-                            recompute_opening_scores(db, user_id, color)
+                            recompute_opening_scores(
+                                db,
+                                user_id,
+                                color,
+                                storage_format=storage_format,
+                            )
                     except BaseException as exc:  # surfaced on the test thread
                         full_errors.append(exc)
                     finally:
@@ -380,6 +492,7 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
                 assert full_thread.is_alive() is False
                 if full_errors:
                     raise full_errors[0]
+                _assert_marker_format(session_factory, user_id, color, storage_format)
         gate_event[0] = None
         monkeypatch.setattr(opening_cache, "_build_cached_scores", real_build)
 
@@ -481,15 +594,77 @@ def test_restored_dump_terminal_lane_p95_under_whole_graph_contention(monkeypatc
             }
             for cell, modes in cells.items()
         }
+        summary["storage_format"] = storage_format.value
+        summary["p95_limit_ms"] = _P95_LIMIT_MS
+        summary["repetitions"] = warm_reps
+        summary["identity"] = _bench_identity(engine)
         print("DELTA_LANE_BENCH_RESULT " + json.dumps(summary, sort_keys=True))
+        written = _write_bench_report(summary)
+        if written:
+            print(f"DELTA_LANE_BENCH_REPORT {written}")
 
         for mode in ("normal", "drill"):
             p95 = summary["whole_graph"][mode]["end_to_end"]["p95_ms"]
             assert p95 < _P95_LIMIT_MS, (
                 f"{mode} whole-graph-contention p95 {p95}ms "
-                f"exceeds {_P95_LIMIT_MS}ms"
+                f"exceeds {_P95_LIMIT_MS}ms in {storage_format.value} mode"
             )
     finally:
         lane.shutdown(drain=False, timeout=30.0)
         reset_scoped_delta_cache()
         engine.dispose()
+
+
+def test_the_bench_report_is_written_only_when_a_path_is_given(tmp_path, monkeypatch):
+    """C7's numbers reach the evaluator as a file, or not at all.
+
+    ``summarize_opening_score_qualification`` cannot read a printed line, so
+    without an artifact it could not tell "C7 ran and passed" from "C7 was never
+    run" — and §4.2 names C7 as a required result. The path is opt-in, so an
+    ordinary release run is unchanged.
+    """
+    summary = {
+        "storage_format": "legacy",
+        "whole_graph": {"normal": {"end_to_end": {"p95_ms": 1200.0}}},
+    }
+    monkeypatch.delenv(_REPORT_ENV, raising=False)
+    assert _write_bench_report(summary) is None
+
+    destination = tmp_path / "nested" / "c7.json"
+    monkeypatch.setenv(_REPORT_ENV, str(destination))
+    assert _write_bench_report(summary) == str(destination)
+    assert json.loads(destination.read_text()) == summary
+
+
+def test_the_bench_report_carries_the_revision_host_and_cluster():
+    """C7 is a qualification input, so it has to be shown to belong to the run.
+
+    The summary carried none of the three, so any lane file from any machine at
+    any commit satisfied §4.2's "C7 is a required result", and
+    ``summarize_opening_score_qualification`` had nothing to compare against the
+    cells, the memory children or the C4 control.
+    """
+
+    class _Conn:
+        def execute(self, statement, *args, **kwargs):
+            assert "cluster_name" in str(statement)
+            return self
+
+        def scalar_one(self):
+            return "ghostreplay-score-storage-qual"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Engine:
+        def connect(self):
+            return _Conn()
+
+    identity = _bench_identity(_Engine())
+    assert identity["cluster_name"] == "ghostreplay-score-storage-qual"
+    assert identity["host_platform"] == platform.platform()
+    assert set(identity) == {"tested_revision", "host_platform", "cluster_name"}
+    assert identity["tested_revision"]

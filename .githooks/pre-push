@@ -182,7 +182,8 @@ done
 
 # Say what was NOT run, every time. A deselection nobody is reminded of is a deselection that
 # quietly becomes "we deleted those tests".
-printf '\nNot run by this gate: @release_seal (the production-shape delta-lane benchmark).\n'
+printf '\nNot run by this gate: @release_seal (the production-shape delta-lane benchmark,\n'
+printf 'and any case that reads host state such as a restored dump or a private-store capture).\n'
 printf 'Run it when validating that release-only benchmark:\n  %s\n' "$release_seal_command"
 
 if ((overall_status != 0)); then
