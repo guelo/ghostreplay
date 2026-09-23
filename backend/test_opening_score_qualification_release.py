@@ -32,6 +32,39 @@ from scripts import qualify_opening_score_storage as qual
 from scripts import summarize_opening_score_qualification as evaluator
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_connection_environment(monkeypatch):
+    """Every case here runs as if the shell carried no connection state.
+
+    The guards under test REFUSE AN INHERITED CONNECTION FIRST, so a shell that
+    exports a production ``DATABASE_URL`` — which this repository's developers
+    do — refuses on that before the case's own branch is reached. Two cases
+    failed exactly that way in ``.githooks/pre-push``, which does not unset it,
+    while passing under the ``env -u DATABASE_URL`` this bead's runbook uses.
+    A case that passes in one of those two shells and fails in the other is
+    testing the shell.
+
+    The mirror image is worse and is the reason this is autouse rather than two
+    ``delenv`` lines: a case that asserts only that SOMETHING was refused would
+    pass on the ambient value while never reaching the branch it names.
+
+    The names come from the modules' own tuples and are never retyped beside
+    them — §1.2's whole lesson. ``c4`` is imported further down this file; the
+    lookup happens when the fixture runs, so the order does not matter.
+    """
+    for name in sorted(
+        {
+            *qual.INHERITED_URL_ENV_NAMES,
+            *qual.INHERITED_HOST_ENV_NAMES,
+            *qual.INHERITED_PG_ENV_NAMES,
+            *c4.INHERITED_URL_ENV_NAMES,
+            *c4.INHERITED_HOST_ENV_NAMES,
+            *c4.REFUSED_ENV_NAMES,
+        }
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 # --------------------------------------------------------------------------
 # §1.2 — environment refusals, ONE CASE PER NAME
 # --------------------------------------------------------------------------
@@ -3783,7 +3816,9 @@ def test_the_control_runner_imports_no_application_module_at_top():
 def test_the_control_guard_normalises_the_driver(monkeypatch):
     # A bare postgresql:// URL selects psycopg2, which is not installed in
     # either worktree's venv, so a correct URL failed at connect time.
-    monkeypatch.delenv("DATABASE_PRIVATE_URL", raising=False)
+    # The one-name `delenv` that used to stand here is gone: clearing
+    # DATABASE_PRIVATE_URL and not DATABASE_URL beside it is the same
+    # one-alias-at-a-time habit §1.2 exists to stop. See the autouse fixture.
     monkeypatch.setenv(
         c4.QUAL_DATABASE_ENV, "postgresql://u:p@127.0.0.1:55440/gr_score_qual_r1_c4"
     )
@@ -3799,6 +3834,28 @@ def test_the_control_guard_refuses_url_query_overrides(monkeypatch):
     )
     with pytest.raises(c4.ControlRefusal, match="query overrides"):
         c4.guard_database_url()
+
+
+def test_the_guard_cases_see_no_inherited_connection_environment():
+    """The isolation the two cases above depend on, asserted rather than assumed.
+
+    Both call a guard with NO argument, so they read the real ``os.environ``.
+    Under a shell exporting a production ``DATABASE_URL`` they refuse on that
+    name and never reach the driver normalisation or the query-override branch
+    they are named for — which is how ``.githooks/pre-push`` failed them while
+    every ``env -u DATABASE_URL`` run passed. If the autouse fixture is ever
+    narrowed or dropped, this fails first and says why.
+    """
+    for name in (
+        *qual.INHERITED_URL_ENV_NAMES,
+        *qual.INHERITED_HOST_ENV_NAMES,
+        *qual.INHERITED_PG_ENV_NAMES,
+    ):
+        assert name not in os.environ, (
+            f"{name} survived into a guard case; the guards refuse an inherited "
+            "connection before anything else, so this case would assert the "
+            "wrong refusal"
+        )
 
 
 def test_the_control_runner_refuses_a_database_that_is_not_empty():
