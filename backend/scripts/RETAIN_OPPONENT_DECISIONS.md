@@ -637,6 +637,13 @@ PG_DUMP=/opt/homebrew/opt/postgresql@18/bin/pg_dump   # not the one on PATH; see
   | age -p > ~/private/opponent_decisions-$(date -u +%Y%m%dT%H%M%SZ).dump.age
 ```
 
+Run it from a real terminal. `age -p` reads the passphrase from `/dev/tty`, so
+it cannot be driven from an agent's shell or any other TTY-less context: it exits
+with `could not read passphrase: standard input is not a terminal, and /dev/tty
+is not available`, and `pg_dump` then dies of SIGPIPE (exit 141). Never leave
+age's prompt empty either — it autogenerates a passphrase and **prints it to the
+terminal**, which in an agent session writes it straight into the transcript.
+
 Use existing approved credentials and whatever encryption tool is already
 approved (`age`, `gpg -c`, …). Two prerequisites are worth checking before the
 capture, not after it, and on this workstation the first one already bites.
@@ -652,9 +659,11 @@ install. Check it with `"$PG_DUMP" --version` against the server's
 is due.
 
 The second is the passphrase, which must have a recorded holder, since an
-unopenable dump is not a snapshot. As of 2026-09-20 neither `age` nor `gpg` is
-on this workstation; install one during the no-deletion interval, not on the day,
-and use that same tool in the verification below.
+unopenable dump is not a snapshot. Install the encryption tool during the
+no-deletion interval, not on the day, and use that same tool in the verification
+below. On this workstation that sequencing mattered: neither `age` nor `gpg` was
+present when the prerequisite was measured on 2026-09-20, and `age` 1.3.2 was
+installed in time for the 2026-09-23 capture. `gpg` is still absent.
 
 Keep the file in a private directory outside any repository, worktree or
 cloud-synced folder. Verify **both** pipeline exit statuses (`pipefail` or
@@ -662,8 +671,30 @@ cloud-synced folder. Verify **both** pipeline exit statuses (`pipefail` or
 that it decrypts nor that it is a valid dump:
 
 ```bash
-age -d <file> | pg_restore -l >/dev/null   # decrypts and parses; writes no plaintext, restores nothing
+PG_RESTORE=/opt/homebrew/opt/postgresql@18/bin/pg_restore   # not the one on PATH
+age -d <file> | "$PG_RESTORE" -f /dev/null   # decrypts and parses; writes no plaintext, restores nothing
 ```
+
+`pg_restore` is pinned for the same reason `pg_dump` is and fails the same way:
+the 15.18 on `PATH` cannot read an archive written by 18.4, exiting with
+`unsupported version (1.16) in file header` — after the passphrase has been typed.
+
+**`-f /dev/null`, not `-l`.** `pg_restore -l` reads only the archive's table of
+contents at the front of the file, exits 0 and closes the pipe, which SIGPIPEs
+`age` on any payload larger than a pipe buffer. The observed result on a provably
+intact 3 MB snapshot is `age -d exit=141  pg_restore -l exit=0`: checking both
+statuses condemns a good snapshot, and the tempting workaround — dropping the
+both-statuses rule — removes the one check that catches a truncated file.
+`-f /dev/null` consumes the whole stream, so both statuses stay meaningful, and
+it parses every data block rather than just the TOC. Measured 2026-09-23:
+`-f /dev/null` from a pipe gives `PIPESTATUS=0 0`, an early-exiting consumer
+gives `141 0`, and `age -d` on a deliberately truncated file exits 1 with
+`failed to decrypt and authenticate payload chunk` — so a full `age -d` exit 0
+is itself proof that every chunk authenticated.
+
+Read the TOC too (`"$PG_RESTORE" -l`, where age's SIGPIPE is expected and
+ignored) and confirm it lists `TABLE DATA`, not merely the table definition. An
+empty archive parses perfectly.
 
 Record its private location, capture date, deletion date (capture + 7 days), the
 accountable owner and who holds the passphrase. Delete it on that date and
