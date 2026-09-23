@@ -11,6 +11,9 @@ row is the transaction's most contended lock; anything appended after its bump
 cannot tell "last statement of the transaction" from "last statement observed".
 Listening to the engine ``commit`` event too gives the boundary.
 
+The separately tagged activity-hint transaction is outside this evidence-write
+contract; its durability and contention behavior have their own tests.
+
 Not a ``test_`` module on purpose — pytest must not collect it.
 """
 
@@ -30,9 +33,13 @@ class StatementLog:
         self.events: list[tuple[str, str]] = []
 
     def _on_cursor(self, conn, cursor, statement, parameters, context, executemany) -> None:
+        if context.execution_options.get("session_activity_hint"):
+            return
         self.events.append(("sql", statement.lower()))
 
     def _on_commit(self, conn) -> None:
+        if conn.get_execution_options().get("session_activity_hint"):
+            return
         self.events.append(("commit", ""))
 
     def statements(self) -> list[str]:
@@ -72,7 +79,7 @@ class StatementLog:
 
 @contextlib.contextmanager
 def capture_statements(target_engine=engine):
-    """Record every statement and commit issued on ``target_engine``.
+    """Record core statements and commits issued on ``target_engine``.
 
     The listener is attached to the shared engine, so ANY traffic during the
     block lands in the log — build auth headers and commit all setup BEFORE

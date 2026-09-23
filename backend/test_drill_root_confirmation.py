@@ -180,6 +180,9 @@ def _capture(target_engine):
     stmts: list[str] = []
 
     def _on(conn, cursor, statement, parameters, context, executemany) -> None:
+        # Boundary writes are in the core transaction; activity hints are separate.
+        if context.execution_options.get("session_activity_hint"):
+            return
         stmts.append(statement.lower())
 
     event.listen(target_engine, "before_cursor_execute", _on)
