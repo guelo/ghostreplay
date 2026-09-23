@@ -407,8 +407,16 @@ Three signals, and the third is the one most often skipped:
           min(xact_start) AS oldest_open_xact
    FROM pg_stat_activity
    WHERE datname = current_database() AND client_addr IS NOT NULL
+     AND pid <> pg_backend_pid()
    GROUP BY client_addr ORDER BY oldest_backend_start;
    ```
+
+   `pid <> pg_backend_pid()` is not optional. Without it your own psql session
+   is a second row with an open transaction — the query is inside that
+   transaction while it runs — and the check fails every time it is run. An
+   operator arrives over the public TCP proxy, so any other session of yours
+   shows a `100.64.x.x` address rather than the containers' `fd12:` private
+   IPv6; a non-`fd12:` row is a workstation, not a revision.
 
 3. `oldest_open_xact` is NULL, or later than the cutover. No transaction opened
    by the revision you are replacing may still be open.
