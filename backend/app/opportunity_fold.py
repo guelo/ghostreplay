@@ -53,6 +53,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Callable
 
 from sqlalchemy import (
     case,
@@ -132,6 +133,8 @@ class FoldOutcome(str, Enum):
     STALE_REPREPARE = "stale_reprepare"
     DEADLINE_EXCEEDED = "deadline_exceeded"
     EXPORT_FAILED = "export_failed"
+    DEFERRED_ACTIVITY = "deferred_activity"
+    DEFERRED_BUDGET = "deferred_budget"
 
 
 # The outcomes a sweep treats as "this user is unavailable right now", as opposed
@@ -398,6 +401,9 @@ def _eligible_rows_query(
             GameSession.user_id == user_id,
             GameSession.started_at <= foldable_cutoff(db, policy=policy),
             ~_pinned_pair(db, user_id=user_id, blunder_ids=blunder_ids),
+            # Legacy NULL/mismatched timestamps must also predate folding.
+            func.coalesce(BlunderOpportunityEvent.occurred_at,
+                          BlunderOpportunityEvent.created_at) < database_clock(db),
         )
     )
     if blunder_ids is not None:
@@ -1171,6 +1177,8 @@ def _drop_orphan(exported: ExportedBatch, *, committed: bool) -> None:
 def fold_user_batch(
     engine, *, user_id: int, limits: FoldLimits | None = None,
     max_pairs: int | None = None,
+    activity_check: Callable[[], bool] | None = None,
+    stop_check: Callable[[], bool] | None = None,
 ) -> FoldResult:
     """Prepare, export and fold ONE bounded batch for one user.
 
@@ -1187,6 +1195,10 @@ def fold_user_batch(
     """
     limits = limits or FoldLimits()
     max_pairs = max_pairs or limits.max_pairs
+    if stop_check is not None and stop_check():
+        return FoldResult(FoldOutcome.DEFERRED_BUDGET, user_id)
+    if activity_check is not None and activity_check():
+        return FoldResult(FoldOutcome.DEFERRED_ACTIVITY, user_id)
     connection = engine.connect()
     db = Session(bind=connection)
     started = time.monotonic()
@@ -1199,6 +1211,9 @@ def fold_user_batch(
                               prepare_seconds=time.monotonic() - started,
                               detail=deferred.detail)
         prepare_seconds = time.monotonic() - started
+
+        if stop_check is not None and stop_check():
+            return FoldResult(FoldOutcome.DEFERRED_BUDGET, user_id)
 
         # Outside every lock, and before the transaction is even opened.
         batch_id = uuid.uuid4()
@@ -1217,6 +1232,15 @@ def fold_user_batch(
                 export_seconds=time.monotonic() - export_started, detail=str(err),
             )
         export_seconds = time.monotonic() - export_started
+
+        if stop_check is not None and stop_check():
+            _drop_orphan(exported, committed=False)
+            return FoldResult(FoldOutcome.DEFERRED_BUDGET, user_id,
+                              prepare_seconds=prepare_seconds, export_seconds=export_seconds)
+        if activity_check is not None and activity_check():
+            _drop_orphan(exported, committed=False)
+            return FoldResult(FoldOutcome.DEFERRED_ACTIVITY, user_id,
+                              prepare_seconds=prepare_seconds, export_seconds=export_seconds)
 
         result = _transfer(db, connection, prepared=prepared, exported=exported,
                            limits=limits)
@@ -1242,7 +1266,7 @@ def fold_user_batch(
         connection.close()
 
 
-def eligible_users(engine, *, limit: int = 1000) -> list[int]:
+def eligible_users(engine, *, limit: int | None = 1000) -> list[int]:
     """Users with at least one raw row old enough to fold. A cheap prefilter.
 
     Deliberately skips the target-pin check, which is per pair and belongs in

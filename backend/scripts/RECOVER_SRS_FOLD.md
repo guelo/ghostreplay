@@ -254,3 +254,11 @@ The PostgreSQL files are not optional. `pg_try_advisory_xact_lock`, `NOWAIT`,
 `idle_in_transaction_session_timeout` terminating a stalled backend, and the
 question those tests exist to answer — *does the user get their locks back?* —
 are properties of the lock manager, and SQLite has none.
+
+## Recurring maintenance
+
+The opt-in hourly API-service job now schedules bounded activity-aware visits
+and expires artifacts on the same mounted volume, including when cleanup is
+disabled. Configuration, lag alerts and the independent rollout gates are in
+[SCHEDULE_SRS_CLEANUP.md](SCHEDULE_SRS_CLEANUP.md). The manual `sweep` command
+remains an operator primitive and does not apply those scheduling rules.

@@ -27,6 +27,8 @@ from app.opening_score_delta_lane import get_delta_lane
 from app.opening_score_scheduler import get_scheduler
 from app.opponent_target_facts import target_source
 from app.opponent_retention import retention_enabled, retention_seconds
+from app.opportunity_cleanup_job import start_cleanup_job
+from app.session_activity import dispose_activity_engine
 from app.srs_write_telemetry import get_store as initialize_srs_telemetry
 from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
@@ -97,9 +99,20 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("opening prewarm failed to start")
 
+    cleanup_job = None
+    try:
+        cleanup_job = start_cleanup_job(engine)
+    except Exception:
+        logging.getLogger(__name__).exception("srs cleanup job failed to start")
+
     try:
         yield
     finally:
+        if cleanup_job is not None:
+            try:
+                cleanup_job.shutdown()
+            except Exception:
+                logging.getLogger(__name__).exception("srs cleanup job failed to stop")
         # Teardown must not be wedged by a hung run: each drain is wrapped so a
         # hang/failure can't wedge teardown and engine.dispose() always runs.
         #
@@ -142,6 +155,8 @@ async def lifespan(app: FastAPI):
             posthog_shutdown()
         except Exception:
             logging.getLogger(__name__).exception("posthog shutdown failed")
+
+        dispose_activity_engine(engine)
         engine.dispose()
 
 

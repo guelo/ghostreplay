@@ -49,6 +49,7 @@ from app.opening_score_delta import (
 from app.posthog_client import capture
 from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
+from app.session_activity import records_session_activity
 from app.session_contracts import (
     DRILL_SESSION_MODE,
     utcnow,
@@ -537,6 +538,7 @@ def _contract(
 
 
 @router.post("/start", response_model=DrillSessionContract, status_code=201)
+@records_session_activity
 def start_drill(
     request: DrillStartRequest,
     db: Session = Depends(get_db),
@@ -618,6 +620,7 @@ def get_drill(
 
 
 @router.post("/{session_id}/fail", response_model=DrillSessionContract)
+@records_session_activity
 def fail_drill(
     session_id: uuid.UUID,
     request: DrillFailRequest,
@@ -674,6 +677,7 @@ def fail_drill(
 
 
 @router.post("/{session_id}/route-check", response_model=DrillRouteCheckResponse)
+@records_session_activity
 def check_drill_route(
     session_id: uuid.UUID,
     request: DrillRouteCheckRequest,
@@ -841,6 +845,7 @@ class DrillNaturalEndRequest(BaseModel):
 
 
 @router.post("/{session_id}/natural-end", response_model=DrillSessionContract)
+@records_session_activity
 def natural_end_drill(
     session_id: uuid.UUID,
     request: DrillNaturalEndRequest,
@@ -924,6 +929,7 @@ def natural_end_drill(
 
 
 @router.post("/{session_id}/abandon", response_model=DrillSessionContract)
+@records_session_activity
 def abandon_drill(
     session_id: uuid.UUID,
     request: DrillTerminalLineRequest | None = None,

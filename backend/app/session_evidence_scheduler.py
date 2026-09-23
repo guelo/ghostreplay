@@ -58,8 +58,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
-from app.db import SessionLocal
 from app import srs_write_telemetry as srs_telemetry
+from app.db import SessionLocal
+from app.session_activity import session_work
 
 logger = logging.getLogger(__name__)
 
@@ -379,17 +380,18 @@ class SessionEvidenceScheduler:
                 sources=entry.sources,
                 outcome="worker_started" if entry.run_opportunity else "not_requested",
             )
-            self.run_side_effects(
-                db,
-                session_id=session_id,
-                user_id=entry.user_id,
-                player_color=entry.player_color,
-                evidence_moves=moves,
-                move_count=len(moves),
-                dialect_name=db.bind.dialect.name,
-                run_opportunity=entry.run_opportunity,
-                is_final=entry.is_final,
-            )
+            with session_work(entry.user_id):
+                self.run_side_effects(
+                    db,
+                    session_id=session_id,
+                    user_id=entry.user_id,
+                    player_color=entry.player_color,
+                    evidence_moves=moves,
+                    move_count=len(moves),
+                    dialect_name=db.bind.dialect.name,
+                    run_opportunity=entry.run_opportunity,
+                    is_final=entry.is_final,
+                )
             srs_telemetry.emit(
                 observation_id=entry.telemetry_id, session_id=session_id,
                 expires_at=entry.telemetry_expires_at,

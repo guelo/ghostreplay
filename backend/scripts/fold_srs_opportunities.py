@@ -9,9 +9,10 @@ Four verbs, and the order they matter in:
 
 This is the manual entry point — for the rollback rehearsal, for a canary, and
 for an operator who needs to answer "can we still roll back?" from a prompt.
-RECURRING scheduling, activity avoidance and the 12h/18h escalation belong to
-``g-srs-cleanup-schedule`` and are deliberately not here: a cron that called this
-would be that scheduler, built by accident and without its guarantees.
+Recurring scheduling, activity avoidance and the 12h/18h escalation live in
+``app.opportunity_cleanup_job``. Do not schedule this manual sweep verb as cron: it
+does not apply the activity, forced-visit or lag-reporting rules. See
+``scripts/SCHEDULE_SRS_CLEANUP.md`` for the opt-in hourly job.
 
 Nothing folds until ``cleanup_enabled`` is set, which ``g-srs-retain-rollout``
 owns. Until then ``sweep`` reports ``disabled`` and changes nothing, which is the

@@ -156,6 +156,11 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
+    "test_opportunity_cleanup_pg.py::test_pg_activity_hint_is_database_stamped_coalesced_and_never_waits_for_upload",
+    "test_opportunity_cleanup_pg.py::test_pg_activity_arriving_during_export_defers_normal_but_not_forced_transfer",
+    "test_opportunity_cleanup_pg.py::test_pg_backlog_age_uses_same_pin_and_legacy_predicates_as_fold",
+    "test_opportunity_cleanup_pg.py::test_pg_activity_migration_is_nullable_indexed_and_reversible",
+
     "test_opponent_session_expiry.py::test_pg_default_start_and_fresh_database_publication",
     "test_opponent_session_expiry.py::test_pg_enforcement_uses_real_clock_after_transaction_start",
     "test_opponent_session_expiry.py::test_pg_replay_deleted_before_lookup_cannot_publish_replacement",

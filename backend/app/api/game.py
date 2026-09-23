@@ -62,6 +62,7 @@ from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
 from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
 from app.security import TokenPayload, get_current_user
+from app.session_activity import records_session_activity
 from app.session_contracts import DRILL_SESSION_MODE, VISIBLE_DRILL_STATE, utcnow
 from app.srs_math import (
     OPPORTUNITY_POWER,
@@ -782,6 +783,7 @@ class NextOpponentMoveResponse(BaseModel):
 
 
 @router.post("/start", response_model=GameStartResponse, status_code=201)
+@records_session_activity
 def start_game(
     request: GameStartRequest,
     db: Session = Depends(get_db),
@@ -842,6 +844,7 @@ def start_game(
 
 
 @router.post("/end", response_model=GameEndResponse)
+@records_session_activity
 def end_game(
     request: GameEndRequest,
     db: Session = Depends(get_db),
@@ -1351,6 +1354,7 @@ def _record_decision(
 
 
 @router.post("/next-opponent-move", response_model=NextOpponentMoveResponse)
+@records_session_activity
 def get_next_opponent_move(
     request: NextOpponentMoveRequest,
     db: Session = Depends(get_db),

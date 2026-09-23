@@ -15,6 +15,8 @@ handlers refresh and lock only their mutating branches:
 
 The SQLite tests (statement capture) run everywhere; the row-lock interleaving
 proofs are ``@pg_required`` and skip cleanly without a Postgres URL.
+These assertions concern the core transaction. The separate best-effort activity
+hint transaction is covered by test_session_activity/test_opportunity_cleanup_pg.
 """
 
 from __future__ import annotations
@@ -118,6 +120,8 @@ def _capture(target_engine):
     stmts: list[str] = []
 
     def _on(conn, cursor, statement, parameters, context, executemany) -> None:
+        if context.execution_options.get("session_activity_hint"):
+            return
         stmts.append(statement.lower())
 
     event.listen(target_engine, "before_cursor_execute", _on)

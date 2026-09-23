@@ -20,6 +20,7 @@ from app.opportunity_store import record_review_basis
 from app.posthog_client import capture
 from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
+from app.session_activity import records_session_activity
 from app.srs_math import as_utc, calculate_priority, expected_interval_hours
 
 router = APIRouter(prefix="/api/srs", tags=["srs"])
@@ -131,6 +132,7 @@ def _find_existing_review(db: Session, *, blunder_id: int, idempotency_key: str)
 
 
 @router.post("/review", response_model=SrsReviewResponse, status_code=200)
+@records_session_activity
 def review_blunder(
     request: SrsReviewRequest,
     db: Session = Depends(get_db),

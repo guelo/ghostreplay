@@ -27,6 +27,14 @@ DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
 # connection that dies mid-request (only the TCP keepalives below do). See g-q6w5.
 DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
 
+# Shared with the isolated activity-hint pool.
+PG_CONNECT_ARGS = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
+}
+
 _engine_kwargs = {
     "pool_pre_ping": True,
     "pool_size": DB_POOL_SIZE,
@@ -39,12 +47,7 @@ if DATABASE_URL.startswith("postgresql"):
     # proxy from reaping an idle gap *within* a long request. These are
     # psycopg/Postgres-specific connect args — SQLite (tests) rejects them, so
     # only attach them for a Postgres URL.
-    _engine_kwargs["connect_args"] = {
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
-    }
+    _engine_kwargs["connect_args"] = PG_CONNECT_ARGS
 
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 

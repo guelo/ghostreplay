@@ -601,6 +601,7 @@ class GameSession(Base):
         Index("idx_game_sessions_user", "user_id"),
         Index("idx_game_sessions_status", "status"),
         Index("idx_game_sessions_user_started", "user_id", "started_at"),
+        Index("idx_game_sessions_user_activity", "user_id", "last_activity_at"),
         Index("idx_game_sessions_user_mode_status", "user_id", "session_mode", "status"),
         Index("idx_game_sessions_drill_state", "drill_state"),
     )
@@ -608,6 +609,7 @@ class GameSession(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
     started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_activity_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     # Expansion only: initialized/enforced by the subsequent expiry release.
     opponent_decisions_expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))

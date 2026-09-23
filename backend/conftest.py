@@ -97,6 +97,7 @@ def _create_test_schema(conn) -> None:
             user_id INTEGER NOT NULL,
             started_at TIMESTAMP NOT NULL,
             opponent_decisions_expires_at TIMESTAMP,
+            last_activity_at TIMESTAMP,
             ended_at TIMESTAMP,
             status VARCHAR(20) NOT NULL,
             result VARCHAR(20),

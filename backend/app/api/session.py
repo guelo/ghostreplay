@@ -97,6 +97,7 @@ from app.models import (
     encode_uci_line,
 )
 from app.security import TokenPayload, get_current_user
+from app.session_activity import records_session_activity
 from app.session_contracts import (
     DRILL_SESSION_MODE,
     NORMAL_MOVE_SEGMENT,
@@ -1623,6 +1624,7 @@ def _opening_boundary_response(
     "/{session_id}/moves/truncate",
     response_model=SessionMovesTruncateResponse,
 )
+@records_session_activity
 def truncate_session_moves(
     session_id: uuid.UUID,
     request: SessionMovesTruncateRequest,
@@ -1824,6 +1826,7 @@ def prove_opening_boundary(
     response_model=SessionMovesResponse,
     response_model_exclude_none=True,
 )
+@records_session_activity
 def upsert_session_moves(
     session_id: uuid.UUID,
     request: SessionMovesRequest,

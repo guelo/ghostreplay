@@ -268,9 +268,18 @@ reviews, writes and purges, and a rollback that leaves nothing folded stops that
 clock rather than spending it, so a rehearsal does not consume the window a later
 rollout needs; after the window, both restoring and a raw-history schema
 downgrade refuse, and the exports and manifests expire rather than becoming an
-archive. Recurring scheduling is separate and not yet present, and nothing folds
-until the disabled cleanup switch is turned on. The transfer, its recovery and
-the operator entry point are in
+archive. An opt-in hourly job on the API service schedules cleanup and expires
+recovery artifacts. Best-effort session activity hints favor idle users, but
+overdue work receives bounded forced visits regardless of activity. Backlog
+reporting measures remaining eligible rows; partial work and skipped attempts
+cannot claim completion, and excessive lag emits an alert. The job and cleanup
+switch default off. Scheduling, activity hints and rollout monitoring are defined
+in [`backend/scripts/SCHEDULE_SRS_CLEANUP.md`](backend/scripts/SCHEDULE_SRS_CLEANUP.md)
+and implemented in
+[`backend/app/opportunity_cleanup.py`](backend/app/opportunity_cleanup.py),
+[`backend/app/opportunity_cleanup_job.py`](backend/app/opportunity_cleanup_job.py)
+and [`backend/app/session_activity.py`](backend/app/session_activity.py).
+The transfer, its recovery and the operator entry point are in
 [`backend/app/opportunity_fold.py`](backend/app/opportunity_fold.py),
 [`backend/app/opportunity_fold_export.py`](backend/app/opportunity_fold_export.py),
 [`backend/app/opportunity_fold_recovery.py`](backend/app/opportunity_fold_recovery.py)
