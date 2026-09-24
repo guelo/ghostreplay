@@ -446,3 +446,440 @@ fixture budgets and at least 500 comparable read samples remain prerequisites,
 with separately reviewed production-shape ceilings required before cutover and
 observation. No benchmark, activation or observation milestone is completed by
 these writer tests.
+
+## Integrated qualification (`g-score-store-qualify`)
+
+The qualification ran on 2026-09-23 and was evaluated on 2026-09-24. Its verdict
+is **pass**, which authorises READINESS for the cutover workflow and is not a
+claim that production is deployed or observed. The decision record is
+[opening-score-storage-qualification-2026-09-24.md](../../docs/analysis/opening-score-storage-qualification-2026-09-24.md)
+beside its sealed
+[JSON](../../docs/analysis/opening-score-storage-qualification-2026-09-24.json).
+
+**Chosen design.** B50 as approved on 2026-09-19 — one wide current row set per
+pair, exact full-read Python diff, Core executemany groups of at most 500, no
+payload cache, no content hash, no COPY, no chunked confidence. The marker value
+is `current-b50-v1`. The qualification drives the SHIPPED code
+(`opening_cache.recompute_opening_scores`, the `opening_score_storage` readers,
+the `/tree` builder's own loop body), never the spike's raw-DDL adapters: the
+spike selected a design, this bead qualified the code that ships.
+
+**Two revisions, not one.** The twenty-six cell reports were measured at
+`0c690ac`. The evaluator that read them is `8222b9b`, run from a clean tree at
+`43db250`. They are different artefacts with different lifetimes — changing how
+a record is READ re-measures nothing — and the homogeneity check in §5 would
+refuse a cell re-run at the evaluator's commit into this run's inputs. The
+record prints both rather than printing one and implying it covers both.
+
+### Environment and identity
+
+PostgreSQL 18.4 by absolute path throughout; the prefix is recorded in every
+report, so a run made with a different build is visible rather than assumed:
+
+```
+/Applications/Postgres.app/Contents/Versions/18/bin
+```
+
+Host `macOS-26.2-arm64-arm-64bit`, Python 3.12.7, settings digest
+`a39de1bec346d79e`. Four stated differences from production are recorded in
+`profile_identity.stated_differences` and carried into every artifact:
+`server_version` 18.4 (Postgres.app) local against 18.6 (Debian) production;
+`datcollate`/`datctype` `en_US.UTF-8` against `en_US.utf8`; `max_wal_size` where
+the one permitted deviation applies; and the host itself. **`active_users_30d`
+is 1**, so "production shape" here means representative SIZE and ROW MIX and
+never representative traffic. Every report carries
+`traffic_representative: false`, and `g-score-store-observe` inherits that
+limitation.
+
+`wal_keep_size=2GB` is a deliberate difference from the census, not an
+oversight: an S3 layout-A publication writes about 160 MB against a 128 MB
+`max_wal_size`, so a checkpoint could recycle the segments holding `start_lsn`
+before `pg_walinspect` reads them. It changes what is retained, not what is
+written.
+
+### Both clusters
+
+Two disposable clusters, built by explicit recipes and never reused from
+anything. **QC-PROD** carries production-derived data and therefore lives inside
+the mode-700 private store with `scram-sha-256` and a generated password that
+never reaches a command line:
+
+```bash
+PREFIX=/Applications/Postgres.app/Contents/Versions/18/bin
+STORE="$HOME/.ghostreplay-private/score-store-qualify"
+umask 077; mkdir -p "$STORE/sock"; chmod 700 "$STORE" "$STORE/sock"
+
+/usr/bin/python3 -c 'import secrets; print(secrets.token_urlsafe(32))' \
+  > "$STORE/.initdb-pw"
+chmod 600 "$STORE/.initdb-pw"
+"$PREFIX/initdb" -D "$STORE/qc-prod" -U postgres -A scram-sha-256 \
+  --pwfile="$STORE/.initdb-pw" --encoding=UTF8 --locale=en_US.UTF-8 \
+  --locale-provider=libc -k
+printf '127.0.0.1:55440:*:postgres:%s\n' "$(cat "$STORE/.initdb-pw")" \
+  > "$STORE/qc-prod.pgpass"
+chmod 600 "$STORE/qc-prod.pgpass"; rm -f "$STORE/.initdb-pw"
+
+# Census-matched postmaster settings, ALL given at start: no ALTER SYSTEM
+# apparatus, so what `ps` shows is what the cluster runs.
+"$PREFIX/pg_ctl" -D "$STORE/qc-prod" -l "$STORE/qc-prod.log" -w -t 60 -o "\
+-p 55440 -c cluster_name=ghostreplay-score-storage-qual \
+-c listen_addresses=127.0.0.1 -c unix_socket_directories=$STORE/sock \
+-c shared_buffers=128MB -c max_connections=500 \
+-c checkpoint_timeout=300s -c checkpoint_completion_target=0.9 \
+-c max_wal_size=128MB -c min_wal_size=32MB -c wal_keep_size=2GB \
+-c full_page_writes=on -c wal_compression=off -c wal_level=replica \
+-c synchronous_commit=on -c fsync=on \
+-c autovacuum=on -c autovacuum_naptime=60s \
+-c autovacuum_vacuum_threshold=50 -c autovacuum_vacuum_scale_factor=0.2 \
+-c autovacuum_analyze_scale_factor=0.1 -c autovacuum_vacuum_cost_delay=2ms \
+-c work_mem=4MB -c maintenance_work_mem=64MB \
+-c default_toast_compression=pglz -c effective_cache_size=4GB \
+-c random_page_cost=4 -c track_counts=on -c track_io_timing=on" start
+```
+
+Giving every GUC at start has a consequence worth knowing before a cell is
+re-run: a command-line setting outranks `postgresql.auto.conf`, so on this
+cluster `ALTER SYSTEM SET` plus `pg_reload_conf()` changes NOTHING. It was
+measured rather than assumed — after `ALTER SYSTEM SET max_wal_size = '8GB'`
+and a reload returning true, `pg_settings` still read `128 MB` with
+`source = command line`. Changing any of these settings means restarting the
+postmaster with different `-o` options; derive the new option list from the
+RUNNING command line by substitution rather than retyping it, and diff the two
+before starting so exactly one option differs.
+
+**QC-SPIKE** is deliberately the documented spike cluster, unchanged, so the SF
+tie-back is settings-matched to the approved fixture ceilings. It holds
+synthetic fixture data only, which is why `/private/tmp` and `-A trust` are
+correct there and would not be on QC-PROD:
+
+```bash
+PREFIX=/Applications/Postgres.app/Contents/Versions/18/bin
+DATA=/private/tmp/ghostreplay-score-storage-spike
+"$PREFIX/initdb" -D "$DATA" -U postgres -A trust --no-locale --encoding=UTF8
+"$PREFIX/pg_ctl" -D "$DATA" -l "$DATA.log" -w -t 60 -o "\
+-p 55439 -c cluster_name=ghostreplay-score-storage-spike \
+-c listen_addresses=127.0.0.1 -c unix_socket_directories=$DATA \
+-c autovacuum=off -c checkpoint_timeout=1h -c max_wal_size=4GB" start
+```
+
+Teardown, after the reports are retained — stop only these two clusters, and
+remove QC-PROD's data directory rather than leaving production-derived pages on
+disk:
+
+```bash
+"$PREFIX/pg_ctl" -D "$HOME/.ghostreplay-private/score-store-qualify/qc-prod" stop
+"$PREFIX/pg_ctl" -D /private/tmp/ghostreplay-score-storage-spike stop
+rm -rf "$HOME/.ghostreplay-private/score-store-qualify/qc-prod" \
+       /private/tmp/ghostreplay-score-storage-spike
+```
+
+Everything derived from production stays in the private store: no user IDs,
+FENs, scores or grades reach any artifact, document or bead. Only aggregates
+reach `docs/analysis`.
+
+### Snapshot, restore and capture
+
+The census (§1.1) is read-only and is run by the user, not by the harness. The
+snapshot is a fresh `pg_dump` taken 2026-09-22T06:02:34Z, and the snapshot date
+is part of the profile identity. **The URL never appears on a command line**:
+`pg_dump -Fc "$URL"` would expand the password into `ps` output. Instead the
+dump runs in its own subshell that sets `umask 077`, reads `DATABASE_URL` from
+its own environment, splits it into `PGHOST`/`PGPORT`/`PGUSER`/`PGDATABASE` and
+a `PGPASSFILE`, traps deletion of both files on exit including on failure, and
+invokes `pg_dump -Fc -Z6 --no-sync` with no connection argument at all.
+`PGSSLMODE=require` is not optional: splitting a URL into `PG*` variables drops
+any `sslmode` it carried, and libpq's default `prefer` would then allow a silent
+plaintext fallback over the public proxy. A recent scheduled dump from valtron
+(`docs/backups.md`) is an equally valid source and is preferred when one is
+fresh enough, since it touches production not at all.
+
+Restore into the template, then verify — never migrate the template:
+
+```bash
+export PGPASSFILE="$STORE/qc-prod.pgpass"
+"$PREFIX/createdb" -h 127.0.0.1 -p 55440 -U postgres gr_snap_base
+"$PREFIX/pg_restore" -h 127.0.0.1 -p 55440 -U postgres -d gr_snap_base \
+  --no-owner --no-acl "$STORE/prod-20260922T060234Z.dump"
+"$PREFIX/psql" -h 127.0.0.1 -p 55440 -U postgres -d gr_snap_base \
+  -c 'VACUUM (FREEZE, ANALYZE)' -c 'CHECKPOINT'
+```
+
+Verify about 1 GB free first. Run `VACUUM (FREEZE, ANALYZE)` and `CHECKPOINT`
+immediately after the restore and again after every template clone, so
+autovacuum has no backlog to work through inside a timed cell. `gr_snap_base`
+legitimately trails Alembic head — it restored at `20260920_01` against a repo
+head of `20260923_01` — and each clone is migrated on its own; making the gate
+pass is never a reason to migrate the template.
+
+Payload capture (§1.3) is the only step that runs the real writer and mutates
+evidence on production-derived data, so it carries its own guard, its own
+provenance sentinel and a closure check against an independently recomputed
+control database:
+
+```bash
+cd backend && source .venv/bin/activate
+env -u DATABASE_URL -u DATABASE_PRIVATE_URL PGPASSFILE="$STORE/qc-prod.pgpass" \
+  TMPDIR=/private/tmp POSTHOG_DISABLED=true \
+  GHOSTREPLAY_STORAGE_QUAL_ADMIN_URL=\
+'postgresql+psycopg://postgres@127.0.0.1:55440/postgres' \
+  GHOSTREPLAY_STORAGE_QUAL_CLUSTER=ghostreplay-score-storage-qual \
+  GHOSTREPLAY_STORAGE_QUAL_PG_PREFIX="$PREFIX" \
+  python -m scripts.qualify_opening_score_capture capture \
+    --run-id r1 --pair-index 0 --census "$STORE/census-20260921.json" \
+    --cutoffs 100 --output "$STORE/capture-s1-r1.pickle"
+```
+
+The admin URL carries no password — `PGPASSFILE` supplies it — so no connection
+string reaches argv or a process listing. The S1 capture closed at 24,848
+logical rows with `equal: true` and `pinned_clock_matches: true`; S0 closed at
+245.
+
+### Cells
+
+One cell per process, serially, with no other writer on either cluster. Each
+invocation creates a fresh `gr_score_qual_<run-id>_<cell>` database, runs the
+cell and drops it:
+
+```bash
+env -u DATABASE_URL -u DATABASE_PRIVATE_URL PGPASSFILE="$STORE/qc-prod.pgpass" \
+  TMPDIR=/private/tmp POSTHOG_DISABLED=true \
+  GHOSTREPLAY_STORAGE_QUAL_ADMIN_URL=\
+'postgresql+psycopg://postgres@127.0.0.1:55440/postgres' \
+  GHOSTREPLAY_STORAGE_QUAL_CLUSTER=ghostreplay-score-storage-qual \
+  GHOSTREPLAY_STORAGE_QUAL_PG_PREFIX="$PREFIX" \
+  python -m scripts.qualify_opening_score_storage run \
+    --cell C1 --capture "$STORE/capture-s1-r1.pickle" \
+    --profile S1 --copies 1 --run-id r1 --output "$STORE/cells-r1/C1-S1.json"
+```
+
+`--copies` is the size multiplier: S1 is 1×, S2 2×, S3 4× of the captured
+24,848 logical rows, giving fit points at 245 / 24,848 / 49,696 / 99,392.
+SF cells use the fixture capture and point at QC-SPIKE (port 55439, cluster
+`ghostreplay-score-storage-spike`, no passfile). Twenty-six reports were
+produced: C1 at S0–S3 and SF, C2 at S1–S3, C3 at S0–S3 and SF, C5 at S1 and SF,
+C6 at S0–S3 and SF, C4 at S1 and SF for both `A_old` and `A_new`, and C7 in both
+storage formats. Every report carries the same identity block, so none is exempt
+from the homogeneity check; only `A_old`, and only on REVISION, is exempt,
+because it IS the predecessor commit by construction.
+
+### Evaluation
+
+Every required result is an evaluator INPUT, so a result that was never run is a
+recorded gap rather than silence:
+
+```bash
+python -m scripts.summarize_opening_score_qualification \
+  --run-id r2 --output ../docs/analysis/opening-score-storage-qualification-2026-09-24.json \
+  --cell "$STORE/cells-r1/C1-S0.json"  … --cell "$STORE/cells-r1/C2-S3.json" \
+  --memory "$STORE/cells-r1/C3-S0.json" … --network "$STORE/cells-r1/C6-S3.json" \
+  --plateau "$STORE/cells-r1/C5-S1.json" \
+  --control "$STORE/cells-r1/C4-S1-A_old.json" \
+  --control "$STORE/cells-r1/C4-S1-A_new.json" \
+  --fixture-control "$STORE/cells-r1/C4-SF-A_old.json" \
+  --fixture-control "$STORE/cells-r1/C4-SF-A_new.json" \
+  --fixture-cell "$STORE/cells-r1/C1-SF.json" … \
+  --delta-lane "$STORE/cells-r1/C7-S1-legacy.json" \
+  --delta-lane "$STORE/cells-r1/C7-S1-current.json"
+```
+
+It writes the JSON and the adjacent `.md` decision record together. Run it from
+a CLEAN tree: `evaluator_revision` records `<sha>-dirty` otherwise, and a dirty
+hash names neither artefact.
+
+### Recorded results
+
+50 gates: 45 pass, 5 deferred, no failures, no insufficient gates and no
+coverage gaps. The A-relative gates are the acceptance gates, because ratios
+transfer across hosts and absolute local numbers do not:
+
+| gate | limit | measured range |
+|---|---|---|
+| combined WAL | ≤ 0.5 × A | 0.052 – 0.191 |
+| vacuumed footprint | ≤ 1.0 × A | 0.056 – 0.074 |
+| publication p95 | ≤ 1.1 × A | 0.391 – 0.832 |
+| composite D read p95 | ≤ 1.1 × A | 0.475 – 1.011 |
+| composite T format-stage p95 | ≤ 1.1 × A | 0.132 – 1.010 |
+
+The C4 legacy-retirement control passed at both sizes — `A_new` publication p95
+at 0.573× `A_old` at S1 and 0.855× at SF — so the already-active atomic
+retirement did not regress the production-default legacy writer. C7's delta lane
+passed in BOTH storage formats against §4.9's 3000 ms warm
+whole-graph-contention bound: legacy 1851.7 ms normal / 1851.5 ms drill, current
+1873.8 ms normal / 1792.9 ms drill.
+
+Fitted `production_shape` ceilings, each as fixed overhead plus a per-logical-row
+slope with its applicable size range, 1.5× headroom applied:
+
+| ceiling | value | applicable range | note |
+|---|---|---|---|
+| post-checkpoint publication WAL | 28,573,696 B at 95,224 rows | 23,806 – 95,224 | production-applicable |
+| warm publication WAL | 4,980,736 B at 99,392 rows | 245 – 99,392 | LOWER BOUND |
+| vacuum WAL per ten publications | 1,048,576 B at 99,392 rows | 245 – 99,392 | |
+| vacuumed footprint | 71,303,168 B at 99,392 rows | 245 – 99,392 | |
+
+C2's post-checkpoint figure is the production-applicable one and C1's warm
+figure is a lower bound: `active_users_30d` is 1 and the gaps between
+publications are expected to exceed `checkpoint_timeout`, so nearly every
+production publication is post-checkpoint.
+
+Five `local_host_only` ceilings are **deferred to `g-score-store-cutover`** and
+are that gate's EXPECTATION and a local regression baseline, never production
+limits: publication p95 2507 ms, composite D read p95 138 ms, composite T
+format-stage p95 28 ms, integrated worker RSS 565,731,541 B, publication
+allocation peak 239,735,198 B — all at 99,392 logical rows. An aggregate `pass`
+with these deferred is correct, because the A-relative counterpart of each is
+measured and enforced here.
+
+**One recorded settings deviation**, permitted by §9.5 and named in the decision
+record: `max_wal_size` raised from the census 128 MB to 8 GB for C1 only, after
+observed discards left fewer than two complete paired blocks. C1's warm ceiling
+is already a lower bound, so the deviation cannot loosen the
+production-applicable ceiling, which is C2's and keeps the census value. Pool
+identity includes the settings digest, so nothing is pooled across the deviation
+in either direction.
+
+The upstream seal has drifted: six of the twelve source digests recorded in the
+approved budget report no longer match, so `summarize_opening_score_budgets` and
+`remeasure_opening_score_budgets` would raise `measured source changed` against
+it. Comparability for the SF tie-back therefore rests on the regenerated
+timeline's deterministic fields. The tie-back was never an acceptance gate.
+
+### Plateau, and what layout A actually does
+
+Fixed live counts, proved reclamation and clean orphan checks are gated for BOTH
+layouts at both sizes — those are the leak proofs, and all of them passed. The
+last-five growth GATE is the SELECTED DESIGN's only: the approved budget places
+the 5% rule under `selected_design_ceilings`, and layout A enters that budget
+solely through the A-relative ratios, none of which is a plateau. B50 measured
+0.00000 against the 0.05 limit.
+
+Layout A's growth is a characterisation. A ten-window C5 at `43db250` with
+QC-PROD at the census `max_wal_size` — deliberately EXCLUDED from the verdict,
+because its `tested_revision` differs and §5 compares revisions for equality —
+answers what the six-window cell could not:
+
+| profile | layout | last-five growth | vacuumed window series (MiB) |
+|---|---|---|---|
+| S1 | A | 0.00005 | 84.59 132.63 140.91 141.83 142.09 142.10 142.11 142.11 142.11 142.11 |
+| S1 | B50 | 0.00000 | 10.45 10.46 × 9 |
+| SF | A | 0.06782 | 12.09 18.57 18.45 19.75 18.55 19.80 18.55 19.80 18.55 19.80 |
+| SF | B50 | 0.00000 | 1.84 × 10 |
+
+**A does plateau at production shape.** The six-window cell read windows 1–5,
+which are the steepest part of the settling curve, and reported 0.07139; the
+ten-window series reproduces those six windows to the byte and then flattens, so
+its last five are windows 5–9 and read 0.00005. The constant was the defect, not
+the layout. At the fixture size A instead settles into a period-2 limit cycle,
+alternating between exactly 19.80 and 18.55 MiB indefinitely — retention, not a
+leak, confirmed by `fixed_live_counts` and proved reclamation — and no number of
+additional windows would cure a relative threshold on a footprint that small.
+
+The statistic itself changed with the same review: `(max - min) / min` over the
+last five windows, which equals the superseded `(last - first) / first` on a
+monotone series and is strictly larger on one that oscillates. The SF cycle is
+exactly the case the old formula would have read as zero growth.
+
+Final vacuumed footprints in that run: at S1, A 99.84 MiB against B50 14.24 MiB
+(7.01×); at SF, A 13.50 MiB against B50 2.21 MiB (6.11×). The earlier six-window
+cell's final footprints agree to within 8 KB, which is the reproducibility check
+on the whole cell.
+
+### Verified release revision, forward conversion and the cutover sequence
+
+The verified release revision is `43db250` on `master` — cells at `0c690ac`,
+evaluator logic in `8222b9b`, harness change in `43db250`. The full pre-push
+gate passed on it with nothing bypassed.
+
+**There is still no production activation switch**, and this section does not
+create one. `opening_cache.default_storage_format()` returns
+`StorageFormat.LEGACY` and is the single patch point, resolved in the writer
+BODY rather than as a def-time default. Introducing a real switch, and the
+authority to flip it, belongs to `g-score-store-cutover`.
+
+Forward conversion is per pair and explicit. `convert_pair(db, user_id, color,
+StorageFormat.CURRENT)` reserves a generation, reads the source under the
+publication lock and republishes it in the target format, preserving
+`computed_at` and every evidence stamp; it performs no scoring and reinterprets
+no evidence. It requires a fresh transaction — including when there is nothing
+to convert — and raises `ValueError("conversion requires a fresh transaction")`
+otherwise. Absent and already-converted pairs are skipped without reserving a
+generation. There is no startup fleet sweep and none should be added.
+
+A conversion participates in ordinary publication ordering in both directions:
+an intervening higher reservation supersedes it normally, and it can itself
+supersede an earlier-reserved rebuild that held fresher evidence. Generation
+order is publication order and not a freshness claim, so the next ordinary
+evidence freshness check is what schedules the rebuild; nothing needs to force
+one.
+
+The cutover runs with a **single publisher**, which is what this deployment has
+anyway. The sequence:
+
+1. Satisfy the `g-score-store-cutover` pre-activation gate first. A matched
+   A/B50 run over the real application-to-database path must produce the
+   absolute publication p95, composite D/T read p95 and worker RSS ceilings this
+   bead could not, and confirm the A-relative ratios hold there within ≤ 1.1.
+   The deferred numbers above are its expectation, not its limits.
+2. Deploy the compatibility binary. Readers already serve either format, so this
+   step changes nothing observable and can precede the decision to convert.
+3. Quiesce publication. One worker, and no second publisher on the same pair —
+   the two-int4 transaction advisory lock (class `0x47525343`) makes a race
+   safe, not free, and a converted pair flipping back mid-window invalidates any
+   measurement taken across it.
+4. Convert each pair with `convert_pair(..., StorageFormat.CURRENT)`, one fresh
+   transaction per pair, tolerating `PublicationSuperseded` as a normal outcome
+   and re-reading the pair rather than retrying blindly.
+5. Only then switch new writes to `StorageFormat.CURRENT`. Real rebuilds also
+   convert lazily when their target format differs, so a pair missed in step 4
+   converges on its next rebuild rather than breaking.
+6. Hand the observation window to `g-score-store-observe`, whose acceptance
+   thresholds come from its own window and never from the local figures here.
+
+### Rollback within the compatibility binary
+
+Rollback is a REVERSE CONVERSION, not a flag flip, and the order matters.
+
+`convert_pair(..., StorageFormat.LEGACY)` writes a complete legacy snapshot and
+clears the pair's current rows in the same transaction that retires the previous
+marker — atomic marker retirement on format switching is what makes the
+intermediate state unobservable. Publication of a legacy batch whose predecessor
+was not legacy also deletes every current-format row for that pair, so the
+reverse path leaves nothing behind for an old reader to trip over.
+
+To return to a pre-compatibility binary:
+
+1. **Disable new current writes.** Necessary and, on its own, **insufficient** —
+   it stops the format spreading, and converts nothing already written.
+2. **Keep both readers and the publication guard in place** for the whole
+   rollback. They are what allows a mixed fleet to serve correct results while
+   pairs are converting; removing either one mid-rollback is what turns a slow
+   rollback into an outage.
+3. **Drain publishers**, then reverse-convert **every** pair before starting an
+   old binary. A single unconverted pair is an unreadable pair for a binary that
+   has never heard of `opening_current_*`.
+4. **Then, and only then, run the downgrade.** Migration `20260919_03` refuses
+   while anything current remains, with two distinct refusals:
+   `reverse-convert current opening scores before downgrade` when any
+   `opening_current_roots` / `_positions` / `_edges` / `_scope` row survives, and
+   `reverse-convert current opening markers before downgrade` when any
+   `opening_score_batches.storage_format <> 'legacy'` marker survives. The second
+   check exists because an EMPTY current publication is a marker with no payload
+   rows — still incompatible with an old reader, and invisible to a payload-only
+   check. Orphan payloads are deliberately included rather than silently dropped:
+   dropping them would hide an incomplete conversion.
+
+`test_opening_score_storage_pg.py::test_pg_conversion_retirement_and_downgrade_guard`
+exercises exactly this order — convert, refuse, publish an empty current batch,
+refuse again on markers, reverse-convert, downgrade — under a non-C database
+default, so the machine-key collation is exercised too.
+
+### What this does not authorise
+
+Passing authorises readiness for the cutover workflow. It does not deploy,
+activate or observe anything. The deferred gate on `g-score-store-cutover`
+blocks B50 activation for any production pair, and its option (b) — an
+explicitly authorised maintenance window on production with one pair converted
+and reverse-converted — needs its own authorisation, which nothing in this
+qualification grants. Material divergence from the spike (§5.5) returns to a
+reviewed design/budget decision before any further migration; layout A's
+plateau is a characterisation and stops nothing.

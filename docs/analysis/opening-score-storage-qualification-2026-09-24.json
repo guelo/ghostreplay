@@ -1,0 +1,4971 @@
+{
+  "ceilings": {
+    "ceilings": {
+      "composite_d_p95_ms": {
+        "anchor": 68.86212458913437,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 138,
+        "deferral_note": "the EXPECTATION for the pre-activation gate and a re-measurable local regression baseline; not a production limit",
+        "deferred_to": "g-score-store-cutover",
+        "derived_from": "measured_fit",
+        "factor": 2.0,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 68.3807546519938,
+        "fixed_overhead": 9.595140265598562,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 0.48136993714056686,
+        "per_logical_row_slope": 0.0005914521730762559,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "reads",
+            "samples": 1300,
+            "size_profile": "S0",
+            "value": 10.221415985142812
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "reads",
+            "samples": 1170,
+            "size_profile": "S1",
+            "value": 23.594124999362975
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "reads",
+            "samples": 1040,
+            "size_profile": "S2",
+            "value": 39.073709020158276
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "reads",
+            "samples": 780,
+            "size_profile": "S3",
+            "value": 68.51104201632552
+          }
+        ],
+        "residuals": [
+          0.48136993714056686,
+          -0.6974188628343967,
+          0.0857615613620979,
+          0.13028736433172128
+        ],
+        "size_logical_rows": 99392,
+        "tag": "local_host_only"
+      },
+      "composite_t_format_stage_p95_ms": {
+        "anchor": 13.756352858459909,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 28,
+        "deferral_note": "the EXPECTATION for the pre-activation gate and a re-measurable local regression baseline; not a production limit",
+        "deferred_to": "g-score-store-cutover",
+        "derived_from": "measured_fit",
+        "factor": 2.0,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 13.066039433062297,
+        "fixed_overhead": 12.294902288449086,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 0.690313425397612,
+        "per_logical_row_slope": 7.758543389942977e-06,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "reads",
+            "samples": 1300,
+            "size_profile": "S0",
+            "value": 11.768
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "reads",
+            "samples": 1170,
+            "size_profile": "S1",
+            "value": 13.178
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "reads",
+            "samples": 1040,
+            "size_profile": "S2",
+            "value": 12.7
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "reads",
+            "samples": 780,
+            "size_profile": "S3",
+            "value": 12.885
+          }
+        ],
+        "residuals": [
+          -0.52880313157962,
+          0.690313425397612,
+          0.019529139244307103,
+          -0.1810394330622973
+        ],
+        "size_logical_rows": 99392,
+        "tag": "local_host_only"
+      },
+      "integrated_worker_rss_bytes": {
+        "anchor": 377154360.5835976,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 565731541,
+        "deferral_note": "the EXPECTATION for the pre-activation gate and a re-measurable local regression baseline; not a production limit",
+        "deferred_to": "g-score-store-cutover",
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 367999694.0220949,
+        "fixed_overhead": 152888412.8548997,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 9154666.561502695,
+        "per_logical_row_slope": 2164.2715828959595,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S0",
+            "value": 150208512
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S1",
+            "value": 204832768
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S2",
+            "value": 269598720
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S3",
+            "value": 363888640
+          }
+        ],
+        "residuals": [
+          -3210147.3927092254,
+          -1833465.1466985047,
+          9154666.561502695,
+          -4111054.0220949054
+        ],
+        "size_logical_rows": 99392,
+        "tag": "local_host_only"
+      },
+      "post_checkpoint_publication_wal_bytes": {
+        "anchor": 19005195.42857143,
+        "applicable_size_range": [
+          23806,
+          95224
+        ],
+        "applies_to": "production_applicable",
+        "applies_to_note": "active_users_30d is 1 and the gaps between publications are expected to exceed checkpoint_timeout, so nearly every production publication is post-checkpoint: C2's ceiling is the production-applicable one and C1's warm figure is a LOWER BOUND",
+        "ceiling": 28573696.0,
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          23806,
+          47612,
+          95224
+        ],
+        "fitted": 18957444.57142857,
+        "fixed_overhead": -142656.0,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 47750.857142857276,
+        "per_logical_row_slope": 200.58074194980858,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 23806,
+            "sample_kind": "publications",
+            "samples": 60,
+            "size_profile": "S1",
+            "value": 4680120
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 47612,
+            "sample_kind": "publications",
+            "samples": 60,
+            "size_profile": "S2",
+            "value": 9335768
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 95224,
+            "sample_kind": "publications",
+            "samples": 60,
+            "size_profile": "S3",
+            "value": 18981320
+          }
+        ],
+        "residuals": [
+          47750.857142857276,
+          -71626.28571428545,
+          23875.428571429104
+        ],
+        "size_logical_rows": 95224,
+        "tag": "production_shape"
+      },
+      "publication_allocation_peak_bytes": {
+        "anchor": 159823464.72098577,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 239735198,
+        "deferral_note": "the EXPECTATION for the pre-activation gate and a re-measurable local regression baseline; not a production limit",
+        "deferred_to": "g-score-store-cutover",
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 159576078.7170536,
+        "fixed_overhead": -188892.60072928667,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 247386.00393219228,
+        "per_logical_row_slope": 1607.422844069773,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S0",
+            "value": 452312
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S1",
+            "value": 39402638
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S2",
+            "value": 79724609
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "spawned_children",
+            "samples": 5,
+            "size_profile": "S3",
+            "value": 159647389
+          }
+        ],
+        "residuals": [
+          247386.00393219228,
+          -349712.22871643305,
+          31015.941837847233,
+          71310.2829464078
+        ],
+        "size_logical_rows": 99392,
+        "tag": "local_host_only"
+      },
+      "publication_p95_ms": {
+        "anchor": 1671.1044190605348,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 2507,
+        "deferral_note": "the EXPECTATION for the pre-activation gate and a re-measurable local regression baseline; not a production limit",
+        "deferred_to": "g-score-store-cutover",
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 1646.8364327943905,
+        "fixed_overhead": 34.37609538865297,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 24.267986266144362,
+        "per_logical_row_slope": 0.01622324067737582,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "publications",
+            "samples": 100,
+            "size_profile": "S0",
+            "value": 18.914291984401643
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "publications",
+            "samples": 90,
+            "size_profile": "S1",
+            "value": 461.7591660062317
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "publications",
+            "samples": 80,
+            "size_profile": "S2",
+            "value": 842.9814580013044
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "publications",
+            "samples": 60,
+            "size_profile": "S3",
+            "value": 1639.6297499886714
+          }
+        ],
+        "residuals": [
+          -19.4364973702084,
+          24.267986266144362,
+          2.3751939097827517,
+          -7.206682805719083
+        ],
+        "size_logical_rows": 99392,
+        "tag": "local_host_only"
+      },
+      "vacuum_wal_bytes_per_ten_publications": {
+        "anchor": 633797.335309894,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 1048576.0,
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 624226.6408007083,
+        "fixed_overhead": 97064.85848635694,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 9570.694509185792,
+        "per_logical_row_slope": 5.3038653243153515,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "vacuum_windows",
+            "samples": 10,
+            "size_profile": "S0",
+            "value": 107935
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "vacuum_windows",
+            "samples": 9,
+            "size_profile": "S1",
+            "value": 220787
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "vacuum_windows",
+            "samples": 8,
+            "size_profile": "S2",
+            "value": 353654
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "vacuum_windows",
+            "samples": 6,
+            "size_profile": "S3",
+            "value": 629716
+          }
+        ],
+        "residuals": [
+          9570.694509185792,
+          -8068.304064944794,
+          -6991.749643532676,
+          5489.359199291677
+        ],
+        "size_logical_rows": 99392,
+        "tag": "production_shape"
+      },
+      "vacuumed_footprint_bytes": {
+        "anchor": 47005520.629331194,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "ceiling": 71303168,
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 46505003.28157283,
+        "fixed_overhead": -206059.51599528268,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 500517.3477583603,
+        "per_logical_row_slope": 469.9680336200914,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "final_footprint",
+            "samples": 1,
+            "size_profile": "S0",
+            "value": 409600
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "final_footprint",
+            "samples": 1,
+            "size_profile": "S1",
+            "value": 10969088
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "final_footprint",
+            "samples": 1,
+            "size_profile": "S2",
+            "value": 22904832
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "final_footprint",
+            "samples": 1,
+            "size_profile": "S3",
+            "value": 46751744
+          }
+        ],
+        "residuals": [
+          500517.3477583603,
+          -502618.18339674734,
+          -244639.88278877735,
+          246740.71842716634
+        ],
+        "size_logical_rows": 99392,
+        "tag": "production_shape"
+      },
+      "warm_publication_wal_bytes": {
+        "anchor": 3246287.108457839,
+        "applicable_size_range": [
+          245,
+          99392
+        ],
+        "applies_to": "lower_bound",
+        "applies_to_note": "active_users_30d is 1 and the gaps between publications are expected to exceed checkpoint_timeout, so nearly every production publication is post-checkpoint: C2's ceiling is the production-applicable one and C1's warm figure is a LOWER BOUND",
+        "ceiling": 4980736.0,
+        "derived_from": "measured_fit",
+        "factor": 1.5,
+        "fit_sizes": [
+          245,
+          24848,
+          49696,
+          99392
+        ],
+        "fitted": 3225862.9231380355,
+        "fixed_overhead": -18087.29377764254,
+        "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+        "max_positive_residual": 20424.185319803422,
+        "per_logical_row_slope": 32.637940849521875,
+        "points": [
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 245,
+            "sample_kind": "publications",
+            "samples": 100,
+            "size_profile": "S0",
+            "value": 8528
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 24848,
+            "sample_kind": "publications",
+            "samples": 90,
+            "size_profile": "S1",
+            "value": 754520
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 49696,
+            "sample_kind": "publications",
+            "samples": 80,
+            "size_profile": "S2",
+            "value": 1624312
+          },
+          {
+            "derived_from": "measured",
+            "layout": "B50",
+            "logical_rows": 99392,
+            "sample_kind": "publications",
+            "samples": 60,
+            "size_profile": "S3",
+            "value": 3225200
+          }
+        ],
+        "residuals": [
+          18618.99826950968,
+          -38380.26045127702,
+          20424.185319803422,
+          -662.9231380354613
+        ],
+        "size_logical_rows": 99392,
+        "tag": "production_shape"
+      }
+    },
+    "gaps": {}
+  },
+  "cells": [
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s0_r1_control",
+        "equal": true,
+        "logical_rows": 245,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C1",
+      "confidence_by_direction": {
+        "asymmetry": 0.010074074074074069,
+        "backward": {
+          "mean_confidence_changed_fraction": 0.34044444444444444,
+          "mean_stable_changed_fraction": 0.06644444444444444,
+          "samples": 45
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.33037037037037037,
+          "mean_stable_changed_fraction": 0.06407407407407407,
+          "samples": 54
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.47,
+        "mean_confidence_changed_fraction": 0.33494949494949494,
+        "min": 0.24,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 99
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 702030,
+        "confidence_bearing_relation_wal_bytes": 499721,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.711822856573081
+      },
+      "distinct_adjacent_steps": 27,
+      "distributions": {
+        "A": {
+          "composite_d_ms": {
+            "count": 1300,
+            "max": 58.58308300958015,
+            "median": 8.260875009000301,
+            "nearest_rank_index": 1234,
+            "p95": 10.113208001712337
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1300,
+            "max": 68.304,
+            "median": 10.041,
+            "nearest_rank_index": 1234,
+            "p95": 11.657
+          },
+          "publication_ms": {
+            "count": 100,
+            "max": 100.92724999412894,
+            "median": 19.09362498554401,
+            "nearest_rank_index": 94,
+            "p95": 22.73095800774172
+          },
+          "publication_wal_bytes": {
+            "count": 100,
+            "max": 165448,
+            "median": 155312,
+            "nearest_rank_index": 94,
+            "p95": 157576
+          }
+        },
+        "B50": {
+          "composite_d_ms": {
+            "count": 1300,
+            "max": 68.08187498245388,
+            "median": 8.423083985690027,
+            "nearest_rank_index": 1234,
+            "p95": 10.221415985142812
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1300,
+            "max": 64.543,
+            "median": 10.021,
+            "nearest_rank_index": 1234,
+            "p95": 11.768
+          },
+          "publication_ms": {
+            "count": 100,
+            "max": 67.41791698732413,
+            "median": 14.44833300774917,
+            "nearest_rank_index": 94,
+            "p95": 18.914291984401643
+          },
+          "publication_wal_bytes": {
+            "count": 100,
+            "max": 142256,
+            "median": 5848,
+            "nearest_rank_index": 94,
+            "p95": 8528
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 15525456,
+              "total": 16248726,
+              "vacuum_wal_bytes": 723270
+            },
+            "B50": {
+              "publication_wal_bytes": 728880,
+              "total": 843796,
+              "vacuum_wal_bytes": 114916
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.051929979002661504,
+          "reference": 16248726,
+          "selected": 843796,
+          "shared_vacuum_wal_bytes": 905596,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_d_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.9875210101973467,
+            1.0494050392779648
+          ],
+          "paired_blocks": 10,
+          "ratio": 1.0106996695224852,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_t_format_stage_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.9862104187946884,
+            1.0183990233693756
+          ],
+          "paired_blocks": 10,
+          "ratio": 1.0095221755168569,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.2925272078049876,
+            0.9037130891592468
+          ],
+          "paired_blocks": 10,
+          "ratio": 0.8320939213366989,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.2066115702479339,
+          "reference": 1982464,
+          "selected": 409600,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 245,
+      "own_catalog_overhead_bytes": 30232,
+      "pool_identity": [
+        "S0",
+        "composite_d",
+        "fixed",
+        "warm",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "414b5824f809c30b",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S0",
+      "sufficiency": {
+        "complete_paired_blocks": 10,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1300,
+              "B50": 1300
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1300,
+              "B50": 1300
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 160763,
+        "B50": 107935
+      },
+      "vacuum_windows_kept": 10,
+      "vacuum_windows_total": 10,
+      "vacuumed_footprint_bytes": 409600
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C1",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6756130392753162,
+          "mean_stable_changed_fraction": 0.002234607046638842,
+          "samples": 89
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934498557610724,
+        "mean_confidence_changed_fraction": 0.6756130392753162,
+        "min": 0.6640081452570846,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 89
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 73454068,
+        "confidence_bearing_relation_wal_bytes": 66547632,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.9059761264685844
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": {
+            "count": 1170,
+            "max": 79.54433397389948,
+            "median": 20.230041991453618,
+            "nearest_rank_index": 1111,
+            "p95": 30.742208007723093
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1170,
+            "max": 26.952,
+            "median": 12.206,
+            "nearest_rank_index": 1111,
+            "p95": 21.012999999999998
+          },
+          "publication_ms": {
+            "count": 90,
+            "max": 969.5927909924649,
+            "median": 842.3850409744773,
+            "nearest_rank_index": 85,
+            "p95": 943.7688750040252
+          },
+          "publication_wal_bytes": {
+            "count": 90,
+            "max": 15208800,
+            "median": 15115784,
+            "nearest_rank_index": 85,
+            "p95": 15190088
+          }
+        },
+        "B50": {
+          "composite_d_ms": {
+            "count": 1170,
+            "max": 92.66383299836889,
+            "median": 20.417666994035244,
+            "nearest_rank_index": 1111,
+            "p95": 23.594124999362975
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1170,
+            "max": 81.66600000000001,
+            "median": 11.685,
+            "nearest_rank_index": 1111,
+            "p95": 13.178
+          },
+          "publication_ms": {
+            "count": 90,
+            "max": 585.7629999809433,
+            "median": 387.5546250201296,
+            "nearest_rank_index": 85,
+            "p95": 461.7591660062317
+          },
+          "publication_wal_bytes": {
+            "count": 90,
+            "max": 11409136,
+            "median": 741224,
+            "nearest_rank_index": 85,
+            "p95": 754520
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 1352323656,
+              "total": 1387514685,
+              "vacuum_wal_bytes": 35191029
+            },
+            "B50": {
+              "publication_wal_bytes": 77037840,
+              "total": 78108179,
+              "vacuum_wal_bytes": 1070339
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.05629358726390705,
+          "reference": 1387514685,
+          "selected": 78108179,
+          "shared_vacuum_wal_bytes": 1814409,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_d_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.5763186766714202,
+            1.0091883146533298
+          ],
+          "paired_blocks": 9,
+          "ratio": 0.7674830966414524,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_t_format_stage_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.5464363758614893,
+            0.9781780902167545
+          ],
+          "paired_blocks": 9,
+          "ratio": 0.6271355827344978,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.47852333377066353,
+            0.515873201758936
+          ],
+          "paired_blocks": 9,
+          "ratio": 0.48927145007220363,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.0736321143799835,
+          "reference": 148971520,
+          "selected": 10969088,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 24848,
+      "own_catalog_overhead_bytes": 1710866,
+      "pool_identity": [
+        "S1",
+        "composite_d",
+        "fixed",
+        "warm",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "414b5824f809c30b",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S1",
+      "sufficiency": {
+        "complete_paired_blocks": 9,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1170,
+              "B50": 1170
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1170,
+              "B50": 1170
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 4315262,
+        "B50": 220787
+      },
+      "vacuum_windows_kept": 9,
+      "vacuum_windows_total": 10,
+      "vacuumed_footprint_bytes": 10969088
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C1",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6759263833726777,
+          "mean_stable_changed_fraction": 0.002185601024171566,
+          "samples": 79
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934498557610724,
+        "mean_confidence_changed_fraction": 0.6759263833726777,
+        "min": 0.6640081452570846,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 79
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 135018415,
+        "confidence_bearing_relation_wal_bytes": 120114440,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.8896152424837752
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": {
+            "count": 1040,
+            "max": 96.88308398472145,
+            "median": 30.242207983974367,
+            "nearest_rank_index": 987,
+            "p95": 59.25258301431313
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1040,
+            "max": 46.864999999999995,
+            "median": 12.196,
+            "nearest_rank_index": 987,
+            "p95": 35.347
+          },
+          "publication_ms": {
+            "count": 80,
+            "max": 2076.7473340092693,
+            "median": 1820.1637079764623,
+            "nearest_rank_index": 75,
+            "p95": 1973.430708021624
+          },
+          "publication_wal_bytes": {
+            "count": 80,
+            "max": 32828680,
+            "median": 32542936,
+            "nearest_rank_index": 75,
+            "p95": 32753120
+          }
+        },
+        "B50": {
+          "composite_d_ms": {
+            "count": 1040,
+            "max": 113.22233299142681,
+            "median": 30.089334002695978,
+            "nearest_rank_index": 987,
+            "p95": 39.073709020158276
+          },
+          "composite_t_format_stage_ms": {
+            "count": 1040,
+            "max": 83.657,
+            "median": 11.318999999999999,
+            "nearest_rank_index": 987,
+            "p95": 12.7
+          },
+          "publication_ms": {
+            "count": 80,
+            "max": 1253.289416024927,
+            "median": 809.6575840027072,
+            "nearest_rank_index": 75,
+            "p95": 842.9814580013044
+          },
+          "publication_wal_bytes": {
+            "count": 80,
+            "max": 23868456,
+            "median": 1490016,
+            "nearest_rank_index": 75,
+            "p95": 1624312
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 2593382768,
+              "total": 2660596223,
+              "vacuum_wal_bytes": 67213455
+            },
+            "B50": {
+              "publication_wal_bytes": 141355232,
+              "total": 143230779,
+              "vacuum_wal_bytes": 1875547
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.05383409093112886,
+          "reference": 2660596223,
+          "selected": 143230779,
+          "shared_vacuum_wal_bytes": 1660915,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_d_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.49924154847066643,
+            1.0088471122327034
+          ],
+          "paired_blocks": 8,
+          "ratio": 0.6594431336557864,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_t_format_stage_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.30764611208532505,
+            0.9430436072382083
+          ],
+          "paired_blocks": 8,
+          "ratio": 0.35929498967380535,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.4213451943321968,
+            0.4337340701096578
+          ],
+          "paired_blocks": 8,
+          "ratio": 0.42716547106252256,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.06555685814771395,
+          "reference": 349388800,
+          "selected": 22904832,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 49696,
+      "own_catalog_overhead_bytes": 3663852,
+      "pool_identity": [
+        "S2",
+        "composite_d",
+        "fixed",
+        "warm",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "414b5824f809c30b",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S2",
+      "sufficiency": {
+        "complete_paired_blocks": 8,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1040,
+              "B50": 1040
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1040,
+              "B50": 1040
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 3,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 8989870,
+        "B50": 353654
+      },
+      "vacuum_windows_kept": 8,
+      "vacuum_windows_total": 10,
+      "vacuumed_footprint_bytes": 22904832
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C1",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6767164144762388,
+          "mean_stable_changed_fraction": 0.0018349837641326826,
+          "samples": 59
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934498557610724,
+        "mean_confidence_changed_fraction": 0.6767164144762388,
+        "min": 0.6640081452570846,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 59
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 215374107,
+        "confidence_bearing_relation_wal_bytes": 185368698,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.8606823753423618
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": {
+            "count": 780,
+            "max": 229.9780840112362,
+            "median": 50.22208302398212,
+            "nearest_rank_index": 740,
+            "p95": 144.36383298016153
+          },
+          "composite_t_format_stage_ms": {
+            "count": 780,
+            "max": 138.59199999999998,
+            "median": 12.424,
+            "nearest_rank_index": 740,
+            "p95": 97.345
+          },
+          "publication_ms": {
+            "count": 60,
+            "max": 4287.892458989518,
+            "median": 4008.339916996192,
+            "nearest_rank_index": 56,
+            "p95": 4191.59866598784
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 72063760,
+            "median": 71626032,
+            "nearest_rank_index": 56,
+            "p95": 71962376
+          }
+        },
+        "B50": {
+          "composite_d_ms": {
+            "count": 780,
+            "max": 156.30316699389368,
+            "median": 50.72529197786935,
+            "nearest_rank_index": 740,
+            "p95": 68.51104201632552
+          },
+          "composite_t_format_stage_ms": {
+            "count": 780,
+            "max": 96.316,
+            "median": 11.332999999999998,
+            "nearest_rank_index": 740,
+            "p95": 12.885
+          },
+          "publication_ms": {
+            "count": 60,
+            "max": 2438.072958000703,
+            "median": 1540.6742499908432,
+            "nearest_rank_index": 56,
+            "p95": 1639.6297499886714
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 48766008,
+            "median": 3005320,
+            "nearest_rank_index": 56,
+            "p95": 3225200
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 4266848552,
+              "total": 4405032838,
+              "vacuum_wal_bytes": 138184286
+            },
+            "B50": {
+              "publication_wal_bytes": 224958736,
+              "total": 227763957,
+              "vacuum_wal_bytes": 2805221
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.05170539366589848,
+          "reference": 4405032838,
+          "selected": 227763957,
+          "shared_vacuum_wal_bytes": 1283154,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_d_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.3942481962745741,
+            1.0060902216392356
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.4745720628361281,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "composite_t_format_stage_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.1001644526759484,
+            0.9741702847891677
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.13236427140582466,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.3843525493087884,
+            0.40147502499655396
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.3911705009578386,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.05645687830164414,
+          "reference": 828096512,
+          "selected": 46751744,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 99392,
+      "own_catalog_overhead_bytes": 7719002,
+      "pool_identity": [
+        "S3",
+        "composite_d",
+        "fixed",
+        "warm",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "414b5824f809c30b",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S3",
+      "sufficiency": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 780,
+              "B50": 780
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 780,
+              "B50": 780
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 1,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 4,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 6,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 0,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 1
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 49225372,
+        "B50": 629716
+      },
+      "vacuum_windows_kept": 6,
+      "vacuum_windows_total": 10,
+      "vacuumed_footprint_bytes": 46751744
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C2",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6916454390520074,
+          "mean_stable_changed_fraction": 0.002502992856771057,
+          "samples": 59
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934855726677288,
+        "mean_confidence_changed_fraction": 0.6916454390520074,
+        "min": 0.6907860031651134,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 59
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 264182399,
+        "confidence_bearing_relation_wal_bytes": 245122269,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.9278523850485588
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 864.5894999790471,
+            "median": 779.1315839858726,
+            "nearest_rank_index": 56,
+            "p95": 830.7023750094231
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 28899896,
+            "median": 19766696,
+            "nearest_rank_index": 56,
+            "p95": 28512400
+          }
+        },
+        "B50": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 468.09191699139774,
+            "median": 360.4479579953477,
+            "nearest_rank_index": 56,
+            "p95": 415.1750000019092
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 10944840,
+            "median": 4468928,
+            "nearest_rank_index": 56,
+            "p95": 4680120
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 1215057656,
+              "total": 1484987970,
+              "vacuum_wal_bytes": 269930314
+            },
+            "B50": {
+              "publication_wal_bytes": 267403288,
+              "total": 283435621,
+              "vacuum_wal_bytes": 16032333
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.19086728426493582,
+          "reference": 1484987970,
+          "selected": 283435621,
+          "shared_vacuum_wal_bytes": 6751270,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.4958763839205848,
+            0.5090666346196698
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.4997879053821167,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.07443274590394686,
+          "reference": 145498112,
+          "selected": 10829824,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 23806,
+      "own_catalog_overhead_bytes": 917854,
+      "pool_identity": [
+        "S1",
+        "composite_d",
+        "growing",
+        "post_checkpoint",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "a39de1bec346d79e",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S1",
+      "sufficiency": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 47601933,
+        "B50": 4799283
+      },
+      "vacuum_windows_kept": 6,
+      "vacuum_windows_total": 6,
+      "vacuumed_footprint_bytes": 10829824
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C2",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6916454390520074,
+          "mean_stable_changed_fraction": 0.002502992856771057,
+          "samples": 59
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934855726677288,
+        "mean_confidence_changed_fraction": 0.6916454390520074,
+        "min": 0.6907860031651134,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 59
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 536894309,
+        "confidence_bearing_relation_wal_bytes": 503416868,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.9376461243138265
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 1842.1917079831474,
+            "median": 1655.5475830100477,
+            "nearest_rank_index": 56,
+            "p95": 1741.8682080169674
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 61290216,
+            "median": 42078720,
+            "nearest_rank_index": 56,
+            "p95": 60942000
+          }
+        },
+        "B50": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 993.9479999884497,
+            "median": 769.9684170074761,
+            "nearest_rank_index": 56,
+            "p95": 793.2575840095524
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 22878808,
+            "median": 9070712,
+            "nearest_rank_index": 56,
+            "p95": 9335768
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 2594588024,
+              "total": 3155434728,
+              "vacuum_wal_bytes": 560846704
+            },
+            "B50": {
+              "publication_wal_bytes": 543427320,
+              "total": 579515206,
+              "vacuum_wal_bytes": 36087886
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.18365621727416065,
+          "reference": 3155434728,
+          "selected": 579515206,
+          "shared_vacuum_wal_bytes": 7485461,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.447737830822761,
+            0.4676233376345173
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.4554062014327925,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.06569742540332175,
+          "reference": 344276992,
+          "selected": 22618112,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 47612,
+      "own_catalog_overhead_bytes": 2327003,
+      "pool_identity": [
+        "S2",
+        "composite_d",
+        "growing",
+        "post_checkpoint",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "a39de1bec346d79e",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S2",
+      "sufficiency": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 98685872,
+        "B50": 10174049
+      },
+      "vacuum_windows_kept": 6,
+      "vacuum_windows_total": 6,
+      "vacuumed_footprint_bytes": 22618112
+    },
+    {
+      "capture_closure": {
+        "control_database": "gr_score_capture_s1_r1_control",
+        "equal": true,
+        "logical_rows": 24848,
+        "pinned_clock_matches": true,
+        "ran": true
+      },
+      "cell": "C2",
+      "confidence_by_direction": {
+        "asymmetry": null,
+        "backward": {
+          "mean_confidence_changed_fraction": null,
+          "mean_stable_changed_fraction": null,
+          "samples": 0
+        },
+        "forward": {
+          "mean_confidence_changed_fraction": 0.6916454390520074,
+          "mean_stable_changed_fraction": 0.002502992856771057,
+          "samples": 59
+        }
+      },
+      "confidence_expectation": {
+        "max": 0.6934855726677288,
+        "mean_confidence_changed_fraction": 0.6916454390520074,
+        "min": 0.6907860031651134,
+        "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+        "samples": 59
+      },
+      "confidence_wal_share": {
+        "attributed_publication_wal_bytes": 1070420401,
+        "confidence_bearing_relation_wal_bytes": 1011405754,
+        "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+        "relations": [
+          "opening_current_roots",
+          "opening_current_positions"
+        ],
+        "share": 0.9448677856430354
+      },
+      "distinct_adjacent_steps": 99,
+      "distributions": {
+        "A": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 3902.090332994703,
+            "median": 3635.2169169986155,
+            "nearest_rank_index": 56,
+            "p95": 3835.577874997398
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 130086816,
+            "median": 90237424,
+            "nearest_rank_index": 56,
+            "p95": 129260512
+          }
+        },
+        "B50": {
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null,
+          "publication_ms": {
+            "count": 60,
+            "max": 2007.1980840002652,
+            "median": 1515.2149589848705,
+            "nearest_rank_index": 56,
+            "p95": 1593.2409170200117
+          },
+          "publication_wal_bytes": {
+            "count": 60,
+            "max": 46745344,
+            "median": 18008616,
+            "nearest_rank_index": 56,
+            "p95": 18981320
+          }
+        }
+      },
+      "gates": {
+        "combined_wal": {
+          "components": {
+            "A": {
+              "publication_wal_bytes": 5575823352,
+              "total": 6794960870,
+              "vacuum_wal_bytes": 1219137518
+            },
+            "B50": {
+              "publication_wal_bytes": 1083427872,
+              "total": 1154989964,
+              "vacuum_wal_bytes": 71562092
+            }
+          },
+          "gate_kind": "a_relative",
+          "limit": 0.5,
+          "ratio": 0.16997742681629305,
+          "reference": 6794960870,
+          "selected": 1154989964,
+          "shared_vacuum_wal_bytes": 7986970,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "publication_p95": {
+          "bootstrap_repetitions": 4000,
+          "gate_kind": "a_relative",
+          "limit": 1.1,
+          "paired_block_percentile_95_interval": [
+            0.4069353030270454,
+            0.4282863651256846
+          ],
+          "paired_blocks": 6,
+          "ratio": 0.41538484393856623,
+          "relative_1_1_gate": "pass",
+          "seed": 20260919,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        },
+        "vacuumed_footprint": {
+          "gate_kind": "a_relative",
+          "limit": 1.0,
+          "ratio": 0.05741626794258373,
+          "reference": 808124416,
+          "selected": 46399488,
+          "transfers_between_hosts": true,
+          "verdict": "pass"
+        }
+      },
+      "logical_rows": 95224,
+      "own_catalog_overhead_bytes": 5875734,
+      "pool_identity": [
+        "S3",
+        "composite_d",
+        "growing",
+        "post_checkpoint",
+        "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+        "a39de1bec346d79e",
+        "ghostreplay-score-storage-qual",
+        "macOS-26.2-arm64-arm-64bit"
+      ],
+      "size_profile": "S3",
+      "sufficiency": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 210321718,
+        "B50": 22576371
+      },
+      "vacuum_windows_kept": 6,
+      "vacuum_windows_total": 6,
+      "vacuumed_footprint_bytes": 46399488
+    }
+  ],
+  "control": {
+    "cluster": "ghostreplay-score-storage-qual",
+    "gate": "A_new publication p95 / A_old publication p95",
+    "limit": 1.1,
+    "profiles": [
+      {
+        "capture_closure": {
+          "A_new": {
+            "control_database": "gr_score_capture_s1_r1_control",
+            "equal": true,
+            "logical_rows": 24848,
+            "pinned_clock_matches": true,
+            "ran": true
+          },
+          "A_old": {
+            "control_database": "gr_score_capture_s1_r1_control",
+            "equal": true,
+            "logical_rows": 24848,
+            "pinned_clock_matches": true,
+            "ran": true
+          }
+        },
+        "capture_synthetic_only": {
+          "A_new": false,
+          "A_old": false
+        },
+        "cluster": "ghostreplay-score-storage-qual",
+        "labels": [
+          "A_new",
+          "A_old"
+        ],
+        "limit": 1.1,
+        "one_sided_stages": {
+          "note": "A_old emits no atomic retirement stage, so these characterise A_new and are never a comparison or a gate",
+          "publication_lock_hold_p95_ms": 691.5252080070786,
+          "publication_lock_hold_samples": 40,
+          "retirement_delete_p95_ms": 30.316582968225703
+        },
+        "publication_p95_ms": {
+          "A_new": 859.0740420040675,
+          "A_old": 1499.984708003467
+        },
+        "publication_p95_ratio": 0.5727,
+        "repetitions": {
+          "A_new": 40,
+          "A_old": 40
+        },
+        "revisions": {
+          "A_new": "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+          "A_old": "6699678684b1e15ccf842c8352d68c1eb52b8f3b"
+        },
+        "size_profile": "S1",
+        "verdict": "pass"
+      }
+    ]
+  },
+  "delta_lane": {
+    "formats": [
+      "current-b50-v1",
+      "legacy"
+    ],
+    "gate": "warm whole-graph-contention p95 < 3000.0 ms",
+    "results": [
+      {
+        "declared_limit_ms": 3000.0,
+        "gates": {
+          "drill": {
+            "limit_ms": 3000.0,
+            "p95_ms": 1851.49,
+            "verdict": "pass"
+          },
+          "normal": {
+            "limit_ms": 3000.0,
+            "p95_ms": 1851.687,
+            "verdict": "pass"
+          }
+        },
+        "identity": {
+          "cluster_name": "ghostreplay-score-storage-qual",
+          "host_platform": "macOS-26.2-arm64-arm-64bit",
+          "tested_revision": "0c690ac42e7e5f790b9d89ffab48a93d572cf0da"
+        },
+        "limit_ms": 3000.0,
+        "process_cold": {
+          "drill": {
+            "counter": {
+              "median_ms": 8.596,
+              "p95_ms": 8.596
+            },
+            "digest": {
+              "median_ms": 15.543,
+              "p95_ms": 15.543
+            },
+            "end_to_end": {
+              "median_ms": 907.32,
+              "p95_ms": 907.32
+            },
+            "overlay": {
+              "median_ms": 606.438,
+              "p95_ms": 606.438
+            },
+            "poll_read": {
+              "median_ms": 15.592,
+              "p95_ms": 15.592
+            },
+            "publish": {
+              "median_ms": 0.027,
+              "p95_ms": 0.027
+            },
+            "queue_to_dispatch": {
+              "median_ms": 0.162,
+              "p95_ms": 0.162
+            },
+            "score": {
+              "median_ms": 232.893,
+              "p95_ms": 232.893
+            },
+            "session_load": {
+              "median_ms": 9.084,
+              "p95_ms": 9.084
+            }
+          },
+          "normal": {
+            "counter": {
+              "median_ms": 11.214,
+              "p95_ms": 11.214
+            },
+            "digest": {
+              "median_ms": 19.007,
+              "p95_ms": 19.007
+            },
+            "end_to_end": {
+              "median_ms": 877.863,
+              "p95_ms": 877.863
+            },
+            "overlay": {
+              "median_ms": 643.33,
+              "p95_ms": 643.33
+            },
+            "poll_read": {
+              "median_ms": 17.622,
+              "p95_ms": 17.622
+            },
+            "publish": {
+              "median_ms": 0.034,
+              "p95_ms": 0.034
+            },
+            "queue_to_dispatch": {
+              "median_ms": 0.164,
+              "p95_ms": 0.164
+            },
+            "score": {
+              "median_ms": 156.15,
+              "p95_ms": 156.15
+            },
+            "session_load": {
+              "median_ms": 11.803,
+              "p95_ms": 11.803
+            }
+          }
+        },
+        "process_cold_note": "recorded, never mixed into the warm p95 and never gated (\u00a74.9)",
+        "repetitions": 10,
+        "storage_format": "legacy"
+      },
+      {
+        "declared_limit_ms": 3000.0,
+        "gates": {
+          "drill": {
+            "limit_ms": 3000.0,
+            "p95_ms": 1792.858,
+            "verdict": "pass"
+          },
+          "normal": {
+            "limit_ms": 3000.0,
+            "p95_ms": 1873.815,
+            "verdict": "pass"
+          }
+        },
+        "identity": {
+          "cluster_name": "ghostreplay-score-storage-qual",
+          "host_platform": "macOS-26.2-arm64-arm-64bit",
+          "tested_revision": "0c690ac42e7e5f790b9d89ffab48a93d572cf0da"
+        },
+        "limit_ms": 3000.0,
+        "process_cold": {
+          "drill": {
+            "counter": {
+              "median_ms": 8.443,
+              "p95_ms": 8.443
+            },
+            "digest": {
+              "median_ms": 15.951,
+              "p95_ms": 15.951
+            },
+            "end_to_end": {
+              "median_ms": 914.414,
+              "p95_ms": 914.414
+            },
+            "overlay": {
+              "median_ms": 608.721,
+              "p95_ms": 608.721
+            },
+            "poll_read": {
+              "median_ms": 15.154,
+              "p95_ms": 15.154
+            },
+            "publish": {
+              "median_ms": 0.022,
+              "p95_ms": 0.022
+            },
+            "queue_to_dispatch": {
+              "median_ms": 0.164,
+              "p95_ms": 0.164
+            },
+            "score": {
+              "median_ms": 239.255,
+              "p95_ms": 239.255
+            },
+            "session_load": {
+              "median_ms": 8.819,
+              "p95_ms": 8.819
+            }
+          },
+          "normal": {
+            "counter": {
+              "median_ms": 10.92,
+              "p95_ms": 10.92
+            },
+            "digest": {
+              "median_ms": 19.149,
+              "p95_ms": 19.149
+            },
+            "end_to_end": {
+              "median_ms": 887.181,
+              "p95_ms": 887.181
+            },
+            "overlay": {
+              "median_ms": 686.837,
+              "p95_ms": 686.837
+            },
+            "poll_read": {
+              "median_ms": 137.245,
+              "p95_ms": 137.245
+            },
+            "publish": {
+              "median_ms": 0.024,
+              "p95_ms": 0.024
+            },
+            "queue_to_dispatch": {
+              "median_ms": 0.169,
+              "p95_ms": 0.169
+            },
+            "score": {
+              "median_ms": 154.43,
+              "p95_ms": 154.43
+            },
+            "session_load": {
+              "median_ms": 11.416,
+              "p95_ms": 11.416
+            }
+          }
+        },
+        "process_cold_note": "recorded, never mixed into the warm p95 and never gated (\u00a74.9)",
+        "repetitions": 10,
+        "storage_format": "current-b50-v1"
+      }
+    ]
+  },
+  "fixture_control": {
+    "cluster": "ghostreplay-score-storage-spike",
+    "gate": "A_new publication p95 / A_old publication p95",
+    "limit": 1.1,
+    "profiles": [
+      {
+        "capture_closure": {
+          "A_new": null,
+          "A_old": null
+        },
+        "capture_synthetic_only": {
+          "A_new": true,
+          "A_old": true
+        },
+        "cluster": "ghostreplay-score-storage-spike",
+        "labels": [
+          "A_new",
+          "A_old"
+        ],
+        "limit": 1.1,
+        "one_sided_stages": {
+          "note": "A_old emits no atomic retirement stage, so these characterise A_new and are never a comparison or a gate",
+          "publication_lock_hold_p95_ms": 153.13045799848624,
+          "publication_lock_hold_samples": 40,
+          "retirement_delete_p95_ms": 2.096458978485316
+        },
+        "publication_p95_ms": {
+          "A_new": 174.22700001043268,
+          "A_old": 203.8666669977829
+        },
+        "publication_p95_ratio": 0.8546,
+        "repetitions": {
+          "A_new": 40,
+          "A_old": 40
+        },
+        "revisions": {
+          "A_new": "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+          "A_old": "6699678684b1e15ccf842c8352d68c1eb52b8f3b"
+        },
+        "size_profile": "SF",
+        "verdict": "pass"
+      }
+    ]
+  },
+  "fixture_tie_back_cells": {
+    "cells": [
+      {
+        "cell": "C1",
+        "paired": {
+          "capture_closure": null,
+          "cell": "C1",
+          "confidence_by_direction": {
+            "asymmetry": 0.0055726944535609,
+            "backward": {
+              "mean_confidence_changed_fraction": 0.578634722678044,
+              "mean_stable_changed_fraction": 0.0026911716442402363,
+              "samples": 44
+            },
+            "forward": {
+              "mean_confidence_changed_fraction": 0.5842074171316048,
+              "mean_stable_changed_fraction": 0.0028224483098129305,
+              "samples": 55
+            }
+          },
+          "confidence_expectation": {
+            "max": 0.6938628158844765,
+            "mean_confidence_changed_fraction": 0.5817306640411334,
+            "min": 0.0,
+            "note": "Density is fixed at CAPTURE time, not by the replay's computed_at: replay patches _build_cached_scores out, so the replay clock stamps the marker and changes no payload row. A materially lower fraction than the fixture's means the capture's clock spacing is unrepresentative and the WAL results are optimistic.",
+            "samples": 99
+          },
+          "confidence_wal_share": {
+            "attributed_publication_wal_bytes": 8883022,
+            "confidence_bearing_relation_wal_bytes": 7591401,
+            "note": "the share of publication WAL landing in the relations that CARRY confidence, not an attribution of the confidence column: WAL records blocks, so no per-column split exists to measure",
+            "relations": [
+              "opening_current_roots",
+              "opening_current_positions"
+            ],
+            "share": 0.854596667665576
+          },
+          "distinct_adjacent_steps": 22,
+          "distributions": {
+            "A": {
+              "composite_d_ms": {
+                "count": 1300,
+                "max": 46.95229197386652,
+                "median": 8.658041013404727,
+                "nearest_rank_index": 1234,
+                "p95": 9.913292014971375
+              },
+              "composite_t_format_stage_ms": {
+                "count": 1300,
+                "max": 57.488,
+                "median": 7.84,
+                "nearest_rank_index": 1234,
+                "p95": 8.737
+              },
+              "publication_ms": {
+                "count": 100,
+                "max": 197.98350002383813,
+                "median": 137.70220801234245,
+                "nearest_rank_index": 94,
+                "p95": 182.33545898692682
+              },
+              "publication_wal_bytes": {
+                "count": 100,
+                "max": 2217632,
+                "median": 2202448,
+                "nearest_rank_index": 94,
+                "p95": 2214608
+              }
+            },
+            "B50": {
+              "composite_d_ms": {
+                "count": 1300,
+                "max": 11.625374987488613,
+                "median": 8.903542009647936,
+                "nearest_rank_index": 1234,
+                "p95": 9.753958001965657
+              },
+              "composite_t_format_stage_ms": {
+                "count": 1300,
+                "max": 11.166,
+                "median": 7.848000000000001,
+                "nearest_rank_index": 1234,
+                "p95": 9.008000000000001
+              },
+              "publication_ms": {
+                "count": 100,
+                "max": 128.1381250009872,
+                "median": 55.60295801842585,
+                "nearest_rank_index": 94,
+                "p95": 106.50591598823667
+              },
+              "publication_wal_bytes": {
+                "count": 100,
+                "max": 1808608,
+                "median": 80296,
+                "nearest_rank_index": 94,
+                "p95": 88688
+              }
+            }
+          },
+          "gates": {
+            "combined_wal": {
+              "components": {
+                "A": {
+                  "publication_wal_bytes": 219476200,
+                  "total": 225764759,
+                  "vacuum_wal_bytes": 6288559
+                },
+                "B50": {
+                  "publication_wal_bytes": 9246096,
+                  "total": 9464307,
+                  "vacuum_wal_bytes": 218211
+                }
+              },
+              "gate_kind": "a_relative",
+              "limit": 0.5,
+              "ratio": 0.041921099829402515,
+              "reference": 225764759,
+              "selected": 9464307,
+              "shared_vacuum_wal_bytes": 1205546,
+              "transfers_between_hosts": true,
+              "verdict": "pass"
+            },
+            "composite_d_p95": {
+              "bootstrap_repetitions": 4000,
+              "gate_kind": "a_relative",
+              "limit": 1.1,
+              "paired_block_percentile_95_interval": [
+                0.9370492421666704,
+                1.0101890613354114
+              ],
+              "paired_blocks": 10,
+              "ratio": 0.9839272349926657,
+              "relative_1_1_gate": "pass",
+              "seed": 20260919,
+              "transfers_between_hosts": true,
+              "verdict": "pass"
+            },
+            "composite_t_format_stage_p95": {
+              "bootstrap_repetitions": 4000,
+              "gate_kind": "a_relative",
+              "limit": 1.1,
+              "paired_block_percentile_95_interval": [
+                1.017290410647253,
+                1.046189376443418
+              ],
+              "paired_blocks": 10,
+              "ratio": 1.0310175117317157,
+              "relative_1_1_gate": "pass",
+              "seed": 20260919,
+              "transfers_between_hosts": true,
+              "verdict": "pass"
+            },
+            "publication_p95": {
+              "bootstrap_repetitions": 4000,
+              "gate_kind": "a_relative",
+              "limit": 1.1,
+              "paired_block_percentile_95_interval": [
+                0.5620858056456877,
+                0.6062473164825244
+              ],
+              "paired_blocks": 10,
+              "ratio": 0.5841207002740645,
+              "relative_1_1_gate": "pass",
+              "seed": 20260919,
+              "transfers_between_hosts": true,
+              "verdict": "pass"
+            },
+            "vacuumed_footprint": {
+              "gate_kind": "a_relative",
+              "limit": 1.0,
+              "ratio": 0.0927753651796289,
+              "reference": 20750336,
+              "selected": 1925120,
+              "transfers_between_hosts": true,
+              "verdict": "pass"
+            }
+          },
+          "logical_rows": 4183,
+          "own_catalog_overhead_bytes": 257950,
+          "pool_identity": [
+            "SF",
+            "composite_d",
+            "fixed",
+            "warm",
+            "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+            "63e14b59597c20e4",
+            "ghostreplay-score-storage-spike",
+            "macOS-26.2-arm64-arm-64bit"
+          ],
+          "size_profile": "SF",
+          "sufficiency": {
+            "complete_paired_blocks": 10,
+            "composites": {
+              "composite_d": {
+                "declared_per_publication": 13,
+                "reads_per_layout": {
+                  "A": 1300,
+                  "B50": 1300
+                },
+                "status": "sufficient"
+              },
+              "composite_t": {
+                "declared_per_publication": 13,
+                "reads_per_layout": {
+                  "A": 1300,
+                  "B50": 1300
+                },
+                "status": "sufficient"
+              }
+            },
+            "discarded_blocks": [],
+            "gated_composites": [
+              "composite_d",
+              "composite_t"
+            ],
+            "reasons": [],
+            "verdict": "sufficient"
+          },
+          "vacuum_wal_max_bytes_by_layout": {
+            "A": 838463,
+            "B50": 113793
+          },
+          "vacuum_windows_kept": 10,
+          "vacuum_windows_total": 10,
+          "vacuumed_footprint_bytes": 1925120
+        },
+        "role": "regression tie-back only (\u00a74.1/\u00a74.2): never a fit point, never a fitted coverage input, never an acceptance gate, and measured on the other cluster",
+        "size_profile": "SF"
+      },
+      {
+        "cell": "C3",
+        "memory": {
+          "children": {
+            "A": 5,
+            "B50": 5
+          },
+          "integrated_worker_rss_bytes": 153337856,
+          "logical_rows": 4117,
+          "publication_allocation_peak_bytes": 4603497
+        },
+        "role": "regression tie-back only (\u00a74.1/\u00a74.2): never a fit point, never a fitted coverage input, never an acceptance gate, and measured on the other cluster",
+        "size_profile": "SF"
+      },
+      {
+        "cell": "C5",
+        "plateau": {
+          "cell": "C5",
+          "characterisations": {
+            "plateau_growth:A": {
+              "gated": false,
+              "note": "ONE-SIDED (\u00a74.8 as scoped rev 16): the approved budget's last-five growth rule is a `selected_design_ceilings` entry, so it is not a gate on the layout being retired. The limit is printed for reference only. The leak proofs for this layout are `fixed_live_counts`, `reclamation` and `orphans`, and those ARE gated.",
+              "reference_limit": 0.05,
+              "statistic": "(last - first) / first over the last five windows (SUPERSEDED by rev 16's max-minus-min; equal on a monotone series, smaller on one that oscillates)",
+              "value": 0.0664144598570828,
+              "window_live_tuples": [
+                8366,
+                8366,
+                8366,
+                8366,
+                8366,
+                8366
+              ],
+              "window_total_bytes": [
+                12681216,
+                19488768,
+                19349504,
+                20717568,
+                19464192,
+                20783104
+              ]
+            }
+          },
+          "gates": {
+            "fixed_live_counts:A": {
+              "value": true,
+              "verdict": "pass"
+            },
+            "fixed_live_counts:B50": {
+              "value": true,
+              "verdict": "pass"
+            },
+            "orphans": {
+              "current_rows_for_legacy_pair": 0,
+              "legacy_rows_for_current_pair": 0,
+              "verdict": "pass"
+            },
+            "plateau_growth:B50": {
+              "limit": 0.05,
+              "statistic": "(last - first) / first over the last five windows (SUPERSEDED by rev 16's max-minus-min; equal on a monotone series, smaller on one that oscillates)",
+              "value": 0.0,
+              "verdict": "pass"
+            },
+            "reclamation:A": {
+              "dead_tuples_held": 12549,
+              "dead_tuples_released": 0,
+              "note": "held == 0 is INSUFFICIENT, not a pass: the open snapshot blocked nothing, so 'returned to zero' proves nothing",
+              "verdict": "pass"
+            },
+            "reclamation:B50": {
+              "dead_tuples_held": 2753,
+              "dead_tuples_released": 0,
+              "note": "held == 0 is INSUFFICIENT, not a pass: the open snapshot blocked nothing, so 'returned to zero' proves nothing",
+              "verdict": "pass"
+            }
+          },
+          "size_profile": "SF"
+        },
+        "role": "regression tie-back only (\u00a74.1/\u00a74.2): never a fit point, never a fitted coverage input, never an acceptance gate, and measured on the other cluster",
+        "size_profile": "SF"
+      },
+      {
+        "cell": "C6",
+        "network": {
+          "cell": "C6",
+          "measured": {
+            "A": {
+              "composite_d_datarow_bytes": 129105,
+              "composite_d_round_trips": 5,
+              "composite_t_datarow_bytes": 67189,
+              "composite_t_round_trips": 9,
+              "mean_datarow_width_bytes": 23.648269410664174,
+              "publication_datarow_bytes_max": 33869,
+              "publication_result_rows_max": 1426,
+              "publication_round_trips_max": 16,
+              "publications": [
+                {
+                  "datarow_bytes": 33382,
+                  "result_queries": 8,
+                  "result_rows": 1424,
+                  "round_trips": 11
+                },
+                {
+                  "datarow_bytes": 33869,
+                  "result_queries": 9,
+                  "result_rows": 1426,
+                  "round_trips": 16
+                },
+                {
+                  "datarow_bytes": 33869,
+                  "result_queries": 9,
+                  "result_rows": 1426,
+                  "round_trips": 16
+                }
+              ],
+              "reconstructed_payload_bytes": 627717
+            },
+            "B50": {
+              "composite_d_datarow_bytes": 130449,
+              "composite_d_round_trips": 5,
+              "composite_t_datarow_bytes": 67562,
+              "composite_t_round_trips": 9,
+              "mean_datarow_width_bytes": 167.1931248507997,
+              "publication_datarow_bytes_max": 700415,
+              "publication_result_rows_max": 4189,
+              "publication_round_trips_max": 32,
+              "publications": [
+                {
+                  "datarow_bytes": 700292,
+                  "result_queries": 10,
+                  "result_rows": 4189,
+                  "round_trips": 22
+                },
+                {
+                  "datarow_bytes": 700409,
+                  "result_queries": 10,
+                  "result_rows": 4189,
+                  "round_trips": 21
+                },
+                {
+                  "datarow_bytes": 700415,
+                  "result_queries": 10,
+                  "result_rows": 4189,
+                  "round_trips": 32
+                }
+              ],
+              "reconstructed_payload_bytes": 627717
+            }
+          },
+          "network_terms": {
+            "A": {
+              "composite_d": {
+                "bytes": 129105,
+                "modelled_ms": 0.8622782548882242,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 5,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              },
+              "composite_t": {
+                "bytes": 67189,
+                "modelled_ms": 1.1946335353153699,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 9,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              },
+              "publication": {
+                "bytes": 33869,
+                "modelled_ms": 1.938615116758592,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 16,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              }
+            },
+            "B50": {
+              "composite_d": {
+                "bytes": 130449,
+                "modelled_ms": 0.8651864636216486,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 5,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              },
+              "composite_t": {
+                "bytes": 67562,
+                "modelled_ms": 1.1954406497927266,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 9,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              },
+              "publication": {
+                "bytes": 700415,
+                "modelled_ms": 5.246245692473167,
+                "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+                "round_trips": 32,
+                "rtt_ms_median": 0.11658298899419606,
+                "throughput_bytes_per_s": 462140143.0210893
+              }
+            }
+          },
+          "probe": {
+            "datarow_width_bytes": 167,
+            "elapsed_s": 0.007703290990320966,
+            "rtt_samples_ms": [
+              0.10308399214409292,
+              0.10345797636546195,
+              0.10387500515207648,
+              0.10441700578667223,
+              0.10654202196747065,
+              0.10683300206437707,
+              0.10716699762269855,
+              0.10733300587162375,
+              0.10733300587162375,
+              0.10750000365078449,
+              0.10750000365078449,
+              0.1075830077752471,
+              0.10766700142994523,
+              0.10766700142994523,
+              0.10770797962322831,
+              0.1077920023817569,
+              0.1077920023817569,
+              0.10783300967887044,
+              0.1078750065062195,
+              0.10800000745803118,
+              0.10800000745803118,
+              0.10804101475514472,
+              0.10804200428538024,
+              0.10808400111272931,
+              0.10812500840984285,
+              0.10812500840984285,
+              0.10816700523719192,
+              0.10820801253430545,
+              0.10829101665876806,
+              0.10833400301635265,
+              0.10845798533409834,
+              0.10845798533409834,
+              0.10850001126527786,
+              0.10854200809262693,
+              0.10858298628591001,
+              0.10858298628591001,
+              0.10870798723772168,
+              0.10874998406507075,
+              0.1087500131689012,
+              0.10883400682359934,
+              0.10887498501688242,
+              0.10887501412071288,
+              0.10891698184423149,
+              0.10891698184423149,
+              0.10895798914134502,
+              0.10895801824517548,
+              0.10899998596869409,
+              0.1090829900931567,
+              0.1090829900931567,
+              0.1090829900931567,
+              0.10908397962339222,
+              0.10912498692050576,
+              0.10912498692050576,
+              0.10912501602433622,
+              0.10912501602433622,
+              0.10920799104496837,
+              0.10920799104496837,
+              0.10941701475530863,
+              0.10941701475530863,
+              0.10958299390040338,
+              0.10966701665893197,
+              0.10979198850691319,
+              0.11058300151489675,
+              0.11095800437033176,
+              0.11137500405311584,
+              0.11275001452304423,
+              0.11308299144729972,
+              0.11320802150294185,
+              0.11324998922646046,
+              0.11337501928210258,
+              0.11374999303370714,
+              0.11416699271649122,
+              0.1142919936683029,
+              0.11441699462011456,
+              0.11441702372394502,
+              0.11449999874457717,
+              0.11475000064820051,
+              0.11475000064820051,
+              0.11487500160001218,
+              0.11487500160001218,
+              0.11487500160001218,
+              0.11504098074510694,
+              0.11520800762809813,
+              0.1152500044554472,
+              0.1152500044554472,
+              0.1152500044554472,
+              0.1153330085799098,
+              0.11533399811014533,
+              0.11541700223460793,
+              0.11545800953172147,
+              0.11570798233151436,
+              0.11579098645597696,
+              0.11583301238715649,
+              0.11591700604185462,
+              0.11600001016631722,
+              0.1160409883596003,
+              0.11612498201429844,
+              0.1162080152425915,
+              0.11629200889728963,
+              0.11658298899419606,
+              0.11666701175272465,
+              0.11670798994600773,
+              0.11683400953188539,
+              0.11704099597409368,
+              0.1171660260297358,
+              0.11729099787771702,
+              0.11733299470506608,
+              0.11737499153241515,
+              0.11766699026338756,
+              0.11783299851231277,
+              0.11791600263677537,
+              0.11799999629147351,
+              0.11812499724328518,
+              0.11816600454039872,
+              0.11850000009872019,
+              0.11883297702297568,
+              0.11891699978150427,
+              0.12549999519251287,
+              0.12787498417310417,
+              0.12820799020119011,
+              0.12820799020119011,
+              0.12845799210481346,
+              0.12845901073887944,
+              0.12866698671132326,
+              0.1287909981328994,
+              0.1289169886149466,
+              0.12891701771877706,
+              0.12895799591206014,
+              0.1290829968638718,
+              0.12912502279505134,
+              0.12924999464303255,
+              0.12929199147038162,
+              0.12929199147038162,
+              0.12933299876749516,
+              0.12933401740156114,
+              0.12937502469867468,
+              0.1294169924221933,
+              0.1294999965466559,
+              0.12954100384376943,
+              0.1295830006711185,
+              0.12958399020135403,
+              0.12966699432581663,
+              0.12970800162293017,
+              0.12970902025699615,
+              0.12974999845027924,
+              0.12983300257474184,
+              0.12983300257474184,
+              0.1298749994020909,
+              0.12995899305678904,
+              0.1300839940086007,
+              0.13012500130571425,
+              0.13016597949899733,
+              0.1301660086028278,
+              0.13020800543017685,
+              0.13025000225752592,
+              0.13025000225752592,
+              0.13033300638198853,
+              0.13033300638198853,
+              0.13041601050645113,
+              0.1305410114582628,
+              0.13058300828561187,
+              0.13062497600913048,
+              0.13066598330624402,
+              0.13066601241007447,
+              0.13070800923742354,
+              0.13087500701658428,
+              0.13091700384393334,
+              0.13095798203721642,
+              0.13104200479574502,
+              0.13108301209285855,
+              0.1311670057475567,
+              0.13124998076818883,
+              0.13154197949916124,
+              0.13158298679627478,
+              0.1317910209763795,
+              0.13195900828577578,
+              0.13204201241023839,
+              0.13212498743087053,
+              0.1324159966316074,
+              0.13249999028630555,
+              0.13254201621748507,
+              0.13254201621748507,
+              0.13349999790079892,
+              0.1340000017080456,
+              0.1341660099569708,
+              0.13483301154337823,
+              0.13587498688139021,
+              0.13691600179299712,
+              0.13695898815058172,
+              0.13699999544769526,
+              0.13770800433121622,
+              0.1402909983880818,
+              0.14108300092630088,
+              0.14325001393444836,
+              0.1500830112490803,
+              0.15112498658709228,
+              0.15304199769161642,
+              0.17970800399780273,
+              0.2337500045541674,
+              0.30862499261274934
+            ],
+            "sample_bytes": 3560000,
+            "sample_rows": 20000
+          }
+        },
+        "role": "regression tie-back only (\u00a74.1/\u00a74.2): never a fit point, never a fitted coverage input, never an acceptance gate, and measured on the other cluster",
+        "size_profile": "SF"
+      }
+    ],
+    "role": "regression tie-back only (\u00a74.1/\u00a74.2): never a fit point, never a fitted coverage input, never an acceptance gate, and measured on the other cluster"
+  },
+  "network": {
+    "S0": {
+      "cell": "C6",
+      "measured": {
+        "A": {
+          "composite_d_datarow_bytes": 75018,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 11137,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 46.76623376623377,
+          "publication_datarow_bytes_max": 2630,
+          "publication_result_rows_max": 52,
+          "publication_round_trips_max": 15,
+          "publications": [
+            {
+              "datarow_bytes": 1984,
+              "result_queries": 7,
+              "result_rows": 50,
+              "round_trips": 10
+            },
+            {
+              "datarow_bytes": 2588,
+              "result_queries": 8,
+              "result_rows": 52,
+              "round_trips": 15
+            },
+            {
+              "datarow_bytes": 2630,
+              "result_queries": 8,
+              "result_rows": 52,
+              "round_trips": 15
+            }
+          ],
+          "reconstructed_payload_bytes": 53527
+        },
+        "B50": {
+          "composite_d_datarow_bytes": 75722,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 10707,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 234.64276228419655,
+          "publication_datarow_bytes_max": 58918,
+          "publication_result_rows_max": 251,
+          "publication_round_trips_max": 23,
+          "publications": [
+            {
+              "datarow_bytes": 58862,
+              "result_queries": 10,
+              "result_rows": 251,
+              "round_trips": 23
+            },
+            {
+              "datarow_bytes": 58918,
+              "result_queries": 10,
+              "result_rows": 251,
+              "round_trips": 20
+            },
+            {
+              "datarow_bytes": 58906,
+              "result_queries": 10,
+              "result_rows": 251,
+              "round_trips": 22
+            }
+          ],
+          "reconstructed_payload_bytes": 53527
+        }
+      },
+      "network_terms": {
+        "A": {
+          "composite_d": {
+            "bytes": 75018,
+            "modelled_ms": 1.371185348643183,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          },
+          "composite_t": {
+            "bytes": 11137,
+            "modelled_ms": 1.1387490046793136,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          },
+          "publication": {
+            "bytes": 2630,
+            "modelled_ms": 1.7269698985898678,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 15,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          }
+        },
+        "B50": {
+          "composite_d": {
+            "bytes": 75722,
+            "modelled_ms": 1.3787391946657666,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          },
+          "composite_t": {
+            "bytes": 10707,
+            "modelled_ms": 1.1341351498643835,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          },
+          "publication": {
+            "bytes": 58918,
+            "modelled_ms": 3.2369343704014932,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 23,
+            "rtt_ms_median": 0.11325001833029091,
+            "throughput_bytes_per_s": 93197557.62763275
+          }
+        }
+      },
+      "probe": {
+        "datarow_width_bytes": 235,
+        "elapsed_s": 0.05279108299873769,
+        "rtt_samples_ms": [
+          0.055500015150755644,
+          0.056459015468135476,
+          0.05658299778588116,
+          0.05704199429601431,
+          0.057249999372288585,
+          0.05733300349675119,
+          0.05750000127591193,
+          0.05800000508315861,
+          0.058166973758488894,
+          0.05833301111124456,
+          0.05854098708368838,
+          0.058833014918491244,
+          0.058833014918491244,
+          0.059125013649463654,
+          0.059165991842746735,
+          0.059291982324793935,
+          0.059457990573719144,
+          0.059874990256503224,
+          0.0600829953327775,
+          0.06016701809130609,
+          0.06024999311193824,
+          0.060457998188212514,
+          0.060457998188212514,
+          0.0609580019954592,
+          0.06154100992716849,
+          0.061790982726961374,
+          0.062333972891792655,
+          0.06349998875521123,
+          0.06366701563820243,
+          0.06391698843799531,
+          0.06433401722460985,
+          0.06491702515631914,
+          0.06666700937785208,
+          0.06758401286788285,
+          0.06916600978001952,
+          0.09941699681803584,
+          0.1026670215651393,
+          0.1027500256896019,
+          0.10362500324845314,
+          0.10420801118016243,
+          0.10679199476726353,
+          0.10708300396800041,
+          0.10716600809246302,
+          0.10733300587162375,
+          0.10737500269897282,
+          0.10741699952632189,
+          0.10745800682343543,
+          0.1075830077752471,
+          0.1076660118997097,
+          0.10774997645057738,
+          0.10775000555440784,
+          0.10779101285152137,
+          0.10795801063068211,
+          0.10804200428538024,
+          0.10816700523719192,
+          0.108207983430475,
+          0.10820900206454098,
+          0.10833298438228667,
+          0.10833301348611712,
+          0.10837501031346619,
+          0.1084999821614474,
+          0.10874998406507075,
+          0.1087500131689012,
+          0.10883301729336381,
+          0.10883301729336381,
+          0.10887501412071288,
+          0.10891599231399596,
+          0.10895801824517548,
+          0.10904102236963809,
+          0.10912498692050576,
+          0.10912498692050576,
+          0.10924998787231743,
+          0.10925001697614789,
+          0.10925001697614789,
+          0.1093749888241291,
+          0.1094160252250731,
+          0.10975002078339458,
+          0.11137497494928539,
+          0.11145899770781398,
+          0.11154200183227658,
+          0.11199997970834374,
+          0.11204200563952327,
+          0.11225001071579754,
+          0.11237501166760921,
+          0.11258397717028856,
+          0.11258400627411902,
+          0.11262501357123256,
+          0.11291599366813898,
+          0.11291599366813898,
+          0.11291698319837451,
+          0.11295799049548805,
+          0.11295799049548805,
+          0.11304201325401664,
+          0.11308302055113018,
+          0.11308398097753525,
+          0.11316701420582831,
+          0.11320799239911139,
+          0.11320802150294185,
+          0.11324998922646046,
+          0.11325001833029091,
+          0.11333302245475352,
+          0.11333398288115859,
+          0.11345799430273473,
+          0.11345799430273473,
+          0.11358401388861239,
+          0.11374999303370714,
+          0.11391699081286788,
+          0.11408401769585907,
+          0.11462499969638884,
+          0.11462499969638884,
+          0.11479100794531405,
+          0.11491699842736125,
+          0.11495800572447479,
+          0.1151659816969186,
+          0.11520800762809813,
+          0.11524997535161674,
+          0.1153330085799098,
+          0.11533399811014533,
+          0.11558301048353314,
+          0.1158749801106751,
+          0.11587500921450555,
+          0.11587500921450555,
+          0.11604200699366629,
+          0.11629197979345918,
+          0.11637501302175224,
+          0.11637501302175224,
+          0.1167499867733568,
+          0.11679099407047033,
+          0.11679198360070586,
+          0.11691701365634799,
+          0.11766699026338756,
+          0.118332973215729,
+          0.11900000390596688,
+          0.11987498146481812,
+          0.12425001477822661,
+          0.12462498852983117,
+          0.1246670144610107,
+          0.1247500185854733,
+          0.12716700439341366,
+          0.1274579844903201,
+          0.12779099051840603,
+          0.1285840116906911,
+          0.128875020891428,
+          0.12912499369122088,
+          0.1292910019401461,
+          0.1295830006711185,
+          0.12979100574739277,
+          0.1298749994020909,
+          0.1298749994020909,
+          0.1299580035265535,
+          0.13008300447836518,
+          0.13012500130571425,
+          0.13016597949899733,
+          0.13029100955463946,
+          0.13033300638198853,
+          0.1303750032093376,
+          0.1303750032093376,
+          0.1303750032093376,
+          0.13054200098849833,
+          0.13058300828561187,
+          0.13062500511296093,
+          0.13066700194031,
+          0.1308330101892352,
+          0.13087497791275382,
+          0.13091700384393334,
+          0.1309590006712824,
+          0.13104200479574502,
+          0.13108301209285855,
+          0.13112497981637716,
+          0.13124998076818883,
+          0.13187501463107765,
+          0.132083980133757,
+          0.13299999409355223,
+          0.1333339896518737,
+          0.13366600614972413,
+          0.13412500265985727,
+          0.13454200234264135,
+          0.1348750083707273,
+          0.135708978632465,
+          0.13587498688139021,
+          0.13783399481326342,
+          0.13858298189006746,
+          0.1387499796692282,
+          0.13904200750403106,
+          0.14041701797395945,
+          0.140791991725564,
+          0.1449169940315187,
+          0.14787499094381928,
+          0.1533330068923533,
+          0.1697080151643604,
+          0.17283300985582173,
+          0.17654200200922787,
+          0.18033399828709662,
+          0.18174998695030808,
+          0.18595799338072538,
+          0.19916598103009164,
+          0.2241660258732736,
+          0.23587499163113534,
+          0.2814999897964299,
+          0.3722500114236027
+        ],
+        "sample_bytes": 4920000,
+        "sample_rows": 20000
+      }
+    },
+    "S1": {
+      "cell": "C6",
+      "measured": {
+        "A": {
+          "composite_d_datarow_bytes": 555475,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 81984,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 23.694068965517243,
+          "publication_datarow_bytes_max": 29349,
+          "publication_result_rows_max": 1209,
+          "publication_round_trips_max": 15,
+          "publications": [
+            {
+              "datarow_bytes": 27193,
+              "result_queries": 7,
+              "result_rows": 1207,
+              "round_trips": 10
+            },
+            {
+              "datarow_bytes": 29349,
+              "result_queries": 8,
+              "result_rows": 1209,
+              "round_trips": 15
+            },
+            {
+              "datarow_bytes": 29349,
+              "result_queries": 8,
+              "result_rows": 1209,
+              "round_trips": 15
+            }
+          ],
+          "reconstructed_payload_bytes": 4413536
+        },
+        "B50": {
+          "composite_d_datarow_bytes": 559907,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 82344,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 197.1520345484295,
+          "publication_datarow_bytes_max": 4900069,
+          "publication_result_rows_max": 24854,
+          "publication_round_trips_max": 51,
+          "publications": [
+            {
+              "datarow_bytes": 4900069,
+              "result_queries": 10,
+              "result_rows": 24854,
+              "round_trips": 32
+            },
+            {
+              "datarow_bytes": 4900051,
+              "result_queries": 10,
+              "result_rows": 24854,
+              "round_trips": 51
+            },
+            {
+              "datarow_bytes": 4899930,
+              "result_queries": 10,
+              "result_rows": 24854,
+              "round_trips": 32
+            }
+          ],
+          "reconstructed_payload_bytes": 4413536
+        }
+      },
+      "network_terms": {
+        "A": {
+          "composite_d": {
+            "bytes": 555475,
+            "modelled_ms": 1.8074419028675945,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          },
+          "composite_t": {
+            "bytes": 81984,
+            "modelled_ms": 1.1783487920591142,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          },
+          "publication": {
+            "bytes": 29349,
+            "modelled_ms": 1.7213600588186637,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 15,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          }
+        },
+        "B50": {
+          "composite_d": {
+            "bytes": 559907,
+            "modelled_ms": 1.817461400899356,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          },
+          "composite_t": {
+            "bytes": 82344,
+            "modelled_ms": 1.1791626502024883,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          },
+          "publication": {
+            "bytes": 4900069,
+            "modelled_ms": 16.704704538137136,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 51,
+            "rtt_ms_median": 0.1103340182453394,
+            "throughput_bytes_per_s": 442337528.8812777
+          }
+        }
+      },
+      "probe": {
+        "datarow_width_bytes": 197,
+        "elapsed_s": 0.009404582990100607,
+        "rtt_samples_ms": [
+          0.10112498421221972,
+          0.10145801934413612,
+          0.10166599531657994,
+          0.10187498992308974,
+          0.10224999277852476,
+          0.10224999277852476,
+          0.1024999946821481,
+          0.1025829988066107,
+          0.10258398833684623,
+          0.10262499563395977,
+          0.10270799975842237,
+          0.10287499753758311,
+          0.10299999848939478,
+          0.1033750013448298,
+          0.10362500324845314,
+          0.10366700007580221,
+          0.10370899690315127,
+          0.10391697287559509,
+          0.10395800927653909,
+          0.10400000610388815,
+          0.10408301022835076,
+          0.10433298302814364,
+          0.10433400166220963,
+          0.10441700578667223,
+          0.10441700578667223,
+          0.1044590026140213,
+          0.10454098810441792,
+          0.10454101720824838,
+          0.10462501086294651,
+          0.10483301593922079,
+          0.10483301593922079,
+          0.10500001371838152,
+          0.10562498937360942,
+          0.10570799349807203,
+          0.10604099952615798,
+          0.10608299635350704,
+          0.10649999603629112,
+          0.10658398969098926,
+          0.10691600618883967,
+          0.1069169957190752,
+          0.10725000174716115,
+          0.10725000174716115,
+          0.10729100904427469,
+          0.10729199857451022,
+          0.10729199857451022,
+          0.10733300587162375,
+          0.10733300587162375,
+          0.10737497359514236,
+          0.10741600999608636,
+          0.10754200047813356,
+          0.10754200047813356,
+          0.10754200047813356,
+          0.10754200047813356,
+          0.10762500460259616,
+          0.10762500460259616,
+          0.10766700142994523,
+          0.1077089982572943,
+          0.10775000555440784,
+          0.10775000555440784,
+          0.10775000555440784,
+          0.1077920023817569,
+          0.1078750065062195,
+          0.10791700333356857,
+          0.10791700333356857,
+          0.10795900016091764,
+          0.10800000745803118,
+          0.10800000745803118,
+          0.10808301158249378,
+          0.10812500840984285,
+          0.10816700523719192,
+          0.10820801253430545,
+          0.10829101665876806,
+          0.10829200618900359,
+          0.10829200618900359,
+          0.10829200618900359,
+          0.10833298438228667,
+          0.10837501031346619,
+          0.10837501031346619,
+          0.1084169780369848,
+          0.10841700714081526,
+          0.10845900396816432,
+          0.10850001126527786,
+          0.10854098945856094,
+          0.10854098945856094,
+          0.10854200809262693,
+          0.10858301538974047,
+          0.108584004919976,
+          0.10866697994060814,
+          0.10870798723772168,
+          0.10870801634155214,
+          0.10891599231399596,
+          0.10895900777541101,
+          0.10899998596869409,
+          0.10912501602433622,
+          0.10933299199678004,
+          0.10949998977594078,
+          0.10966698755510151,
+          0.10970799485221505,
+          0.11029100278392434,
+          0.1103340182453394,
+          0.11079199612140656,
+          0.11083399294875562,
+          0.1109160075429827,
+          0.1112080062739551,
+          0.11166598415002227,
+          0.11179200373589993,
+          0.11212500976398587,
+          0.11225001071579754,
+          0.1127920113503933,
+          0.11283298954367638,
+          0.11287498637102544,
+          0.11304099461995065,
+          0.11308302055113018,
+          0.11316698510199785,
+          0.11320901103317738,
+          0.11341599747538567,
+          0.11354099842719734,
+          0.1135829952545464,
+          0.11383299715816975,
+          0.11383401579223573,
+          0.1144580019172281,
+          0.11454097693786025,
+          0.1145839923992753,
+          0.11520797852426767,
+          0.11529200128279626,
+          0.11529200128279626,
+          0.1153330085799098,
+          0.115458999061957,
+          0.11550000635907054,
+          0.11558400001376867,
+          0.11562500731088221,
+          0.11579101555980742,
+          0.11583298328332603,
+          0.11591700604185462,
+          0.1161250111181289,
+          0.11629099026322365,
+          0.11637501302175224,
+          0.11679201270453632,
+          0.1168329908978194,
+          0.11720799375325441,
+          0.11799999629147351,
+          0.11824999819509685,
+          0.11929200263693929,
+          0.11958298273384571,
+          0.12041701120324433,
+          0.12608300312422216,
+          0.12658300693146884,
+          0.12708298163488507,
+          0.1279159914702177,
+          0.12795900693163276,
+          0.1280830183532089,
+          0.12824998702853918,
+          0.12829099432565272,
+          0.12837498798035085,
+          0.1284580212086439,
+          0.12895901454612613,
+          0.1289999927394092,
+          0.12929199147038162,
+          0.12937502469867468,
+          0.12966597569175065,
+          0.1297919952776283,
+          0.13004100765101612,
+          0.1300839940086007,
+          0.13033297727815807,
+          0.1304580073338002,
+          0.13050000416114926,
+          0.1305410114582628,
+          0.13083399971947074,
+          0.13091598520986736,
+          0.1312500098720193,
+          0.13158301590010524,
+          0.13179201050661504,
+          0.13179201050661504,
+          0.13195897918194532,
+          0.13229198521003127,
+          0.13329199282452464,
+          0.13354199472814798,
+          0.1336249988526106,
+          0.13370797387324274,
+          0.13420800678431988,
+          0.13512501027435064,
+          0.13612498878501356,
+          0.1372499973513186,
+          0.13787500211037695,
+          0.13804101035930216,
+          0.13862500782124698,
+          0.14266700600273907,
+          0.14358398038893938,
+          0.14633301179856062,
+          0.14883402036502957,
+          0.15045798500068486,
+          0.15133299166336656,
+          0.15391700435429811,
+          0.15825001173652709,
+          0.16383398906327784,
+          0.17133299843408167,
+          0.178084010258317,
+          0.2187499776482582,
+          0.23266699281521142,
+          0.4063329834025353
+        ],
+        "sample_bytes": 4160000,
+        "sample_rows": 20000
+      }
+    },
+    "S2": {
+      "cell": "C6",
+      "measured": {
+        "A": {
+          "composite_d_datarow_bytes": 1095086,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 81984,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 23.568109528419306,
+          "publication_datarow_bytes_max": 56995,
+          "publication_result_rows_max": 2411,
+          "publication_round_trips_max": 17,
+          "publications": [
+            {
+              "datarow_bytes": 56431,
+              "result_queries": 9,
+              "result_rows": 2409,
+              "round_trips": 12
+            },
+            {
+              "datarow_bytes": 56995,
+              "result_queries": 10,
+              "result_rows": 2411,
+              "round_trips": 17
+            },
+            {
+              "datarow_bytes": 56995,
+              "result_queries": 10,
+              "result_rows": 2411,
+              "round_trips": 17
+            }
+          ],
+          "reconstructed_payload_bytes": 9316210
+        },
+        "B50": {
+          "composite_d_datarow_bytes": 1103566,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 82344,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 207.4431075878905,
+          "publication_datarow_bytes_max": 10310442,
+          "publication_result_rows_max": 49702,
+          "publication_round_trips_max": 67,
+          "publications": [
+            {
+              "datarow_bytes": 10310442,
+              "result_queries": 10,
+              "result_rows": 49702,
+              "round_trips": 49
+            },
+            {
+              "datarow_bytes": 10310406,
+              "result_queries": 10,
+              "result_rows": 49702,
+              "round_trips": 67
+            },
+            {
+              "datarow_bytes": 10310164,
+              "result_queries": 10,
+              "result_rows": 49702,
+              "round_trips": 49
+            }
+          ],
+          "reconstructed_payload_bytes": 9316210
+        }
+      },
+      "network_terms": {
+        "A": {
+          "composite_d": {
+            "bytes": 1095086,
+            "modelled_ms": 2.737788276860481,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          },
+          "composite_t": {
+            "bytes": 81984,
+            "modelled_ms": 1.1987121137299088,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          },
+          "publication": {
+            "bytes": 56995,
+            "modelled_ms": 2.0710467825997636,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 17,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          }
+        },
+        "B50": {
+          "composite_d": {
+            "bytes": 1103566,
+            "modelled_ms": 2.7545281722333974,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          },
+          "composite_t": {
+            "bytes": 82344,
+            "modelled_ms": 1.1994227696655515,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          },
+          "publication": {
+            "bytes": 10310442,
+            "modelled_ms": 28.072205417748,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 67,
+            "rtt_ms_median": 0.11520800762809813,
+            "throughput_bytes_per_s": 506574253.36838484
+          }
+        }
+      },
+      "probe": {
+        "datarow_width_bytes": 207,
+        "elapsed_s": 0.008606832998339087,
+        "rtt_samples_ms": [
+          0.05387500277720392,
+          0.05641698953695595,
+          0.056541000958532095,
+          0.056541000958532095,
+          0.05662499461323023,
+          0.057792000006884336,
+          0.05816700286231935,
+          0.05870801396667957,
+          0.0591249845456332,
+          0.05954198422841728,
+          0.059582991525530815,
+          0.05962498835287988,
+          0.05974998930469155,
+          0.05991599755361676,
+          0.05995799438096583,
+          0.06004198803566396,
+          0.06012499216012657,
+          0.06062499596737325,
+          0.06074999691918492,
+          0.060874997870996594,
+          0.06091600516811013,
+          0.060959020629525185,
+          0.06137500167824328,
+          0.06150000263005495,
+          0.06162500358186662,
+          0.06212500738911331,
+          0.062207982409745455,
+          0.06295900675468147,
+          0.06529100937768817,
+          0.06670897710137069,
+          0.06795802619308233,
+          0.07029200787656009,
+          0.07362500764429569,
+          0.07449998520314693,
+          0.08475000504404306,
+          0.09191600838676095,
+          0.10783399920910597,
+          0.1086670090444386,
+          0.1092919846996665,
+          0.10958302300423384,
+          0.10991599992848933,
+          0.10995898628607392,
+          0.1111250021494925,
+          0.11116600944660604,
+          0.11145800817757845,
+          0.11179098510183394,
+          0.11254200944676995,
+          0.11329201515763998,
+          0.11329201515763998,
+          0.1135410275310278,
+          0.11362499208189547,
+          0.11366599937900901,
+          0.11374999303370714,
+          0.11387499398551881,
+          0.11395799810998142,
+          0.11399999493733048,
+          0.11399999493733048,
+          0.11412499588914216,
+          0.11416699271649122,
+          0.11420800001360476,
+          0.11424999684095383,
+          0.1142919936683029,
+          0.11441600508987904,
+          0.11441699462011456,
+          0.1144580019172281,
+          0.1144580019172281,
+          0.1144580019172281,
+          0.11445899144746363,
+          0.11449999874457717,
+          0.11454100604169071,
+          0.11458300286903977,
+          0.11458300286903977,
+          0.11462499969638884,
+          0.11466600699350238,
+          0.11470800382085145,
+          0.11470800382085145,
+          0.11470800382085145,
+          0.11475000064820051,
+          0.11475000064820051,
+          0.11475000064820051,
+          0.11479097884148359,
+          0.11479100794531405,
+          0.11483300477266312,
+          0.11483300477266312,
+          0.11487500160001218,
+          0.11491597979329526,
+          0.11491600889712572,
+          0.11491699842736125,
+          0.11495800572447479,
+          0.11495800572447479,
+          0.11500000255182385,
+          0.11500000255182385,
+          0.11500000255182385,
+          0.11504199937917292,
+          0.11504199937917292,
+          0.11512500350363553,
+          0.11512500350363553,
+          0.11512500350363553,
+          0.11516601080074906,
+          0.11520800762809813,
+          0.11520800762809813,
+          0.1152500044554472,
+          0.1152500044554472,
+          0.1152500044554472,
+          0.11529200128279626,
+          0.1153330085799098,
+          0.11537500540725887,
+          0.11541598360054195,
+          0.1154160127043724,
+          0.11541700223460793,
+          0.11550000635907054,
+          0.11570900096558034,
+          0.11583301238715649,
+          0.11599998106248677,
+          0.11604200699366629,
+          0.1164170098491013,
+          0.11645900667645037,
+          0.11649998486973345,
+          0.11658298899419606,
+          0.11687498772516847,
+          0.11687501682899892,
+          0.11691698455251753,
+          0.11699998867698014,
+          0.11704201460815966,
+          0.11708299280144274,
+          0.11724999058060348,
+          0.117292016511783,
+          0.11745799565687776,
+          0.11749999248422682,
+          0.11750002158805728,
+          0.11758299660868943,
+          0.11758299660868943,
+          0.11783401714637876,
+          0.11787499533966184,
+          0.11799999629147351,
+          0.11804199311882257,
+          0.11808300041593611,
+          0.11812502634711564,
+          0.11829199502244592,
+          0.11837499914690852,
+          0.11845800327137113,
+          0.11845902190543711,
+          0.11904098209924996,
+          0.11995798558928072,
+          0.12066602357663214,
+          0.12070802040398121,
+          0.1212499919347465,
+          0.12170799891464412,
+          0.12450001668184996,
+          0.12812501518055797,
+          0.13112500892020762,
+          0.13154197949916124,
+          0.13170798774808645,
+          0.13170897727832198,
+          0.13174998457543552,
+          0.13191701145842671,
+          0.13204201241023839,
+          0.13220799155533314,
+          0.13237498933449388,
+          0.13237498933449388,
+          0.13249999028630555,
+          0.13249999028630555,
+          0.13262499123811722,
+          0.13266701716929674,
+          0.1332090178038925,
+          0.13333300012163818,
+          0.13349999790079892,
+          0.1336249988526106,
+          0.1336249988526106,
+          0.1337080029770732,
+          0.1340000017080456,
+          0.13445800868794322,
+          0.13470801059156656,
+          0.13475000741891563,
+          0.1348750083707273,
+          0.13491598656401038,
+          0.1350840029772371,
+          0.13512501027435064,
+          0.13516598846763372,
+          0.13533400488086045,
+          0.13541601947508752,
+          0.13579201186075807,
+          0.1358330191578716,
+          0.13591698370873928,
+          0.1360829919576645,
+          0.13624998973682523,
+          0.13654198846779764,
+          0.13662499259226024,
+          0.13670799671672285,
+          0.13749999925494194,
+          0.13979198411107063,
+          0.14079202082939446,
+          0.14191700029186904,
+          0.1431250129826367,
+          0.14525000005960464,
+          0.14545800513587892,
+          0.14641700545325875,
+          0.16391600365750492,
+          0.24937500711530447,
+          0.47970900777727365
+        ],
+        "sample_bytes": 4360000,
+        "sample_rows": 20000
+      }
+    },
+    "S3": {
+      "cell": "C6",
+      "measured": {
+        "A": {
+          "composite_d_datarow_bytes": 2174308,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 81984,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 23.44187495672644,
+          "publication_datarow_bytes_max": 114561,
+          "publication_result_rows_max": 4815,
+          "publication_round_trips_max": 19,
+          "publications": [
+            {
+              "datarow_bytes": 111723,
+              "result_queries": 11,
+              "result_rows": 4813,
+              "round_trips": 14
+            },
+            {
+              "datarow_bytes": 112287,
+              "result_queries": 12,
+              "result_rows": 4815,
+              "round_trips": 19
+            },
+            {
+              "datarow_bytes": 114561,
+              "result_queries": 12,
+              "result_rows": 4815,
+              "round_trips": 19
+            }
+          ],
+          "reconstructed_payload_bytes": 19121558
+        },
+        "B50": {
+          "composite_d_datarow_bytes": 2190884,
+          "composite_d_round_trips": 5,
+          "composite_t_datarow_bytes": 82344,
+          "composite_t_round_trips": 9,
+          "mean_datarow_width_bytes": 212.59949563036145,
+          "publication_datarow_bytes_max": 21132174,
+          "publication_result_rows_max": 99398,
+          "publication_round_trips_max": 99,
+          "publications": [
+            {
+              "datarow_bytes": 21132174,
+              "result_queries": 10,
+              "result_rows": 99398,
+              "round_trips": 81
+            },
+            {
+              "datarow_bytes": 21132102,
+              "result_queries": 10,
+              "result_rows": 99398,
+              "round_trips": 99
+            },
+            {
+              "datarow_bytes": 21131618,
+              "result_queries": 10,
+              "result_rows": 99398,
+              "round_trips": 81
+            }
+          ],
+          "reconstructed_payload_bytes": 19121558
+        }
+      },
+      "network_terms": {
+        "A": {
+          "composite_d": {
+            "bytes": 2174308,
+            "modelled_ms": 4.631072249680724,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          },
+          "composite_t": {
+            "bytes": 81984,
+            "modelled_ms": 1.2106974067428382,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          },
+          "publication": {
+            "bytes": 114561,
+            "modelled_ms": 2.447104776893574,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 19,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          }
+        },
+        "B50": {
+          "composite_d": {
+            "bytes": 2190884,
+            "modelled_ms": 4.661895562133136,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 5,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          },
+          "composite_t": {
+            "bytes": 82344,
+            "modelled_ms": 1.211366831965019,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 9,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          },
+          "publication": {
+            "bytes": 21132174,
+            "modelled_ms": 50.93630076179534,
+            "provenance": "MODELLED from loopback-measured throughput and RTT; no matched application-to-database path exists on this host",
+            "round_trips": 99,
+            "rtt_ms_median": 0.11758299660868943,
+            "throughput_bytes_per_s": 537774777.6327256
+          }
+        }
+      },
+      "probe": {
+        "datarow_width_bytes": 213,
+        "elapsed_s": 0.008330624987138435,
+        "rtt_samples_ms": [
+          0.05812497693113983,
+          0.059667014284059405,
+          0.059667014284059405,
+          0.060874997870996594,
+          0.061708997236564755,
+          0.06299998494796455,
+          0.06299998494796455,
+          0.0646670232526958,
+          0.0652089947834611,
+          0.06575000588782132,
+          0.06833299994468689,
+          0.06912500248290598,
+          0.06954200216569006,
+          0.07704200106672943,
+          0.07837501470930874,
+          0.08562501170672476,
+          0.09045901242643595,
+          0.09458401473239064,
+          0.10195799404755235,
+          0.10362500324845314,
+          0.10366700007580221,
+          0.1044590026140213,
+          0.10479200864210725,
+          0.10633299825713038,
+          0.10733300587162375,
+          0.10783298057503998,
+          0.10804098565131426,
+          0.10812500840984285,
+          0.10816697613336146,
+          0.10829101665876806,
+          0.10833301348611712,
+          0.10845798533409834,
+          0.10854197898879647,
+          0.1086670090444386,
+          0.1087500131689012,
+          0.10883298818953335,
+          0.10887498501688242,
+          0.10891701094806194,
+          0.10900001507252455,
+          0.1090829900931567,
+          0.10912498692050576,
+          0.1091659942176193,
+          0.10916698374785483,
+          0.10920799104496837,
+          0.10925001697614789,
+          0.1093749888241291,
+          0.1093749888241291,
+          0.10941698565147817,
+          0.10945799294859171,
+          0.1094590115826577,
+          0.10954099707305431,
+          0.10958299390040338,
+          0.10987499263137579,
+          0.11029199231415987,
+          0.11100000119768083,
+          0.11104100849479437,
+          0.11129101039841771,
+          0.11249998351559043,
+          0.11512500350363553,
+          0.11566700413823128,
+          0.11579098645597696,
+          0.1160409883596003,
+          0.11604200699366629,
+          0.11612498201429844,
+          0.11620900477282703,
+          0.11641698074527085,
+          0.11650001397356391,
+          0.11654099216684699,
+          0.11658298899419606,
+          0.11666599311865866,
+          0.11666701175272465,
+          0.1167499867733568,
+          0.1167499867733568,
+          0.1168329908978194,
+          0.11683302000164986,
+          0.11683398042805493,
+          0.116915995022282,
+          0.11704099597409368,
+          0.1170419855043292,
+          0.11708299280144274,
+          0.11708299280144274,
+          0.11712498962879181,
+          0.11712501873262227,
+          0.11712501873262227,
+          0.11716599692590535,
+          0.11716701555997133,
+          0.11720799375325441,
+          0.11720799375325441,
+          0.1172090123873204,
+          0.11725001968443394,
+          0.11729099787771702,
+          0.11733299470506608,
+          0.11733299470506608,
+          0.11737499153241515,
+          0.11737502063624561,
+          0.11741698835976422,
+          0.11741701746359468,
+          0.11745799565687776,
+          0.11749999248422682,
+          0.11758299660868943,
+          0.11766701936721802,
+          0.11770898709073663,
+          0.11775002349168062,
+          0.1177910016849637,
+          0.11783299851231277,
+          0.11787499533966184,
+          0.11791600263677537,
+          0.1179169921670109,
+          0.11795799946412444,
+          0.11799999629147351,
+          0.11804202222265303,
+          0.11812499724328518,
+          0.11816699407063425,
+          0.11820902000181377,
+          0.11829097638837993,
+          0.11833300231955945,
+          0.11841699597425759,
+          0.1186660083476454,
+          0.11895800707861781,
+          0.11900000390596688,
+          0.11983400327153504,
+          0.12004200834780931,
+          0.12045798939652741,
+          0.12583297211676836,
+          0.12941600289195776,
+          0.13054200098849833,
+          0.13066598330624402,
+          0.13120900257490575,
+          0.13120900257490575,
+          0.1312500098720193,
+          0.13129200669936836,
+          0.13133298489265144,
+          0.1314590044785291,
+          0.13170798774808645,
+          0.13175001367926598,
+          0.13179099187254906,
+          0.13183298869989812,
+          0.13195801875554025,
+          0.13199998647905886,
+          0.13204198330640793,
+          0.13208299060352147,
+          0.13208400923758745,
+          0.13216599472798407,
+          0.1322080206591636,
+          0.13225001748651266,
+          0.13229201431386173,
+          0.13258401304483414,
+          0.13262499123811722,
+          0.13270802446641028,
+          0.13275002129375935,
+          0.1327920181211084,
+          0.1328329963143915,
+          0.13287499314174056,
+          0.13295799726620317,
+          0.13324999599717557,
+          0.13333401875570416,
+          0.1334169937763363,
+          0.13345800107344985,
+          0.13345800107344985,
+          0.13358399155549705,
+          0.1337080029770732,
+          0.1337080029770732,
+          0.13379199663177133,
+          0.13383300392888486,
+          0.13395797577686608,
+          0.1340000017080456,
+          0.13412500265985727,
+          0.13425000361166894,
+          0.13437497545965016,
+          0.13437500456348062,
+          0.1344159827567637,
+          0.13458399916999042,
+          0.13462500646710396,
+          0.13462500646710396,
+          0.1347920042462647,
+          0.13483298243954778,
+          0.13641701661981642,
+          0.13691699132323265,
+          0.1372499973513186,
+          0.14016698696650565,
+          0.14387501869350672,
+          0.1500830112490803,
+          0.15329199959523976,
+          0.15420900308527052,
+          0.15516701387241483,
+          0.15800000983290374,
+          0.15970799722708762,
+          0.16008300008252263,
+          0.1604169956408441,
+          0.16108399722725153,
+          0.16166697605513036,
+          0.16166700515896082,
+          0.16175000928342342,
+          0.16812499961815774,
+          0.18125001224689186,
+          0.20204100292176008,
+          0.2055420191027224,
+          0.21525000920519233,
+          0.25429201195947826,
+          0.5113339866511524
+        ],
+        "sample_bytes": 4480000,
+        "sample_rows": 20000
+      }
+    }
+  },
+  "plateau": [
+    {
+      "cell": "C5",
+      "characterisations": {
+        "plateau_growth:A": {
+          "gated": false,
+          "note": "ONE-SIDED (\u00a74.8 as scoped rev 16): the approved budget's last-five growth rule is a `selected_design_ceilings` entry, so it is not a gate on the layout being retired. The limit is printed for reference only. The leak proofs for this layout are `fixed_live_counts`, `reclamation` and `orphans`, and those ARE gated.",
+          "reference_limit": 0.05,
+          "statistic": "(last - first) / first over the last five windows (SUPERSEDED by rev 16's max-minus-min; equal on a monotone series, smaller on one that oscillates)",
+          "value": 0.07139070507156742,
+          "window_live_tuples": [
+            49696,
+            49696,
+            49696,
+            49696,
+            49696,
+            49696
+          ],
+          "window_total_bytes": [
+            88702976,
+            139075584,
+            147759104,
+            148717568,
+            148996096,
+            149004288
+          ]
+        }
+      },
+      "gates": {
+        "fixed_live_counts:A": {
+          "value": true,
+          "verdict": "pass"
+        },
+        "fixed_live_counts:B50": {
+          "value": true,
+          "verdict": "pass"
+        },
+        "orphans": {
+          "current_rows_for_legacy_pair": 0,
+          "legacy_rows_for_current_pair": 0,
+          "verdict": "pass"
+        },
+        "plateau_growth:B50": {
+          "limit": 0.05,
+          "statistic": "(last - first) / first over the last five windows (SUPERSEDED by rev 16's max-minus-min; equal on a monotone series, smaller on one that oscillates)",
+          "value": 0.0,
+          "verdict": "pass"
+        },
+        "reclamation:A": {
+          "dead_tuples_held": 74544,
+          "dead_tuples_released": 0,
+          "note": "held == 0 is INSUFFICIENT, not a pass: the open snapshot blocked nothing, so 'returned to zero' proves nothing",
+          "verdict": "pass"
+        },
+        "reclamation:B50": {
+          "dead_tuples_held": 24802,
+          "dead_tuples_released": 0,
+          "note": "held == 0 is INSUFFICIENT, not a pass: the open snapshot blocked nothing, so 'returned to zero' proves nothing",
+          "verdict": "pass"
+        }
+      },
+      "size_profile": "S1"
+    }
+  ],
+  "profile": {
+    "cache": "not_applicable",
+    "cluster_identity": "ghostreplay-score-storage-qual",
+    "content_hash": "not_applicable",
+    "evaluator_revision": "43db2506e4aedb93fa25b6d3e7f5568c893dd3c0",
+    "host_identity": "macOS-26.2-arm64-arm-64bit",
+    "identity_checked_over": [
+      "C1:S0",
+      "C1:S1",
+      "C1:S2",
+      "C1:S3",
+      "C2:S1",
+      "C2:S2",
+      "C2:S3",
+      "C3:S0",
+      "C3:S1",
+      "C3:S2",
+      "C3:S3",
+      "C5:S1",
+      "C6:S0",
+      "C6:S1",
+      "C6:S2",
+      "C6:S3",
+      "C1:SF",
+      "C3:SF",
+      "C5:SF",
+      "C6:SF",
+      "C4:S1:A_old",
+      "C4:S1:A_new",
+      "C4:SF:A_old",
+      "C4:SF:A_new",
+      "C7:legacy",
+      "C7:current-b50-v1"
+    ],
+    "identity_revision_exempt": [
+      "C4:S1:A_old",
+      "C4:SF:A_old"
+    ],
+    "incomplete_cells": {},
+    "optional_optimizations": [],
+    "optional_optimizations_note": "the spike selected none \u2014 no payload cache, no content hash, no COPY, no chunked confidence \u2014 so the acceptance item is met by recorded non-applicability rather than by silence",
+    "postgres_binary_prefix": "/Applications/Postgres.app/Contents/Versions/18/bin",
+    "sample_windows": {
+      "C1:S0": {
+        "complete_paired_blocks": 10,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1300,
+              "B50": 1300
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1300,
+              "B50": 1300
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C1:S1": {
+        "complete_paired_blocks": 9,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1170,
+              "B50": 1170
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1170,
+              "B50": 1170
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C1:S2": {
+        "complete_paired_blocks": 8,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1040,
+              "B50": 1040
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 1040,
+              "B50": 1040
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 3,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C1:S3": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 780,
+              "B50": 780
+            },
+            "status": "sufficient"
+          },
+          "composite_t": {
+            "declared_per_publication": 13,
+            "reads_per_layout": {
+              "A": 780,
+              "B50": 780
+            },
+            "status": "sufficient"
+          }
+        },
+        "discarded_blocks": [
+          {
+            "block": 1,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 4,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 6,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 1,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 0
+          },
+          {
+            "block": 8,
+            "reference_catalog_autovacuum": 0,
+            "reference_num_requested": 0,
+            "reference_num_timed": 0,
+            "selected_catalog_autovacuum": 0,
+            "selected_num_requested": 0,
+            "selected_num_timed": 1
+          }
+        ],
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C2:S1": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C2:S2": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      },
+      "C2:S3": {
+        "complete_paired_blocks": 6,
+        "composites": {
+          "composite_d": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          },
+          "composite_t": {
+            "note": "the cell declares no reads of this composite; not gated",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "status": "not_measured"
+          }
+        },
+        "discarded_blocks": [],
+        "gated_composites": [],
+        "reasons": [],
+        "verdict": "sufficient"
+      }
+    },
+    "settings_deviating_cells": [
+      "C1:S0",
+      "C1:S1",
+      "C1:S2",
+      "C1:S3"
+    ],
+    "settings_deviation_note": "\u00a79.5 permits ONE recorded settings deviation \u2014 max_wal_size raised for C1 only, if and only if observed discards leave fewer than two complete paired blocks. C1's warm ceiling is already a LOWER BOUND, so the deviation cannot loosen the production-applicable ceiling, which is C2's and keeps the census value. Pool identity includes the settings digest, so nothing is pooled across the deviation either way.",
+    "settings_deviations": {
+      "C1:S0": {
+        "max_wal_size": {
+          "baseline": "128",
+          "measured": "8192"
+        }
+      },
+      "C1:S1": {
+        "max_wal_size": {
+          "baseline": "128",
+          "measured": "8192"
+        }
+      },
+      "C1:S2": {
+        "max_wal_size": {
+          "baseline": "128",
+          "measured": "8192"
+        }
+      },
+      "C1:S3": {
+        "max_wal_size": {
+          "baseline": "128",
+          "measured": "8192"
+        }
+      }
+    },
+    "settings_digest": "a39de1bec346d79e",
+    "settings_digest_by_cell": {
+      "C1:S0": "414b5824f809c30b",
+      "C1:S1": "414b5824f809c30b",
+      "C1:S2": "414b5824f809c30b",
+      "C1:S3": "414b5824f809c30b",
+      "C2:S1": "a39de1bec346d79e",
+      "C2:S2": "a39de1bec346d79e",
+      "C2:S3": "a39de1bec346d79e",
+      "C3:S0": "a39de1bec346d79e",
+      "C3:S1": "a39de1bec346d79e",
+      "C3:S2": "a39de1bec346d79e",
+      "C3:S3": "a39de1bec346d79e",
+      "C5:S1": "a39de1bec346d79e",
+      "C6:S0": "a39de1bec346d79e",
+      "C6:S1": "a39de1bec346d79e",
+      "C6:S2": "a39de1bec346d79e",
+      "C6:S3": "a39de1bec346d79e"
+    },
+    "stated_differences": [
+      {
+        "kind": "setting",
+        "local": "8192",
+        "name": "max_wal_size",
+        "production": "128"
+      },
+      {
+        "kind": "setting",
+        "local": "18.4 (Postgres.app)",
+        "name": "server_version",
+        "production": "18.6 (Debian 18.6-1.pgdg13+2)"
+      },
+      {
+        "kind": "database",
+        "local": "en_US.UTF-8",
+        "name": "datcollate",
+        "production": "en_US.utf8"
+      },
+      {
+        "kind": "database",
+        "local": "en_US.UTF-8",
+        "name": "datctype",
+        "production": "en_US.utf8"
+      },
+      {
+        "kind": "host",
+        "local": {
+          "machine": "arm64",
+          "platform": "macOS-26.2-arm64-arm-64bit",
+          "processor": "arm",
+          "python": "3.12.7"
+        },
+        "name": "cpu_storage_rss_collation_network",
+        "note": "A-relative ratios transfer between hosts; absolute host-dependent ceilings do not. Apple Silicon vs Railway vCPUs, macOS vs Linux fsync and RSS accounting, libc collation matched by NAME and PROVIDER only, and no matched application-to-database network path exists locally.",
+        "production": {
+          "cpu_count": 48,
+          "cpu_max": "800000 100000",
+          "mem_max": "8000000000"
+        }
+      }
+    ],
+    "tested_revision": "0c690ac42e7e5f790b9d89ffab48a93d572cf0da",
+    "traffic_representative": false,
+    "upstream_source_digest_drift": "six of twelve digests recorded in opening-score-storage-budgets-2026-09-19.json have drifted"
+  },
+  "run_id": "r2",
+  "schema": 2,
+  "seal": {
+    "input_sha256": {
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C1-S0.json": "536f7d65b5a0d2de310bad98026f8aa70b4b920d5d17642b6475bdbab57160c9",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C1-S1.json": "9041dbc220f4121be74e13ef2c77c5a731ec18244b76bee4d2af89804bf5c8b6",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C1-S2.json": "961872a9234f7f42d57a2c2699fa4a2cc2a7957fcef59bcd19fd22526daa84a1",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C1-S3.json": "ff963ff0db1a4bc6cd4187ecccbea96da827718b95073191387028b03399fad7",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C1-SF.json": "371de37998c915ad98074081ef52f2539a989e4fc21d2d54345267bd68ba8e0d",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C2-S1.json": "f0c6eb4284973c91000bbf841a0fbf9d8d08fc71cffb9d92519504c904c3b2e1",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C2-S2.json": "71e254ef1688f211f20094fa4b737cb6dc0a9da85c3513bde3d21dddbaa6208f",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C2-S3.json": "501f26db167b834369d44e0a3a640aa8893402ef0e5c7601f420923edc92d783",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C3-S0.json": "87069ab7cb19cf6dbd0c61c30d5312741f831a142cae90e633c15bd84358ea40",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C3-S1.json": "771075b42678e38806a5ec15db86618d1b29d04caf4668a5c1ca0d593ef12205",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C3-S2.json": "92d982294b18e31040bd1a6dd43dbfddd266905b0e6b3b9a6d535ce1c4815a56",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C3-S3.json": "0d4629770df8ca1625c9c7be739fea03706b1a4998bd5bb99baf239a30a0d618",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C3-SF.json": "24fe79681d30823066ec3a312decb0792ec70ff47fdcd7210b8cf94b0a486d31",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C4-S1-A_new.json": "f4c0a43c4c8f2dd647ce26fa85640eebf4d0affd6fa00f6466d91b60353c0756",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C4-S1-A_old.json": "acd63b59809096c5fbdf9fc0081df94ccf23253844219b1147ee02815462c47d",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C4-SF-A_new.json": "15ae92e5d55037d14d4643c50d040b03a7dd7006c1fa5dea3c558a004f89fdc1",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C4-SF-A_old.json": "e761696453bbada599c9efd8d1352a441e05fffbe548a024209faedca19da3ad",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C5-S1.json": "671fc07659aeeb6d46d16a01f3613700af8ffa477dd81d885cad3461f5a05da1",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C5-SF.json": "8f974fbca5b7df26c34fe29e388f8efb12e4b7373e6e0228c88fbafeba374b9d",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C6-S0.json": "f92510db08f52a15974d5892baa963c3644ee8440ee532422e3a4565aa1ea8b9",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C6-S1.json": "9887da86f94e99e0ddbd2d582c4286354a0c97bca9de9baa916082deb5cd0c0e",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C6-S2.json": "beedaac656f863eb420d0a1e32090c020c7a0c86395ea36e58b0116593087a39",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C6-S3.json": "7885468bec88bae8498b2d0c15c17c56d56c6e1926534f6fc16bad5ed8c781d3",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C6-SF.json": "79d8b71a1515384222e0e31e847452c2d11c99a85fcbd7f931cd8de6f6967dfb",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C7-S1-current.json": "7dcac36221b9adf341fb6bc50aa570d206c562d364324718bffdb4e018a40e3e",
+      "/Users/miguel/.ghostreplay-private/score-store-qualify/cells-r1/C7-S1-legacy.json": "f02a97adb09bc7d7abddf77df90dc9fea2fa86f19ff1c94c0e5f21635cdd8225"
+    },
+    "note": "a record of what produced these numbers, not a gate; the approved budget report's own seal has already drifted",
+    "tooling_sha256": {
+      "app/models.py": "e43b1a59d28a1e289e8657936ad74b201d18cbbe12b64d978e0595a5071bef95",
+      "app/opening_cache.py": "a4d2a933a730441043959bb508d96df2d0dedb8337499b546de3c6b8e5bf94f8",
+      "app/opening_score_delta.py": "5c2e3a9f314f4301377ae25c7f7e6d37db1bc923b00c8983ebd040bbd49c50c4",
+      "app/opening_score_storage.py": "9bee1e668265ea30ee4a9b11621731143a0791dd2eb0d20a37cf22fc54bd496c",
+      "scripts/bench_opening_score_storage.py": "c3049d7baa8dcd8bec0fbe3cde5cdf9027a0303957bd598b70715e4478d0218f",
+      "scripts/opening_score_storage_adapters.py": "2a3bb2f49b8f149c162b259a88f37a7461404a2db14b5c47e7c17dda78bf5168",
+      "scripts/opening_score_storage_workload.py": "c6109827ec122e7e85122137ff2901abe7cf9e27f3e5f6904caa9453e1a74b9b",
+      "scripts/qualify_legacy_retirement_cost.py": "29544c072cbf19503dd375bc091d01edb780e5dae72bc3f55ffae0fa768dc25d",
+      "scripts/qualify_opening_score_capture.py": "8ca1ece60917e2e9a2c749b2cfd53a2bb08d5c31ffc9d1de5f114ad50328fc65",
+      "scripts/qualify_opening_score_storage.py": "6715a6007f7a139c3b63a1e5ea08abe592e194febf7a225a16f0b064018b8d4a",
+      "scripts/summarize_opening_score_qualification.py": "e05649b4f8da0c1484e0106bb822c309b75914b6ccfbfcd24e8a7ccae8fdab00"
+    }
+  },
+  "verdict": {
+    "a_relative_gates_enforced_here": [
+      "combined_wal_ratio_max",
+      "composite_d_p95_ratio_max",
+      "composite_t_format_stage_p95_ratio_max",
+      "publication_p95_ratio_max",
+      "vacuumed_footprint_ratio_max"
+    ],
+    "aggregate": "pass",
+    "coverage_gaps": {},
+    "deferred_absolute_ceilings": [
+      "composite_d_p95_ms",
+      "composite_t_format_stage_p95_ms",
+      "integrated_worker_rss_bytes",
+      "publication_allocation_peak_bytes",
+      "publication_p95_ms"
+    ],
+    "failing_gates": [],
+    "insufficient_gates": [],
+    "note": "Passing authorises READINESS for the cutover workflow. It is not a claim that production is deployed or observed.",
+    "per_gate": {
+      "C1:S0:combined_wal": "pass",
+      "C1:S0:composite_d_p95": "pass",
+      "C1:S0:composite_t_format_stage_p95": "pass",
+      "C1:S0:publication_p95": "pass",
+      "C1:S0:vacuumed_footprint": "pass",
+      "C1:S1:combined_wal": "pass",
+      "C1:S1:composite_d_p95": "pass",
+      "C1:S1:composite_t_format_stage_p95": "pass",
+      "C1:S1:publication_p95": "pass",
+      "C1:S1:vacuumed_footprint": "pass",
+      "C1:S2:combined_wal": "pass",
+      "C1:S2:composite_d_p95": "pass",
+      "C1:S2:composite_t_format_stage_p95": "pass",
+      "C1:S2:publication_p95": "pass",
+      "C1:S2:vacuumed_footprint": "pass",
+      "C1:S3:combined_wal": "pass",
+      "C1:S3:composite_d_p95": "pass",
+      "C1:S3:composite_t_format_stage_p95": "pass",
+      "C1:S3:publication_p95": "pass",
+      "C1:S3:vacuumed_footprint": "pass",
+      "C2:S1:combined_wal": "pass",
+      "C2:S1:publication_p95": "pass",
+      "C2:S1:vacuumed_footprint": "pass",
+      "C2:S2:combined_wal": "pass",
+      "C2:S2:publication_p95": "pass",
+      "C2:S2:vacuumed_footprint": "pass",
+      "C2:S3:combined_wal": "pass",
+      "C2:S3:publication_p95": "pass",
+      "C2:S3:vacuumed_footprint": "pass",
+      "C4:S1:publication_p95": "pass",
+      "C4:SF:publication_p95": "pass",
+      "C5:S1:fixed_live_counts:A": "pass",
+      "C5:S1:fixed_live_counts:B50": "pass",
+      "C5:S1:orphans": "pass",
+      "C5:S1:plateau_growth:B50": "pass",
+      "C5:S1:reclamation:A": "pass",
+      "C5:S1:reclamation:B50": "pass",
+      "C7:current-b50-v1:drill": "pass",
+      "C7:current-b50-v1:normal": "pass",
+      "C7:legacy:drill": "pass",
+      "C7:legacy:normal": "pass",
+      "ceiling:composite_d_p95_ms": "deferred",
+      "ceiling:composite_t_format_stage_p95_ms": "deferred",
+      "ceiling:integrated_worker_rss_bytes": "deferred",
+      "ceiling:post_checkpoint_publication_wal_bytes": "pass",
+      "ceiling:publication_allocation_peak_bytes": "deferred",
+      "ceiling:publication_p95_ms": "deferred",
+      "ceiling:vacuum_wal_bytes_per_ten_publications": "pass",
+      "ceiling:vacuumed_footprint_bytes": "pass",
+      "ceiling:warm_publication_wal_bytes": "pass"
+    },
+    "precedence": "fail > insufficient_evidence > inconclusive > pass; a measured failure is never reported as a gap, and a gap never as a pass"
+  }
+}
