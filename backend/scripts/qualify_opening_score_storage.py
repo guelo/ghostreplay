@@ -660,15 +660,18 @@ def read_autovacuum_state(engine) -> tuple[list[dict], dict]:
                 "inserted_since_vacuum": int(inserted),
                 "reltuples": float(reltuples),
                 "reloptions": list(reloptions or ()),
+                "relkind": str(relkind),
             }
-            for name, dead, modified, inserted, reltuples, reloptions in conn.execute(
-                text(
-                    "SELECT s.schemaname || '.' || s.relname, s.n_dead_tup, "
-                    "s.n_mod_since_analyze, s.n_ins_since_vacuum, c.reltuples, "
-                    "c.reloptions FROM pg_stat_all_tables s "
-                    "JOIN pg_class c ON c.oid = s.relid"
-                )
-            ).all()
+            for name, dead, modified, inserted, reltuples, reloptions, relkind in (
+                conn.execute(
+                    text(
+                        "SELECT s.schemaname || '.' || s.relname, s.n_dead_tup, "
+                        "s.n_mod_since_analyze, s.n_ins_since_vacuum, c.reltuples, "
+                        "c.reloptions, c.relkind FROM pg_stat_all_tables s "
+                        "JOIN pg_class c ON c.oid = s.relid"
+                    )
+                ).all()
+            )
         ]
         settings = {
             str(name): float(setting)
@@ -692,7 +695,8 @@ def relation_autovacuum_option(reloptions) -> bool | None:
 def eligible_relations(rows, settings) -> list[dict]:
     """Every relation autovacuum could pick up RIGHT NOW, and on which rule.
 
-    Pure, so §2.6 pins the arithmetic without a cluster. Relations carrying
+    Pure, so §2.6 pins the arithmetic without a cluster. TOAST relations are
+    never eligible on the ANALYZE rule (see below). Relations carrying
     ``autovacuum_enabled=false`` are skipped — the measured tables all do, heap
     and TOAST alike (``disable_relation_autovacuum``), and they sit far over
     every threshold by design, which is the whole reason their vacuum windows
@@ -723,7 +727,26 @@ def eligible_relations(rows, settings) -> list[dict]:
             )
             if row["inserted_since_vacuum"] > insert_threshold:
                 reasons.append("insert_vacuum")
-        if row["modified_since_analyze"] > analyze_threshold:
+        # AUTOVACUUM NEVER ANALYZES A TOAST RELATION, so an analyze threshold
+        # crossed on one is not something the launcher can pick up. PostgreSQL
+        # sets ``doanalyze = false`` for ``RELKIND_TOASTVALUE`` in
+        # ``do_autovacuum``, and nothing can clear the counter either: ANALYZE
+        # on a TOAST relation is skipped outright — measured on 18.4,
+        # ``WARNING: skipping "pg_toast_2619" --- cannot analyze non-tables or
+        # special system tables``, with ``n_mod_since_analyze`` unchanged and
+        # ``last_analyze`` still null afterwards. Counting it made the refusal
+        # PERMANENT: ``pg_toast_2619`` — ``pg_statistic``'s own TOAST relation,
+        # which every vacuum window dirties by analyzing the measured tables —
+        # crossed 52 during C1/S0 and refused the cell at its first vacuum
+        # window, and no number of maintenance rounds could ever bring it back.
+        # Corroborated on a live 18.4 cluster: of 113 TOAST relations across
+        # two databases, one had been autovacuumed and NONE had ever been
+        # autoanalyzed, against 43 autoanalyzed heaps.
+        #
+        # The VACUUM side is untouched: autovacuum does vacuum TOAST relations,
+        # and a TOAST relation over its vacuum threshold is still eligible.
+        is_toast = row.get("relkind") == "t"
+        if not is_toast and row["modified_since_analyze"] > analyze_threshold:
             reasons.append("analyze")
         if reasons:
             eligible.append(

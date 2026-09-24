@@ -402,8 +402,13 @@ def _catalog_script(
     }
 
 
-def _state_row(name, *, dead=0, modified=0, inserted=0, reltuples=0.0, reloptions=()):
-    return (name, dead, modified, inserted, reltuples, list(reloptions))
+def _state_row(
+    name, *, dead=0, modified=0, inserted=0, reltuples=0.0, reloptions=(), relkind="r"
+):
+    # ``relkind`` last, matching the column the catalog read now selects: the
+    # ANALYZE rule does not apply to a TOAST relation, so the row has to carry
+    # which kind it is rather than leave the caller to infer it from the name.
+    return (name, dead, modified, inserted, reltuples, list(reloptions), relkind)
 
 
 def _drive_vacuum_window(monkeypatch, *, script=None):
@@ -657,6 +662,48 @@ def test_the_eligibility_arithmetic_is_postgres_own():
         "public.c": ["analyze"],
         "public.d": ["insert_vacuum"],
     }
+
+
+def test_a_toast_relation_is_never_eligible_on_the_analyze_rule():
+    # AUTOVACUUM NEVER ANALYZES A TOAST RELATION — PostgreSQL sets
+    # ``doanalyze = false`` for ``RELKIND_TOASTVALUE`` — and ANALYZE on one is
+    # skipped outright, so the counter can never come down either. Counting it
+    # made the refusal PERMANENT rather than transient: ``pg_toast_2619``,
+    # ``pg_statistic``'s own TOAST relation, is dirtied by every vacuum window
+    # analyzing the measured tables, and it refused C1/S0 at its first window
+    # with "53 modified over 52" that no maintenance round could clear.
+    #
+    # Same numbers, twice, and the ONLY difference is ``relkind``: the heap is
+    # eligible and the TOAST relation is not. A test that showed only the TOAST
+    # side would pass just as well against a function that had stopped reading
+    # the analyze rule at all.
+    settings = {name: float(value) for name, value in _AUTOVACUUM_SETTING_ROWS}
+    rows = [
+        {"name": "pg_toast.pg_toast_2619", "dead_tuples": 0,
+         "modified_since_analyze": 53, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "t"},
+        {"name": "pg_catalog.pg_statistic", "dead_tuples": 0,
+         "modified_since_analyze": 53, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "r"},
+    ]
+    eligible = {e["relation"]: e["reasons"] for e in qual.eligible_relations(rows, settings)}
+    assert eligible == {"pg_catalog.pg_statistic": ["analyze"]}
+
+
+def test_a_toast_relation_is_still_eligible_on_the_vacuum_rule():
+    # The carve-out is the ANALYZE rule ALONE. Autovacuum DOES vacuum TOAST
+    # relations, so dropping them from the vacuum rule too would hide the one
+    # kind of pass that really can land inside a measured block. Observed on a
+    # live 18.4 cluster: of 113 TOAST relations, one had been autovacuumed and
+    # none had ever been autoanalyzed.
+    settings = {name: float(value) for name, value in _AUTOVACUUM_SETTING_ROWS}
+    rows = [
+        {"name": "pg_toast.pg_toast_2619", "dead_tuples": 500,
+         "modified_since_analyze": 500, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "t"},
+    ]
+    eligible = {e["relation"]: e["reasons"] for e in qual.eligible_relations(rows, settings)}
+    assert eligible == {"pg_toast.pg_toast_2619": ["vacuum"]}
 
 
 def test_a_relation_with_autovacuum_off_is_not_eligible_however_dirty():
