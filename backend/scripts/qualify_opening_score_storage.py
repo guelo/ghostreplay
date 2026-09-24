@@ -2266,6 +2266,12 @@ def split_vacuum_wal(wal: dict) -> dict:
 # §4.8 — C5: plateau, MVCC reclamation, orphans
 # --------------------------------------------------------------------------
 
+# The approved spike cell emits one window per ten publications and reads the
+# LAST FIVE of them, so five is the floor below which the statistic has no
+# meaning at all.
+PUBLICATIONS_PER_PLATEAU_WINDOW = 10
+MINIMUM_PLATEAU_WINDOWS = 5
+
 
 def run_plateau_cell(
     engine,
@@ -2283,25 +2289,61 @@ def run_plateau_cell(
     Genuine evidence growth is reported SEPARATELY from dead tuples and leaked
     data: a fixed working set that grows is a leak, while a growing working set
     that grows is the workload, and one number cannot say which happened.
+
+    TEN WINDOWS, AND THE APPROVED FORMULA (corrected rev 16). The window count
+    was a hard-coded ``range(6)`` that nothing decided: every "sixty" in the
+    plan belongs to C2 (§4.4), and the approved shape is the spike's fixed
+    cell, which ran 100 publications and emits one window per ten — so its last
+    five were windows five to nine, where layout A measured 1.5%, while six
+    windows put the last five at the steepest part of A's settling. The count
+    is now derived from the cell's own publication spec, so the two cannot
+    drift apart again. The growth statistic is the spike's
+    ``(max - min) / min`` over the last five rather than
+    ``(last - first) / first``: the two agree exactly on a monotone series and
+    the spike's is STRICTER when the series oscillates, which is the case the
+    looser one was least able to see — layout A at the fixture size alternates
+    between two footprints rather than converging, and reads 0.0664 by the old
+    formula against 0.0741 by this one.
     """
     from app.opening_score_storage import StorageFormat
 
     formats = {"A": StorageFormat.LEGACY, "B50": StorageFormat.CURRENT}
     windows: dict[str, list] = {"A": [], "B50": []}
+    # BEFORE ``scheduler_isolation``, and that ordering is load-bearing: it
+    # enters its patches EAGERLY, at the call, while only ``with stack:``
+    # unwinds them. Anything that raises in between leaves the scheduler class
+    # patched for the rest of the process — in-process callers (the §2.6 tests)
+    # then see every later dispatch refused by a cell that already failed.
+    # Nothing used to raise there, so the hazard had never fired.
+    # One window per ten publications, as the approved spike cell does it.
+    window_count = len(indices) // PUBLICATIONS_PER_PLATEAU_WINDOW
+    if window_count < MINIMUM_PLATEAU_WINDOWS:
+        raise QualificationRefusal(
+            f"a plateau cell of {len(indices)} publications yields "
+            f"{window_count} windows; the growth statistic reads the LAST FIVE, "
+            f"so it needs at least {MINIMUM_PLATEAU_WINDOWS}"
+        )
     stack, scheduler_requests = scheduler_isolation()
     result = {} if partial is None else partial
-    result.update({"cell": "C5", "windows": windows, "complete": False})
+    result.update(
+        {"cell": "C5", "windows": windows, "window_count": window_count,
+         "complete": False}
+    )
     with stack:
         for layout, storage_format in formats.items():
             owner = OWNER_BY_LAYOUT[layout]
-            for window in range(6):
+            for window in range(window_count):
                 # The counter diff used to start at the window, so C5's ten
                 # publications between windows were the one span of a cell where
                 # an autovacuum on a measured relation could pass unobserved.
                 # C5 is nothing but publications and windows, so "the windows are
                 # diffed" left most of the cell undiffed.
                 counters_before = read_counters(engine, created_relations)
-                for cutoff in indices[window * 10 : (window + 1) * 10]:
+                span = slice(
+                    window * PUBLICATIONS_PER_PLATEAU_WINDOW,
+                    (window + 1) * PUBLICATIONS_PER_PLATEAU_WINDOW,
+                )
+                for cutoff in indices[span]:
                     publish(
                         session_factory, owner, color, candidates[cutoff], storage_format
                     )
@@ -2365,9 +2407,17 @@ def run_plateau_cell(
             "window_total_bytes": totals,
             "window_live_tuples": live,
             "fixed_live_counts": len(set(live[-5:])) == 1,
+            # The APPROVED statistic (corrected rev 16): max minus min over the
+            # last five, not last minus first. Identical on a monotone series,
+            # and strictly larger on one that oscillates — which is what a
+            # two-generation retention pattern on a small relation looks like,
+            # and exactly what last-minus-first cannot see.
             "last_five_growth_fraction": (
-                (last_five[-1] - last_five[0]) / last_five[0] if last_five[0] else 0.0
+                (max(last_five) - min(last_five)) / min(last_five)
+                if min(last_five)
+                else 0.0
             ),
+            "growth_statistic": "(max - min) / min over the last five windows",
             "dead_tuples_held": held_by_layout[layout][f"{layout}_dead_tuples"],
             "dead_tuples_released": released_by_layout[layout][f"{layout}_dead_tuples"],
             "reclaimed_after_reader_finished": (
@@ -3100,7 +3150,11 @@ CELL_SPECS = {
     # §4.1's S0 eligibility rule moves from forty sessions to sixty with it.
     "C2": {"membership": "growing", "publications": 60, "reads": (0, 0), "checkpoint": True},
     "C3": {"membership": "fixed", "publications": 0, "reads": (0, 0), "checkpoint": False},
-    "C5": {"membership": "fixed", "publications": 60, "reads": (0, 0), "checkpoint": False},
+    # 100, not 60 (corrected rev 16): ten windows is the APPROVED shape, taken
+    # from the spike's fixed cell. The 60 here was never decided — every
+    # "sixty" in the plan is C2's (§4.4) — and it put C5's last five windows at
+    # the steepest part of layout A's settling.
+    "C5": {"membership": "fixed", "publications": 100, "reads": (0, 0), "checkpoint": False},
     "C6": {"membership": "fixed", "publications": 0, "reads": (0, 0), "checkpoint": False},
 }
 

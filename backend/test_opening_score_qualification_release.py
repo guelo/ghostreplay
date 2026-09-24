@@ -4510,7 +4510,7 @@ def _drive_plateau_cell(monkeypatch):
         "publish",
         lambda *a, **k: {"publish_ms": 1.0, "storage_format": "x"},
     )
-    held = iter([1, 0] * 8)
+    held = iter([1, 0] * 12)
     monkeypatch.setattr(
         qual,
         "footprint",
@@ -4531,11 +4531,12 @@ def _drive_plateau_cell(monkeypatch):
     monkeypatch.setattr(qual, "check_orphans", lambda factory, color: {"clean": True})
     monkeypatch.setattr(qual, "assert_no_foreign_activity", lambda eng: None)
 
+    publications = qual.CELL_SPECS["C5"]["publications"]
     result = qual.run_plateau_cell(
         engine,
         lambda: None,
-        [object()] * 60,
-        list(range(60)),
+        [object()] * publications,
+        list(range(publications)),
         "black",
         created_relations=("user_opening_scores",),
     )
@@ -4549,12 +4550,64 @@ def test_c5_diffs_its_publications_and_not_only_its_windows(monkeypatch):
     # could pass unobserved, and there are twelve of them.
     result, spans, _log = _drive_plateau_cell(monkeypatch)
     windows = result["windows"]
-    assert len(windows["A"]) == len(windows["B50"]) == 6
+    # TEN, from the cell's own publication spec (rev 16): the approved spike
+    # cell ran 100 publications and emits one window per ten, and the count was
+    # a hard-coded 6 that nothing decided.
+    assert qual.CELL_SPECS["C5"]["publications"] == 100
+    assert len(windows["A"]) == len(windows["B50"]) == 10 == result["window_count"]
     for layout_windows in windows.values():
         for entry in layout_windows:
             assert entry["publication_span"]["span"][0] < entry["publication_span"]["span"][1]
     # every diff is over a DISJOINT span, never the same pair read twice
     assert len({span for span in spans}) == len(spans)
+
+
+def test_the_plateau_statistic_is_max_minus_min_over_the_last_five():
+    # The approved formula, from the spike's `cell_summary`. It agrees exactly
+    # with last-minus-first on a monotone series and is STRICTLY larger on one
+    # that oscillates — a two-generation retention pattern on a small relation
+    # — which is the case the looser statistic could not see. These are the
+    # measured C5 window totals at S1 and at the fixture size.
+    monotone = [147_759_104, 148_717_568, 148_996_096, 149_004_288]
+    settling = [139_075_584, *monotone]
+    oscillating = [19_488_768, 19_349_504, 20_717_568, 19_464_192, 20_783_104]
+
+    def approved(values):
+        return (max(values) - min(values)) / min(values)
+
+    def superseded(values):
+        return (values[-1] - values[0]) / values[0]
+
+    assert approved(settling) == pytest.approx(superseded(settling))
+    assert approved(oscillating) > superseded(oscillating)
+    assert approved(oscillating) == pytest.approx(0.07409, abs=1e-5)
+    assert superseded(oscillating) == pytest.approx(0.06641, abs=1e-5)
+
+
+def test_a_plateau_cell_too_short_to_read_five_windows_refuses():
+    # The statistic reads the LAST FIVE windows, so fewer than five is not a
+    # smaller sample — it is no statistic at all.
+    #
+    # AND THE REFUSAL LEAVES NO GLOBAL STATE BEHIND. `scheduler_isolation`
+    # enters its class patches EAGERLY, at the call, while only `with stack:`
+    # unwinds them, so a raise between the two leaves `OpeningScoreScheduler`
+    # patched for the rest of the process. Nothing in this cell raised there
+    # before, so the hazard had never fired: the first refusal added to it
+    # failed 74 unrelated scheduler tests that happened to run afterwards, and
+    # every one of them passed in isolation. The validation therefore runs
+    # BEFORE any global state is acquired.
+    from app.opening_score_scheduler import OpeningScoreScheduler
+
+    before = OpeningScoreScheduler.request_recompute
+    with pytest.raises(qual.QualificationRefusal, match="LAST FIVE"):
+        qual.run_plateau_cell(
+            _RecordingEngine({}),
+            lambda: None,
+            [object()] * 40,
+            list(range(40)),
+            "black",
+        )
+    assert OpeningScoreScheduler.request_recompute is before
 
 
 def test_c5_diffs_and_settles_the_reader_held_phase(monkeypatch):
