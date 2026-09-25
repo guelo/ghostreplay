@@ -52,6 +52,7 @@ METRIC_SAMPLE_RULES = {
     "composite_d_p95_ms": ("reads", MINIMUM_READS_PER_POOL),
     "composite_t_format_stage_p95_ms": ("reads", MINIMUM_READS_PER_POOL),
     "vacuum_wal_bytes_per_ten_publications": ("vacuum_windows", MINIMUM_VACUUM_WINDOWS),
+    "post_checkpoint_vacuum_wal_bytes_per_ten_publications": ("vacuum_windows", MINIMUM_VACUUM_WINDOWS),
     "vacuumed_footprint_bytes": ("final_footprint", 1),
     "integrated_worker_rss_bytes": ("spawned_children", MINIMUM_MEMORY_CHILDREN),
     "publication_allocation_peak_bytes": ("spawned_children", MINIMUM_MEMORY_CHILDREN),
@@ -83,7 +84,8 @@ PERMITTED_DEVIATING_CELLS = frozenset({"C1"})
 PRODUCTION_SHAPE_METRICS = {
     "post_checkpoint_publication_wal_bytes": ("production_applicable", 1.5, MIB / 4),
     "warm_publication_wal_bytes": ("lower_bound", 1.5, MIB / 4),
-    "vacuum_wal_bytes_per_ten_publications": (None, 1.5, MIB / 4),
+    "vacuum_wal_bytes_per_ten_publications": ("lower_bound", 1.5, MIB / 4),
+    "post_checkpoint_vacuum_wal_bytes_per_ten_publications": ("production_applicable", 1.5, MIB / 4),
     "vacuumed_footprint_bytes": (None, 1.5, MIB),
 }
 LOCAL_HOST_ONLY_METRICS = {
@@ -1228,6 +1230,9 @@ def build_ceilings(cell_results: list[dict], memory_reports: list[dict]) -> dict
                     distributions["composite_t_format_stage_ms"]["p95"],
                     distributions["composite_t_format_stage_ms"]["count"], "reads")
         elif result["cell"] == "C2":
+            add("post_checkpoint_vacuum_wal_bytes_per_ten_publications", size, rows,
+                result["vacuum_wal_max_bytes_by_layout"]["B50"],
+                result["vacuum_windows_kept"], "vacuum_windows")
             add("post_checkpoint_publication_wal_bytes", size, rows,
                 distributions["publication_wal_bytes"]["p95"],
                 distributions["publication_wal_bytes"]["count"], "publications")

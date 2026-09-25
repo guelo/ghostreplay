@@ -22,6 +22,7 @@ from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
 from app.opening_baseline_scheduler import get_baseline_scheduler
+from app.opening_cache import default_storage_format
 from app.opening_prewarm import start_prewarm
 from app.opening_score_delta_lane import get_delta_lane
 from app.opening_score_scheduler import get_scheduler
@@ -42,6 +43,10 @@ configure_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Reject a mistyped rollout setting before accepting traffic or starting workers.
+    storage_format = default_storage_format()
+    logging.getLogger(__name__).info(
+        "OPENING_SCORE_STORAGE_FORMAT=%s", storage_format.value
+    )
     target_source()
     retention_enabled()
     retention_seconds()

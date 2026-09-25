@@ -1,0 +1,92 @@
+{
+  "metric": "post_checkpoint_vacuum_wal_bytes_per_ten_publications",
+  "ceiling": {
+    "fixed_overhead": -1401878.0000000037,
+    "per_logical_row_slope": 250.56910622772173,
+    "residuals": [
+      236112.85714286007,
+      -354169.2857142836,
+      118056.4285714291
+    ],
+    "max_positive_residual": 236112.85714286007,
+    "applicable_size_range": [
+      23806,
+      95224
+    ],
+    "fit_sizes": [
+      23806,
+      47612,
+      95224
+    ],
+    "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+    "size_logical_rows": 95224,
+    "fitted": 22458314.57142857,
+    "anchor": 22694427.428571433,
+    "factor": 1.5,
+    "ceiling": 34078720.0,
+    "derived_from": "measured_fit",
+    "tag": "production_shape",
+    "applies_to": "production_applicable",
+    "applies_to_note": "active_users_30d is 1 and the gaps between publications are expected to exceed checkpoint_timeout, so nearly every production publication is post-checkpoint: C2's ceiling is the production-applicable one and C1's warm figure is a LOWER BOUND",
+    "points": [
+      {
+        "size_profile": "S1",
+        "logical_rows": 23806,
+        "value": 4799283,
+        "samples": 6,
+        "sample_kind": "vacuum_windows",
+        "layout": "B50",
+        "derived_from": "measured"
+      },
+      {
+        "size_profile": "S2",
+        "logical_rows": 47612,
+        "value": 10174049,
+        "samples": 6,
+        "sample_kind": "vacuum_windows",
+        "layout": "B50",
+        "derived_from": "measured"
+      },
+      {
+        "size_profile": "S3",
+        "logical_rows": 95224,
+        "value": 22576371,
+        "samples": 6,
+        "sample_kind": "vacuum_windows",
+        "layout": "B50",
+        "derived_from": "measured"
+      }
+    ]
+  },
+  "at_measured_sizes": [
+    {
+      "size_logical_rows": 23806,
+      "fitted": 4563170.14285714,
+      "max_positive_residual": 236112.85714286007,
+      "anchor": 4799283.0,
+      "factor": 1.5,
+      "ceiling": 7340032.0,
+      "derived_from": "measured_fit"
+    },
+    {
+      "size_logical_rows": 47612,
+      "fitted": 10528218.285714284,
+      "max_positive_residual": 236112.85714286007,
+      "anchor": 10764331.142857144,
+      "factor": 1.5,
+      "ceiling": 16252928.0,
+      "derived_from": "measured_fit"
+    },
+    {
+      "size_logical_rows": 95224,
+      "fitted": 22458314.57142857,
+      "max_positive_residual": 236112.85714286007,
+      "anchor": 22694427.428571433,
+      "factor": 1.5,
+      "ceiling": 34078720.0,
+      "derived_from": "measured_fit"
+    }
+  ],
+  "warm_ceiling_changed": false,
+  "source_sha256": "864bc29cc5ba89a6561bfa3a811d9af7267f54201a7d95a45ee828627c687939"
+}

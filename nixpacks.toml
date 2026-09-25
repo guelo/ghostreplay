@@ -6,8 +6,9 @@ NIXPACKS_PYTHON_PACKAGE_MANAGER = "requirements"
 
 [phases.install]
 cmds = [
+  "if [ ! -x /opt/venv/bin/python ]; then python -m venv /opt/venv; fi",
   "/opt/venv/bin/python -m ensurepip --upgrade",
-  "if [ -f backend/requirements.txt ]; then requirements=backend/requirements.txt; else requirements=requirements.txt; fi; /opt/venv/bin/python -m pip install -r \"$requirements\"",
+  "if [ -f backend/requirements.txt ]; then requirements=backend/requirements.txt; constraints=backend/requirements.production.constraints.txt; else requirements=requirements.txt; constraints=requirements.production.constraints.txt; fi; /opt/venv/bin/python -m pip install -r \"$requirements\" -c \"$constraints\"",
 ]
 
 [phases.build]
