@@ -1216,3 +1216,68 @@ can supersede an earlier-reserved rebuild with fresher evidence. A subsequent
 freshness check remains responsible for rebuilding; supersession is publication
 order only. Ambiguous-commit recovery uses a five-second PostgreSQL lock timeout;
 timeout propagates as failure rather than confirming an unknown outcome.
+
+### Release qualification (passed 2026-09-24, activation still gated)
+
+The integrated qualification for `g-score-store-qualify` returned an aggregate
+**pass** over fifty gates — forty-five pass, five deferred, no failures, no
+insufficient gates and no coverage gaps. The sealed report and its decision
+record are `docs/analysis/opening-score-storage-qualification-2026-09-24.json`
+and the adjacent `.md`; the runbook is the qualification section of
+`backend/scripts/BENCH_OPENING_SCORE_STORAGE.md`.
+
+Passing authorises READINESS for the cutover workflow. It is not a claim that
+production is deployed or observed, and it does not activate anything:
+`opening_cache.default_storage_format()` still returns `StorageFormat.LEGACY`
+and there is still no production activation switch.
+
+Twenty-six cells were measured at revision `0c690ac` against a restored
+production snapshot on a census-matched disposable PostgreSQL 18.4 cluster, at
+four sizes (245 / 24,848 / 49,696 / 99,392 logical rows) plus the synthetic
+fixture on the original spike cluster. The record names two revisions, because
+the cells and the reading of them are separate artefacts: the evaluator is
+`8222b9b`, run from a clean tree at `43db250`. Changing how a record is read
+re-measures nothing, and the run's own homogeneity check would refuse a cell
+re-run at the evaluator's commit.
+
+The acceptance gates are A-relative, because ratios transfer across hosts and
+absolute local timings do not. B50 measured 0.052–0.191× A on combined WAL
+(limit 0.5), 0.056–0.074× A on vacuumed footprint (limit 1.0), 0.391–0.832× A on
+publication p95 and 0.132–1.011× A on the two composite read p95s (limit 1.1).
+Four `production_shape` ceilings were fitted as fixed overhead plus a
+per-logical-row slope: post-checkpoint publication WAL is the
+production-applicable one and warm publication WAL is a lower bound, because
+`active_users_30d` is 1 and the gaps between publications exceed
+`checkpoint_timeout`, so nearly every production publication is
+post-checkpoint. That single-user fact also bounds the whole result: "production
+shape" means representative SIZE and ROW MIX here, never representative traffic.
+
+Five absolute `local_host_only` ceilings — publication p95, both composite read
+p95s, integrated worker RSS and publication allocation peak — are **deferred to
+`g-score-store-cutover`**. They are that gate's expectation and a local
+regression baseline, never production limits. An aggregate pass with them
+deferred is correct precisely because the A-relative counterpart of each is
+measured and enforced. Before any production pair is activated, that gate must
+produce the absolute ceilings over the real application-to-database path and
+confirm the A-relative ratios hold there within the same 1.1 bound.
+
+The legacy-retirement control passed at both sizes: `A_new` publication p95 came
+in at 0.573× `A_old` at production shape and 0.855× on the fixture, so the atomic
+retirement the production-default legacy writer already performs did not regress
+it. The terminal delta lane passed its 3000 ms warm whole-graph-contention gate
+in BOTH storage formats, within about 1% of each other — the result the
+format-agnostic reader work predicted.
+
+**Leak proofs and the plateau.** Fixed live counts, proved reclamation and clean
+orphan checks are gated for both layouts at both sizes and all passed. The 5%
+last-five growth rule is the SELECTED DESIGN's gate — the approved budget places
+it under `selected_design_ceilings`, and layout A enters that budget only
+through the A-relative ratios — so B50's 0.00000 is the gate and layout A's
+growth is a characterisation that stops nothing. A separate ten-window
+characterisation, deliberately excluded from the verdict because it was measured
+at a different revision, establishes that **layout A does plateau at production
+shape**: 0.00005 over windows 5–9, where the earlier six-window cell had read
+0.07139 over windows 1–5, the steepest part of the same settling curve. At the
+much smaller fixture size A instead settles into a period-2 limit cycle,
+alternating between two fixed footprints indefinitely — retention rather than a
+leak, and not something more windows would change.

@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import math
+import subprocess
 from collections import Counter
 from pathlib import Path
 
@@ -112,6 +113,39 @@ CONTROL_LABELS = ("A_old", "A_new")
 # "A_new worse than A_old" is read at that band and at the p95, not the median.
 CONTROL_P95_RATIO_MAX = A_RELATIVE_GATES["publication_p95_ratio_max"]
 MINIMUM_CONTROL_REPETITIONS = MINIMUM_CELL_SAMPLES
+
+# §4.8 as scoped rev 16. The approved budget puts
+# `last_five_vacuum_growth_fraction` under `selected_design_ceilings`, beside
+# B50's WAL and footprint anchors; layout A enters that budget only through
+# `a_relative_minimum_improvement`'s four ratios and NONE of them is a plateau.
+# §4.8 named no layout and this evaluator gated both, which is wider than what
+# was approved. A's growth is computed, reported and gates nothing — the §4.7
+# pattern for a one-sided figure. Fixed live counts, reclamation and orphans
+# stay gated for BOTH layouts: those are leak proofs rather than efficiency
+# claims, and they are what "no leaks" means for the format being retired too.
+SELECTED_DESIGN_LAYOUT = "B50"
+PLATEAU_GROWTH_LIMIT = 0.05
+
+# §4.2's matrix, read SIZE BY SIZE (rev 16). `--plateau` and `--network` were
+# single paths while the matrix requires C6 at four sizes and C5 at one, so four
+# C6 reports and one C5 report had nowhere to go and `coverage_gaps` printed
+# `{}` over five measured results. Where the matrix and §4.1's eligibility rule
+# disagree, §4.1 governs: C2 needs sixty ordered cutoffs and neither S0 (28) nor
+# SF (23) has them, so the matrix's `Y` in those two cells is the §6.5
+# contradiction rather than a required result.
+FIT_PROFILES = ("S0", "S1", "S2", "S3")
+REQUIRED_PROFILES = {
+    "C1": FIT_PROFILES,
+    "C2": ("S1", "S2", "S3"),
+    "C3": FIT_PROFILES,
+    "C4": ("S1", FIXTURE_PROFILE),
+    "C5": ("S1",),
+    "C6": FIT_PROFILES,
+}
+# SF gates nothing, and a tie-back nobody supplied is still not a tie-back that
+# came back clean. §5.1b is about knowing WHAT RAN. C4 is absent here because
+# its SF pair is a GATE and is required above, not a tie-back (§4.7).
+REQUIRED_TIE_BACKS = ("C1", "C3", "C5", "C6")
 
 # §4.9: warm whole-graph-contention p95 under 3000 ms for normal AND drill, in
 # BOTH formats. Process-cold figures are recorded and never mixed into the warm
@@ -972,19 +1006,63 @@ def evaluate_plateau(cell: dict) -> dict:
     zero dead tuples held it says only that nothing was ever there. The proof
     needs the reader to have HELD something and the count to have returned to
     zero, which is why the harness records both halves.
+
+    THE GROWTH GATE IS THE SELECTED DESIGN'S (scoped rev 16). See
+    ``SELECTED_DESIGN_LAYOUT``. Layout A's growth is carried in
+    ``characterisations`` with the same limit printed beside it for reference,
+    and it reaches no gate name, so it can neither pass nor fail.
     """
     if not cell.get("complete", True):
         return {"verdict": "insufficient_evidence", "reason": "cell did not complete"}
     plateau = cell["result"]["plateau"]
     orphans = cell["result"]["orphans"]
+    profile = cell.get("profile")
     gates: dict[str, dict] = {}
+    characterisations: dict[str, dict] = {}
+    # WHICH statistic the report carries. The harness computed
+    # `(last - first) / first` until rev 16 and writes `growth_statistic` from
+    # then on, and the two differ on a series that oscillates — so a reader of
+    # an older report is told what they are looking at rather than left to
+    # assume the current formula.
+    statistic = cell["result"].get(
+        "growth_statistic",
+        next(
+            (
+                entry["growth_statistic"]
+                for entry in plateau.values()
+                if "growth_statistic" in entry
+            ),
+            "(last - first) / first over the last five windows (SUPERSEDED by "
+            "rev 16's max-minus-min; equal on a monotone series, smaller on one "
+            "that oscillates)",
+        ),
+    )
     for layout, entry in sorted(plateau.items()):
         growth = entry["last_five_growth_fraction"]
-        gates[f"plateau_growth:{layout}"] = {
-            "value": growth,
-            "limit": 0.05,
-            "verdict": "pass" if growth <= 0.05 else "fail",
-        }
+        if layout == SELECTED_DESIGN_LAYOUT:
+            gates[f"plateau_growth:{layout}"] = {
+                "value": growth,
+                "limit": PLATEAU_GROWTH_LIMIT,
+                "statistic": statistic,
+                "verdict": "pass" if growth <= PLATEAU_GROWTH_LIMIT else "fail",
+            }
+        else:
+            characterisations[f"plateau_growth:{layout}"] = {
+                "value": growth,
+                "reference_limit": PLATEAU_GROWTH_LIMIT,
+                "statistic": statistic,
+                "gated": False,
+                "window_total_bytes": entry["window_total_bytes"],
+                "window_live_tuples": entry["window_live_tuples"],
+                "note": (
+                    "ONE-SIDED (§4.8 as scoped rev 16): the approved budget's "
+                    "last-five growth rule is a `selected_design_ceilings` "
+                    "entry, so it is not a gate on the layout being retired. "
+                    "The limit is printed for reference only. The leak proofs "
+                    "for this layout are `fixed_live_counts`, `reclamation` "
+                    "and `orphans`, and those ARE gated."
+                ),
+            }
         gates[f"fixed_live_counts:{layout}"] = {
             "value": entry["fixed_live_counts"],
             "verdict": "pass" if entry["fixed_live_counts"] else "fail",
@@ -1009,7 +1087,86 @@ def evaluate_plateau(cell: dict) -> dict:
         "legacy_rows_for_current_pair": orphans["legacy_rows_for_current_pair"],
         "verdict": "pass" if orphans["clean"] else "fail",
     }
-    return {"cell": "C5", "size_profile": cell.get("profile"), "gates": gates}
+    return {
+        "cell": "C5",
+        "size_profile": profile,
+        "gates": gates,
+        "characterisations": characterisations,
+    }
+
+
+def memory_summary(report: dict) -> dict:
+    """§4.6's C3, read for a tie-back rather than for a fit.
+
+    ``build_ceilings`` reads the same fields to FIT them, and a fixture cell may
+    never be fitted, so the tie-back needs its own reading of the report.
+    """
+    result = report.get("result", {})
+    if not report.get("complete", True) or "repeated_maximum" not in result:
+        return {
+            "verdict": "insufficient_evidence",
+            "reason": "no repeated maximum recorded",
+        }
+    maximum = result["repeated_maximum"][SELECTED_DESIGN_LAYOUT]
+    return {
+        "logical_rows": result.get("logical_rows"),
+        "children": {
+            layout: len(children)
+            for layout, children in sorted((result.get("children") or {}).items())
+        },
+        "integrated_worker_rss_bytes": maximum[
+            "untraced_worker_rss_highwater_bytes"
+        ],
+        "publication_allocation_peak_bytes": maximum[
+            "publication_allocation_peak_bytes"
+        ],
+    }
+
+
+def network_summary(report: dict) -> dict:
+    """§4.10's C6, provenance checked exactly as a fit input's is."""
+    terms = report["result"]["network_terms"]
+    for layout_terms in terms.values():
+        assert_network_provenance(layout_terms)
+    return report["result"]
+
+
+# §4.1/§4.2's tie-back cells, and the evaluator that reads each shape.
+FIXTURE_TIE_BACK_EVALUATORS = {
+    "C1": ("paired", lambda cell: evaluate_cell(cell)),
+    "C3": ("memory", memory_summary),
+    "C5": ("plateau", evaluate_plateau),
+    "C6": ("network", network_summary),
+}
+
+FIXTURE_TIE_BACK_ROLE = (
+    "regression tie-back only (§4.1/§4.2): never a fit point, never a fitted "
+    "coverage input, never an acceptance gate, and measured on the other cluster"
+)
+
+
+def evaluate_fixture_cell(cell: dict) -> dict:
+    """Dispatch on the cell the report DECLARES, not on the caller's flag.
+
+    ``--fixture-cell`` ran ``evaluate_cell`` on everything it was handed, which
+    is C1's paired-block evaluator, so a C3, C5 or C6 fixture report raised
+    ``KeyError: 'paired_blocks'`` and three measured tie-backs had nowhere to
+    go at all. The role is unchanged — reported, never fitted, never a gate —
+    and only the reading is dispatched.
+    """
+    kind = cell.get("cell")
+    if kind not in FIXTURE_TIE_BACK_EVALUATORS:
+        raise QualificationEvaluationError(
+            f"--fixture-cell was handed a {kind!r} report; §4.2's tie-back "
+            f"cells are {sorted(FIXTURE_TIE_BACK_EVALUATORS)}"
+        )
+    field, evaluate = FIXTURE_TIE_BACK_EVALUATORS[kind]
+    return {
+        "cell": kind,
+        "size_profile": cell.get("profile"),
+        "role": FIXTURE_TIE_BACK_ROLE,
+        field: evaluate(cell),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -1117,7 +1274,9 @@ def build_ceilings(cell_results: list[dict], memory_reports: list[dict]) -> dict
     return {"ceilings": ceilings, "gaps": gaps}
 
 
-def evaluate_control(reports: list[dict]) -> dict:
+def evaluate_control(
+    reports: list[dict], *, expected_cluster: str = QUALIFICATION_CLUSTER
+) -> dict:
     """§4.7's C4: is the SHIPPED legacy writer slower than its predecessor?
 
     Two labels at one size, from two worktrees. The comparison is the
@@ -1126,6 +1285,14 @@ def evaluate_control(reports: list[dict]) -> dict:
     are ONE-SIDED: A_old's writer has no atomic retirement stage, so those are
     reported as a characterisation of A_new and gate nothing, exactly as the
     runner's own report says.
+
+    §4.7 MEASURES BOTH S1 AND SF, AND SAYS A REGRESSION IN EITHER BLOCKS THE
+    RELEASE (rev 16). The SF pair runs on the fixture cluster, so this refused
+    it and SF had no other home: half of §4.7 could not be evaluated. The
+    cluster rule is therefore "both halves on the SAME cluster, and that cluster
+    is the one this role requires", which is a tightening for the production
+    pair — it was only ever compared with its own other half — and the only
+    thing that lets the SF pair be a gate at all.
     """
     by_profile: dict[str, dict[str, dict]] = {}
     for report in reports:
@@ -1174,6 +1341,12 @@ def evaluate_control(reports: list[dict]) -> dict:
                 f"C4:{profile} compared labels measured on different clusters "
                 f"{sorted(clusters)}"
             )
+        if clusters and clusters != {expected_cluster}:
+            raise QualificationEvaluationError(
+                f"C4:{profile} was measured on {sorted(clusters)}; this control "
+                f"role requires {expected_cluster!r}"
+            )
+        entry["cluster"] = expected_cluster
         entry["revisions"] = {"A_old": old.get("revision"), "A_new": new_.get("revision")}
         entry["repetitions"] = {
             "A_old": old.get("repetitions"),
@@ -1217,6 +1390,7 @@ def evaluate_control(reports: list[dict]) -> dict:
         "profiles": results,
         "gate": "A_new publication p95 / A_old publication p95",
         "limit": CONTROL_P95_RATIO_MAX,
+        "cluster": expected_cluster,
     }
 
 
@@ -1291,35 +1465,73 @@ def evaluate_delta_lane(reports: list[dict]) -> dict:
 
 def required_coverage(
     cell_results: list[dict],
-    plateau: dict | None,
-    network: dict | None,
+    plateaus: list[dict] = (),
+    networks: list[dict] = (),
+    *,
+    memory_reports: list[dict] = (),
     control: dict | None = None,
+    fixture_control: dict | None = None,
     delta_lane: dict | None = None,
+    fixture_cells: list[dict] = (),
 ) -> dict:
-    """The inputs the verdict needs, absent ones recorded as gaps.
+    """The inputs the verdict needs, absent ones recorded as gaps — PER SIZE.
 
-    §4.2's matrix names C5 and C6 as required results. An evaluator that simply
-    does not look at an input it was not given cannot distinguish "measured and
-    clean" from "never run", and only one of those authorises readiness.
+    §4.2's matrix names C5 and C6 as required results, and this read them as
+    "one C5 and one C6", so four of C6's five sizes and the SF tie-backs could
+    be missing while ``coverage_gaps`` printed ``{}``. An evaluator that does
+    not look at an input it was not given cannot distinguish "measured and
+    clean" from "never run", and only one of those authorises readiness — which
+    is the whole of §5.1b, applied here one level down.
     """
-    gaps = {}
-    if plateau is None:
-        gaps["C5:plateau"] = "no C5 report supplied"
-    if network is None:
-        gaps["C6:network"] = "no C6 report supplied"
-    if not any(result["cell"] == "C1" for result in cell_results):
-        gaps["C1"] = "no C1 cell supplied"
-    if not any(result["cell"] == "C2" for result in cell_results):
-        gaps["C2"] = "no C2 cell supplied"
-    # §4.2 names C4 and C7 as required results just as it names C5 and C6.
-    if control is None or not control["profiles"]:
-        gaps["C4:control"] = "no A_old/A_new control report supplied"
-    else:
-        for entry in control["profiles"]:
+    gaps: dict[str, str] = {}
+    measured: dict[str, set] = {}
+
+    def seen(cell, profile):
+        measured.setdefault(str(cell), set()).add(str(profile))
+
+    for result in cell_results:
+        seen(result["cell"], result["size_profile"])
+    for report in memory_reports:
+        seen(report.get("cell") or "C3", report.get("profile"))
+    for result in plateaus or ():
+        seen("C5", result.get("size_profile"))
+    for report in networks or ():
+        seen(report.get("cell") or "C6", report.get("profile"))
+    for evaluated in (control, fixture_control):
+        for entry in (evaluated or {}).get("profiles", []):
+            seen("C4", entry["size_profile"])
+    for cell in fixture_cells or ():
+        seen(cell.get("cell"), cell.get("profile"))
+
+    for cell in sorted(REQUIRED_PROFILES):
+        for profile in REQUIRED_PROFILES[cell]:
+            if profile in measured.get(cell, set()):
+                continue
+            gaps[f"{cell}:{profile}"] = (
+                f"§4.2 requires {cell} at {profile} and no report was supplied"
+            )
+    for cell in REQUIRED_TIE_BACKS:
+        if FIXTURE_PROFILE in measured.get(cell, set()):
+            continue
+        gaps[f"{cell}:{FIXTURE_PROFILE}"] = (
+            f"§4.2's {cell} tie-back at {FIXTURE_PROFILE} was not supplied; SF "
+            "gates nothing, but a tie-back nobody ran is not a tie-back that "
+            "came back clean"
+        )
+
+    # §4.7's SF pair is a GATE and not a tie-back, so its absence is named as
+    # what it is rather than folded into the tie-back sentence above.
+    if FIXTURE_PROFILE not in measured.get("C4", set()):
+        gaps[f"C4:{FIXTURE_PROFILE}"] = (
+            "§4.7 measures legacy publication p95 at S1 AND SF for both "
+            "commits and a regression in EITHER blocks the release; the SF "
+            "control pair is a gate and none was supplied"
+        )
+
+    for evaluated in (control, fixture_control):
+        for entry in (evaluated or {}).get("profiles", []):
             if entry["verdict"] == "insufficient_evidence":
                 gaps[f"C4:{entry['size_profile']}"] = entry["reason"]
-    if control is not None:
-        for entry in control["profiles"]:
             for label, closure in sorted((entry.get("capture_closure") or {}).items()):
                 if (closure or {}).get("skipped"):
                     gaps[f"C4:{entry['size_profile']}:{label}:capture_closure"] = (
@@ -1327,6 +1539,7 @@ def required_coverage(
                         "nothing proves the reveal mechanism left the final "
                         "payload unperturbed"
                     )
+
     if delta_lane is None or not delta_lane["results"]:
         gaps["C7:delta_lane"] = "no delta-lane report supplied"
     else:
@@ -1350,9 +1563,10 @@ def aggregate_verdict(
     cell_results: list[dict],
     ceilings: dict,
     *,
-    plateau: dict | None = None,
+    plateaus: list[dict] = (),
     coverage: dict | None = None,
     control: dict | None = None,
+    fixture_control: dict | None = None,
     delta_lane: dict | None = None,
 ) -> dict:
     """Per gate, and no aggregate pass while any gate is insufficient.
@@ -1374,14 +1588,20 @@ def aggregate_verdict(
             continue
         for name, gate in result["gates"].items():
             per_gate[f"{prefix}:{name}"] = gate["verdict"]
-    if plateau is not None:
+    # PER SIZE (rev 16): §4.2 runs C5 at one production size and the tie-back,
+    # and a single unqualified `C5:` prefix could not have carried two.
+    for plateau in plateaus or ():
+        size = plateau.get("size_profile")
         if plateau.get("verdict") == "insufficient_evidence":
-            per_gate["C5"] = "insufficient_evidence"
-        else:
-            for name, gate in plateau["gates"].items():
-                per_gate[f"C5:{name}"] = gate["verdict"]
-    for entry in (control or {}).get("profiles", []):
-        per_gate[f"C4:{entry['size_profile']}:publication_p95"] = entry["verdict"]
+            per_gate[f"C5:{size}"] = "insufficient_evidence"
+            continue
+        for name, gate in plateau["gates"].items():
+            per_gate[f"C5:{size}:{name}"] = gate["verdict"]
+    # §4.7's control at BOTH sizes. The SF pair runs on the fixture cluster and
+    # is a gate, not a tie-back: a regression in either blocks the release.
+    for evaluated in (control, fixture_control):
+        for entry in (evaluated or {}).get("profiles", []):
+            per_gate[f"C4:{entry['size_profile']}:publication_p95"] = entry["verdict"]
     for entry in (delta_lane or {}).get("results", []):
         for mode, gate in entry["gates"].items():
             per_gate[f"C7:{entry['storage_format']}:{mode}"] = gate["verdict"]
@@ -1451,6 +1671,38 @@ SEALED_SOURCES = (
 )
 
 
+def evaluator_revision() -> str | None:
+    """The revision of THIS script, which is not the one the cells were run at.
+
+    §17.5: the cells and the reading of them are different artefacts with
+    different lifetimes, and a record that prints one revision implies it covers
+    both. The rule is the harness's — ``-dirty`` when a TRACKED file is
+    modified, untracked paths ignored because several agents edit this
+    repository at once — and it is spelled again here rather than imported,
+    because the harness pulls in SQLAlchemy and this evaluator reads nothing but
+    JSON. §2.6 asserts the two spellings agree.
+    """
+    root = str(Path(__file__).resolve().parents[2])
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return head + "-dirty" if dirty else head
+
+
 def source_seal(inputs: list[Path]) -> dict:
     """§5.1's seal: the tooling that produced the numbers, and the inputs read.
 
@@ -1483,7 +1735,13 @@ def decision_record(report: dict) -> str:
         "# Opening score storage — integrated qualification decision",
         "",
         f"- Run id: `{report['run_id']}`",
-        f"- Tested revision: `{report['profile']['tested_revision']}`",
+        f"- Tested revision (the CELLS): `{report['profile']['tested_revision']}`",
+        "- Evaluator revision (this reading of them): "
+        + f"`{report['profile'].get('evaluator_revision')}`",
+        "  The two are different artefacts with different lifetimes: a change "
+        "to how the record is READ does not re-measure anything, and §5's "
+        "homogeneity check would refuse a cell re-run at the evaluator's "
+        "commit into this run's inputs.",
         f"- Settings digest: `{report['profile']['settings_digest']}`",
         f"- Cluster: `{report['profile']['cluster_identity']}`",
         f"- Host: {report['profile']['host_identity']}",
@@ -1550,17 +1808,73 @@ def decision_record(report: dict) -> str:
         lines.append(report["fixture_tie_back_cells"]["role"])
         lines.append("")
         for result in report["fixture_tie_back_cells"]["cells"]:
-            lines.append(
-                f"- `{result['cell']}:{result['size_profile']}`: "
-                f"{result['gates'].get('verdict', 'per-gate, see the JSON')}"
+            # Four report SHAPES, dispatched on the cell each one declares
+            # (rev 16). Printing `gates` for all of them assumed C1.
+            field, _evaluate = next(
+                (
+                    (field, fn)
+                    for cell, (field, fn) in FIXTURE_TIE_BACK_EVALUATORS.items()
+                    if cell == result["cell"]
+                ),
+                (None, None),
             )
-    if "control" in report:
-        lines += ["", "## Legacy-retirement control (C4, A_new vs A_old)", ""]
+            body = result.get(field) or {}
+            if field == "paired":
+                detail = body.get("gates", {}).get(
+                    "verdict", "per-gate, see the JSON"
+                )
+            elif field == "plateau":
+                detail = body.get("verdict") or "per-gate, see the JSON"
+            elif field == "memory":
+                detail = body.get("verdict") or (
+                    f"rss {body.get('integrated_worker_rss_bytes')} B, "
+                    f"allocation peak "
+                    f"{body.get('publication_allocation_peak_bytes')} B"
+                )
+            else:
+                detail = "network terms recorded, provenance checked"
+            lines.append(
+                f"- `{result['cell']}:{result['size_profile']}` ({field}): {detail}"
+            )
+    if "plateau" in report:
+        lines += ["", "## Plateau, reclamation and orphans (C5)", ""]
         lines.append(
-            f"Gate: {report['control']['gate']} <= {report['control']['limit']}."
+            "The last-five growth GATE is the selected design's (§4.8 as scoped "
+            "rev 16): the approved budget places it under "
+            "`selected_design_ceilings`, and layout A enters that budget only "
+            "through the A-relative ratios. A's growth is carried below as a "
+            "characterisation and gates nothing. Fixed live counts, reclamation "
+            "and orphans are gated for BOTH layouts — those are the leak proofs."
+        )
+        for entry in report["plateau"]:
+            lines += ["", f"### C5 at {entry.get('size_profile')}", ""]
+            if entry.get("verdict") == "insufficient_evidence":
+                lines.append(f"- {entry['reason']}")
+                continue
+            for name, gate in sorted(entry["gates"].items()):
+                value = gate.get("value")
+                shown = f" ({value})" if value is not None else ""
+                lines.append(f"- `{name}`: {gate['verdict']}{shown}")
+            for name, note in sorted(entry.get("characterisations", {}).items()):
+                lines.append(
+                    f"- `{name}`: {note['value']:.5f} — NOT GATED "
+                    f"(reference limit {note['reference_limit']}, statistic: "
+                    f"{note['statistic']}); window totals "
+                    + ", ".join(str(v) for v in note["window_total_bytes"])
+                )
+    for field, title in (
+        ("control", "Legacy-retirement control (C4, A_new vs A_old)"),
+        ("fixture_control", "Legacy-retirement control at SF (C4, §4.7's other half)"),
+    ):
+        if field not in report:
+            continue
+        lines += ["", f"## {title}", ""]
+        lines.append(
+            f"Gate: {report[field]['gate']} <= {report[field]['limit']}, on "
+            f"cluster `{report[field].get('cluster')}`."
         )
         lines.append("")
-        for entry in report["control"]["profiles"]:
+        for entry in report[field]["profiles"]:
             ratio = entry.get("publication_p95_ratio")
             detail = f"{ratio:.3f}x" if ratio is not None else entry.get("reason", "")
             lines.append(f"- `{entry['size_profile']}`: {entry['verdict']} ({detail})")
@@ -1660,9 +1974,9 @@ def assert_no_fixture_in_fit(cells: list[dict], *, fixture_clusters=()) -> None:
     )
     if on_spike:
         raise QualificationEvaluationError(
-            f"{on_spike} were measured on {sorted(spike)}, the cluster the "
-            "fixture cells ran on; the --profile label says otherwise but the "
-            "recorded cluster decides"
+            f"{on_spike} were measured on {sorted(spike)}, the fixture cluster "
+            "a supplied tie-back or SF control ran on; the --profile label says "
+            "otherwise but the recorded cluster decides"
         )
 
 
@@ -1687,43 +2001,63 @@ def assert_fixture_cells_are_fixtures(cells: list[dict]) -> None:
         )
 
 
-def _identity_descriptor(name, revision, host, cluster, *, compare_revision=True):
+def _identity_descriptor(
+    name,
+    revision,
+    host,
+    cluster,
+    *,
+    compare_revision=True,
+    expected_cluster=QUALIFICATION_CLUSTER,
+):
     return {
         "name": name,
         "revision": revision,
         "host_identity": host,
         "cluster_identity": cluster,
         "compare_revision": compare_revision,
+        "expected_cluster": expected_cluster,
     }
 
 
-def identity_descriptors(reports, *, controls=(), lanes=()):
-    """One (name, revision, host, cluster) row per input, whatever wrote it.
+def identity_descriptors(
+    reports, *, controls=(), lanes=(), fixtures=(), fixture_controls=()
+):
+    """One (name, revision, host, cluster, expected cluster) row per input.
 
-    The three kinds of report record their identity differently — ``run_cell``
-    writes a ``profile_identity``/``cluster`` pair, the C4 runner writes flat
+    The report shapes record identity differently — ``run_cell`` writes a
+    ``profile_identity``/``cluster`` pair, the C4 runner writes flat
     ``revision``/``host_platform``/``cluster`` fields, and the C7 lane gate
     writes an ``identity`` block — so they are normalised here rather than each
     growing its own comparison.
+
+    FIXTURE INPUTS JOIN THE ROWS (rev 16) and carry the FIXTURE cluster as the
+    one they are required to be on. They sat outside the check entirely, so a
+    tie-back measured at another revision or on another host would have been
+    reported as this run's — the regression signal SF exists to give, read off
+    the wrong build.
 
     Returns the rows and the names of the inputs that carry no identity at all,
     which is a refusal rather than an exemption.
     """
     descriptors, nameless = [], []
-    for report in reports:
+
+    def from_cell(report, expected_cluster):
         name = f"{report.get('cell')}:{report.get('profile')}"
         if not report.get("profile_identity") or not report.get("cluster"):
             nameless.append(name)
-            continue
+            return
         descriptors.append(
             _identity_descriptor(
                 name,
                 report["profile_identity"]["tested_revision"],
                 report["profile_identity"]["host"]["platform"],
                 report["cluster"]["cluster_name"],
+                expected_cluster=expected_cluster,
             )
         )
-    for report in controls:
+
+    def from_control(report, expected_cluster):
         label = report.get("label")
         name = f"C4:{report.get('profile')}:{label}"
         cluster = report.get("cluster")
@@ -1734,7 +2068,7 @@ def identity_descriptors(reports, *, controls=(), lanes=()):
             or not cluster.get("cluster_name")
         ):
             nameless.append(name)
-            continue
+            return
         descriptors.append(
             _identity_descriptor(
                 name,
@@ -1745,10 +2079,21 @@ def identity_descriptors(reports, *, controls=(), lanes=()):
                 # the control — so its revision is EXPECTED to differ and only
                 # its host and cluster are compared. A_new carries no such
                 # exemption: it is the shipped writer, and it must have been
-                # measured at the revision this qualification is about.
+                # measured at the revision this qualification is about. The SF
+                # pair carries the same exemption for the same reason.
                 compare_revision=label != "A_old",
+                expected_cluster=expected_cluster,
             )
         )
+
+    for report in reports:
+        from_cell(report, QUALIFICATION_CLUSTER)
+    for report in fixtures:
+        from_cell(report, FIXTURE_CLUSTER)
+    for report in controls:
+        from_control(report, QUALIFICATION_CLUSTER)
+    for report in fixture_controls:
+        from_control(report, FIXTURE_CLUSTER)
     for report in lanes:
         name = f"C7:{report.get('storage_format')}"
         identity = report.get("identity")
@@ -1769,8 +2114,10 @@ def identity_descriptors(reports, *, controls=(), lanes=()):
     return descriptors, sorted(nameless)
 
 
-def assert_identity_homogeneity(reports: list[dict], *, controls=(), lanes=()) -> dict:
-    """One qualification, one revision, one host, one cluster — over EVERY input.
+def assert_identity_homogeneity(
+    reports: list[dict], *, controls=(), lanes=(), fixtures=(), fixture_controls=()
+) -> dict:
+    """One qualification, one revision, one host — over EVERY input.
 
     The check used to run over ``--cell`` reports alone, then over the fit set.
     ``--control`` and ``--delta-lane`` became verdict inputs without joining it:
@@ -1778,14 +2125,22 @@ def assert_identity_homogeneity(reports: list[dict], *, controls=(), lanes=()) -
     revision to nothing at all, and a C7 summary carried no revision, host or
     cluster in the first place, so any lane file from any machine passed.
 
-    The CLUSTER is additionally required to be the qualification cluster BY
-    NAME. Homogeneity alone cannot see a run measured end to end on the spike
-    cluster — every input agrees — and the cluster-sharing rule in
+    THE CLUSTER IS REQUIRED BY NAME, per ROLE (completed rev 16). Agreement is
+    not enough: a run measured end to end on the spike cluster is perfectly
+    homogeneous with itself, and the cluster-sharing rule in
     ``assert_no_fixture_in_fit`` only fires when a fixture cell was supplied to
-    share a cluster with.
+    share a cluster with. Fit and gate inputs must carry the qualification
+    cluster's recorded name; tie-backs and §4.7's SF control must carry the
+    fixture cluster's. Requiring each row's own expected cluster subsumes the
+    old "they must all agree" rule for the production inputs and is what lets
+    the fixture inputs join the revision and host comparison at all.
     """
     descriptors, nameless = identity_descriptors(
-        reports, controls=controls, lanes=lanes
+        reports,
+        controls=controls,
+        lanes=lanes,
+        fixtures=fixtures,
+        fixture_controls=fixture_controls,
     )
     if nameless:
         raise QualificationEvaluationError(
@@ -1797,42 +2152,51 @@ def assert_identity_homogeneity(reports: list[dict], *, controls=(), lanes=()) -
     if not descriptors:
         return {"reports": [], "revision": None, "host": None, "cluster": None}
     baseline = next(
-        (d for d in descriptors if d["compare_revision"]), descriptors[0]
+        (
+            d
+            for d in descriptors
+            if d["compare_revision"]
+            and d["expected_cluster"] == QUALIFICATION_CLUSTER
+        ),
+        next((d for d in descriptors if d["compare_revision"]), descriptors[0]),
     )
     disagreeing = []
     for descriptor in descriptors:
-        keys = ["host_identity", "cluster_identity"]
+        keys = ["host_identity"]
         if descriptor["compare_revision"] and baseline["compare_revision"]:
             keys.append("revision")
         if any(descriptor[key] != baseline[key] for key in keys):
             disagreeing.append(descriptor)
     if disagreeing:
         raise QualificationEvaluationError(
-            "inputs were measured at different revisions, hosts or clusters: "
+            "inputs were measured at different revisions or hosts: "
             + ", ".join(
-                f"{d['name']}=({d['revision']}, {d['host_identity']}, "
-                f"{d['cluster_identity']})"
+                f"{d['name']}=({d['revision']}, {d['host_identity']})"
                 for d in [baseline, *disagreeing]
             )
         )
-    elsewhere = sorted(
-        f"{d['name']}@{d['cluster_identity']}"
+    misplaced = sorted(
+        f"{d['name']}@{d['cluster_identity']} (expected {d['expected_cluster']})"
         for d in descriptors
-        if d["cluster_identity"] != QUALIFICATION_CLUSTER
+        if d["cluster_identity"] != d["expected_cluster"]
     )
-    if elsewhere:
+    if misplaced:
         raise QualificationEvaluationError(
-            "every fit and gate input must be measured on the qualification "
-            f"cluster {QUALIFICATION_CLUSTER!r}; these were not: {elsewhere}. "
-            f"{FIXTURE_CLUSTER!r} carries the §4.2 fixture capture, and its "
-            "cells belong in --fixture-cell, which is reported and enters "
-            "nothing"
+            "every input must be measured on the cluster its ROLE requires — "
+            f"fit and gate inputs on {QUALIFICATION_CLUSTER!r}, §4.2 tie-backs "
+            f"and §4.7's SF control on {FIXTURE_CLUSTER!r} — these were not: "
+            f"{misplaced}"
         )
     return {
         "reports": [d["name"] for d in descriptors],
         "revision": baseline["revision"],
         "host": baseline["host_identity"],
-        "cluster": baseline["cluster_identity"],
+        "cluster": QUALIFICATION_CLUSTER,
+        "fixture_cluster_reports": [
+            d["name"]
+            for d in descriptors
+            if d["expected_cluster"] == FIXTURE_CLUSTER
+        ],
         "revision_exempt": [
             d["name"] for d in descriptors if not d["compare_revision"]
         ],
@@ -1850,14 +2214,26 @@ def main(argv=None) -> int:
         help="SF tie-back cells; evaluated and reported, never fitted",
     )
     parser.add_argument("--memory", type=Path, action="append", default=[])
-    parser.add_argument("--plateau", type=Path, default=None)
-    parser.add_argument("--network", type=Path, default=None)
+    # §4.2 runs C5 at one production size and C6 at four. These took ONE path
+    # each, so four C6 reports and one C5 report could not reach the evaluator.
+    parser.add_argument("--plateau", type=Path, action="append", default=[])
+    parser.add_argument("--network", type=Path, action="append", default=[])
     parser.add_argument(
         "--control",
         type=Path,
         action="append",
         default=[],
         help="§4.7 C4 control reports (A_old and A_new, one file each)",
+    )
+    parser.add_argument(
+        "--fixture-control",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "§4.7's SF C4 control pair, measured on the fixture cluster; a GATE "
+            "at the same band as --control, not a tie-back"
+        ),
     )
     parser.add_argument(
         "--delta-lane",
@@ -1874,23 +2250,25 @@ def main(argv=None) -> int:
 
     cells = [json.loads(path.read_text()) for path in args.cell]
     fixture_cells = [json.loads(path.read_text()) for path in args.fixture_cell]
+    fixture_controls = [json.loads(path.read_text()) for path in args.fixture_control]
     assert_fixture_cells_are_fixtures(fixture_cells)
+    # The clusters a supplied tie-back or SF control actually ran on, minus the
+    # qualification cluster itself: a fixture input MISPLACED onto the
+    # qualification cluster would otherwise make every correct fit input look
+    # like it shared a cluster with a fixture. The misplacement is caught by
+    # the identity role rule instead, which is where it belongs.
     fixture_clusters = {
-        cell["cluster"]["cluster_name"]
-        for cell in fixture_cells
-        if isinstance(cell.get("cluster"), dict)
-    }
+        report["cluster"]["cluster_name"]
+        for report in fixture_cells + fixture_controls
+        if isinstance(report.get("cluster"), dict)
+    } - {QUALIFICATION_CLUSTER}
     memory = [json.loads(path.read_text()) for path in args.memory]
-    plateau_report = (
-        json.loads(args.plateau.read_text()) if args.plateau is not None else None
-    )
-    network = (
-        json.loads(args.network.read_text()) if args.network is not None else None
-    )
+    plateau_reports = [json.loads(path.read_text()) for path in args.plateau]
+    network_reports = [json.loads(path.read_text()) for path in args.network]
     controls = [json.loads(path.read_text()) for path in args.control]
     lanes = [json.loads(path.read_text()) for path in args.delta_lane]
     # EVERY report that feeds a fit or a gate, not just ``--cell``.
-    fit_inputs = cells + memory + [r for r in (plateau_report, network) if r]
+    fit_inputs = cells + memory + plateau_reports + network_reports
     assert_no_fixture_in_fit(fit_inputs, fixture_clusters=fixture_clusters)
     complete = [cell for cell in cells if cell.get("complete", True)]
     all_complete = [r for r in fit_inputs if r.get("complete", True)]
@@ -1900,7 +2278,11 @@ def main(argv=None) -> int:
     # deviation for C1 — and that is checked, not merely noted, by
     # ``settings_homogeneity`` below.
     identity = assert_identity_homogeneity(
-        all_complete, controls=controls, lanes=lanes
+        all_complete,
+        controls=controls,
+        lanes=lanes,
+        fixtures=fixture_cells,
+        fixture_controls=fixture_controls,
     )
     descriptors = [_sample_descriptor(cell, "composite_d") for cell in complete]
     homogeneity = settings_homogeneity(all_complete)
@@ -1908,13 +2290,25 @@ def main(argv=None) -> int:
     deviating = homogeneity["deviating_cells"]
 
     results = [evaluate_cell(cell) for cell in cells]
-    fixture_results = [evaluate_cell(cell) for cell in fixture_cells]
-    plateau = evaluate_plateau(plateau_report) if plateau_report else None
+    fixture_results = [evaluate_fixture_cell(cell) for cell in fixture_cells]
+    plateaus = [evaluate_plateau(report) for report in plateau_reports]
     control = evaluate_control(controls) if controls else None
+    fixture_control = (
+        evaluate_control(fixture_controls, expected_cluster=FIXTURE_CLUSTER)
+        if fixture_controls
+        else None
+    )
     delta_lane = evaluate_delta_lane(lanes) if lanes else None
     ceilings = build_ceilings(results, memory)
     coverage = required_coverage(
-        results, plateau_report, network, control=control, delta_lane=delta_lane
+        results,
+        plateaus,
+        network_reports,
+        memory_reports=memory,
+        control=control,
+        fixture_control=fixture_control,
+        delta_lane=delta_lane,
+        fixture_cells=fixture_cells,
     )
     report = {
         "schema": 2,
@@ -1924,11 +2318,14 @@ def main(argv=None) -> int:
             + list(args.fixture_cell)
             + list(args.memory)
             + list(args.control)
+            + list(args.fixture_control)
             + list(args.delta_lane)
-            + [p for p in (args.plateau, args.network) if p is not None]
+            + list(args.plateau)
+            + list(args.network)
         ),
         "profile": {
             "tested_revision": descriptors[0]["revision"] if descriptors else None,
+            "evaluator_revision": evaluator_revision(),
             "settings_digest": homogeneity["baseline_digest"],
             "settings_digest_by_cell": settings_by_cell,
             "settings_deviating_cells": deviating,
@@ -1984,12 +2381,12 @@ def main(argv=None) -> int:
         "cells": results,
         "ceilings": ceilings,
     }
-    if plateau is not None:
-        report["plateau"] = plateau
-    if network is not None:
-        for layout, terms in network["result"]["network_terms"].items():
-            assert_network_provenance(terms)
-        report["network"] = network["result"]
+    if plateaus:
+        report["plateau"] = plateaus
+    if network_reports:
+        report["network"] = {
+            str(net.get("profile")): network_summary(net) for net in network_reports
+        }
     if args.approved_budgets:
         approved = json.loads(args.approved_budgets.read_text())
         report["confidence_vs_fixture"] = compare_confidence_against_fixture(
@@ -2002,25 +2399,28 @@ def main(argv=None) -> int:
             )
     if fixture_results:
         # SF is REPORTED — a regression signal is worthless if nobody sees it —
-        # and it enters nothing: not the fit, not the coverage, not the verdict.
+        # and it enters no fit and no gate. It IS a coverage input as of rev 16:
+        # §5.1b is about knowing what ran, and a tie-back nobody supplied is
+        # not a tie-back that came back clean.
         report["fixture_tie_back_cells"] = {
             "cells": fixture_results,
-            "role": (
-                "regression tie-back only (§4.1/§4.2): never a fit point, never "
-                "a coverage input, never an acceptance gate, and measured on "
-                "the other cluster"
-            ),
+            "role": FIXTURE_TIE_BACK_ROLE,
         }
     if control is not None:
         report["control"] = control
+    if fixture_control is not None:
+        # §4.7's other half. A GATE, on the fixture cluster, because §4.7 says a
+        # regression at EITHER size blocks the release.
+        report["fixture_control"] = fixture_control
     if delta_lane is not None:
         report["delta_lane"] = delta_lane
     report["verdict"] = aggregate_verdict(
         results,
         ceilings,
-        plateau=plateau,
+        plateaus=plateaus,
         coverage=coverage,
         control=control,
+        fixture_control=fixture_control,
         delta_lane=delta_lane,
     )
     write_report(args.output, report)

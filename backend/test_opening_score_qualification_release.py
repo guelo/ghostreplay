@@ -402,8 +402,13 @@ def _catalog_script(
     }
 
 
-def _state_row(name, *, dead=0, modified=0, inserted=0, reltuples=0.0, reloptions=()):
-    return (name, dead, modified, inserted, reltuples, list(reloptions))
+def _state_row(
+    name, *, dead=0, modified=0, inserted=0, reltuples=0.0, reloptions=(), relkind="r"
+):
+    # ``relkind`` last, matching the column the catalog read now selects: the
+    # ANALYZE rule does not apply to a TOAST relation, so the row has to carry
+    # which kind it is rather than leave the caller to infer it from the name.
+    return (name, dead, modified, inserted, reltuples, list(reloptions), relkind)
 
 
 def _drive_vacuum_window(monkeypatch, *, script=None):
@@ -657,6 +662,48 @@ def test_the_eligibility_arithmetic_is_postgres_own():
         "public.c": ["analyze"],
         "public.d": ["insert_vacuum"],
     }
+
+
+def test_a_toast_relation_is_never_eligible_on_the_analyze_rule():
+    # AUTOVACUUM NEVER ANALYZES A TOAST RELATION — PostgreSQL sets
+    # ``doanalyze = false`` for ``RELKIND_TOASTVALUE`` — and ANALYZE on one is
+    # skipped outright, so the counter can never come down either. Counting it
+    # made the refusal PERMANENT rather than transient: ``pg_toast_2619``,
+    # ``pg_statistic``'s own TOAST relation, is dirtied by every vacuum window
+    # analyzing the measured tables, and it refused C1/S0 at its first window
+    # with "53 modified over 52" that no maintenance round could clear.
+    #
+    # Same numbers, twice, and the ONLY difference is ``relkind``: the heap is
+    # eligible and the TOAST relation is not. A test that showed only the TOAST
+    # side would pass just as well against a function that had stopped reading
+    # the analyze rule at all.
+    settings = {name: float(value) for name, value in _AUTOVACUUM_SETTING_ROWS}
+    rows = [
+        {"name": "pg_toast.pg_toast_2619", "dead_tuples": 0,
+         "modified_since_analyze": 53, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "t"},
+        {"name": "pg_catalog.pg_statistic", "dead_tuples": 0,
+         "modified_since_analyze": 53, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "r"},
+    ]
+    eligible = {e["relation"]: e["reasons"] for e in qual.eligible_relations(rows, settings)}
+    assert eligible == {"pg_catalog.pg_statistic": ["analyze"]}
+
+
+def test_a_toast_relation_is_still_eligible_on_the_vacuum_rule():
+    # The carve-out is the ANALYZE rule ALONE. Autovacuum DOES vacuum TOAST
+    # relations, so dropping them from the vacuum rule too would hide the one
+    # kind of pass that really can land inside a measured block. Observed on a
+    # live 18.4 cluster: of 113 TOAST relations, one had been autovacuumed and
+    # none had ever been autoanalyzed.
+    settings = {name: float(value) for name, value in _AUTOVACUUM_SETTING_ROWS}
+    rows = [
+        {"name": "pg_toast.pg_toast_2619", "dead_tuples": 500,
+         "modified_since_analyze": 500, "inserted_since_vacuum": 0,
+         "reltuples": 20.0, "reloptions": [], "relkind": "t"},
+    ]
+    eligible = {e["relation"]: e["reasons"] for e in qual.eligible_relations(rows, settings)}
+    assert eligible == {"pg_toast.pg_toast_2619": ["vacuum"]}
 
 
 def test_a_relation_with_autovacuum_off_is_not_eligible_however_dirty():
@@ -2239,43 +2286,64 @@ def _cell(cell, profile, rows, *, publications=100, reads=None, complete=True,
 _SIZES = (("S0", 245), ("S1", 24_815), ("S2", 49_630), ("S3", 99_260))
 
 
+_QUAL_CLUSTER = "ghostreplay-score-storage-qual"
+_FIXTURE_CLUSTER = "ghostreplay-score-storage-spike"
+
+# Distinguishes "the caller said none" from "the caller said nothing", now that
+# §4.2's matrix is checked size by size and the full set is what a passing run
+# actually needs.
+_DEFAULT = object()
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _memory_report(profile, rows, *, cluster=_QUAL_CLUSTER):
+    return {
+        "cell": "C3",
+        "profile": profile,
+        "complete": True,
+        "cluster": {"cluster_name": cluster},
+        "profile_identity": _identity(),
+        "result": {
+            "cell": "C3",
+            "logical_rows": rows,
+            "copies": 1,
+            "children": {"A": [{}] * 5, "B50": [{}] * 5},
+            "repeated_maximum": {
+                "B50": {
+                    "untraced_worker_rss_highwater_bytes": 200_000_000 + rows * 10,
+                    "publication_allocation_peak_bytes": 50_000_000 + rows * 5,
+                }
+            },
+        },
+    }
+
+
 def _full_run():
     cells = [_cell("C1", profile, rows) for profile, rows in _SIZES]
     cells += [
         _cell("C2", profile, rows, publications=40)
         for profile, rows in _SIZES[1:]
     ]
-    memory = [
-        {
-            "cell": "C3",
-            "profile": profile,
-            "complete": True,
-            "cluster": {"cluster_name": "ghostreplay-score-storage-qual"},
-            "profile_identity": _identity(),
-            "result": {
-                "cell": "C3",
-                "logical_rows": rows,
-                "copies": 1,
-                "children": {"A": [{}] * 5, "B50": [{}] * 5},
-                "repeated_maximum": {
-                    "B50": {
-                        "untraced_worker_rss_highwater_bytes": 200_000_000 + rows * 10,
-                        "publication_allocation_peak_bytes": 50_000_000 + rows * 5,
-                    }
-                },
-            },
-        }
-        for profile, rows in _SIZES
-    ]
+    memory = [_memory_report(profile, rows) for profile, rows in _SIZES]
     return cells, memory
 
 
-def _plateau_report(held=5_000, released=0, growth=0.01, clean=True):
+def _plateau_report(held=5_000, released=0, growth=0.01, clean=True, *,
+                    profile="S1", cluster=_QUAL_CLUSTER, a_growth=None):
+    # `a_growth` lets layout A diverge from the selected design, which is the
+    # whole point of §4.8 as scoped rev 16: A's growth is reported and gates
+    # nothing, so a run where A is over the reference limit and B50 is not must
+    # still pass.
     return {
         "cell": "C5",
-        "profile": "S1",
+        "profile": profile,
         "complete": True,
-        "cluster": {"cluster_name": "ghostreplay-score-storage-qual"},
+        "cluster": {"cluster_name": cluster},
         "profile_identity": _identity(),
         "result": {
             "cell": "C5",
@@ -2284,7 +2352,9 @@ def _plateau_report(held=5_000, released=0, growth=0.01, clean=True):
                     "window_total_bytes": [1, 1, 1, 1, 1, 1],
                     "window_live_tuples": [1] * 6,
                     "fixed_live_counts": True,
-                    "last_five_growth_fraction": growth,
+                    "last_five_growth_fraction": (
+                        growth if layout == "B50" or a_growth is None else a_growth
+                    ),
                     "dead_tuples_held": held,
                     "dead_tuples_released": released,
                     "reclaimed_after_reader_finished": released == 0,
@@ -2301,7 +2371,7 @@ def _plateau_report(held=5_000, released=0, growth=0.01, clean=True):
     }
 
 
-def _network_report():
+def _network_report(*, profile="S1", cluster=_QUAL_CLUSTER):
     term = {
         "modelled_ms": 12.0,
         "bytes": 11_000_000,
@@ -2312,9 +2382,9 @@ def _network_report():
     }
     return {
         "cell": "C6",
-        "profile": "S1",
+        "profile": profile,
         "complete": True,
-        "cluster": {"cluster_name": "ghostreplay-score-storage-qual"},
+        "cluster": {"cluster_name": cluster},
         "profile_identity": _identity(),
         "result": {
             "cell": "C6",
@@ -2357,6 +2427,31 @@ def _control_reports(old_p95=100.0, new_p95=101.0, **kwargs):
     ]
 
 
+def _fixture_control_reports(**kwargs):
+    """§4.7's OTHER half. A gate, on the fixture cluster, not a tie-back."""
+    kwargs.setdefault("profile", "SF")
+    kwargs.setdefault("cluster", _FIXTURE_CLUSTER)
+    return _control_reports(**kwargs)
+
+
+def _full_networks():
+    return [_network_report(profile=profile) for profile, _rows in _SIZES]
+
+
+def _tie_back_cells():
+    """§4.2's SF tie-backs, one per cell kind that has one.
+
+    Four different report SHAPES, which is the point: routing them all through
+    C1's paired-block evaluator raised `KeyError: 'paired_blocks'`.
+    """
+    return [
+        _cell("C1", "SF", 4_117, cluster=_FIXTURE_CLUSTER),
+        _memory_report("SF", 4_117, cluster=_FIXTURE_CLUSTER),
+        _plateau_report(profile="SF", cluster=_FIXTURE_CLUSTER),
+        _network_report(profile="SF", cluster=_FIXTURE_CLUSTER),
+    ]
+
+
 def _lane_report(storage_format, *, normal=1200.0, drill=1400.0, repetitions=10,
                  limit=3000.0, cluster="ghostreplay-score-storage-qual",
                  host="macOS-15", revision="abc123"):
@@ -2389,26 +2484,52 @@ def _lane_reports(**kwargs):
     return [_lane_report(fmt, **kwargs) for fmt in evaluator.DELTA_LANE_FORMATS]
 
 
-def _evaluate(cells, memory, plateau=None, network=None, control=None,
-              delta_lane=None):
+def _evaluate(cells, memory, plateau=_DEFAULT, network=_DEFAULT, control=None,
+              delta_lane=None, fixture_cells=_DEFAULT, fixture_control=_DEFAULT):
+    """Defaults are §4.2's FULL set, because that is what a pass needs.
+
+    Coverage is checked size by size, so "one C6" is no longer a complete run.
+    A test that wants a gap says so by passing `None` or `()` explicitly.
+    """
     results = [evaluator.evaluate_cell(cell) for cell in cells]
     ceilings = evaluator.build_ceilings(results, memory)
-    plateau_result = evaluator.evaluate_plateau(plateau) if plateau else None
+    plateau_reports = _as_list(_plateau_report() if plateau is _DEFAULT else plateau)
+    networks = _as_list(_full_networks() if network is _DEFAULT else network)
+    tie_backs = _tie_back_cells() if fixture_cells is _DEFAULT else list(fixture_cells)
+    plateaus = [evaluator.evaluate_plateau(report) for report in plateau_reports]
     control_result = evaluator.evaluate_control(
         _control_reports() if control is None else control
+    )
+    sf_pair = (
+        _fixture_control_reports() if fixture_control is _DEFAULT else fixture_control
+    )
+    fixture_control_result = (
+        evaluator.evaluate_control(
+            sf_pair, expected_cluster=evaluator.FIXTURE_CLUSTER
+        )
+        if sf_pair
+        else None
     )
     lane_result = evaluator.evaluate_delta_lane(
         _lane_reports() if delta_lane is None else delta_lane
     )
     coverage = evaluator.required_coverage(
-        results, plateau, network, control=control_result, delta_lane=lane_result
+        results,
+        plateaus,
+        networks,
+        memory_reports=memory,
+        control=control_result,
+        fixture_control=fixture_control_result,
+        delta_lane=lane_result,
+        fixture_cells=tie_backs,
     )
     verdict = evaluator.aggregate_verdict(
         results,
         ceilings,
-        plateau=plateau_result,
+        plateaus=plateaus,
         coverage=coverage,
         control=control_result,
+        fixture_control=fixture_control_result,
         delta_lane=lane_result,
     )
     return results, ceilings, verdict
@@ -2418,7 +2539,7 @@ def test_a_complete_run_reaches_an_aggregate_pass():
     # The assembled evaluator could not emit `pass` under ANY input before this.
     cells, memory = _full_run()
     _results, ceilings, verdict = _evaluate(
-        cells, memory, _plateau_report(), _network_report()
+        cells, memory, _plateau_report(), _full_networks()
     )
     assert ceilings["gaps"] == {}, ceilings["gaps"]
     assert verdict["coverage_gaps"] == {}
@@ -2428,7 +2549,7 @@ def test_a_complete_run_reaches_an_aggregate_pass():
 def test_c2_contributes_a_post_checkpoint_ceiling_rather_than_insufficiency():
     cells, memory = _full_run()
     results, ceilings, verdict = _evaluate(
-        cells, memory, _plateau_report(), _network_report()
+        cells, memory, _plateau_report(), _full_networks()
     )
     c2 = [r for r in results if r["cell"] == "C2"]
     assert all(r["sufficiency"]["verdict"] == "sufficient" for r in c2)
@@ -2552,18 +2673,23 @@ def test_c1_cells_alone_do_not_pass():
     # Evaluating C1 alone yielded `pass` with no C2 ceiling, no memory ceilings
     # and no C5 result anywhere in the verdict. A missing input is a gap.
     cells = [_cell("C1", profile, rows) for profile, rows in _SIZES]
-    _results, ceilings, verdict = _evaluate(cells, [])
+    _results, ceilings, verdict = _evaluate(
+        cells, [], plateau=None, network=None, fixture_cells=(), fixture_control=()
+    )
     assert verdict["aggregate"] == "insufficient_evidence"
     assert "post_checkpoint_publication_wal_bytes" in ceilings["gaps"]
     assert "integrated_worker_rss_bytes" in ceilings["gaps"]
-    assert set(verdict["coverage_gaps"]) >= {"C2", "C5:plateau", "C6:network"}
+    # Named per SIZE, and the tie-backs counted (rev 16).
+    assert set(verdict["coverage_gaps"]) >= {
+        "C2:S1", "C3:S0", "C4:SF", "C5:S1", "C6:S0", "C6:S3", "C1:SF", "C5:SF"
+    }
 
 
 def test_an_incomplete_cell_is_a_recorded_gap_not_a_pass():
     cells, memory = _full_run()
     cells[1] = _cell("C1", "S1", 24_815, complete=False)
     results, _ceilings, verdict = _evaluate(
-        cells, memory, _plateau_report(), _network_report()
+        cells, memory, _plateau_report(), _full_networks()
     )
     broken = [r for r in results if "incomplete" in r]
     assert broken and broken[0]["incomplete"]["message"] == "boom"
@@ -2584,14 +2710,51 @@ def test_a_reader_that_held_nothing_does_not_prove_reclamation():
 def test_plateau_growth_and_orphans_reach_the_aggregate_verdict():
     cells, memory = _full_run()
     _r, _c, verdict = _evaluate(
-        cells, memory, _plateau_report(growth=0.2), _network_report()
+        cells, memory, _plateau_report(growth=0.2), _full_networks()
     )
-    assert verdict["per_gate"]["C5:plateau_growth:B50"] == "fail"
+    assert verdict["per_gate"]["C5:S1:plateau_growth:B50"] == "fail"
     assert verdict["aggregate"] == "fail"
     _r, _c, dirty = _evaluate(
-        cells, memory, _plateau_report(clean=False), _network_report()
+        cells, memory, _plateau_report(clean=False), _full_networks()
     )
-    assert dirty["per_gate"]["C5:orphans"] == "fail"
+    assert dirty["per_gate"]["C5:S1:orphans"] == "fail"
+
+
+def test_the_plateau_growth_gate_is_the_selected_designs_and_a_is_reported():
+    # §4.8 as scoped rev 16. The approved budget puts
+    # `last_five_vacuum_growth_fraction` under `selected_design_ceilings`, and
+    # layout A enters that budget only through the A-relative ratios, none of
+    # which is a plateau. Gating A was this evaluator's own addition.
+    plateau = evaluator.evaluate_plateau(
+        _plateau_report(growth=0.0, a_growth=0.07139)
+    )
+    assert plateau["gates"]["plateau_growth:B50"]["verdict"] == "pass"
+    assert "plateau_growth:A" not in plateau["gates"]
+    reported = plateau["characterisations"]["plateau_growth:A"]
+    assert reported["value"] == 0.07139
+    assert reported["gated"] is False
+    assert reported["reference_limit"] == 0.05
+    # The LEAK proofs stay gated for both layouts: they are what "no leaks"
+    # means for the format being retired as much as for the one being
+    # qualified, and A passes all three.
+    assert plateau["gates"]["fixed_live_counts:A"]["verdict"] == "pass"
+    assert plateau["gates"]["reclamation:A"]["verdict"] == "pass"
+
+
+def test_layout_a_over_the_plateau_limit_does_not_fail_the_run():
+    cells, memory = _full_run()
+    _r, _c, verdict = _evaluate(
+        cells, memory, _plateau_report(growth=0.0, a_growth=0.07139),
+        _full_networks(),
+    )
+    assert verdict["aggregate"] == "pass", verdict["failing_gates"]
+    assert verdict["per_gate"]["C5:S1:plateau_growth:B50"] == "pass"
+    assert "C5:S1:plateau_growth:A" not in verdict["per_gate"]
+    # And the selected design is still gated, at the size-qualified name.
+    _r, _c, failed = _evaluate(
+        cells, memory, _plateau_report(growth=0.2), _full_networks()
+    )
+    assert failed["per_gate"]["C5:S1:plateau_growth:B50"] == "fail"
 
 
 def test_forward_and_backward_changed_fractions_stay_separable():
@@ -2621,13 +2784,22 @@ def test_the_sealed_output_carries_a_run_id_and_source_hashes(tmp_path):
         path = tmp_path / f"mem{index}.json"
         path.write_text(json.dumps(report))
         memory_paths.append(path)
-    plateau_path = tmp_path / "c5.json"
-    plateau_path.write_text(json.dumps(_plateau_report()))
-    network_path = tmp_path / "c6.json"
-    network_path.write_text(json.dumps(_network_report()))
+    plateau_paths = [_write(tmp_path, "c5.json", _plateau_report())]
+    network_paths = [
+        _write(tmp_path, f"c6_{index}.json", report)
+        for index, report in enumerate(_full_networks())
+    ]
+    tie_back_paths = [
+        _write(tmp_path, f"sf_{index}.json", cell)
+        for index, cell in enumerate(_tie_back_cells())
+    ]
     control_paths = [
         _write(tmp_path, f"c4_{index}.json", report)
         for index, report in enumerate(_control_reports())
+    ]
+    fixture_control_paths = [
+        _write(tmp_path, f"c4sf_{index}.json", report)
+        for index, report in enumerate(_fixture_control_reports())
     ]
     lane_paths = [
         _write(tmp_path, f"c7_{index}.json", report)
@@ -2641,13 +2813,17 @@ def test_the_sealed_output_carries_a_run_id_and_source_hashes(tmp_path):
         argv += ["--memory", str(path)]
     for path in control_paths:
         argv += ["--control", str(path)]
+    for path in fixture_control_paths:
+        argv += ["--fixture-control", str(path)]
+    for path in tie_back_paths:
+        argv += ["--fixture-cell", str(path)]
     for path in lane_paths:
         argv += ["--delta-lane", str(path)]
-    argv += [
-        "--plateau", str(plateau_path),
-        "--network", str(network_path),
-        "--output", str(output),
-    ]
+    for path in plateau_paths:
+        argv += ["--plateau", str(path)]
+    for path in network_paths:
+        argv += ["--network", str(path)]
+    argv += ["--output", str(output)]
     assert evaluator.main(argv) == 0
     report = json.loads(output.read_text())
     assert report["run_id"] == "r7"
@@ -2655,7 +2831,14 @@ def test_the_sealed_output_carries_a_run_id_and_source_hashes(tmp_path):
         "scripts/summarize_opening_score_qualification.py"
     ] != "missing"
     assert len(report["seal"]["input_sha256"]) == (
-        len(paths) + len(memory_paths) + len(control_paths) + len(lane_paths) + 2
+        len(paths)
+        + len(memory_paths)
+        + len(control_paths)
+        + len(fixture_control_paths)
+        + len(tie_back_paths)
+        + len(lane_paths)
+        + len(plateau_paths)
+        + len(network_paths)
     )
     assert report["verdict"]["aggregate"] == "pass"
     decision = output.with_suffix(".md").read_text()
@@ -3512,23 +3695,34 @@ def _write(tmp_path, name, payload):
     return path
 
 
-def _run_main(tmp_path, cells, memory, *, fixture_cells=(), plateau=None,
-              network=None, control=None, delta_lane=None):
+def _run_main(tmp_path, cells, memory, *, fixture_cells=_DEFAULT, plateau=_DEFAULT,
+              network=_DEFAULT, control=None, delta_lane=None,
+              fixture_control=_DEFAULT):
     argv = ["--run-id", "r1", "--output", str(tmp_path / "out.json")]
     for index, report in enumerate(_control_reports() if control is None else control):
         argv += ["--control", str(_write(tmp_path, f"c4_{index}.json", report))]
+    sf_pair = (
+        _fixture_control_reports() if fixture_control is _DEFAULT else fixture_control
+    )
+    for index, report in enumerate(sf_pair):
+        argv += ["--fixture-control", str(_write(tmp_path, f"c4sf_{index}.json", report))]
     for index, report in enumerate(_lane_reports() if delta_lane is None else delta_lane):
         argv += ["--delta-lane", str(_write(tmp_path, f"c7_{index}.json", report))]
     for index, cell in enumerate(cells):
         argv += ["--cell", str(_write(tmp_path, f"cell{index}.json", cell))]
-    for index, cell in enumerate(fixture_cells):
+    tie_backs = _tie_back_cells() if fixture_cells is _DEFAULT else list(fixture_cells)
+    for index, cell in enumerate(tie_backs):
         argv += ["--fixture-cell", str(_write(tmp_path, f"sf{index}.json", cell))]
     for index, report in enumerate(memory):
         argv += ["--memory", str(_write(tmp_path, f"mem{index}.json", report))]
-    if plateau is not None:
-        argv += ["--plateau", str(_write(tmp_path, "plateau.json", plateau))]
-    if network is not None:
-        argv += ["--network", str(_write(tmp_path, "network.json", network))]
+    for index, report in enumerate(
+        _as_list(_plateau_report() if plateau is _DEFAULT else plateau)
+    ):
+        argv += ["--plateau", str(_write(tmp_path, f"plateau{index}.json", report))]
+    for index, report in enumerate(
+        _as_list(_full_networks() if network is _DEFAULT else network)
+    ):
+        argv += ["--network", str(_write(tmp_path, f"network{index}.json", report))]
     evaluator.main(argv)
     return json.loads((tmp_path / "out.json").read_text())
 
@@ -3536,7 +3730,7 @@ def _run_main(tmp_path, cells, memory, *, fixture_cells=(), plateau=None,
 def test_the_assembled_evaluator_reaches_a_pass_through_main(tmp_path):
     cells, memory = _full_run()
     report = _run_main(
-        tmp_path, cells, memory, plateau=_plateau_report(), network=_network_report()
+        tmp_path, cells, memory, plateau=_plateau_report(), network=_full_networks()
     )
     assert report["verdict"]["aggregate"] == "pass", report["verdict"]["per_gate"]
     assert report["profile"]["settings_deviating_cells"] == []
@@ -3552,22 +3746,31 @@ def test_an_sf_cell_cannot_be_a_fit_point(tmp_path):
     cells.append(_cell("C1", "SF", 71_000, cluster="ghostreplay-score-storage-spike"))
     with pytest.raises(evaluator.QualificationEvaluationError, match="fit points"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
 
 def test_a_fixture_cell_is_reported_and_enters_nothing(tmp_path):
     cells, memory = _full_run()
-    fixture = _cell("C1", "SF", 71_000, cluster="ghostreplay-score-storage-spike")
     report = _run_main(
-        tmp_path, cells, memory, fixture_cells=[fixture],
-        plateau=_plateau_report(), network=_network_report(),
+        tmp_path, cells, memory,
+        plateau=_plateau_report(), network=_full_networks(),
     )
-    assert [r["size_profile"] for r in report["fixture_tie_back_cells"]["cells"]] == ["SF"]
+    assert [r["size_profile"] for r in report["fixture_tie_back_cells"]["cells"]] == [
+        "SF", "SF", "SF", "SF"
+    ]
+    assert [r["cell"] for r in report["fixture_tie_back_cells"]["cells"]] == [
+        "C1", "C3", "C5", "C6"
+    ]
     fitted = report["ceilings"]["ceilings"]["warm_publication_wal_bytes"]
     assert [point["size_profile"] for point in fitted["points"]] == [
         "S0", "S1", "S2", "S3"
     ]
-    assert "SF" not in json.dumps(report["verdict"])
+    # A tie-back reaches NO gate. `C4:SF` is the one SF name in `per_gate`, and
+    # it is there because §4.7 makes the SF control a gate, not a tie-back.
+    assert [
+        name for name in report["verdict"]["per_gate"] if ":SF" in name
+    ] == ["C4:SF:publication_p95"]
+    assert report["verdict"]["coverage_gaps"] == {}
     assert report["verdict"]["aggregate"] == "pass"
 
 
@@ -3585,7 +3788,7 @@ def test_a_cell_measured_under_other_settings_is_refused_not_noted(tmp_path):
     )
     with pytest.raises(evaluator.QualificationEvaluationError, match="C2:S3"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
 
 def test_c1_may_deviate_on_max_wal_size_and_only_on_that(tmp_path):
@@ -3596,7 +3799,7 @@ def test_c1_may_deviate_on_max_wal_size_and_only_on_that(tmp_path):
         identity=_identity(settings={"max_wal_size": {"setting": "4096MB"}}),
     )
     report = _run_main(
-        tmp_path, cells, memory, plateau=_plateau_report(), network=_network_report()
+        tmp_path, cells, memory, plateau=_plateau_report(), network=_full_networks()
     )
     assert report["profile"]["settings_deviating_cells"] == ["C1:S0"]
     deviation = report["profile"]["settings_deviations"]["C1:S0"]["max_wal_size"]
@@ -3610,7 +3813,7 @@ def test_c1_may_deviate_on_max_wal_size_and_only_on_that(tmp_path):
     )
     with pytest.raises(evaluator.QualificationEvaluationError, match="fsync"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
 
 def test_cells_measured_on_different_clusters_refuse(tmp_path):
@@ -3618,9 +3821,9 @@ def test_cells_measured_on_different_clusters_refuse(tmp_path):
     # FIT cell from another cluster is a different qualification.
     cells, memory = _full_run()
     cells[1] = _cell("C1", "S1", 24_815, cluster="ghostreplay-score-storage-spike")
-    with pytest.raises(evaluator.QualificationEvaluationError, match="clusters"):
+    with pytest.raises(evaluator.QualificationEvaluationError, match="fixture cluster"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
 
 def test_a_memory_or_plateau_report_from_elsewhere_refuses(tmp_path):
@@ -3632,14 +3835,14 @@ def test_a_memory_or_plateau_report_from_elsewhere_refuses(tmp_path):
     memory[0] = dict(memory[0], profile_identity=_identity(tested_revision="old"))
     with pytest.raises(evaluator.QualificationEvaluationError, match="revisions"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
     cells, memory = _full_run()
     plateau = _plateau_report()
     plateau["cluster"] = {"cluster_name": "ghostreplay-score-storage-spike"}
-    with pytest.raises(evaluator.QualificationEvaluationError, match="clusters"):
+    with pytest.raises(evaluator.QualificationEvaluationError, match="fixture cluster"):
         _run_main(tmp_path, cells, memory, plateau=plateau,
-                  network=_network_report())
+                  network=_full_networks())
 
 
 def test_a_plateau_measured_under_other_settings_refuses(tmp_path):
@@ -3665,7 +3868,7 @@ def test_a_mislabelled_fixture_cell_is_caught_by_its_recorded_cluster(tmp_path):
     cells.append(mislabelled)
     with pytest.raises(evaluator.QualificationEvaluationError, match="cluster"):
         _run_main(tmp_path, cells, memory, fixture_cells=[fixture],
-                  plateau=_plateau_report(), network=_network_report())
+                  plateau=_plateau_report(), network=_full_networks())
 
 
 def test_a_production_shape_cell_cannot_hide_in_the_fixture_argument(tmp_path):
@@ -3675,7 +3878,7 @@ def test_a_production_shape_cell_cannot_hide_in_the_fixture_argument(tmp_path):
     smuggled = cells.pop()
     with pytest.raises(evaluator.QualificationEvaluationError, match="fixture-cell"):
         _run_main(tmp_path, cells, memory, fixture_cells=[smuggled],
-                  plateau=_plateau_report(), network=_network_report())
+                  plateau=_plateau_report(), network=_full_networks())
 
 
 def test_a_missing_control_or_delta_lane_is_a_recorded_gap(tmp_path):
@@ -3683,9 +3886,13 @@ def test_a_missing_control_or_delta_lane_is_a_recorded_gap(tmp_path):
     # evaluator input: a run with no control at all reported `pass`.
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report(), control=[], delta_lane=[])
+                       network=_full_networks(), control=[], delta_lane=[],
+                       fixture_control=())
     gaps = report["verdict"]["coverage_gaps"]
-    assert "C4:control" in gaps
+    # §4.7 measures BOTH sizes and a regression in either blocks the release,
+    # so both absences are named (rev 16).
+    assert "C4:S1" in gaps
+    assert "C4:SF" in gaps
     assert "C7:delta_lane" in gaps
     assert report["verdict"]["aggregate"] == "insufficient_evidence"
 
@@ -3695,7 +3902,7 @@ def test_one_delta_lane_format_is_not_both(tmp_path):
     # B50 is what activation would switch to.
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report(),
+                       network=_full_networks(),
                        delta_lane=[_lane_report("legacy")])
     assert "C7:current-b50-v1" in report["verdict"]["coverage_gaps"]
     assert report["verdict"]["aggregate"] == "insufficient_evidence"
@@ -3707,7 +3914,7 @@ def test_a_slower_shipped_legacy_writer_fails_the_control(tmp_path):
     # labels run sequentially in different worktrees and different databases.
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report(),
+                       network=_full_networks(),
                        control=_control_reports(old_p95=100.0, new_p95=140.0))
     assert report["verdict"]["per_gate"]["C4:S1:publication_p95"] == "fail"
     assert report["control"]["profiles"][0]["publication_p95_ratio"] == 1.4
@@ -3717,7 +3924,7 @@ def test_a_slower_shipped_legacy_writer_fails_the_control(tmp_path):
 def test_a_thin_control_run_is_a_gap_not_a_pass(tmp_path):
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report(),
+                       network=_full_networks(),
                        control=_control_reports(repetitions=8))
     assert "C4:S1" in report["verdict"]["coverage_gaps"]
     assert report["verdict"]["aggregate"] == "insufficient_evidence"
@@ -3726,7 +3933,7 @@ def test_a_thin_control_run_is_a_gap_not_a_pass(tmp_path):
 def test_a_delta_lane_over_the_warm_limit_fails(tmp_path):
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report(),
+                       network=_full_networks(),
                        delta_lane=_lane_reports(drill=3200.0))
     per_gate = report["verdict"]["per_gate"]
     assert per_gate["C7:legacy:drill"] == "fail"
@@ -3739,7 +3946,7 @@ def test_the_process_cold_lane_figures_are_carried_and_never_gated(tmp_path):
     # The fabricated cold p95 here is 2600 ms, well above the warm numbers.
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report())
+                       network=_full_networks())
     entry = report["delta_lane"]["results"][0]
     assert entry["process_cold"]["normal"]["end_to_end"]["p95_ms"] == 2600.0
     assert not any(
@@ -3758,10 +3965,10 @@ def test_two_controls_on_different_clusters_are_not_a_comparison(tmp_path):
     # other half. Either way it never becomes a comparison.
     cells, memory = _full_run()
     with pytest.raises(
-        evaluator.QualificationEvaluationError, match="different revisions, hosts"
+        evaluator.QualificationEvaluationError, match="cluster its ROLE requires"
     ):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report(), control=control)
+                  network=_full_networks(), control=control)
 
 
 def test_a_measured_failure_outranks_a_missing_input(tmp_path):
@@ -3772,7 +3979,8 @@ def test_a_measured_failure_outranks_a_missing_input(tmp_path):
     for record in cells[1]["result"]["records"]["B50"]:
         record["wal"]["total_bytes"] = 2_000_000
     # No C5 report: a real gap, alongside a real measured failure.
-    report = _run_main(tmp_path, cells, memory, network=_network_report())
+    report = _run_main(tmp_path, cells, memory, network=_full_networks(),
+                       plateau=None)
     verdict = report["verdict"]
     assert verdict["aggregate"] == "fail"
     assert "C1:S1:combined_wal" in verdict["failing_gates"]
@@ -3785,7 +3993,7 @@ def test_a_skipped_closure_check_is_a_coverage_gap(tmp_path):
         "C1", "S1", 24_815, closure={"ran": False, "skipped": True},
     )
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report())
+                       network=_full_networks())
     gaps = report["verdict"]["coverage_gaps"]
     assert "C1:S1:capture_closure" in gaps
     assert report["verdict"]["aggregate"] == "insufficient_evidence"
@@ -4260,11 +4468,11 @@ def test_a_fixture_shaped_plateau_or_memory_report_is_refused_too(tmp_path):
     sf_plateau["profile"] = "SF"
     with pytest.raises(evaluator.QualificationEvaluationError, match="fit points"):
         _run_main(tmp_path, cells, memory, plateau=sf_plateau,
-                  network=_network_report())
+                  network=_full_networks())
     memory[0]["profile"] = "SF"
     with pytest.raises(evaluator.QualificationEvaluationError, match="fit points"):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report())
+                  network=_full_networks())
 
 
 # --------------------------------------------------------------------------
@@ -4302,7 +4510,7 @@ def _drive_plateau_cell(monkeypatch):
         "publish",
         lambda *a, **k: {"publish_ms": 1.0, "storage_format": "x"},
     )
-    held = iter([1, 0] * 8)
+    held = iter([1, 0] * 12)
     monkeypatch.setattr(
         qual,
         "footprint",
@@ -4323,11 +4531,12 @@ def _drive_plateau_cell(monkeypatch):
     monkeypatch.setattr(qual, "check_orphans", lambda factory, color: {"clean": True})
     monkeypatch.setattr(qual, "assert_no_foreign_activity", lambda eng: None)
 
+    publications = qual.CELL_SPECS["C5"]["publications"]
     result = qual.run_plateau_cell(
         engine,
         lambda: None,
-        [object()] * 60,
-        list(range(60)),
+        [object()] * publications,
+        list(range(publications)),
         "black",
         created_relations=("user_opening_scores",),
     )
@@ -4341,12 +4550,64 @@ def test_c5_diffs_its_publications_and_not_only_its_windows(monkeypatch):
     # could pass unobserved, and there are twelve of them.
     result, spans, _log = _drive_plateau_cell(monkeypatch)
     windows = result["windows"]
-    assert len(windows["A"]) == len(windows["B50"]) == 6
+    # TEN, from the cell's own publication spec (rev 16): the approved spike
+    # cell ran 100 publications and emits one window per ten, and the count was
+    # a hard-coded 6 that nothing decided.
+    assert qual.CELL_SPECS["C5"]["publications"] == 100
+    assert len(windows["A"]) == len(windows["B50"]) == 10 == result["window_count"]
     for layout_windows in windows.values():
         for entry in layout_windows:
             assert entry["publication_span"]["span"][0] < entry["publication_span"]["span"][1]
     # every diff is over a DISJOINT span, never the same pair read twice
     assert len({span for span in spans}) == len(spans)
+
+
+def test_the_plateau_statistic_is_max_minus_min_over_the_last_five():
+    # The approved formula, from the spike's `cell_summary`. It agrees exactly
+    # with last-minus-first on a monotone series and is STRICTLY larger on one
+    # that oscillates — a two-generation retention pattern on a small relation
+    # — which is the case the looser statistic could not see. These are the
+    # measured C5 window totals at S1 and at the fixture size.
+    monotone = [147_759_104, 148_717_568, 148_996_096, 149_004_288]
+    settling = [139_075_584, *monotone]
+    oscillating = [19_488_768, 19_349_504, 20_717_568, 19_464_192, 20_783_104]
+
+    def approved(values):
+        return (max(values) - min(values)) / min(values)
+
+    def superseded(values):
+        return (values[-1] - values[0]) / values[0]
+
+    assert approved(settling) == pytest.approx(superseded(settling))
+    assert approved(oscillating) > superseded(oscillating)
+    assert approved(oscillating) == pytest.approx(0.07409, abs=1e-5)
+    assert superseded(oscillating) == pytest.approx(0.06641, abs=1e-5)
+
+
+def test_a_plateau_cell_too_short_to_read_five_windows_refuses():
+    # The statistic reads the LAST FIVE windows, so fewer than five is not a
+    # smaller sample — it is no statistic at all.
+    #
+    # AND THE REFUSAL LEAVES NO GLOBAL STATE BEHIND. `scheduler_isolation`
+    # enters its class patches EAGERLY, at the call, while only `with stack:`
+    # unwinds them, so a raise between the two leaves `OpeningScoreScheduler`
+    # patched for the rest of the process. Nothing in this cell raised there
+    # before, so the hazard had never fired: the first refusal added to it
+    # failed 74 unrelated scheduler tests that happened to run afterwards, and
+    # every one of them passed in isolation. The validation therefore runs
+    # BEFORE any global state is acquired.
+    from app.opening_score_scheduler import OpeningScoreScheduler
+
+    before = OpeningScoreScheduler.request_recompute
+    with pytest.raises(qual.QualificationRefusal, match="LAST FIVE"):
+        qual.run_plateau_cell(
+            _RecordingEngine({}),
+            lambda: None,
+            [object()] * 40,
+            list(range(40)),
+            "black",
+        )
+    assert OpeningScoreScheduler.request_recompute is before
 
 
 def test_c5_diffs_and_settles_the_reader_held_phase(monkeypatch):
@@ -4432,6 +4693,9 @@ def test_a_whole_run_on_the_spike_cluster_refuses_without_a_fixture_cell(tmp_pat
             tmp_path, cells, memory, plateau=plateau, network=network,
             control=_control_reports(cluster=spike),
             delta_lane=_lane_reports(cluster=spike),
+            # Nothing legitimately on the fixture cluster, so the by-name rule
+            # is the only thing left that can see this run.
+            fixture_cells=(), fixture_control=(),
         )
 
 
@@ -4446,7 +4710,7 @@ def test_a_shipped_control_measured_at_another_revision_refuses(tmp_path):
         evaluator.QualificationEvaluationError, match="different revisions"
     ):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report(), control=control)
+                  network=_full_networks(), control=control)
 
 
 def test_the_predecessor_control_is_exempt_on_revision_and_only_on_that(tmp_path):
@@ -4455,16 +4719,18 @@ def test_the_predecessor_control_is_exempt_on_revision_and_only_on_that(tmp_path
     # Its host and cluster are still compared.
     cells, memory = _full_run()
     report = _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                       network=_network_report())
-    assert report["profile"]["identity_revision_exempt"] == ["C4:S1:A_old"]
+                       network=_full_networks())
+    assert report["profile"]["identity_revision_exempt"] == [
+        "C4:S1:A_old", "C4:SF:A_old"
+    ]
 
     control = _control_reports()
     control[0]["host_platform"] = "Linux-6.8"
     with pytest.raises(
-        evaluator.QualificationEvaluationError, match="different revisions, hosts"
+        evaluator.QualificationEvaluationError, match="different revisions or hosts"
     ):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report(), control=control)
+                  network=_full_networks(), control=control)
 
 
 def test_a_delta_lane_from_another_machine_refuses(tmp_path):
@@ -4474,10 +4740,146 @@ def test_a_delta_lane_from_another_machine_refuses(tmp_path):
     lanes = _lane_reports()
     lanes[1]["identity"] = dict(lanes[1]["identity"], host_platform="Linux-6.8")
     with pytest.raises(
-        evaluator.QualificationEvaluationError, match="different revisions, hosts"
+        evaluator.QualificationEvaluationError, match="different revisions or hosts"
     ):
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report(), delta_lane=lanes)
+                  network=_full_networks(), delta_lane=lanes)
+
+
+def test_a_missing_size_is_a_named_gap(tmp_path):
+    # `--plateau` and `--network` were single paths while §4.2 requires C6 at
+    # four sizes and C5 at one, so four C6 reports and one C5 report had
+    # nowhere to go — and `coverage_gaps` printed `{}` over five measured
+    # results, which is exactly the blindness §5.1b was written to close.
+    cells, memory = _full_run()
+    report = _run_main(
+        tmp_path, cells, memory, network=[_network_report(profile="S1")]
+    )
+    assert set(report["verdict"]["coverage_gaps"]) == {"C6:S0", "C6:S2", "C6:S3"}
+    assert report["verdict"]["aggregate"] == "insufficient_evidence"
+
+    # The same rule reaches C3, whose sizes only ever showed up as a fit
+    # refusal on the metric rather than as a missing cell.
+    thin = _run_main(tmp_path, cells, memory[:2])
+    assert set(thin["verdict"]["coverage_gaps"]) >= {"C3:S2", "C3:S3"}
+
+
+def test_a_missing_tie_back_is_a_named_gap(tmp_path):
+    # SF gates nothing, and a tie-back nobody supplied is still not a tie-back
+    # that came back clean.
+    cells, memory = _full_run()
+    report = _run_main(tmp_path, cells, memory, fixture_cells=())
+    assert set(report["verdict"]["coverage_gaps"]) == {
+        "C1:SF", "C3:SF", "C5:SF", "C6:SF"
+    }
+    assert report["verdict"]["aggregate"] == "insufficient_evidence"
+
+
+def test_each_tie_back_shape_reaches_its_own_evaluator(tmp_path):
+    # `--fixture-cell` ran `evaluate_cell` on everything, which is C1's
+    # paired-block evaluator, so a C3, C5 or C6 tie-back raised
+    # `KeyError: 'paired_blocks'` and three measured results were unroutable.
+    cells, memory = _full_run()
+    report = _run_main(tmp_path, cells, memory)
+    routed = {
+        entry["cell"]: entry for entry in report["fixture_tie_back_cells"]["cells"]
+    }
+    assert set(routed) == {"C1", "C3", "C5", "C6"}
+    assert routed["C1"]["paired"]["cell"] == "C1"
+    assert routed["C3"]["memory"]["integrated_worker_rss_bytes"] > 0
+    assert routed["C5"]["plateau"]["gates"]["orphans"]["verdict"] == "pass"
+    assert routed["C6"]["network"]["network_terms"]["B50"]["publication"][
+        "modelled_ms"
+    ]
+    # Routed, and still entering nothing: no SF fit point and no SF gate but
+    # §4.7's control, which is a gate by design.
+    assert [n for n in report["verdict"]["per_gate"] if ":SF" in n] == [
+        "C4:SF:publication_p95"
+    ]
+    assert report["verdict"]["coverage_gaps"] == {}
+    assert report["verdict"]["aggregate"] == "pass"
+
+
+def test_a_c5_tie_back_reports_layout_a_growth_and_fails_nothing(tmp_path):
+    # C5 at SF measured A at 6.6%, and there A does NOT converge: its totals
+    # alternate between two values about 1.37 MB apart on a 19.8 MB footprint,
+    # the two-generation retention pattern on a small relation. A longer run
+    # cannot cure a relative threshold on a footprint that small, which is why
+    # scoping the gate is the fix and lengthening the cell is not.
+    cells, memory = _full_run()
+    tie_backs = _tie_back_cells()
+    tie_backs[2] = _plateau_report(
+        profile="SF", cluster=_FIXTURE_CLUSTER, growth=0.0, a_growth=0.06641
+    )
+    report = _run_main(tmp_path, cells, memory, fixture_cells=tie_backs)
+    routed = {
+        entry["cell"]: entry for entry in report["fixture_tie_back_cells"]["cells"]
+    }
+    growth = routed["C5"]["plateau"]["characterisations"]["plateau_growth:A"]
+    assert growth["value"] == 0.06641
+    assert growth["gated"] is False
+    assert not [n for n in report["verdict"]["per_gate"] if n.startswith("C5:SF")]
+    assert report["verdict"]["aggregate"] == "pass"
+
+
+def test_a_tie_back_from_another_revision_or_cluster_is_refused(tmp_path):
+    # Fixture reports sat outside the identity check entirely, so a tie-back
+    # measured at another revision or on another host would have been reported
+    # as this run's — the regression signal SF exists to give, read off the
+    # wrong build.
+    cells, memory = _full_run()
+    stale = _tie_back_cells()
+    stale[0] = _cell(
+        "C1", "SF", 4_117, cluster=_FIXTURE_CLUSTER,
+        identity=_identity(tested_revision="older"),
+    )
+    with pytest.raises(
+        evaluator.QualificationEvaluationError, match="different revisions or hosts"
+    ):
+        _run_main(tmp_path, cells, memory, fixture_cells=stale)
+
+    # And the cluster is required BY NAME, per role: a tie-back recorded on the
+    # qualification cluster is not a tie-back.
+    misplaced = _tie_back_cells()
+    misplaced[0] = _cell("C1", "SF", 4_117, cluster=_QUAL_CLUSTER)
+    with pytest.raises(
+        evaluator.QualificationEvaluationError, match="cluster its ROLE requires"
+    ):
+        _run_main(tmp_path, cells, memory, fixture_cells=misplaced)
+
+
+def test_the_sf_control_is_a_gate_and_not_a_tie_back(tmp_path):
+    # §4.7 measures legacy publication p95 at S1 AND SF for both commits and
+    # says a regression in EITHER blocks the release. `--control` refuses a
+    # pair measured on the fixture cluster and SF had no other home, so half of
+    # §4.7 could not be evaluated at all.
+    cells, memory = _full_run()
+    report = _run_main(tmp_path, cells, memory)
+    assert report["verdict"]["per_gate"]["C4:SF:publication_p95"] == "pass"
+    assert report["fixture_control"]["cluster"] == evaluator.FIXTURE_CLUSTER
+    assert report["fixture_control"]["limit"] == evaluator.CONTROL_P95_RATIO_MAX
+
+    slower = _run_main(
+        tmp_path, cells, memory,
+        fixture_control=_fixture_control_reports(old_p95=100.0, new_p95=140.0),
+    )
+    assert slower["verdict"]["per_gate"]["C4:SF:publication_p95"] == "fail"
+    assert slower["verdict"]["aggregate"] == "fail"
+
+
+def test_an_sf_control_on_the_wrong_cluster_is_refused(tmp_path):
+    cells, memory = _full_run()
+    with pytest.raises(
+        evaluator.QualificationEvaluationError, match="cluster its ROLE requires"
+    ):
+        _run_main(
+            tmp_path, cells, memory,
+            fixture_control=_control_reports(profile="SF"),
+        )
+    # The predecessor exemption travels with it, for the reason the production
+    # pair has it: A_old IS the predecessor commit by construction.
+    report = _run_main(tmp_path, cells, memory)
+    assert "C4:SF:A_old" in report["profile"]["identity_revision_exempt"]
 
 
 def test_an_input_with_no_identity_at_all_is_refused_by_name(tmp_path):
@@ -4490,7 +4892,7 @@ def test_an_input_with_no_identity_at_all_is_refused_by_name(tmp_path):
         evaluator.QualificationEvaluationError, match="C4:S1:A_old"
     ) as excinfo:
         _run_main(tmp_path, cells, memory, plateau=_plateau_report(),
-                  network=_network_report(), control=control, delta_lane=lanes)
+                  network=_full_networks(), control=control, delta_lane=lanes)
     assert "C7:legacy" in str(excinfo.value)
 
 
