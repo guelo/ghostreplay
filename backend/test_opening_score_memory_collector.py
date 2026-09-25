@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from pathlib import Path
@@ -14,6 +15,15 @@ from scripts import qualify_opening_score_storage as q
 
 @pytest.fixture
 def collection(tmp_path, monkeypatch):
+    original_umask = os.umask(0o022)
+    try:
+        yield from _collection(tmp_path, monkeypatch)
+    finally:
+        restored_umask = os.umask(original_umask)
+        assert restored_umask == 0o022, "collector leaked its private umask"
+
+
+def _collection(tmp_path, monkeypatch):
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}")
     seed = tmp_path / "C3.json"
@@ -52,7 +62,7 @@ def collection(tmp_path, monkeypatch):
             "publication_allocation_peak_bytes": 100}))
 
     monkeypatch.setattr(collector.subprocess, "run", worker)
-    return args, calls, worker
+    yield args, calls, worker
 
 
 def test_clean_parent_collects_five_independent_workers_without_loading_capture(collection):

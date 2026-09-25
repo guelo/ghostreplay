@@ -24,10 +24,17 @@ def worker_command(args, layout, output):
 
 
 def collect(args):
+    previous_umask = os.umask(0o077)
+    try:
+        return _collect(args)
+    finally:
+        os.umask(previous_umask)
+
+
+def _collect(args):
     from scripts import bench_opening_score_cutover as runner
     from scripts import qualify_opening_score_storage as q
 
-    os.umask(0o077)
     for path in (args.manifest, args.seed_report, args.capture_slice, args.output):
         q.assert_private_store(path)
     if args.output.exists():
