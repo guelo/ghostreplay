@@ -625,7 +625,9 @@ def test_a_full_rollback_restores_raw_history_alongside_later_writes(
     monkeypatch.setenv("DATABASE_URL", pg_migration_db)
     monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path / "exports"))
     cfg = config()
-    command.upgrade(cfg, MANIFEST)
+    # This rehearsal runs today's ORM/writers before downgrading. Schema-only
+    # migration tests above remain pinned to their historical revisions.
+    command.upgrade(cfg, "head")
     engine = create_engine(pg_migration_db)
     user_id = 8841
     try:
@@ -746,7 +748,9 @@ def test_the_downgrade_refuses_while_rows_are_deleted_and_after_the_window(
     monkeypatch.setenv("DATABASE_URL", pg_migration_db)
     monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", str(tmp_path / "exports"))
     cfg = config()
-    command.upgrade(cfg, MANIFEST)
+    # This rehearsal runs today's ORM/writers before downgrading. Schema-only
+    # migration tests above remain pinned to their historical revisions.
+    command.upgrade(cfg, "head")
     engine = create_engine(pg_migration_db)
     user_id = 8842
     try:

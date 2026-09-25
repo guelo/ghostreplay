@@ -156,6 +156,15 @@ pg_required = pg_gate  # alias: both apply the pg_gate marker object.
 # silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
 # decorations across the Release-A test files.
 REQUIRED_PG_GATE_TESTS = frozenset({
+    "test_srs_retention_integration_pg.py::test_pg_state_creation_failure_rolls_back_before_legal_fallback",
+    "test_srs_retention_integration_pg.py::test_pg_missing_state_is_created_before_target_publication",
+    "test_srs_retention_integration_pg.py::test_pg_evidence_worker_commit_outliving_grace_is_not_lost",
+    "test_srs_retention_gates.py::test_pg_randomized_commits_preserve_the_raw_oracle",
+    "test_srs_retention_gates.py::test_pg_two_turnovers_account_for_net_storage",
+    "test_srs_retention_integration_pg.py::test_pg_final_stamp_interlocks_with_real_fold_past_grace",
+    "test_srs_retention_integration_pg.py::test_pg_computation_outliving_grace_falls_back_after_real_fold",
+    "test_srs_retention_integration_pg.py::test_pg_endpoint_waits_for_actual_fold_then_rechecks_or_degrades",
+    "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia",
     "test_opportunity_cleanup_pg.py::test_pg_activity_hint_is_database_stamped_coalesced_and_never_waits_for_upload",
     "test_opportunity_cleanup_pg.py::test_pg_activity_arriving_during_export_defers_normal_but_not_forced_transfer",
     "test_opportunity_cleanup_pg.py::test_pg_backlog_age_uses_same_pin_and_legacy_predicates_as_fold",
@@ -587,6 +596,15 @@ REQUIRED_PG_GATE_TESTS = frozenset({
 # the matrix (e.g. the both-FOR-UPDATE deadlock case) fails the gate rather than
 # quietly shrinking it.
 REQUIRED_PG_GATE_PARAM_CASES = frozenset({
+    "test_srs_retention_gates.py::test_pg_randomized_commits_preserve_the_raw_oracle[7]",
+    "test_srs_retention_gates.py::test_pg_randomized_commits_preserve_the_raw_oracle[29]",
+    "test_srs_retention_integration_pg.py::test_pg_final_stamp_interlocks_with_real_fold_past_grace[commit]",
+    "test_srs_retention_integration_pg.py::test_pg_final_stamp_interlocks_with_real_fold_past_grace[rollback]",
+    "test_srs_retention_integration_pg.py::test_pg_final_stamp_interlocks_with_real_fold_past_grace[disconnect]",
+    "test_srs_retention_integration_pg.py::test_pg_endpoint_waits_for_actual_fold_then_rechecks_or_degrades[short]",
+    "test_srs_retention_integration_pg.py::test_pg_endpoint_waits_for_actual_fold_then_rechecks_or_degrades[timeout]",
+    "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia[policy]",
+    "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia[targeted_history]",
     # Both builder seams are distinct publication windows: the edge case splices
     # wave 1 into wave 2, the position case races the final fence. And the
     # bounded-read plan has to hold for the marker format that does NOT own the
