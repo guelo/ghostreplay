@@ -295,6 +295,9 @@ and
 [`backend/test_opportunity_compaction_migration.py`](backend/test_opportunity_compaction_migration.py),
 with the fold and recovery reference in
 [`backend/scripts/RECOVER_SRS_FOLD.md`](backend/scripts/RECOVER_SRS_FOLD.md).
+Integrated raw-oracle parity, publication/fold races, finite restoration and
+two-turnover synthetic storage qualification are documented in
+[`backend/scripts/COMPACT_SRS_EVENTS.md`](backend/scripts/COMPACT_SRS_EVENTS.md).
 
 New targeted decisions also atomically preserve each session/target's latest
 served time in compact facts. Targeted counters can read those facts after a

@@ -3,11 +3,12 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import DateTime, create_engine, literal, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -21,6 +22,8 @@ os.environ["POSTHOG_DISABLED"] = "true"
 os.environ.pop("POSTHOG_PROJECT_TOKEN", None)
 
 from app.api import session as session_api
+from app import opportunity_fold, opportunity_fold_recovery, opportunity_retention
+from app.opportunity_fold import FoldLimits
 from app.db import get_db
 from app.main import app
 from app.models import (
@@ -53,6 +56,23 @@ engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+# Arithmetic tests deliberately relax the transaction budget, not production.
+LIMITS = FoldLimits(transaction_deadline=30, statement_timeout_ms=5000,
+                    idle_in_transaction_ms=5000, user_cooldown=0)
+
+
+@pytest.fixture
+def qualification_clock(monkeypatch, tmp_path):
+    """Advance SQL predicates without changing host time or immutable sessions."""
+    clock = [datetime.now(timezone.utc)]
+    def expression(db):
+        return literal(clock[0], type_=DateTime(timezone=True))
+    for module in (opportunity_retention, opportunity_fold, opportunity_fold_recovery):
+        monkeypatch.setattr(module, 'database_clock', expression)
+    monkeypatch.setenv('GHOSTREPLAY_SRS_FOLD_EXPORT_DIR', str(tmp_path / 'exports'))
+    return clock
 
 
 def await_pg_lock(observer, blocked_pid: int, blocker_pid: int | None = None,
