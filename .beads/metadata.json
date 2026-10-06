@@ -3,5 +3,6 @@
   "backend": "dolt",
   "dolt_mode": "embedded",
   "dolt_database": "ghostreplay",
-  "project_id": "2729aeee-d916-4de8-aca6-6e11ef3e70d4"
+  "project_id": "2729aeee-d916-4de8-aca6-6e11ef3e70d4",
+  "last_bd_version": "1.3.1"
 }
