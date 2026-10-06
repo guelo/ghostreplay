@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -369,9 +370,17 @@ def default_storage_format() -> StorageFormat:
 
     The single patch point for the reader/qualification test matrix, resolved in
     the writer BODY (never as a def-time default, which a fixture could not
-    reach). New PRODUCTION writes stay legacy until cutover.
+    reach). The deployment selector defaults to legacy; explicit maintenance
+    overrides remain available for conversion and rollback. Invalid configuration
+    fails before scoring or generation reservation rather than changing format.
     """
-    return StorageFormat.LEGACY
+    value = os.environ.get("OPENING_SCORE_STORAGE_FORMAT", StorageFormat.LEGACY.value)
+    try:
+        return StorageFormat(value)
+    except ValueError:
+        raise ValueError(
+            "OPENING_SCORE_STORAGE_FORMAT must be legacy or current-b50-v1"
+        ) from None
 
 
 def get_latest_opening_score_batch(

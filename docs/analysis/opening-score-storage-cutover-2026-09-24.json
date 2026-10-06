@@ -1,0 +1,645 @@
+{
+  "relative_gates_pass": true,
+  "activation_authorized": false,
+  "traffic_representative": false,
+  "cells": {
+    "C1": {
+      "cell": "C1",
+      "size_profile": "S1",
+      "sufficiency": {
+        "verdict": "sufficient",
+        "reasons": [],
+        "composites": {
+          "composite_d": {
+            "status": "sufficient",
+            "reads_per_layout": {
+              "A": 910,
+              "B50": 910
+            },
+            "declared_per_publication": 13
+          },
+          "composite_t": {
+            "status": "sufficient",
+            "reads_per_layout": {
+              "A": 910,
+              "B50": 910
+            },
+            "declared_per_publication": 13
+          }
+        },
+        "gated_composites": [
+          "composite_d",
+          "composite_t"
+        ],
+        "complete_paired_blocks": 7,
+        "discarded_blocks": [
+          {
+            "block": 2,
+            "reference_num_timed": 1,
+            "reference_num_requested": 0,
+            "reference_catalog_autovacuum": 0,
+            "selected_num_timed": 0,
+            "selected_num_requested": 0,
+            "selected_catalog_autovacuum": 0
+          },
+          {
+            "block": 5,
+            "reference_num_timed": 1,
+            "reference_num_requested": 0,
+            "reference_catalog_autovacuum": 0,
+            "selected_num_timed": 0,
+            "selected_num_requested": 0,
+            "selected_catalog_autovacuum": 0
+          },
+          {
+            "block": 8,
+            "reference_num_timed": 0,
+            "reference_num_requested": 0,
+            "reference_catalog_autovacuum": 0,
+            "selected_num_timed": 1,
+            "selected_num_requested": 0,
+            "selected_catalog_autovacuum": 0
+          }
+        ]
+      },
+      "vacuum_windows_kept": 7,
+      "vacuum_windows_total": 10,
+      "gates": {
+        "publication_p95": {
+          "ratio": 0.644023617934146,
+          "paired_block_percentile_95_interval": [
+            0.4346336864279185,
+            0.7750651800248606
+          ],
+          "paired_blocks": 7,
+          "bootstrap_repetitions": 4000,
+          "seed": 20260919,
+          "relative_1_1_gate": "pass",
+          "limit": 1.1,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        },
+        "composite_d_p95": {
+          "ratio": 0.9249496310956868,
+          "paired_block_percentile_95_interval": [
+            0.8688338055590796,
+            1.0305682174723656
+          ],
+          "paired_blocks": 7,
+          "bootstrap_repetitions": 4000,
+          "seed": 20260919,
+          "relative_1_1_gate": "pass",
+          "limit": 1.1,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        },
+        "composite_t_format_stage_p95": {
+          "ratio": 0.7974411777592779,
+          "paired_block_percentile_95_interval": [
+            0.7128169979437972,
+            1.0360491477511264
+          ],
+          "paired_blocks": 7,
+          "bootstrap_repetitions": 4000,
+          "seed": 20260919,
+          "relative_1_1_gate": "pass",
+          "limit": 1.1,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        },
+        "combined_wal": {
+          "reference": 1085095242,
+          "selected": 64131646,
+          "ratio": 0.0591023197943393,
+          "limit": 0.5,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true,
+          "components": {
+            "A": {
+              "publication_wal_bytes": 1051197760,
+              "vacuum_wal_bytes": 33897482,
+              "total": 1085095242
+            },
+            "B50": {
+              "publication_wal_bytes": 63237352,
+              "vacuum_wal_bytes": 894294,
+              "total": 64131646
+            }
+          },
+          "shared_vacuum_wal_bytes": 1412484
+        },
+        "vacuumed_footprint": {
+          "reference": 148971520,
+          "selected": 10969088,
+          "ratio": 0.0736321143799835,
+          "limit": 1.0,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        }
+      },
+      "distributions": {
+        "A": {
+          "publication_ms": {
+            "p95": 3622.5847229361534,
+            "count": 70,
+            "nearest_rank_index": 66,
+            "max": 4493.663005530834,
+            "median": 2229.9710512161255
+          },
+          "publication_wal_bytes": {
+            "p95": 15199992,
+            "count": 70,
+            "nearest_rank_index": 66,
+            "max": 15218376,
+            "median": 15121856
+          },
+          "composite_d_ms": {
+            "p95": 66.38290733098984,
+            "count": 910,
+            "nearest_rank_index": 864,
+            "max": 231.53415322303772,
+            "median": 48.25109988451004
+          },
+          "composite_t_format_stage_ms": {
+            "p95": 45.646,
+            "count": 910,
+            "nearest_rank_index": 864,
+            "max": 167.774,
+            "median": 28.811
+          }
+        },
+        "B50": {
+          "publication_ms": {
+            "p95": 2333.030119538307,
+            "count": 70,
+            "nearest_rank_index": 66,
+            "max": 3558.376245200634,
+            "median": 982.1604341268539
+          },
+          "publication_wal_bytes": {
+            "p95": 863384,
+            "count": 70,
+            "nearest_rank_index": 66,
+            "max": 11409136,
+            "median": 748480
+          },
+          "composite_d_ms": {
+            "p95": 61.400845646858215,
+            "count": 910,
+            "nearest_rank_index": 864,
+            "max": 200.29813796281815,
+            "median": 47.17501997947693
+          },
+          "composite_t_format_stage_ms": {
+            "p95": 36.4,
+            "count": 910,
+            "nearest_rank_index": 864,
+            "max": 216.331,
+            "median": 28.08
+          }
+        }
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 10769705,
+        "B50": 220787
+      },
+      "logical_rows": 24848
+    },
+    "C2": {
+      "cell": "C2",
+      "size_profile": "S1",
+      "sufficiency": {
+        "verdict": "sufficient",
+        "reasons": [],
+        "composites": {
+          "composite_d": {
+            "status": "not_measured",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "note": "the cell declares no reads of this composite; not gated"
+          },
+          "composite_t": {
+            "status": "not_measured",
+            "reads_per_layout": {
+              "A": 0,
+              "B50": 0
+            },
+            "note": "the cell declares no reads of this composite; not gated"
+          }
+        },
+        "gated_composites": [],
+        "complete_paired_blocks": 6,
+        "discarded_blocks": []
+      },
+      "vacuum_windows_kept": 6,
+      "vacuum_windows_total": 6,
+      "gates": {
+        "publication_p95": {
+          "ratio": 0.5548965414415379,
+          "paired_block_percentile_95_interval": [
+            0.4931890120456224,
+            0.6993711637914154
+          ],
+          "paired_blocks": 6,
+          "bootstrap_repetitions": 4000,
+          "seed": 20260919,
+          "relative_1_1_gate": "pass",
+          "limit": 1.1,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        },
+        "combined_wal": {
+          "reference": 1486308177,
+          "selected": 283877707,
+          "ratio": 0.19099518618876574,
+          "limit": 0.5,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true,
+          "components": {
+            "A": {
+              "publication_wal_bytes": 1216941288,
+              "vacuum_wal_bytes": 269366889,
+              "total": 1486308177
+            },
+            "B50": {
+              "publication_wal_bytes": 267877216,
+              "vacuum_wal_bytes": 16000491,
+              "total": 283877707
+            }
+          },
+          "shared_vacuum_wal_bytes": 6705870
+        },
+        "vacuumed_footprint": {
+          "reference": 145498112,
+          "selected": 10829824,
+          "ratio": 0.07443274590394686,
+          "limit": 1.0,
+          "verdict": "pass",
+          "gate_kind": "a_relative",
+          "transfers_between_hosts": true
+        }
+      },
+      "distributions": {
+        "A": {
+          "publication_ms": {
+            "p95": 3228.33488881588,
+            "count": 60,
+            "nearest_rank_index": 56,
+            "max": 4147.661931812763,
+            "median": 1696.8754976987839
+          },
+          "publication_wal_bytes": {
+            "p95": 28554936,
+            "count": 60,
+            "nearest_rank_index": 56,
+            "max": 28942344,
+            "median": 19804296
+          },
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null
+        },
+        "B50": {
+          "publication_ms": {
+            "p95": 1791.3918644189835,
+            "count": 60,
+            "nearest_rank_index": 56,
+            "max": 2023.7580090761185,
+            "median": 1008.0758705735207
+          },
+          "publication_wal_bytes": {
+            "p95": 4688416,
+            "count": 60,
+            "nearest_rank_index": 56,
+            "max": 10944840,
+            "median": 4476712
+          },
+          "composite_d_ms": null,
+          "composite_t_format_stage_ms": null
+        }
+      },
+      "vacuum_wal_max_bytes_by_layout": {
+        "A": 47738830,
+        "B50": 4799283
+      },
+      "logical_rows": 23806
+    }
+  },
+  "memory": {
+    "A": [
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 174596096,
+        "publication_allocation_peak_bytes": 35577338
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 174923776,
+        "publication_allocation_peak_bytes": 35672974
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 175501312,
+        "publication_allocation_peak_bytes": 35577846
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 174592000,
+        "publication_allocation_peak_bytes": 35673100
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 174915584,
+        "publication_allocation_peak_bytes": 35672549
+      }
+    ],
+    "B50": [
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 177184768,
+        "publication_allocation_peak_bytes": 39287193
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 176238592,
+        "publication_allocation_peak_bytes": 39286893
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 175943680,
+        "publication_allocation_peak_bytes": 39286993
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 175505408,
+        "publication_allocation_peak_bytes": 39286693
+      },
+      {
+        "logical_rows": 24848,
+        "untraced_worker_rss_highwater_bytes": 175501312,
+        "publication_allocation_peak_bytes": 39286893
+      }
+    ]
+  },
+  "settings_review": {
+    "baseline_digest": "cfb3260d06138870",
+    "digest_by_cell": {
+      "C1:S1": "76e3d7ca9fafb725",
+      "C2:S1": "cfb3260d06138870",
+      "C3:S1": "cfb3260d06138870"
+    },
+    "deviating_cells": [
+      "C1:S1"
+    ],
+    "deviating_settings": {
+      "C1:S1": {
+        "max_wal_size": {
+          "baseline": "128",
+          "measured": "8192"
+        }
+      }
+    }
+  },
+  "allow_warm_wal_deviation": true,
+  "shape_checks": [
+    {
+      "cell": "C1",
+      "metric": "warm_publication_wal_bytes",
+      "logical_rows": 24848,
+      "measured": 863384,
+      "ceiling": 1310720.0,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "lower_bound"
+    },
+    {
+      "cell": "C1",
+      "metric": "vacuum_wal_bytes_per_ten_publications",
+      "logical_rows": 24848,
+      "measured": 220787,
+      "ceiling": 524288.0,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "lower_bound"
+    },
+    {
+      "cell": "C1",
+      "metric": "vacuumed_footprint_bytes",
+      "logical_rows": 24848,
+      "measured": 10969088,
+      "ceiling": 18874368,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "production_shape"
+    },
+    {
+      "cell": "C2",
+      "metric": "post_checkpoint_publication_wal_bytes",
+      "logical_rows": 23806,
+      "measured": 4688416,
+      "ceiling": 7077888.0,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "production_applicable"
+    },
+    {
+      "cell": "C2",
+      "metric": "vacuum_wal_bytes_per_ten_publications",
+      "logical_rows": 23806,
+      "measured": 4799283,
+      "ceiling": 524288.0,
+      "passes": false,
+      "verdict": "pending_review",
+      "applicability": "warm_fit_applied_to_post_checkpoint_requires_review"
+    },
+    {
+      "cell": "C2",
+      "metric": "vacuumed_footprint_bytes",
+      "logical_rows": 23806,
+      "measured": 10829824,
+      "ceiling": 17825792,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "production_shape"
+    },
+    {
+      "cell": "C2",
+      "metric": "post_checkpoint_vacuum_wal_bytes_per_ten_publications",
+      "logical_rows": 23806,
+      "measured": 4799283,
+      "ceiling": 7340032.0,
+      "passes": true,
+      "verdict": "pass",
+      "applicability": "production_applicable"
+    }
+  ],
+  "qualification_vacuum_budget": {
+    "metric": "post_checkpoint_vacuum_wal_bytes_per_ten_publications",
+    "ceiling": {
+      "fixed_overhead": -1401878.0000000037,
+      "per_logical_row_slope": 250.56910622772173,
+      "residuals": [
+        236112.85714286007,
+        -354169.2857142836,
+        118056.4285714291
+      ],
+      "max_positive_residual": 236112.85714286007,
+      "applicable_size_range": [
+        23806,
+        95224
+      ],
+      "fit_sizes": [
+        23806,
+        47612,
+        95224
+      ],
+      "logical_row_denominator": "positions + roots + edges + scope counted once; marker, indexes and MVCC versions excluded",
+      "size_logical_rows": 95224,
+      "fitted": 22458314.57142857,
+      "anchor": 22694427.428571433,
+      "factor": 1.5,
+      "ceiling": 34078720.0,
+      "derived_from": "measured_fit",
+      "tag": "production_shape",
+      "applies_to": "production_applicable",
+      "applies_to_note": "active_users_30d is 1 and the gaps between publications are expected to exceed checkpoint_timeout, so nearly every production publication is post-checkpoint: C2's ceiling is the production-applicable one and C1's warm figure is a LOWER BOUND",
+      "points": [
+        {
+          "size_profile": "S1",
+          "logical_rows": 23806,
+          "value": 4799283,
+          "samples": 6,
+          "sample_kind": "vacuum_windows",
+          "layout": "B50",
+          "derived_from": "measured"
+        },
+        {
+          "size_profile": "S2",
+          "logical_rows": 47612,
+          "value": 10174049,
+          "samples": 6,
+          "sample_kind": "vacuum_windows",
+          "layout": "B50",
+          "derived_from": "measured"
+        },
+        {
+          "size_profile": "S3",
+          "logical_rows": 95224,
+          "value": 22576371,
+          "samples": 6,
+          "sample_kind": "vacuum_windows",
+          "layout": "B50",
+          "derived_from": "measured"
+        }
+      ]
+    },
+    "at_measured_sizes": [
+      {
+        "size_logical_rows": 23806,
+        "fitted": 4563170.14285714,
+        "max_positive_residual": 236112.85714286007,
+        "anchor": 4799283.0,
+        "factor": 1.5,
+        "ceiling": 7340032.0,
+        "derived_from": "measured_fit"
+      },
+      {
+        "size_logical_rows": 47612,
+        "fitted": 10528218.285714284,
+        "max_positive_residual": 236112.85714286007,
+        "anchor": 10764331.142857144,
+        "factor": 1.5,
+        "ceiling": 16252928.0,
+        "derived_from": "measured_fit"
+      },
+      {
+        "size_logical_rows": 95224,
+        "fitted": 22458314.57142857,
+        "max_positive_residual": 236112.85714286007,
+        "anchor": 22694427.428571433,
+        "factor": 1.5,
+        "ceiling": 34078720.0,
+        "derived_from": "measured_fit"
+      }
+    ],
+    "warm_ceiling_changed": false,
+    "source_sha256": "864bc29cc5ba89a6561bfa3a811d9af7267f54201a7d95a45ee828627c687939"
+  },
+  "proposed_real_path_ceilings": {
+    "C1:publication_p95_ms": {
+      "measured_p95": 2333.030119538307,
+      "ceiling": 3500,
+      "factor": 1.5,
+      "logical_rows": 24848,
+      "samples": 70,
+      "reviewed": false,
+      "measurement_regime": "warm_only",
+      "max_wal_size_mb": 8192
+    },
+    "C1:composite_d_p95_ms": {
+      "measured_p95": 61.400845646858215,
+      "ceiling": 123,
+      "factor": 2.0,
+      "logical_rows": 24848,
+      "samples": 910,
+      "reviewed": false,
+      "measurement_regime": "warm_only",
+      "max_wal_size_mb": 8192
+    },
+    "C1:composite_t_format_stage_p95_ms": {
+      "measured_p95": 36.4,
+      "ceiling": 73,
+      "factor": 2.0,
+      "logical_rows": 24848,
+      "samples": 910,
+      "reviewed": false,
+      "measurement_regime": "warm_only",
+      "max_wal_size_mb": 8192
+    },
+    "C2:publication_p95_ms": {
+      "measured_p95": 1791.3918644189835,
+      "ceiling": 2688,
+      "factor": 1.5,
+      "logical_rows": 23806,
+      "samples": 60,
+      "reviewed": false,
+      "measurement_regime": "post_checkpoint_without_reads",
+      "max_wal_size_mb": 128
+    },
+    "untraced_worker_rss_highwater_bytes": {
+      "measured_max": 177184768,
+      "ceiling": 265777152,
+      "factor": 1.5,
+      "logical_rows": 24848,
+      "reviewed": false
+    },
+    "publication_allocation_peak_bytes": {
+      "measured_max": 39287193,
+      "ceiling": 58930790,
+      "factor": 1.5,
+      "logical_rows": 24848,
+      "reviewed": false
+    }
+  },
+  "limitations": [
+    "Measured sizes only; no extrapolation or cross-host pooling.",
+    "Production-shape WAL/footprint ceilings remain additional acceptance gates.",
+    "Budget review, deployment verification and production conversion remain pending."
+  ],
+  "inputs_sha256": {
+    "C1-S1-r3.json": "d9880b102cb2583247ced6274ab9f79acd559e7a0639a69110cfa76835831d3c",
+    "C2-S1-r3.json": "e2c43fe4ee5c310335b53d655ffc20335e8c99605730d2581520b1e201f886b1",
+    "C3-S1-r3-clean.json": "cdf3a5457ffaadc52d2027581255959327389b244bcafba5ec332c826febdfe6"
+  },
+  "evaluator_sha256": "d4c6d1554ce2cc0148e4c7814c6b123ec2ac8f4fbf60201c48369c43e6f495f7",
+  "qualification_evaluator_sha256": "1970fc1dc86ba03d792d8f25186ef645d7a8db9a5744a7c01a2adef161941bb6",
+  "qualification_report_sha256": "864bc29cc5ba89a6561bfa3a811d9af7267f54201a7d95a45ee828627c687939"
+}

@@ -159,9 +159,11 @@ payload query to an exact publication marker in the same statement, so a
 retirement is reported as such instead of being served as an empty result, and
 the multi-statement tree read fences its marker after its bounded reads, discards
 and retries an invalidated attempt, and falls back to one short read-only
-snapshot. Legacy snapshots remain the production default: integrated release
-qualification passed on 2026-09-24, and activation is held behind a separate
-pre-activation gate that must measure the real application-to-database path.
+snapshot. Legacy snapshots remain the production default. A deployment setting
+can select current-row publication for subsequent rebuilds; it does not trigger
+a conversion sweep. Activation requires the separately reviewed real-path
+performance budgets and coordinated cutover described in
+[`BENCH_OPENING_SCORE_STORAGE.md`](backend/scripts/BENCH_OPENING_SCORE_STORAGE.md).
 Storage conversion preserves scoring and evidence identity. The exact relational
 schema, constraints, and migration history remain authoritative in the backend
 model and migration layer, not in this overview.

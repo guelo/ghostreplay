@@ -345,8 +345,10 @@ The reviewed B50 implementation now lives in `app/opening_score_storage.py`, wit
 schema migration `20260919_03`. This is separate from the sealed disposable spike
 adapters above: their historical measurements do not qualify the application
 implementation. Production calls still default to legacy. The test-only/internal
-`storage_format=StorageFormat.CURRENT` argument exercises the selected writer;
-there is no deployment activation flag yet. Readers now serve both formats (see
+`storage_format=StorageFormat.CURRENT` argument exercises the selected writer.
+`OPENING_SCORE_STORAGE_FORMAT` selects the deployment writer, defaulting to
+`legacy`; `current-b50-v1` enables B50 only after the pre-activation gate and
+budget review. Readers now serve both formats (see
 "Reader contract" below). Maintenance calls require a fresh session transaction. Legacy bulk insert paging and timing events are
 preserved; qualification must include the already-active atomic retirement cost.
 
@@ -786,15 +788,33 @@ on the whole cell.
 
 ### Verified release revision, forward conversion and the cutover sequence
 
+Real-path evidence and reviewed S1 applicability are in the
+[cutover report](../../docs/analysis/opening-score-storage-cutover-2026-09-24.md).
+The [vacuum budget review](../../docs/analysis/opening-score-vacuum-budget-scope-2026-09-24.md)
+defines the approved, separately fitted post-checkpoint maintenance limit.
+
 The verified release revision is `43db250` on `master` — cells at `0c690ac`,
 evaluator logic in `8222b9b`, harness change in `43db250`. The full pre-push
 gate passed on it with nothing bypassed.
 
-**There is still no production activation switch**, and this section does not
-create one. `opening_cache.default_storage_format()` returns
-`StorageFormat.LEGACY` and is the single patch point, resolved in the writer
-BODY rather than as a def-time default. Introducing a real switch, and the
-authority to flip it, belongs to `g-score-store-cutover`.
+**Deployment selector:** `OPENING_SCORE_STORAGE_FORMAT=legacy` (also the
+unset default) or `current-b50-v1`. `opening_cache.default_storage_format()`
+validates it during API lifespan startup, before database checks or workers,
+and logs `OPENING_SCORE_STORAGE_FORMAT=<effective value>`. Other values,
+including an empty value, reject startup. Direct writers also validate it
+before scoring or generation reservation, without database work on failure.
+An explicit `storage_format=` maintenance argument overrides the selector,
+so forward/reverse conversion remains available independently. The selector does
+not change scoring fingerprints, invalidate baselines, schedule a rebuild or
+convert existing pairs by itself. Readers continue to serve both formats.
+
+Keep the selector unset or `legacy` until the real-path gate and budget review
+pass. Coordinate the environment of the app AND direct publication scripts;
+changing Railway service configuration requires a drain/restart of the single
+publisher. Verify the deployed commit, effective selector and one running
+instance before allowing new publications. This switch's implementation is not
+authority to activate it. Existing conversion/publication contracts are unchanged;
+the real-path run must use the reviewed revision that includes this selector.
 
 Forward conversion is per pair and explicit. `convert_pair(db, user_id, color,
 StorageFormat.CURRENT)` reserves a generation, reads the source under the
@@ -826,14 +846,143 @@ anyway. The sequence:
    the two-int4 transaction advisory lock (class `0x47525343`) makes a race
    safe, not free, and a converted pair flipping back mid-window invalidates any
    measurement taken across it.
-4. Convert each pair with `convert_pair(..., StorageFormat.CURRENT)`, one fresh
-   transaction per pair, tolerating `PublicationSuperseded` as a normal outcome
-   and re-reading the pair rather than retrying blindly.
-5. Only then switch new writes to `StorageFormat.CURRENT`. Real rebuilds also
-   convert lazily when their target format differs, so a pair missed in step 4
-   converges on its next rebuild rather than breaking.
+4. If an explicit conversion is needed, use
+   `convert_pair(..., StorageFormat.CURRENT)`, one fresh transaction per pair,
+   tolerating `PublicationSuperseded` as a normal outcome and re-reading the
+   pair rather than retrying blindly. Do not sweep dormant pairs at startup.
+5. Set `OPENING_SCORE_STORAGE_FORMAT=current-b50-v1` and restart the drained
+   publisher. Real rebuilds convert lazily when their target format differs;
+   dormant pairs remain legacy. Verify the first real publication's marker,
+   current rows and reader/freshness/baseline/delta behavior before starting the
+   observation clock.
 6. Hand the observation window to `g-score-store-observe`, whose acceptance
    thresholds come from its own window and never from the local figures here.
+
+### Isolated Railway pre-activation measurement
+
+`scripts/bench_opening_score_cutover.py` reuses the qualified C1/C2 publication
+and composite-read cells, including paired AB/BA blocks, checkpoint and catalog
+discard rules, per-layout vacuum accounting and retained individual samples.
+C3 prepares a two-candidate capture slice. On Linux, its initial child RSS samples
+are diagnostics: `ru_maxrss` can carry the capture-loader parent's footprint
+across exec. Run `scripts/collect_opening_score_memory.py` afterwards to launch
+five fresh workers per layout from a small parent that never loads the capture;
+the evaluator refuses Linux RSS from the original parent. This entry point
+is separate from the local loopback-only qualification launcher.
+
+Provisioning is explicit: use a new non-production environment named
+`score-store-cutover`, a separate PG18 service restored from the existing private
+dump, and an idle app container in the production region with the production
+Python/dependency setup. Do not duplicate production variables or start the API,
+migrations or scheduler. Configure an explicit idle start command and no restart
+loop. The runner receives only `CUTOVER_DATABASE_URL`, referring to that
+environment's temporary database. No ordinary `DATABASE_URL` or PG fallback may
+be inherited. Keep captures, manifests, reports and detailed logs under
+`~/.ghostreplay-private/` with directory mode 700 and file mode 600; never include
+them in a build upload. Transfer them separately after verifying the service ID.
+
+The operator creates a fresh `gr_score_qual_cutover_*` database for each cell,
+installs `pg_walinspect` and `pgstattuple`, and gives each database the run's
+sentinel comment. The manifest records `environment_id`, `runner_service_id`,
+`database_host`, `cluster_name`, `system_identifier`, `sentinel`, `base_revision`,
+`source_manifest` (backend-relative Python file paths to SHA-256 digests), and
+`runtime` (the production Python version and installed package-version mapping).
+Seal the actual runner source, including its selector and remote entry point.
+Compare the production and runner package inventories before measurement;
+unpinned requirements can install a newer dependency in a fresh container.
+The runner checks the runtime seal before every cell and memory subprocess.
+The production Nixpacks install uses `requirements.production.constraints.txt`
+to preserve the measured runtime, and creates its venv explicitly on a cold
+builder. Verify the deployed package inventory as well as the commit before
+activation; a commit alone does not identify an unpinned Python environment.
+Before importing the application or writing, the runner validates the Railway
+identity, exact private host and port, then the server's system identifier,
+cluster and database comment in a read-only transaction. Production's environment
+ID is explicitly refused. A populated measurement database is also refused;
+the restored snapshot is retained separately as `gr_snap_base`.
+
+Example inside the idle runner, from the backend root, with its venv active:
+
+```bash
+umask 077
+python -m scripts.bench_opening_score_cutover \
+  --manifest ~/.ghostreplay-private/cutover/manifest.json \
+  --database gr_score_qual_cutover_s1_c1 \
+  --capture ~/.ghostreplay-private/cutover/capture-s1.pickle \
+  --output ~/.ghostreplay-private/cutover/C1-S1.json --cell C1
+```
+
+Repeat serially with fresh databases/output names for C2 and C3; never measure
+another cell or restore a database on the cluster concurrently. Match deployed
+checkpoint settings; the retained WAL setting used to protect inspection must
+be disclosed. C1's warm result remains a lower bound and any warm-cell setting
+deviation requires its own recorded decision. Retain failed reports and logs;
+do not pool runs across source, settings or size changes. At least 500 retained
+individual reads per layout/composite/comparable window and the existing paired
+block requirements apply. A-relative latency/read limits remain 1.1. Derive
+size-specific real-path ceilings for review; this runner does not grant activation
+or label local macOS ceilings as production limits. Download private artifacts
+before stopping/deleting the temporary runner, then remove the temporary services
+and volume after the measurement/review handoff. Record their IDs and disposition
+in `g-score-store-cutover`.
+
+After C3, with the same database, manifest, source/runtime and server settings,
+collect Linux memory from the clean parent:
+
+```bash
+python -m scripts.collect_opening_score_memory \
+  --manifest ~/.ghostreplay-private/cutover/manifest.json \
+  --database gr_score_qual_cutover_s1_c3 \
+  --seed-report ~/.ghostreplay-private/cutover/C3-S1.json \
+  --output ~/.ghostreplay-private/cutover/C3-S1-clean.json
+```
+
+The collector derives the slice path from the original report, retains every
+child report, and records its own digest, the original report digest and child
+digests. Use this clean-parent report as the evaluator's C3 input. The reason is
+documented by Linux's [getrusage manual](https://www.man7.org/linux/man-pages/man2/getrusage.2.html):
+resource-usage accounting survives exec. Starting Python again from a parent
+that already holds the entire capture is insufficient isolation for RSS.
+
+Evaluate retrieved private reports with `scripts/summarize_opening_score_cutover.py`:
+
+```bash
+python -m scripts.summarize_opening_score_cutover \
+  ~/.ghostreplay-private/score-store-cutover/C1-S1.json \
+  ~/.ghostreplay-private/score-store-cutover/C2-S1.json \
+  ~/.ghostreplay-private/score-store-cutover/C3-S1-clean.json \
+  --output ~/.ghostreplay-private/score-store-cutover/evaluation.json \
+  --qualification-report ../docs/analysis/opening-score-storage-qualification-2026-09-24.json \
+  --qualification-sha256 864bc29cc5ba89a6561bfa3a811d9af7267f54201a7d95a45ee828627c687939 \
+  --public-output ../docs/analysis/opening-score-storage-cutover-2026-09-24.json \
+  --vacuum-output ../docs/analysis/opening-score-vacuum-budget-scope-2026-09-24.json
+```
+
+It reuses qualification's sufficiency and paired-bootstrap relative gates.
+Source/capture/scale mismatches are refused. Settings must agree unless the
+operator explicitly passes `--allow-warm-wal-deviation` after review; that permits
+only qualification's C1-only `max_wal_size` exception, never a changed C2 or C3
+setting or relaxed durability. Proposed real-path ceilings use qualification's
+reviewed headroom factors but apply only to the measured sizes. They remain
+unreviewed proposals, and WAL/footprint acceptance still uses qualification's
+production-shape profile. The evaluator never authorizes activation.
+The public file is a strict projection of this evaluation, including the
+deviation flag, warm labels, vacuum maxima/window counts, failed C2 comparison
+against the historical warm fit, and five memory samples per layout. The vacuum
+output is generated by qualification's ceiling builder from sealed C2 cells;
+the historical report is not modified. The historical schedule mismatch remains
+`pending_review` in computed evidence; the linked review records its approval
+and resolution using the separate post-checkpoint metric.
+
+For the reviewed S1 handoff, use **3,500 ms publication p95 as the limit**;
+2,688 ms from C2 without interleaved reads is an expectation. Production is
+post-checkpoint with reads, matching neither measured schedule exactly. The
+D/T limits (123/73 ms) derive only from the deviating warm C1 cell at 8GB.
+Post-checkpoint vacuum WAL is production-applicable because gaps exceed the
+checkpoint timeout; the unchanged warm limit is a lower bound. These approvals
+apply at measured S1 sizes, not arbitrary larger cohorts. Composite T measured
+36.4 ms versus a local expectation of 28 ms at the larger S3 size, and its
+relative upper 95% bound of 1.036 is closest to the 1.1 gate.
 
 ### Rollback within the compatibility binary
 
@@ -848,7 +997,8 @@ reverse path leaves nothing behind for an old reader to trip over.
 
 To return to a pre-compatibility binary:
 
-1. **Disable new current writes.** Necessary and, on its own, **insufficient** —
+1. **Disable new current writes** with `OPENING_SCORE_STORAGE_FORMAT=legacy`
+   and a coordinated publisher restart. Necessary and, on its own, **insufficient** —
    it stops the format spreading, and converts nothing already written.
 2. **Keep both readers and the publication guard in place** for the whole
    rollback. They are what allows a mixed fleet to serve correct results while
