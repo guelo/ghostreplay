@@ -7,7 +7,7 @@ This directory contains the FastAPI backend skeleton for Ghost Replay.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt -c requirements.production.constraints.txt
 export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/ghostreplay"
 uvicorn app.main:app --reload --port 8000 --no-access-log
 ```
@@ -19,12 +19,23 @@ cd backend
 alembic -c alembic.ini upgrade head
 ```
 
+## Dependencies
+
+`requirements.txt` lists the runtime dependencies without versions;
+`requirements.production.constraints.txt` pins their full closure to what Railway
+installs (the service's `NIXPACKS_INSTALL_CMD`, set in the Railway dashboard,
+passes the same `-c`). Always install with those constraints so tests run the
+libraries production runs. When the constraints file changes, rerun the install
+above in every existing venv: `test_dependency_pins.py` fails the suite (and so
+the pre-push gate and CI) when the venv's runtime versions differ from the pins,
+or when a runtime dependency has no pin. To bump a dependency, change its pin,
+reinstall, and run the full suite under `-W error` before deploying.
+
 ## Testing
 
 ```bash
 cd backend
 source .venv/bin/activate
-pip install -r requirements-dev.txt
 pytest
 ```
 

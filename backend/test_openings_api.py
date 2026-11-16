@@ -308,6 +308,18 @@ def test_score_no_auth_returns_401(client):
 # ---------------------------------------------------------------------------
 
 
+def _vary_tokens(resp) -> set[str]:
+    """Vary selectors, so the roots endpoint's own contract is asserted alone.
+
+    The endpoint negotiates its representation on Accept-Encoding, so every
+    response it sends (200, 304, 406) must say so. Middleware may append its own
+    selectors: Starlette's CORSMiddleware adds ``Origin`` to every response from
+    1.7 on, so production sends ``Accept-Encoding, Origin``. Neither the order nor
+    the extra fields are this endpoint's to assert.
+    """
+    return {token.strip().lower() for token in resp.headers.get("vary", "").split(",")}
+
+
 def test_roots_list(client, auth_headers):
     headers = {**auth_headers(), "Accept-Encoding": "identity"}
     resp = client.get("/api/openings/roots", headers=headers)
@@ -315,7 +327,7 @@ def test_roots_list(client, auth_headers):
     assert resp.headers["cache-control"] == "private, no-cache"
     assert resp.headers["content-length"] == str(len(resp.content))
     assert "content-encoding" not in resp.headers
-    assert resp.headers["vary"] == "Accept-Encoding"
+    assert "accept-encoding" in _vary_tokens(resp)
     assert resp.headers["etag"].startswith('"')
     data = resp.json()
     assert data["total_families"] == 1
@@ -338,7 +350,7 @@ def test_roots_gzip_and_conditional_reuse(
 
     assert compressed.status_code == 200
     assert compressed.headers["content-encoding"] == "gzip"
-    assert compressed.headers["vary"] == "Accept-Encoding"
+    assert "accept-encoding" in _vary_tokens(compressed)
     assert compressed.headers["cache-control"] == "private, no-cache"
     assert compressed.headers["content-length"] == str(len(expected.body))
     assert compressed.headers["etag"] == expected.etag
@@ -359,7 +371,7 @@ def test_roots_gzip_and_conditional_reuse(
     assert "content-encoding" not in revalidated.headers
     assert "content-type" not in revalidated.headers
     assert revalidated.headers["cache-control"] == "private, no-cache"
-    assert revalidated.headers["vary"] == "Accept-Encoding"
+    assert "accept-encoding" in _vary_tokens(revalidated)
     assert (
         revalidated.headers["content-length"]
         == compressed.headers["content-length"]
@@ -405,7 +417,7 @@ def test_roots_rejects_unacceptable_encodings(client, auth_headers):
     assert resp.status_code == 406
     assert resp.content == b""
     assert resp.headers["content-length"] == "0"
-    assert resp.headers["vary"] == "Accept-Encoding"
+    assert "accept-encoding" in _vary_tokens(resp)
 
 
 def test_roots_list_family_filter(client, auth_headers):

@@ -139,7 +139,7 @@ git push -u origin linux-canonical-profile
 ```bash
 cd ~/ghostreplay/backend
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements.production.constraints.txt
 ```
 
 ### 6. Point at prod DB and migrate

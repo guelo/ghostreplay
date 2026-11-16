@@ -140,7 +140,8 @@ else
     >"$backend_lint_log"
   {
     printf '\nBackend virtualenv is missing: backend/.venv/bin/python\n'
-    printf 'Create it and install backend/requirements-dev.txt before pushing.\n'
+    printf 'Create it and install the pinned dependencies before pushing:\n'
+    printf '  cd backend && python3.12 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt -c requirements.production.constraints.txt\n'
   } | tee -a "$backend_lint_log" >&2
   record_result "Backend lint" "FAILED" "$backend_lint_log"
   overall_status=1
@@ -153,7 +154,8 @@ if [ ! -x backend/.venv/bin/python ]; then
     >"$backend_log"
   {
     printf '\nBackend virtualenv is missing: backend/.venv/bin/python\n'
-    printf 'Create it and install backend/requirements-dev.txt before pushing.\n'
+    printf 'Create it and install the pinned dependencies before pushing:\n'
+    printf '  cd backend && python3.12 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt -c requirements.production.constraints.txt\n'
   } | tee -a "$backend_log" >&2
   record_result "Backend tests" "FAILED" "$backend_log"
   overall_status=1

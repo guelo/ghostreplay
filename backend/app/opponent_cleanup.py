@@ -35,7 +35,7 @@ import time
 from typing import Callable
 import uuid
 
-from sqlalchemy import DateTime, and_, delete, distinct, func, or_, select, type_coerce
+from sqlalchemy import DateTime, and_, delete, func, or_, select, type_coerce
 from sqlalchemy.orm import Session
 
 from app.models import GameSession, OpponentDecision, OpponentTargetFact
@@ -280,7 +280,7 @@ def candidate_sessions_query(
     Built here, alone, so the plan gate in test_opponent_decision_retention.py
     and the sizing harness EXPLAIN what the sweep runs and not a paraphrase.
     """
-    sessions = select(distinct(OpponentDecision.session_id).label("session_id"))
+    sessions = select(OpponentDecision.session_id.label("session_id")).distinct()
     if cursor is not None:
         sessions = sessions.where(OpponentDecision.session_id > cursor)
     sessions = sessions.order_by(OpponentDecision.session_id).limit(page).subquery()

@@ -24,7 +24,7 @@ For faster results, run the script on a machine with more cores.
 ```bash
 git clone <repo> && cd ghostreplay/backend
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements.production.constraints.txt
 apt install stockfish   # or brew install stockfish
 ```
 
