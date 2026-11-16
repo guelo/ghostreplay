@@ -71,7 +71,14 @@ DISTINCT_FENS = (
     "8/8/8/8/8/K6k/8/8 w - - 0 1",
     "8/8/8/8/K6k/8/8/8 w - - 0 1",
 )
-NOW = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+# The real clock, not a fixed date. The fold measures M + G and the 30-day pin
+# window from the DATABASE clock, which on SQLite is the host's wall clock and
+# cannot be frozen here: ``shifted_clock``'s SQLite branch is a bare
+# ``strftime('now', ...)`` that never consults a patched ``database_clock``. A
+# fixed NOW therefore ages: a decision seeded "2 days ago" quietly leaves the
+# pin window a month later and the fold deletes the row the test means to keep
+# (g-compaction-time-bomb). Seed every instant relative to this one.
+NOW = datetime.now(timezone.utc)
 # Comfortably past M + G (60 days + 1 hour) for every session seeded below.
 OLD = NOW - timedelta(days=120)
 # A generous deadline: the deterministic suite is proving the protocol, not the
