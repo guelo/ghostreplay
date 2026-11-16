@@ -120,7 +120,7 @@ def test_next_opponent_move_happy_path_returns_valid_contract(
     from app.opponent_move_controller import ControllerMove
 
     session_id = create_game_session(user_id=123, player_color="white")
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
@@ -163,7 +163,7 @@ def test_next_opponent_move_returns_legal_move(
     from app.opponent_move_controller import ControllerMove
 
     session_id = create_game_session(user_id=123, player_color="white")
-    fake_move = ControllerMove(uci="g8f6", san="Nf6", method="maia3_api")
+    fake_move = ControllerMove(uci="g8f6", san="Nf6", method="maia3_local")
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
@@ -192,7 +192,7 @@ def test_next_opponent_move_black_player_validates_turn(
     from app.opponent_move_controller import ControllerMove
 
     session_id = create_game_session(user_id=123, player_color="black")
-    fake_move = ControllerMove(uci="e2e4", san="e4", method="maia3_api")
+    fake_move = ControllerMove(uci="e2e4", san="e4", method="maia3_local")
 
     # FEN shows white to move (opponent's turn for black player)
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
@@ -236,7 +236,7 @@ def test_next_opponent_move_allows_ended_session(
     )
     db_session.commit()
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
             "/api/game/next-opponent-move",
@@ -336,7 +336,7 @@ def test_next_opponent_move_engine_branch_happy_path(
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
@@ -374,7 +374,7 @@ def test_next_opponent_move_releases_db_transaction_before_engine_fallback(
 
     def fake_choose_move(**_kwargs):
         assert observed["rolled_back"] is True
-        return ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+        return ControllerMove(uci="e7e5", san="e5", method="maia3_local")
 
     monkeypatch.setattr(SqlAlchemySession, "rollback", spy_rollback)
     with patch("app.opponent_move_controller.choose_move", side_effect=fake_choose_move):
@@ -401,7 +401,7 @@ def test_next_opponent_move_passes_moves_to_controller(
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = ControllerMove(uci="d7d5", san="d5", method="maia3_api")
+    fake_move = ControllerMove(uci="d7d5", san="d5", method="maia3_local")
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move) as mock_choose:
         client.post(

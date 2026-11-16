@@ -71,7 +71,7 @@ AFTER_E4_E5_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2
 AFTER_E4_E5_PLAYED_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 # A suppressed request loses its target, not its opponent: it goes to the engine
 # like any untargeted move. Patched so these tests never touch the network.
-MAIA_MOVE = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+MAIA_MOVE = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
 
 
 def _seed(db, *, started_at: datetime | None = None) -> tuple[uuid.UUID, int]:

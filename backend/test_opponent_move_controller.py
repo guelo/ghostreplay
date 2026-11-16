@@ -1,9 +1,9 @@
-"""Opponent move controller: the remote Maia path and the local retention floor.
+"""Opponent move controller: the local Maia path and the local retention floor.
 
 ``fallback_move`` is what answers when a retention-degraded request finds the
 engine unavailable too. Its whole value is that it CANNOT fail the way
 ``choose_move`` can, so the tests here are about independence and determinism
-rather than about move quality: no remote call, a legal move for the position it
+rather than about move quality: no engine call, a legal move for the position it
 was asked about, and the same answer every time the same request is recomputed.
 """
 
@@ -14,6 +14,7 @@ from unittest.mock import patch
 import chess
 import pytest
 
+from app.maia3_client import Maia3Error, Maia3Move
 from app.opponent_move_controller import (
     LOCAL_FALLBACK_METHOD,
     ControllerMove,
@@ -82,12 +83,28 @@ def test_fallback_move_rejects_a_position_with_no_legal_move():
 
 def test_choose_move_still_calls_maia_and_converts_the_result():
     """The ordinary engine path is untouched by the fallback's existence."""
-    with patch("app.opponent_move_controller.maia3_get_move") as remote:
-        remote.return_value = type("Result", (), {"uci": "e7e5"})()
+    with patch("app.opponent_move_controller.maia3_get_move") as engine:
+        engine.return_value = Maia3Move(uci="e7e5")
         move = choose_move(AFTER_E4_FEN, target_elo=1500, moves=["e2e4"])
 
-    remote.assert_called_once_with(moves=["e2e4"], target_elo=1500)
-    assert move == ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    engine.assert_called_once_with(fen=AFTER_E4_FEN, moves=["e2e4"], target_elo=1500)
+    assert move == ControllerMove(uci="e7e5", san="e5", method="maia3_local")
+
+
+def test_choose_move_sends_an_empty_history_when_moves_is_none():
+    with patch("app.opponent_move_controller.maia3_get_move") as engine:
+        engine.return_value = Maia3Move(uci="e7e5")
+        choose_move(AFTER_E4_FEN, target_elo=800, moves=None)
+
+    engine.assert_called_once_with(fen=AFTER_E4_FEN, moves=[], target_elo=800)
+
+
+def test_choose_move_propagates_an_unavailable_engine():
+    """Maia3Error reaches the endpoint, which answers 503 (or the local floor)."""
+    with patch("app.opponent_move_controller.maia3_get_move") as engine:
+        engine.side_effect = Maia3Error("engine unavailable (restarting)")
+        with pytest.raises(Maia3Error):
+            choose_move(AFTER_E4_FEN, target_elo=1500, moves=["e2e4"])
 
 
 def test_choose_move_rejects_an_illegal_remote_move():

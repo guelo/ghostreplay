@@ -62,7 +62,7 @@ def test_success_paths_survive_failed_hints_and_stamp_successful_hints(
         elif action in ('opponent', 'replay'):
             from app.opponent_move_controller import ControllerMove
             with patch('app.opponent_move_controller.choose_move', return_value=ControllerMove(
-                uci='e7e5', san='e5', method='maia3_api',
+                uci='e7e5', san='e5', method='maia3_local',
             )):
                 payload = {'session_id': sid, 'fen': ROOT_FEN + ' 0 1'}
                 response = client.post('/api/game/next-opponent-move', headers=headers, json=payload)

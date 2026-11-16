@@ -61,7 +61,7 @@ def _post(client, auth_headers, session_id, fen, *, moves=None, user_id=123):
 def _engine_move(uci: str = "e7e5", san: str = "e5"):
     from app.opponent_move_controller import ControllerMove
 
-    return ControllerMove(uci=uci, san=san, method="maia3_api")
+    return ControllerMove(uci=uci, san=san, method="maia3_local")
 
 
 # ---------------------------------------------------------------------------

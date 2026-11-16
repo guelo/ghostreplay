@@ -46,7 +46,7 @@ USER_ID = 123
 # What Maia answers with in these tests. A suppressed request loses its target,
 # not its opponent: it goes to the engine exactly like any untargeted move, and
 # only falls back to a local legal move if the engine itself is unavailable.
-MAIA_MOVE = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+MAIA_MOVE = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
 # Black to move: the opponent's turn for a white player.
 FEN_A = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 # White to move: the player's colour, so a blunder here is ghost-eligible.
@@ -731,7 +731,7 @@ def test_untargeted_branches_take_no_retention_lock(
         patch("app.srs_target_admission.admit_target_publication") as admission,
         patch(
             "app.opponent_move_controller.choose_move",
-            return_value=ControllerMove(uci="e7e5", san="e5", method="maia3_api"),
+            return_value=ControllerMove(uci="e7e5", san="e5", method="maia3_local"),
         ),
     ):
         response = _post(client, auth_headers, session_id)

@@ -118,15 +118,15 @@ and timing contract is in
 The browser owns the board experience, legal local move application, and live
 analysis orchestration. FastAPI validates session and account boundaries,
 uses Ghost steering when a target is available, and delegates other opponent
-moves to the remote Maia3 service. PostgreSQL holds the durable, account-scoped
-training record.
+moves to a local Maia3 engine subprocess. PostgreSQL holds the durable,
+account-scoped training record.
 
 ```mermaid
 flowchart LR
     Player[Player] --> Browser[React browser]
     Browser --> Worker[Browser Stockfish worker]
     Browser --> API[FastAPI coordinator]
-    API --> Maia[Remote Maia3 service]
+    API --> Maia[Maia3 engine subprocess]
     API --> DB[(PostgreSQL)]
 ```
 
@@ -134,11 +134,14 @@ flowchart LR
 | --- | --- |
 | Browser | Game UI, local move application, live analysis orchestration, and a local-engine fallback when FastAPI is unreachable |
 | FastAPI | Account/session validation, Ghost selection, opponent decisions, and durable-write coordination |
-| Maia3 | Remote engine inference when the Ghost does not supply a move |
+| Maia3 | Human-like move inference in an unmodified local engine subprocess when the Ghost does not supply a move |
 | PostgreSQL | Per-account sessions, training evidence, and derived progress records |
 
 During local fallback, the browser marks the move as locally sourced and Ghost
 steering is unavailable for that move.
+
+Maia3 is AGPL-3.0 and runs unmodified, at a pinned upstream commit, only as a
+separate process that FastAPI drives over UCI; the API process never imports it.
 
 ## Core domain model
 

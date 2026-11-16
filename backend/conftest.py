@@ -20,8 +20,14 @@ os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
 # a client even if the disable flag is later changed.
 os.environ["POSTHOG_DISABLED"] = "true"
 os.environ.pop("POSTHOG_PROJECT_TOKEN", None)
+# The local Maia3 engine must never spawn in tests. Forced, not setdefault, so a
+# developer's shell MAIA3_ENABLED=1 cannot start engines: an opponent move that
+# reaches the engine fails fast with Maia3Error (503), as on a machine without
+# weights. Tests of the engine service build their own instances with fakes.
+os.environ["MAIA3_ENABLED"] = "0"
 
 from app.api import session as session_api
+from app import maia3_client as _maia3_client
 from app import opportunity_fold, opportunity_fold_recovery, opportunity_retention
 from app.opportunity_fold import FoldLimits
 from app.db import get_db
@@ -819,6 +825,24 @@ def _db_override():
         _reset_test_schema(conn)
     yield
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_maia3_boot_weights_error():
+    """Every test starts and ends with no recorded Maia3 boot-weights failure.
+
+    A test that runs the real boot check (or the lifespan) may record one; the
+    teardown clears it, so a later test that enables the engine is not told
+    "Maia3 weights missing". This sets a module value, not a method.
+
+    Deliberately NOT built on ``monkeypatch``: an autouse fixture that requests it
+    sets it up before the later autouse fixtures, so its undo would then run
+    AFTER their teardowns. ``_stop_leaked_scheduler_daemons`` would then see a
+    test's still-patched Mock singleton instead of the real one.
+    """
+    _maia3_client._boot_weights_error = None
+    yield
+    _maia3_client._boot_weights_error = None
 
 
 @pytest.fixture(autouse=True)

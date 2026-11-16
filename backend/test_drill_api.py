@@ -433,7 +433,7 @@ def test_next_opponent_move_steers_post_root_then_falls_back_at_boundary(
     boundary_board = chess.Board(f"{positions[4]} 0 1")
     boundary_board.push_uci("f1b5")
     boundary_fen = normalize_fen(boundary_board.fen())
-    fallback = ControllerMove(uci="a7a6", san="a6", method="maia3_api")
+    fallback = ControllerMove(uci="a7a6", san="a6", method="maia3_local")
     with (
         patch("app.api.game.get_opening_graph", return_value=graph),
         patch("app.opponent_move_controller.choose_move", return_value=fallback) as mock_maia,
@@ -649,7 +649,7 @@ def test_converted_drill_next_opponent_move_uses_backend_engine_fallback(
     session.converted_at = now
     db_session.commit()
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
             "/api/game/next-opponent-move",

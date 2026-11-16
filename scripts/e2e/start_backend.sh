@@ -8,6 +8,10 @@ DEFAULT_DB_URL="sqlite:///$BACKEND_DIR/.tmp/e2e.sqlite3"
 export DATABASE_URL="${DATABASE_URL:-$DEFAULT_DB_URL}"
 export BACKEND_PORT="${BACKEND_PORT:-8010}"
 export JWT_SECRET="${JWT_SECRET:-e2e-test-secret-32-bytes-minimum}"
+# The e2e suite runs on machines with and without Maia3 weights, so the local
+# engine is off by default (opponent moves 503, then browser Stockfish). Opt in
+# for a manual run with MAIA3_ENABLED=1.
+export MAIA3_ENABLED="${MAIA3_ENABLED:-0}"
 
 if [[ "$DATABASE_URL" == sqlite:///* ]]; then
   DB_PATH="${DATABASE_URL#sqlite:///}"

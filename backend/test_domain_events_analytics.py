@@ -186,7 +186,7 @@ def test_opponent_move_served_engine_fallback(client, auth_headers, captured):
     )
     session_id = start.json()["session_id"]
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         r = client.post(
             "/api/game/next-opponent-move",
@@ -217,7 +217,7 @@ def test_opponent_move_served_marks_a_replayed_decision(client, auth_headers, ca
     )
     session_id = start.json()["session_id"]
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     body = {"session_id": session_id, "fen": fen_after_e4, "moves": ["e2e4"]}
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         assert client.post(

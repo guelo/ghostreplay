@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -20,7 +21,15 @@ from app.api.openings import router as openings_router
 from app.api.stats import router as stats_router
 from app.api.session import router as session_router
 from app.api.srs import router as srs_router
+from app.database_url import is_deploy_platform
 from app.db import engine
+from app.maia3_client import (
+    boot_weights_error,
+    check_maia3_weights_at_boot,
+    maia3_settings,
+    shutdown_engine,
+    start_engine,
+)
 from app.opening_baseline_scheduler import get_baseline_scheduler
 from app.opening_cache import default_storage_format
 from app.opening_prewarm import start_prewarm
@@ -50,6 +59,7 @@ async def lifespan(app: FastAPI):
     target_source()
     retention_enabled()
     retention_seconds()
+    maia3 = maia3_settings()
     # Validate once before workers/requests. A disabled or unavailable collector
     # must not prevent gameplay startup; its static health message gates observation.
     initialize_srs_telemetry()
@@ -104,6 +114,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("opening prewarm failed to start")
 
+    # Start the local Maia3 engine (g-maia3-local-engine). The weights check is
+    # one sha256 of the checkpoint and never aborts boot: a failure logs an ERROR
+    # and leaves the engine off, so opponent moves answer 503 and the browser
+    # plays its local engine, as with MAIA3_ENABLED=0. The spawn itself runs in
+    # the background and must never delay /health.
+    try:
+        check_maia3_weights_at_boot(maia3, is_deploy_platform())
+        if boot_weights_error() is None:
+            start_engine()
+    except Exception:
+        logging.getLogger(__name__).exception("maia3 engine failed to start")
+
     cleanup_job = None
     try:
         cleanup_job = start_cleanup_job(engine)
@@ -113,6 +135,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # The engine has no ordering dependency on the schedulers. Its shutdown
+        # is bounded (about 5 s) and blocking, so it runs off the event loop.
+        try:
+            await asyncio.to_thread(shutdown_engine)
+        except Exception:
+            logging.getLogger(__name__).exception("maia3 engine shutdown failed")
         if cleanup_job is not None:
             try:
                 cleanup_job.shutdown()

@@ -219,11 +219,12 @@ opponent for the rest of the game and write those moves into their position grap
 Only when the engine **also** fails does a deterministic local legal move answer
 (`opponent_move_controller.fallback_move`, seeded per user/position/session over
 the sorted legal UCIs). That is the floor that makes the guarantee unconditional,
-and it covers both ways `choose_move` can fail: the remote Maia3 API is allowed to
-be down and answers 503 when it is, and the move it returns is derived from
-`moves` rather than from the request FEN, so it can come back illegal in the
-position actually being played and be rejected as a 400. Neither is the client's
-fault and a legal move demonstrably exists in both, so serving one beats erroring.
+and it covers both ways `choose_move` can fail: the local Maia3 engine is allowed
+to be unavailable (disabled, not started, crashed and restarting, busy, or too
+slow for the request, which abandons the move) and answers 503 when it is, and an
+engine defect could return a move that is illegal in the position actually being
+played, which is rejected as a 400. Neither is the client's fault and a legal move
+demonstrably exists in both, so serving one beats erroring.
 An *ordinary* request still gets that 503 or 400 — nothing about a suppressed
 target makes an engine failure acceptable for everyone else. The one error that
 survives here is a position with no legal move at all (malformed or terminal FEN):
@@ -281,8 +282,9 @@ rollback, with no retention lock held. So an in-flight publication drains in
 
 An HTTP or proxy timeout is **not** a substitute for any of this: cancelling the
 request does not roll back a backend still blocked inside the database. The
-request as a whole — ghost search plus a remote Maia call — is not bounded here,
-and does not need to be: it holds no retention lock while it runs.
+request as a whole — ghost search plus a Maia engine call, which itself waits at
+most `MAIA3_MOVE_TIMEOUT_S` — is not bounded here, and does not need to be: it
+holds no retention lock while it runs.
 
 ## Whole-user purge
 

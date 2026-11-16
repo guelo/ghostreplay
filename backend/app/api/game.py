@@ -1844,7 +1844,7 @@ def get_next_opponent_move(
             served, was_replayed, retention_suppression=retention_suppression
         )
 
-    # Step 2: Backend engine fallback — remote Maia3 API
+    # Step 2: Backend engine fallback — the local Maia3 engine
     #
     # A retention-suppressed request arrives here too, and takes this path FIRST.
     # It has already lost its target; making it play a worse move as well would
@@ -1858,9 +1858,10 @@ def get_next_opponent_move(
         from app.maia3_client import Maia3Error
         from app.opponent_move_controller import choose_move
 
-        # The remote Maia call can stall on network/DNS outside the database.
-        # Safe: this fallback path has no pending writes. Release the read
-        # transaction/connection before waiting on that external dependency.
+        # The engine call can wait up to MAIA3_MOVE_TIMEOUT_S (readiness, the
+        # engine lock, inference) outside the database. Safe: this fallback path
+        # has no pending writes. Release the read transaction/connection before
+        # waiting on the engine.
         # engine_elo was copied at entry (immutable), so no row read is needed here.
         db.rollback()
 
@@ -1875,26 +1876,28 @@ def get_next_opponent_move(
     except (Maia3Error, ValueError) as e:
         if "engine_started" in locals():
             engine_ms = _elapsed_ms(engine_started)
-        # Two distinct engine failures, and both are the engine's, not the
-        # client's: Maia3Error is the API being down, and ValueError is
-        # `choose_move` rejecting the move Maia returned as illegal in the
-        # requested FEN (Maia derives its position from `moves`, which this path
-        # forwards unvalidated, so the two can disagree).
+        # Two distinct failures. Maia3Error is the engine being unavailable
+        # (disabled, not started, restarting, busy, or too slow for this
+        # request's budget). ValueError is either a position with no move to
+        # play (malformed or terminal FEN) or `choose_move` rejecting the
+        # engine's move as illegal in the requested FEN; the engine is only ever
+        # sent that FEN, or legal history that replays to it, so the latter is an
+        # engine defect, not the client's fault.
         unavailable = isinstance(e, Maia3Error)
         if retention_suppression is None:
             _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
             raise HTTPException(
                 status_code=503 if unavailable else 400,
                 detail=(
-                    f"Maia3 API unavailable: {e}"
+                    f"Maia3 engine unavailable: {e}"
                     if unavailable
                     else f"Invalid input: {e}"
                 ),
             )
         # The local floor, and the only place it is reached: retention
         # bookkeeping has already removed this request's target, and a guarantee
-        # that it never FAILS the move cannot then rest on a remote dependency
-        # that is allowed to be down (503) or to answer with a move this position
+        # that it never FAILS the move cannot then rest on an engine that is
+        # allowed to be unavailable (503) or to answer with a move this position
         # cannot play (400). Either way the position itself is fine and a legal
         # move exists, so serving one is strictly better than an error. An
         # ordinary request still gets its 503/400 — nothing about retention makes

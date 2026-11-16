@@ -1,5 +1,5 @@
 """
-Opponent move controller: delegates to the remote Maia3 API.
+Opponent move controller: delegates to the local Maia3 engine.
 
 Converts the UCI move returned by Maia3 into both UCI and SAN formats
 for the frontend.
@@ -25,7 +25,7 @@ class ControllerMove:
 def choose_move(fen: str, target_elo: int, moves: list[str] | None = None) -> ControllerMove:
     """
     Select an opponent move for the given position and target ELO
-    by calling the remote Maia3 API.
+    from the local Maia3 engine.
 
     Args:
         fen: Current board position FEN.
@@ -33,10 +33,11 @@ def choose_move(fen: str, target_elo: int, moves: list[str] | None = None) -> Co
         moves: UCI move history from game start.
 
     Raises:
-        Maia3Error: If the Maia3 API call fails.
-        ValueError: If the returned UCI move is illegal in the position.
+        Maia3Error: If the Maia3 engine is unavailable.
+        ValueError: If the position is malformed or over, or the engine
+            returned a move that is illegal in it (an engine defect).
     """
-    result = maia3_get_move(moves=moves or [], target_elo=target_elo)
+    result = maia3_get_move(fen=fen, moves=moves or [], target_elo=target_elo)
 
     board = chess.Board(fen)
     uci_move = chess.Move.from_uci(result.uci)
@@ -48,7 +49,7 @@ def choose_move(fen: str, target_elo: int, moves: list[str] | None = None) -> Co
 
     san = board.san(uci_move)
 
-    return ControllerMove(uci=result.uci, san=san, method="maia3_api")
+    return ControllerMove(uci=result.uci, san=san, method="maia3_local")
 
 
 # Distinguishes a retention-degraded move from a Maia one in the decision log and
@@ -59,16 +60,17 @@ LOCAL_FALLBACK_METHOD = "local_legal"
 
 
 def fallback_move(fen: str, *, seed: int) -> ControllerMove:
-    """A legal move for this position chosen locally, with no remote inference.
+    """A legal move for this position chosen locally, with no engine inference.
 
     Exists for exactly one caller, in exactly one situation: SRS retention
     bookkeeping has suppressed a request's target AND :func:`choose_move` cannot
-    answer — either the Maia3 API is down, or it returned a move that is illegal
-    in the requested position. A suppressed request goes to the engine first, like
-    any other untargeted move — losing a target is not a reason to play worse.
-    This is the floor under that, because a guarantee whose whole content is
-    "never fail a move" must not rest on a network dependency that is allowed to
-    be down, nor on that dependency agreeing with the caller about the position.
+    answer — either the Maia3 engine is unavailable, or it returned a move that is
+    illegal in the requested position. A suppressed request goes to the engine
+    first, like any other untargeted move — losing a target is not a reason to
+    play worse. This is the floor under that, because a guarantee whose whole
+    content is "never fail a move" must not rest on an engine that is allowed to
+    be unavailable (disabled, restarting, busy or slow), nor on that engine being
+    free of defects.
 
     Selection is deterministic in ``seed`` over the SORTED legal UCI moves, so the
     same request for the same position answers identically every time. That is not

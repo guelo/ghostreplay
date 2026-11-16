@@ -654,7 +654,7 @@ def test_next_opponent_move_no_blunder_in_path(client, auth_headers, create_game
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
@@ -2191,7 +2191,7 @@ def test_next_opponent_move_engine_fallback(client, auth_headers, create_game_se
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_local")
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
