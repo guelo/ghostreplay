@@ -352,14 +352,17 @@ Railway:
 ```bash
 railway logs --service ghostreplay | grep scoped_opening_delta
 railway logs --service ghostreplay | grep opening_baseline_job
+railway logs --service ghostreplay | grep opening_score_delta_read
 ```
 
 | Log line | Source | Tells you |
 | --- | --- | --- |
-| `scoped_opening_delta outcome=… request_count=… candidate_count=… published_count=… session_load_ms=… overlay_ms=… digest_ms=… score_ms=… publish_ms=… total_ms=…` | `opening_score_delta.py:1396` | per-invocation overlay cost and where the time goes; `published_count` vs `request_count` is the lane's own hit rate |
-| `opening_baseline_job … source=… mismatch_reason=… snapshot_ms=…` | `opening_score_delta.py:1225` | baseline readiness latency — the upstream gate for `reason = baseline_missing` |
-| `opening_baseline_snapshot … source=… snapshot_ms=…` | `opening_score_delta.py:1000` | snapshot cost in isolation |
-| `POST /api/session/{id}/opening-boundary 200 12.345ms client=…` | `http_logging.py:24` | proof endpoint latency under the session-row lock (positional `<method> <path> <status> <ms>`, not `key=value`) |
+| `scoped_opening_delta outcome=… request_count=… candidate_count=… published_count=… session_load_ms=… overlay_ms=… digest_ms=… score_ms=… publish_ms=… total_ms=…` | `publish_scoped_opening_score_deltas` | per-invocation overlay cost and where the time goes; `published_count` vs `request_count` is the lane's own hit rate |
+| `opening_score_delta_read source=… scoped=… reason=… session_id=… read_ms=…` | `read_opening_score_delta` | one line per poll GET. `source` is the precedence branch that served (`fresh_batch` / `scoped_terminal` / `scoped_boundary` / `stale_batch` / `empty` / `no_chain` / `missing_session` / `token_stale` / `failed`) — so a fresh read now says whether the scoped lane or the whole-graph batch got there first. `reason` names the guard that refused a scoped publication; `none` when one served or none was consulted. The closed list is `ScopedDeltaRejection` in `backend/app/opening_score_delta.py`, each member commented with what it means — start with `shared_digest` (a shared-scope write landed under the publication, the g-6qwoj stall), `superseded` (this lane stored a publication and a newer request overtook it), `other_lane_leftover` (the only stored publication is the other lane's, already overtaken) and `absent` (nothing was stored). Read `other_lane_leftover` as `absent` for the lane named by `scoped`: both lanes share one slot per session and an overtaken publication is never removed, so with boundary publication on, a session that published at the boundary reads `scoped=terminal reason=other_lane_leftover` until its terminal lane publishes, including when that run is discarded and stores nothing. None of these reasons says whether a replacement run is pending — `absent` and `other_lane_leftover` are also what a discarded run reads after recovery re-requests it. For that, read `terminal_delta_recovery outcome=enqueued`/`scheduled` on the same session. Branch labels only — no digest, token or FEN |
+| `terminal_delta_recovery outcome=… session_id=… attempt=…` | `enqueue_terminal_delta_recovery` | whether a terminal scoped miss asked for a bounded replacement lane run, and why not (`enqueued` / `cooldown` / `min_interval` / `attempts_exhausted` / `scheduled` / `ineligible` / `not_enqueued` / `failed`). `attempt` is what the session has spent in the current cooldown window — the evidence for tuning `TERMINAL_DELTA_RECOVERY_MIN_INTERVAL_SECONDS` and `_MAX_ATTEMPTS` (g-6qwoj) |
+| `opening_baseline_job … source=… mismatch_reason=… snapshot_ms=…` | `run_baseline_snapshot_job` | baseline readiness latency — the upstream gate for `reason = baseline_missing` |
+| `opening_baseline_snapshot … source=… snapshot_ms=…` | `snapshot_opening_baseline` | snapshot cost in isolation |
+| `POST /api/session/{id}/opening-boundary 200 12.345ms client=…` | `HTTPLoggingMiddleware` (`_build_http_message`) | proof endpoint latency under the session-row lock (positional `<method> <path> <status> <ms>`, not `key=value`) |
 
 CPU, memory, and queue pressure are Railway's own service metrics in the
 dashboard, not application logs.

@@ -3,8 +3,10 @@
 
 The g-6qwoj pilot captured ~12 s accuracy-failure polls whose *own* scoped lane run
 had already published in well under a second. Production logs could not name the
-reader's rejection branch: ``read_opening_score_delta`` logs only ``source=`` and
-``compute_ms=``, and every scoped miss degrades to the same stale fallback.
+reader's rejection branch at the time: ``read_opening_score_delta`` logged nothing,
+and every scoped miss degraded to the same stale fallback, so the branch below had to
+be identified by reproduction. It is now logged directly (g-delta-read-reason,
+``opening_score_delta_read reason=``; see test_opening_score_delta_read_reason.py).
 
 These tests pin the sequence on the checked-out revision and separate the two ways a
 terminal poll ends up waiting on the whole-graph worker instead of the ~800 ms scoped

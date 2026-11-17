@@ -64,6 +64,35 @@ high-cardinality/user-derived value. That privacy choice also means the two
 event streams can be compared only in aggregate, not joined into individual
 waits.
 
+## The server side of the same wait
+
+These client events say how long a poll took, never why. The backend answers that
+in Railway logs, one line per poll GET:
+
+```
+opening_score_delta_read source=… scoped=… reason=… session_id=… read_ms=…
+```
+
+`source` is the precedence branch that served the read, so a fresh poll says
+whether the scoped lane or the whole-graph batch got there first — the two are
+not interchangeable when attributing a wait. `reason` names the guard that
+refused a scoped publication, which is what turns a run of identical stale polls
+into a diagnosis (g-delta-read-reason). Pair it with `terminal_delta_recovery`
+and `scoped_opening_delta` for the lane side. Field meanings are in
+[`opening_boundary_rollout_monitoring.md` §4](./opening_boundary_rollout_monitoring.md#4-what-posthog-cannot-see);
+the authoritative reason list is `ScopedDeltaRejection` in
+`backend/app/opening_score_delta.py`.
+
+Unlike the client events above, this line carries `session_id`. That joins a poll
+to its own `terminal_delta_recovery` line and to the HTTP access line, which
+prints the same id in the request path. It does not reach the lane's own logs:
+`scoped_opening_delta` carries counts and timings and
+`opening_score_delta_lane_run` carries user and colour, neither a session — so a
+poll is still tied to a lane run by user plus timing, now anchored by the
+recovery line. The poll line carries no digest, token, FEN, opening key or
+score. Report any log-derived number through
+[`railway-log-query-completeness.md`](./railway-log-query-completeness.md).
+
 ## Example PostHog queries
 
 Use a deployment-bounded date range for every query. Client capture can be

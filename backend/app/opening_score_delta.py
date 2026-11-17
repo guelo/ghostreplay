@@ -362,6 +362,80 @@ TERMINAL_DELTA_RECOVERY_MIN_INTERVAL_SECONDS = 1.0
 TERMINAL_DELTA_RECOVERY_MAX_ATTEMPTS = 3
 
 
+class ScopedDeltaRejection(str, Enum):
+    """Why ``_validated_scoped_score_map`` refused a scoped publication (g-delta-read-reason).
+
+    BRANCH NAMES ONLY. Every member is a fixed guard label, so the field stays
+    low-cardinality and never carries an evidence value, digest, token, FEN, opening
+    key or identifier. Diagnosing g-delta-stale-publish cost a source read plus a
+    purpose-built reproduction to learn which of these fired in production, because
+    all of them degrade to the same stale fallback.
+    """
+
+    # Nothing stored at all: never made, evicted, or discarded by the publisher
+    # (``counter_drift`` / ``scope_identity_drift`` / ``no_publishable_overlays``).
+    # Says NOTHING about whether a replacement is pending — a discarded run that
+    # recovery has already re-requested reads this too. ``terminal_delta_recovery``
+    # is what answers that.
+    ABSENT = "absent"
+    # THIS lane stored a publication and a newer request overtook its generation,
+    # which is what a poll reads between a terminal recovery reservation and the run
+    # it launches. Split out of ABSENT because that one label covered both "there was
+    # a publication and it has been replaced" and "there was never one".
+    SUPERSEDED = "superseded"
+    # The only stored publication is the OTHER lane's, and a newer request has
+    # overtaken it. Both lanes share one slot per session and a publication is never
+    # removed when it is overtaken, so a session that published at the opening
+    # boundary still holds that publication after the terminal request mints its
+    # generation. For the lane reading, read this as ABSENT: the slot holds nothing
+    # of its own, because its own publication would have replaced the leftover. Split
+    # out of SUPERSEDED, which would otherwise claim a terminal publication that never
+    # existed whenever boundary publication is on.
+    OTHER_LANE_LEFTOVER = "other_lane_leftover"
+    # A publication exists but belongs to the other lane, or to a source outside the
+    # closed set; the terminal and boundary readers each accept only their own.
+    SOURCE_MISMATCH = "source_mismatch"
+    SOURCE_UNKNOWN = "source_unknown"
+    # Bindings the publication was stamped with no longer describe this request.
+    TOKEN_MISMATCH = "token_mismatch"
+    SESSION_IDENTITY = "session_identity"
+    PLAYED_CHAIN = "played_chain"
+    # Terminal only: the session stopped qualifying as evidence.
+    INELIGIBLE = "ineligible"
+    # Boundary only: the proven active prefix vanished, or moved under the publication.
+    BOUNDARY_SNAPSHOT = "boundary_snapshot"
+    BOUNDARY_PREFIX = "boundary_prefix"
+    # Shared proofs.
+    REGISTRY_DRIFT = "registry_drift"
+    EVIDENCE_SEQ = "evidence_seq"
+    EPOCH_MISSING = "epoch_missing"
+    # The epoch moved and the publication's own shared scope changed with it. This is
+    # the branch behind the g-6qwoj stalls: a deferred analysis-cache write landing at
+    # a position the session scored.
+    SHARED_DIGEST = "shared_digest"
+    # Lost to a concurrent publication between the proof and the hand-off.
+    REARM_LOST = "rearm_lost"
+    GENERATION_RACE = "generation_race"
+
+
+class OpeningDeltaReadSource(str, Enum):
+    """Which precedence branch of ``read_opening_score_delta`` served one poll.
+
+    Recorded because a fresh read alone does not say whether the scoped lane or the
+    whole-graph batch got there first, and the g-6qwoj baseline turns on that split.
+    """
+
+    FRESH_BATCH = "fresh_batch"
+    SCOPED_TERMINAL = "scoped_terminal"
+    SCOPED_BOUNDARY = "scoped_boundary"
+    STALE_BATCH = "stale_batch"
+    EMPTY = "empty"
+    NO_CHAIN = "no_chain"
+    MISSING_SESSION = "missing_session"
+    TOKEN_STALE = "token_stale"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True, slots=True)
 class _TerminalRecoveryAttempt:
     """One terminal recovery re-enqueue, with the counters it was launched against.
@@ -1059,16 +1133,33 @@ def _publish_scoped_delta(publication: ScopedDeltaPublication) -> bool:
         return True
 
 
-def _current_scoped_delta(session_id) -> ScopedDeltaPublication | None:
+def _current_scoped_delta_with_reason(
+    session_id,
+) -> tuple[ScopedDeltaPublication | None, ScopedDeltaRejection | None, str | None]:
+    """Latest still-current publication, plus the branch name when there is none.
+
+    Both absences are the same verdict and always were; only the label is new
+    (g-delta-read-reason). Named here rather than by a second lookup in the caller
+    so the label cannot disagree with the verdict it explains.
+
+    The third element is the lane of the overtaken publication, set only alongside
+    ``SUPERSEDED``. This lookup does not know which lane is asking, so the caller
+    compares it, exactly as it compares a current publication's source.
+    """
     key = str(session_id)
     with _scoped_delta_lock:
         publication = _scoped_delta_publications.get(key)
         if publication is None:
-            return None
+            return None, ScopedDeltaRejection.ABSENT, None
         if _scoped_delta_generations.get(key) != publication.generation:
-            return None
+            return None, ScopedDeltaRejection.SUPERSEDED, publication.source
         _scoped_delta_publications.move_to_end(key)
-        return publication
+        return publication, None, None
+
+
+def _current_scoped_delta(session_id) -> ScopedDeltaPublication | None:
+    publication, _, _ = _current_scoped_delta_with_reason(session_id)
+    return publication
 
 
 def _rearm_scoped_delta_epoch(
@@ -2088,41 +2179,59 @@ def _validated_scoped_score_map(
     *,
     expected_source: str,
     expected_reconciliation_token: str | None = None,
-) -> dict[str, float] | None:
-    """Return a scoped score map only while every binding/proof still holds."""
-    publication = _current_scoped_delta(session.id)
+) -> tuple[dict[str, float] | None, ScopedDeltaRejection | None]:
+    """Return a scoped score map only while every binding/proof still holds.
+
+    The second element names the guard that refused, or ``None`` on acceptance
+    (g-delta-read-reason). It is OBSERVABILITY ONLY: the guards, their order and
+    their verdicts are exactly as before. The bindings below were one combined
+    condition and are now evaluated one at a time purely so a refusal can be named —
+    same short-circuit, same accept/reject, one label out.
+    """
+    publication, absence, overtaken_source = _current_scoped_delta_with_reason(
+        session.id
+    )
     if publication is None:
-        return None
+        if (
+            absence is ScopedDeltaRejection.SUPERSEDED
+            and overtaken_source != expected_source
+        ):
+            # Another lane's leftover, not this lane's replaced publication.
+            return None, ScopedDeltaRejection.OTHER_LANE_LEFTOVER
+        return None, absence
+    if publication.source != expected_source:
+        return None, ScopedDeltaRejection.SOURCE_MISMATCH
+    if publication.reconciliation_token != expected_reconciliation_token:
+        return None, ScopedDeltaRejection.TOKEN_MISMATCH
     if (
-        publication.source != expected_source
-        or publication.reconciliation_token
-        != expected_reconciliation_token
-        or publication.user_id != session.user_id
+        publication.user_id != session.user_id
         or publication.player_color != session.player_color
         or publication.session_mode != session.session_mode
         or publication.status != session.status
         or publication.drill_state != session.drill_state
         or publication.drill_terminal_reason != session.drill_terminal_reason
-        or publication.played_root_keys != played_root_keys
     ):
-        return None
+        return None, ScopedDeltaRejection.SESSION_IDENTITY
+    if publication.played_root_keys != played_root_keys:
+        return None, ScopedDeltaRejection.PLAYED_CHAIN
     if publication.source == SCOPED_DELTA_SOURCE_TERMINAL:
         if not session_is_evidence_eligible(session):
-            return None
+            return None, ScopedDeltaRejection.INELIGIBLE
     elif publication.source == SCOPED_DELTA_SOURCE_OPENING_BOUNDARY:
         snapshot = active_prefix_snapshot(db, session)
+        if snapshot is None:
+            return None, ScopedDeltaRejection.BOUNDARY_SNAPSHOT
         if (
-            snapshot is None
-            or publication.status != "active"
+            publication.status != "active"
             or publication.line_revision != session.move_line_revision
             or publication.opening_middle_ply != session.opening_middle_ply
             or publication.prefix_digest != snapshot.prefix_digest
             or publication.reconciliation_token
             != snapshot.reconciliation_token
         ):
-            return None
+            return None, ScopedDeltaRejection.BOUNDARY_PREFIX
     else:
-        return None
+        return None, ScopedDeltaRejection.SOURCE_UNKNOWN
 
     graph = get_opening_graph()
     roots = get_opening_roots()
@@ -2130,18 +2239,18 @@ def _validated_scoped_score_map(
     if publication.registry_fingerprint != opening_score_inputs_fingerprint(
         graph, roots, routing_snapshot
     ):
-        return None
+        return None, ScopedDeltaRejection.REGISTRY_DRIFT
     if (
         current_evidence_seq(db, session.user_id, session.player_color)
         != publication.evidence_seq
     ):
-        return None
+        return None, ScopedDeltaRejection.EVIDENCE_SEQ
 
     # Sample the live epoch before a possible scoped read so a successful re-arm
     # is a lower bound on the evidence that read observed.
     epoch = current_cache_epoch(db)
     if epoch is None:
-        return None
+        return None, ScopedDeltaRejection.EPOCH_MISSING
     if epoch != publication.cache_epoch:
         if (
             shared_scope_digest(
@@ -2151,17 +2260,17 @@ def _validated_scoped_score_map(
             )
             != publication.scoped_shared_digest
         ):
-            return None
+            return None, ScopedDeltaRejection.SHARED_DIGEST
         publication = _rearm_scoped_delta_epoch(publication, epoch)
         if publication is None:
-            return None
+            return None, ScopedDeltaRejection.REARM_LOST
     else:
         # Close the request-generation race after all DB checks.
         current = _current_scoped_delta(session.id)
         if current is None or current.generation != publication.generation:
-            return None
+            return None, ScopedDeltaRejection.GENERATION_RACE
         publication = current
-    return dict(publication.scored_roots)
+    return dict(publication.scored_roots), None
 
 
 def _delta_items_from_cache(
@@ -2369,10 +2478,18 @@ def read_opening_score_delta(
     waits; a scoped miss only re-enqueues best-effort — an active miss re-enqueues
     its own token, a terminal miss asks for one bounded replacement run
     (:func:`enqueue_terminal_delta_recovery`). Any failure degrades to ``([], False)``.
+
+    Every read logs which branch served it and, on a scoped miss, which guard refused
+    (g-delta-read-reason) — see the ``finally`` below.
     """
+    t0 = time.perf_counter()
+    source = OpeningDeltaReadSource.FAILED
+    scoped_lane: str | None = None
+    rejection: ScopedDeltaRejection | None = None
     try:
         authoritative = db.get(GameSession, session.id, populate_existing=True)
         if authoritative is None:
+            source = OpeningDeltaReadSource.MISSING_SESSION
             return [], False
         active_snapshot: ActivePrefixSnapshot | None = None
         if reconciliation_token is not None:
@@ -2382,17 +2499,20 @@ def read_opening_score_delta(
                 or active_snapshot.reconciliation_token
                 != reconciliation_token
             ):
+                source = OpeningDeltaReadSource.TOKEN_STALE
                 return [], False
             played_fens = [row.fen_after for row in active_snapshot.rows]
         else:
             played_fens = _session_played_fens(db, authoritative.id)
         chain = played_opening_chain(played_fens, get_opening_roots())
         if not chain:
+            source = OpeningDeltaReadSource.NO_CHAIN
             return [], True
         played_root_keys = tuple(root.opening_key for root in chain)
 
         if active_snapshot is not None:
-            scoped_scores = _validated_scoped_score_map(
+            scoped_lane = SCOPED_DELTA_SOURCE_OPENING_BOUNDARY
+            scoped_scores, rejection = _validated_scoped_score_map(
                 db,
                 authoritative,
                 played_root_keys,
@@ -2400,6 +2520,7 @@ def read_opening_score_delta(
                 expected_reconciliation_token=reconciliation_token,
             )
             if scoped_scores is None:
+                source = OpeningDeltaReadSource.EMPTY
                 enqueue_opening_boundary_delta(
                     db,
                     authoritative,
@@ -2409,6 +2530,7 @@ def read_opening_score_delta(
             items, _ = _delta_items_from_score_map(
                 authoritative, chain, scoped_scores
             )
+            source = OpeningDeltaReadSource.SCOPED_BOUNDARY
             return items, True
 
         batch, rows = list_cached_opening_scores(
@@ -2420,13 +2542,18 @@ def read_opening_score_delta(
                 chain,
                 {row.opening_key: row.opening_score for row in rows},
             )
+            # Left as the terminal lane's NOT-CONSULTED state on purpose: the fresh
+            # batch outranks it, so no publication was examined and there is no
+            # verdict to report.
+            source = OpeningDeltaReadSource.FRESH_BATCH
             return items, True
 
         # Sampled BEFORE the read below, not only after: with no lane request pending
         # or in flight beforehand, nothing can publish while the read runs, so a miss
         # here cannot be a publication that landed a thread-switch too late.
         scheduled_before_read = _terminal_delta_request_scheduled(authoritative)
-        scoped_scores = _validated_scoped_score_map(
+        scoped_lane = SCOPED_DELTA_SOURCE_TERMINAL
+        scoped_scores, rejection = _validated_scoped_score_map(
             db,
             authoritative,
             played_root_keys,
@@ -2436,6 +2563,7 @@ def read_opening_score_delta(
             items, _ = _delta_items_from_score_map(
                 authoritative, chain, scoped_scores
             )
+            source = OpeningDeltaReadSource.SCOPED_TERMINAL
             return items, True
 
         # Reached only with no provably-fresh batch AND no usable publication, so
@@ -2461,12 +2589,47 @@ def read_opening_score_delta(
                 chain,
                 {row.opening_key: row.opening_score for row in rows},
             )
+            source = OpeningDeltaReadSource.STALE_BATCH
             return items, False
+        source = OpeningDeltaReadSource.EMPTY
         return [], False
     except Exception:  # noqa: BLE001 — supplementary poll must never raise
+        source = OpeningDeltaReadSource.FAILED
         logger.warning(
             "opening delta poll failed session_id=%s",
             getattr(session, "id", None),
             exc_info=True,
         )
         return [], False
+    finally:
+        # Fields go IN THE MESSAGE: the root formatter prints %(message)s only, so
+        # extra= kwargs would be dropped (same pattern as compute_opening_score_delta
+        # and terminal_delta_recovery).
+        #
+        # WHY, per field (g-delta-read-reason). ``source`` names the precedence branch
+        # that served: a fresh read alone never said whether the scoped lane or the
+        # whole-graph batch got there first, which is exactly the split the g-6qwoj
+        # baseline turns on. ``reason`` names the guard that refused a scoped
+        # publication — every rejection used to degrade to the same stale fallback, so
+        # diagnosing g-delta-stale-publish needed a source read and a purpose-built
+        # reproduction to learn what a one-token field could have said. ``scoped``
+        # says which lane's publication was examined, since a reason alone does not
+        # (``none`` when precedence meant none was consulted). ``session_id`` joins this
+        # poll to its own ``terminal_delta_recovery`` line and to the HTTP access line,
+        # which already prints the same id in the request path. It does NOT reach the
+        # lane's own logs: ``scoped_opening_delta`` carries counts and timings and
+        # ``opening_score_delta_lane_run`` carries user and colour, neither a session,
+        # so a poll is still tied to a lane run by user plus timing — now anchored by
+        # the recovery line instead of guessed from nearby isolated runs.
+        #
+        # Branch labels only: no digest, token, FEN, opening key, score or evidence
+        # value is logged, here or in ScopedDeltaRejection.
+        logger.info(
+            "opening_score_delta_read source=%s scoped=%s reason=%s session_id=%s "
+            "read_ms=%.2f",
+            source.value,
+            "none" if scoped_lane is None else scoped_lane,
+            "none" if rejection is None else rejection.value,
+            getattr(session, "id", None),
+            (time.perf_counter() - t0) * 1000.0,
+        )
