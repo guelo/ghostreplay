@@ -94,6 +94,42 @@ def fold_exports(tmp_path, monkeypatch):
     return tmp_path / "exports"
 
 
+def _deployed(monkeypatch, *, export_dir_value: str | None = None) -> None:
+    """A deployed service, by the platform rule the guard itself consults.
+
+    Patching the rule rather than setting one platform's variables keeps these
+    tests right when platform detection changes.
+    """
+    monkeypatch.setattr("app.opportunity_fold_export.is_deploy_platform", lambda: True)
+    if export_dir_value is None:
+        monkeypatch.delenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", raising=False)
+    else:
+        monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", export_dir_value)
+
+
+def test_deployed_export_refuses_implicit_storage(monkeypatch, tmp_path):
+    from app.opportunity_fold_export import FoldExportError
+
+    _deployed(monkeypatch)
+    with pytest.raises(FoldExportError, match="durable private storage"):
+        export_dir()
+    # A relative path resolves inside the image just as the default does.
+    _deployed(monkeypatch, export_dir_value="exports")
+    with pytest.raises(FoldExportError, match="relative"):
+        export_dir()
+    # An operator still has to verify that this configured directory is mounted.
+    _deployed(monkeypatch, export_dir_value=str(tmp_path))
+    assert export_dir() == tmp_path
+
+
+def test_local_export_preserves_development_default(monkeypatch):
+    monkeypatch.setattr("app.opportunity_fold_export.is_deploy_platform", lambda: False)
+    monkeypatch.delenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR")
+    assert export_dir() == Path(__file__).resolve().parent / ".srs_fold_exports"
+    monkeypatch.setenv("GHOSTREPLAY_SRS_FOLD_EXPORT_DIR", "exports")
+    assert export_dir() == Path("exports")
+
+
 # ---------------------------------------------------------------------------
 # Seeding
 # ---------------------------------------------------------------------------
@@ -1415,6 +1451,100 @@ def test_expiry_removes_committed_manifests_their_artifacts_and_orphans(db_sessi
     assert db_session.query(OpportunityFoldBatch).count() == 0
 
 
+def test_expiry_without_export_storage_still_expires_manifests(db_session, monkeypatch, caplog):
+    """A missing directory skips only the orphan half, and says so without raising.
+
+    Manifests name their own files, so the seven-day bound does not depend on the
+    setting. Raising after that commit would report work that succeeded as a
+    failure; the hourly job would log it as ``srs_cleanup_job_failed``.
+    """
+    user_id = 9610
+    _simple(db_session, user_id=user_id, rows=2)
+    db_session.commit()
+    fold_user_batch(engine, user_id=user_id, limits=PATIENT)
+    db_session.expire_all()
+    batch = db_session.query(OpportunityFoldBatch).one()
+    artifact = Path(batch.artifact_uri)
+    orphan = artifact.parent / f"fold-{user_id}-{uuid.uuid4()}.json"
+    orphan.write_text("{}")
+    stale = (datetime.now(timezone.utc) - timedelta(days=8)).timestamp()
+    os.utime(orphan, (stale, stale))
+    batch.committed_at = datetime.now(timezone.utc) - timedelta(days=8)
+    batch.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+    db_session.commit()
+    _deployed(monkeypatch)
+
+    with caplog.at_level("ERROR", logger="app.opportunity_fold_recovery"):
+        report = expire_fold_artifacts(engine)
+
+    assert report.manifests_deleted == 1
+    assert report.artifacts_deleted == 1
+    assert not artifact.exists()
+    assert report.orphan_sweep_skipped and "durable private storage" in report.orphan_sweep_skipped
+    # No directory to scan, so the orphan stays for the next configured run.
+    assert report.orphans_deleted == 0
+    assert orphan.exists()
+    assert [r.getMessage().split()[0] for r in caplog.records
+            if r.levelname == "ERROR"] == ["srs_fold_orphan_sweep_skipped"]
+    db_session.expire_all()
+    assert db_session.query(OpportunityFoldBatch).count() == 0
+
+
+def test_a_sweep_without_export_storage_attempts_nothing(db_session, monkeypatch):
+    """Missing configuration is not a full disk: one error, no attempts at all."""
+    user_id = 9702
+    _simple(db_session, user_id=user_id, rows=2)
+    db_session.commit()
+    _deployed(monkeypatch)
+
+    with patch("app.opportunity_fold.fold_user_batch",
+               side_effect=AssertionError("attempted a fold")):
+        report = sweep(engine, user_ids=[user_id], limits=PATIENT)
+
+    assert report.candidates == 1
+    assert report.outcomes == {}
+    assert len(report.errors) == 1 and "export storage" in report.errors[0]
+    db_session.expire_all()
+    assert db_session.query(BlunderOpportunityEvent).count() == 2
+
+
+def test_a_disabled_sweep_reports_disabled_before_export_storage(db_session, monkeypatch):
+    """``sweep --user N`` gives the reason that applies first, as the hourly job does."""
+    user_id = 9703
+    _simple(db_session, user_id=user_id, rows=2)
+    _pause_folding(db_session)
+    _deployed(monkeypatch)
+
+    report = sweep(engine, user_ids=[user_id], limits=PATIENT)
+
+    assert report.outcomes == {FoldOutcome.DISABLED.value: 1}
+    assert report.errors == []
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_the_export_probe_refuses_a_directory_it_cannot_write(fold_exports):
+    """A mount with the wrong owner is configuration too, not a full disk."""
+    from app.opportunity_fold_export import FoldExportError, probe_export_storage
+
+    fold_exports.mkdir()
+    fold_exports.chmod(0o500)
+    try:
+        with pytest.raises(FoldExportError, match="cannot create files"):
+            probe_export_storage()
+    finally:
+        fold_exports.chmod(0o700)
+    assert list(fold_exports.iterdir()) == []
+
+
+def test_the_export_probe_creates_the_directory_and_leaves_nothing(fold_exports):
+    from app.opportunity_fold_export import probe_export_storage
+
+    assert probe_export_storage() == fold_exports
+    assert fold_exports.stat().st_mode & 0o777 == 0o700
+    assert list(fold_exports.iterdir()) == []
+
+
 def test_the_operator_cli_imports_and_parses(monkeypatch):
     """Import-time and argparse smoke, before any database work.
 
@@ -1437,7 +1567,18 @@ def test_the_operator_cli_imports_and_parses(monkeypatch):
     assert exc.value.code == 0
 
 
-def test_a_failed_export_costs_a_sweep_and_not_a_row(db_session):
+def test_status_reports_unusable_export_storage_instead_of_crashing(monkeypatch):
+    """``status`` is the question an operator asks before the directory exists."""
+    from scripts.fold_srs_opportunities import _export_dir_line
+
+    _deployed(monkeypatch)
+    line = _export_dir_line()
+    assert line.startswith("export directory: UNAVAILABLE (")
+    assert "durable private storage" in line
+
+
+@pytest.mark.parametrize("missing_deployed_config", [False, True])
+def test_a_failed_export_costs_a_sweep_and_not_a_row(db_session, monkeypatch, missing_deployed_config):
     """No export, no deletion — a slow or full disk never loses evidence."""
     from app.opportunity_fold_export import FoldExportError
 
@@ -1445,9 +1586,13 @@ def test_a_failed_export_costs_a_sweep_and_not_a_row(db_session):
     blunder, _ = _simple(db_session, user_id=user_id, rows=2)
     db_session.commit()
 
-    with patch("app.opportunity_fold.write_export",
-               side_effect=FoldExportError("no space left on device")):
+    if missing_deployed_config:
+        _deployed(monkeypatch)
         result = fold_user_batch(engine, user_id=user_id, limits=PATIENT)
+    else:
+        with patch("app.opportunity_fold.write_export",
+                   side_effect=FoldExportError("no space left on device")):
+            result = fold_user_batch(engine, user_id=user_id, limits=PATIENT)
 
     assert result.outcome is FoldOutcome.EXPORT_FAILED
     db_session.expire_all()

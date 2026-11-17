@@ -98,7 +98,15 @@ Wire release monitoring to these log events before activating:
 - `srs_cleanup_backlog_unknown`, `srs_cleanup_user_failed`,
   `srs_cleanup_job_failed`, `srs_cleanup_shutdown_timeout` (ERROR): investigate;
   missing measurement is not a zero backlog.
-- `srs_cleanup_sweep` (INFO): disabled state, candidate/batch/deleted counts,
+- `srs_cleanup_export_unavailable` (ERROR, once per run while cleanup is
+  enabled) and `srs_fold_orphan_sweep_skipped` (ERROR, once per expiry run):
+  this process has no usable `GHOSTREPLAY_SRS_FOLD_EXPORT_DIR`: it is unset or
+  relative on a deployed service, or (for the sweep only) this process cannot
+  create files in it. No fold is attempted and, when unset or relative, orphans
+  are not swept; backlog, lag alerts and manifest expiry continue. A full disk
+  is not caught up front and still shows as `export_failed` retries. See
+  [ROLLOUT_SRS_RETENTION.md](ROLLOUT_SRS_RETENTION.md#export-storage-guard).
+- `srs_cleanup_sweep` (INFO): disabled and export-unavailable state, candidate/batch/deleted counts,
   deferred/capped/alert/error counts. Monitor for at least one successful hourly
   execution; absence of logs is not evidence of a healthy empty backlog.
 - `session_activity_hint_failed` (WARNING): optional activity avoidance degraded;

@@ -235,8 +235,17 @@ Artifacts live in `GHOSTREPLAY_SRS_FOLD_EXPORT_DIR` (default
 `backend/.srs_fold_exports`), owner-only (0700/0600) because they hold one user's
 rows verbatim. Point it at durable storage on its own volume: an artifact a
 redeploy can delete is not a seven-day guarantee, and the default directory is
-inside the deploy image. `g-srs-retain-rollout` owns making that mandatory before
-folding is switched on.
+inside the deploy image. On managed deployments (detected by
+`app.database_url.is_deploy_platform`), an unset or relative export directory
+raises `FoldExportError` before transfer: a batch reports `export_failed` and
+deletes nothing, and a sweep checks once and attempts nothing. A sweep with
+cleanup enabled also probes the directory with a file it creates and removes,
+so a directory this process cannot write is refused the same way. Expiry still
+removes expired manifests and their files and skips only the orphan sweep.
+Local development keeps its default and may use a relative path. An explicit
+path alone does not prove durability: rollout must still verify the mount and
+private permissions. See
+[ROLLOUT_SRS_RETENTION.md](ROLLOUT_SRS_RETENTION.md#export-storage-guard).
 
 ## Verification
 

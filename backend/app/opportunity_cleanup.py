@@ -13,6 +13,7 @@ from app.models import (Blunder, BlunderOpportunityEvent, GameSession,
 from app.opponent_target_facts import target_source
 from app.opportunity_fold import (FoldLimits, FoldOutcome, SweepReport,
                                   _eligible_rows_query, eligible_users, fold_user_batch)
+from app.opportunity_fold_export import FoldExportError, probe_export_storage
 from app.opportunity_retention import database_clock, load_policy
 from app.session_activity import known_inflight
 from app.srs_math import as_utc
@@ -99,6 +100,8 @@ class CleanupReport:
     deferred: list[int] = field(default_factory=list)
     alert_users: list[int] = field(default_factory=list)
     disabled: bool = False
+    # Why no fold was attempted although cleanup is enabled, or None.
+    export_unavailable: str | None = None
 
 
 @dataclass
@@ -122,6 +125,11 @@ def scheduled_sweep(engine, *, limits=SCHEDULED_LIMITS, max_attempts=100,
     Each user pays only for their fold attempts and required cooldowns, not for
     other users' work or their preliminary quiet-time preference.
     All waits and reads are outside the fold's critical transaction.
+
+    An unusable export directory (unset, relative on a deployed service, or not
+    writable by this process) is checked once before any attempt. It logs one
+    ERROR and skips every fold, but the final backlog pass still runs, so lag
+    alerts keep firing until storage is fixed.
     """
     if not 1 <= max_attempts <= 100 or not 0 < max_seconds <= 120:
         raise ValueError("visits require 1..100 attempts and 0..120 seconds")
@@ -135,6 +143,13 @@ def scheduled_sweep(engine, *, limits=SCHEDULED_LIMITS, max_attempts=100,
     pending = eligible_users(engine, limit=None)
     report.sweep.candidates = len(pending)
     visits = {uid: _Visit(size=limits.max_pairs) for uid in pending}
+    try:
+        probe_export_storage()
+    except FoldExportError as err:
+        report.export_unavailable = str(err)
+        logger.error("srs_cleanup_export_unavailable candidates=%s reason=%s",
+                     len(pending), err)
+        pending = []
     while pending and not stopped():
         moment = clock()
         uid = next((uid for uid in pending if visits[uid].ready_at <= moment), None)

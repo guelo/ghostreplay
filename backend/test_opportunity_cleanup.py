@@ -1,4 +1,5 @@
 """Scheduling contracts use virtual time; transfer/eligibility use real SQL."""
+import os
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -13,8 +14,8 @@ from app.opportunity_fold import FoldOutcome, FoldResult
 from app.session_activity import known_inflight
 from app.opportunity_retention import database_clock
 from app.srs_math import as_utc
-from test_opportunity_compaction import (_blunder, _session, _event, _enable_folding,
-                                        _simple, PATIENT)
+from test_opportunity_compaction import (_blunder, _deployed, _session, _event,
+                                        _enable_folding, _simple, PATIENT)
 
 
 class Clock:
@@ -29,7 +30,8 @@ class Clock:
 
 
 @pytest.fixture
-def schedule(db_session, monkeypatch):
+def schedule(db_session, monkeypatch, tmp_path):
+    monkeypatch.setenv('GHOSTREPLAY_SRS_FOLD_EXPORT_DIR', str(tmp_path / 'exports'))
     _enable_folding(db_session)
     db_session.commit()
     clock = Clock()
@@ -280,6 +282,53 @@ def test_activity_unknown_and_coalescing_tolerance(db_session):
     with session_work(43):
         assert cleanup.recently_active(engine, 43)
     assert not known_inflight(43)
+
+
+@pytest.mark.parametrize('storage', [
+    'unset',
+    pytest.param('unwritable', marks=pytest.mark.skipif(
+        hasattr(os, 'geteuid') and os.geteuid() == 0,
+        reason='root ignores directory permissions')),
+])
+def test_missing_export_storage_is_one_error_not_a_hundred_retries(
+        schedule, monkeypatch, caplog, tmp_path, storage):
+    """Storage is checked once. Backlog and lag alerts are still measured.
+
+    ``unwritable`` is an absolute path under a parent the process cannot write,
+    the wrong-owner mount the rollout runbook warns about.
+    """
+    schedule.state[1] = Backlog(200, 24 * 3600)
+    if storage == 'unset':
+        _deployed(monkeypatch)
+        reason = 'durable private storage'
+    else:
+        locked = tmp_path / 'locked'
+        locked.mkdir(mode=0o500)
+        _deployed(monkeypatch, export_dir_value=str(locked / 'exports'))
+        reason = 'cannot create files'
+    try:
+        with caplog.at_level('WARNING'):
+            report = schedule.run()
+    finally:
+        if storage == 'unwritable':
+            locked.chmod(0o700)
+    assert schedule.calls == []
+    assert report.export_unavailable and reason in report.export_unavailable
+    assert report.sweep.candidates == 1 and not report.sweep.outcomes
+    assert report.remaining == {1: Backlog(200, 24 * 3600)}
+    assert report.alert_users == [1]
+    assert sorted(r.getMessage().split()[0] for r in caplog.records
+                  if r.levelno >= 30) == [
+        'srs_cleanup_export_unavailable', 'srs_cleanup_lag_alert']
+
+
+def test_hourly_run_without_export_storage_reports_instead_of_raising(schedule, monkeypatch):
+    """Expiry in ``finally`` must not turn a deliberate skip into a job failure."""
+    from app import opportunity_cleanup_job as job
+    _deployed(monkeypatch)
+    report = job.run_once(engine, sleep=schedule.clock.sleep)
+    assert report.export_unavailable
+    assert schedule.calls == []
 
 
 def test_expiry_runs_even_if_sweep_fails(monkeypatch):

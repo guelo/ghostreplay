@@ -46,7 +46,7 @@ from app.opportunity_fold import (  # noqa: E402
     eligible_users,
     sweep,
 )
-from app.opportunity_fold_export import export_dir  # noqa: E402
+from app.opportunity_fold_export import FoldExportError, export_dir  # noqa: E402
 from app.opportunity_retention import load_policy  # noqa: E402
 from app.opportunity_fold_recovery import (  # noqa: E402
     RecoveryExpired,
@@ -84,9 +84,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _export_dir_line() -> str:
+    """The directory, or why this process has none. Status must never crash."""
+    try:
+        return f"export directory: {export_dir()}"
+    except FoldExportError as err:
+        return f"export directory: UNAVAILABLE ({err})"
+
+
 def _print_status() -> int:
+    # First, so the line prints even if the database read below fails.
+    print(_export_dir_line())
     status = fold_status(engine)
-    print(f"export directory: {export_dir()}")
     print(f"database clock:   {status.now}")
     if status.first_fold_committed_at is None:
         print("first fold:       never — nothing has been deleted")
@@ -164,6 +173,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"manifests_deleted={report.manifests_deleted} "
           f"artifacts_deleted={report.artifacts_deleted} "
           f"orphans_deleted={report.orphans_deleted}")
+    if report.orphan_sweep_skipped:
+        # Expired manifests still went. The orphan half did not, so the run did
+        # not do everything it was asked.
+        print(f"  ERROR orphan sweep skipped: {report.orphan_sweep_skipped}",
+              file=sys.stderr)
+        return 1
     return 0
 
 

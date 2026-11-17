@@ -18,9 +18,10 @@ def run_once(engine, *, stopped=lambda: False, sleep=time.sleep):
     try:
         report = scheduled_sweep(engine, stopped=stopped, sleep=sleep)
         logger.info(
-            "srs_cleanup_sweep disabled=%s candidates=%s batches=%s rows_deleted=%s "
-            "capped=%s deferred=%s alerts=%s errors=%s",
-            report.disabled, report.sweep.candidates, report.sweep.batches,
+            "srs_cleanup_sweep disabled=%s export_unavailable=%s candidates=%s "
+            "batches=%s rows_deleted=%s capped=%s deferred=%s alerts=%s errors=%s",
+            report.disabled, report.export_unavailable is not None,
+            report.sweep.candidates, report.sweep.batches,
             report.sweep.rows_deleted, len(report.capped), len(report.deferred),
             len(report.alert_users), len(report.sweep.errors),
         )

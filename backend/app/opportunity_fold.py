@@ -90,6 +90,7 @@ from app.opportunity_fold_export import (
     FoldRow,
     canonical_rowset_hash,
     discard_export,
+    probe_export_storage,
     write_export,
 )
 from app.opportunity_retention import (
@@ -139,7 +140,9 @@ class FoldOutcome(str, Enum):
 
 # The outcomes a sweep treats as "this user is unavailable right now", as opposed
 # to "this user has nothing to do". Both stop the per-user loop; only the first
-# group is worth retrying on the next sweep.
+# group is worth retrying on the next sweep. EXPORT_FAILED belongs here for a
+# full or slow disk. An unusable export directory is not transient, and
+# :func:`sweep` probes it before the loop instead.
 TRANSIENT_OUTCOMES = frozenset({
     FoldOutcome.SKIPPED_PUBLICATION,
     FoldOutcome.SKIPPED_USER_BUSY,
@@ -1316,11 +1319,28 @@ def sweep(
 
     WHEN a sweep runs, and how it avoids active users, belongs to
     ``g-srs-cleanup-schedule``. This is the primitive it drives.
+
+    An export directory this process cannot use (unset or relative on a
+    deployed service, or not writable) is checked once, before the first
+    attempt. It is configuration, not contention: every attempt would prepare a
+    batch and fail its export the same way. The sweep attempts nothing and
+    reports one error. The policy is read first, as the hourly job does, so with
+    cleanup disabled each user still reports ``disabled`` whatever the storage.
     """
     limits = limits or FoldLimits()
     report = SweepReport()
     pending = list(user_ids if user_ids is not None else eligible_users(engine))
     report.candidates = len(pending)
+    if pending:
+        with Session(bind=engine) as db:
+            enabled = load_policy(db).cleanup_enabled
+        if enabled:
+            try:
+                probe_export_storage()
+            except FoldExportError as err:
+                logger.error("fold sweep not started: %s", err)
+                report.errors.append(f"export storage: {err}")
+                return report
     sizes: dict[int, int] = {}
     ready_at: dict[int, float] = {}
     attempts = 0

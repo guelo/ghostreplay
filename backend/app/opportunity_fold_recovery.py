@@ -647,6 +647,9 @@ class ExpiryReport:
     manifests_deleted: int = 0
     artifacts_deleted: int = 0
     orphans_deleted: int = 0
+    # Why the orphan half did not run, or None when it did. Expired manifests
+    # name their own files, so they still expire without an export directory.
+    orphan_sweep_skipped: str | None = None
 
 
 def expire_fold_artifacts(engine) -> ExpiryReport:
@@ -669,8 +672,21 @@ def expire_fold_artifacts(engine) -> ExpiryReport:
     manifests behind already expired (:mod:`app.opportunity_purge`), so they come
     through the FIRST half here, by name, on the first run after the purge — no
     age rule, and no question about the owner to get wrong.
+
+    The export directory is resolved BEFORE anything is deleted. Only the orphan
+    half needs it. When it cannot be resolved (a deployed service without a
+    durable export directory), expired manifests and the files they name still
+    go: the seven-day bound and a purge's expired manifests do not depend on the
+    setting. The orphan sweep is skipped, logged once, and reported in
+    ``orphan_sweep_skipped``. Nothing raises after the commit.
     """
     report = ExpiryReport()
+    try:
+        directory: Path | None = export_dir()
+    except FoldExportError as err:
+        directory = None
+        report.orphan_sweep_skipped = str(err)
+        logger.error("srs_fold_orphan_sweep_skipped reason=%s", err)
     with Session(bind=engine) as db:
         now = as_utc(db.execute(select(database_clock(db))).scalar_one())
         expired = db.execute(
@@ -689,7 +705,7 @@ def expire_fold_artifacts(engine) -> ExpiryReport:
         live = set(
             db.execute(select(OpportunityFoldBatch.batch_id)).scalars()
         )
-        purged = _purged_users(db)
+        purged = _purged_users(db, directory)
 
     for row in expired:
         try:
@@ -698,13 +714,14 @@ def expire_fold_artifacts(engine) -> ExpiryReport:
         except FoldExportError:
             logger.warning("could not remove expired fold export %s", row.artifact_uri)
 
-    report.orphans_deleted = _sweep_orphans(
-        live, cutoff=now - RECOVERY_WINDOW, purged=purged
-    )
+    if directory is not None:
+        report.orphans_deleted = _sweep_orphans(
+            directory, live, cutoff=now - RECOVERY_WINDOW, purged=purged
+        )
     return report
 
 
-def _purged_users(db: Session) -> set[int]:
+def _purged_users(db: Session, directory: Path | None) -> set[int]:
     """Which artifact owners have no SRS evidence left for this file to belong to.
 
     Deleting an ACCOUNT cascades its manifests away, which leaves the exports as
@@ -727,9 +744,9 @@ def _purged_users(db: Session) -> set[int]:
     fold commits that row before it writes an export, and a claimed file never
     reaches the age rule at all.
     """
-    if not _dedicated_export_directory():
+    if directory is None or not _dedicated_export_directory():
         return set()
-    owners = _artifact_owners()
+    owners = _artifact_owners(directory)
     if not owners:
         return set()
     protected = set(
@@ -755,15 +772,15 @@ def _dedicated_export_directory() -> bool:
     seven days, by which time the window had closed everywhere.
 
     A configured directory is the operator naming the deployment that owns it.
-    ``g-srs-retain-rollout`` makes setting it a production gate; until then this
-    costs a dev machine nothing but the age rule it always had.
+    A platform :func:`app.database_url.is_deploy_platform` recognises cannot
+    export without one (:func:`export_dir` refuses), so this rule is always on
+    there. On a dev machine it costs nothing but the age rule it always had.
     """
     return bool(os.environ.get(EXPORT_DIR_ENV))
 
 
-def _artifact_owners() -> set[int]:
+def _artifact_owners(directory: Path) -> set[int]:
     """The user ids named by the files in the export directory."""
-    directory = export_dir()
     if not directory.is_dir():
         return set()
     owners = set()
@@ -784,7 +801,9 @@ def _owner_of(name: str) -> int | None:
     return int(raw)
 
 
-def _sweep_orphans(live: set, *, cutoff: datetime, purged: set[int]) -> int:
+def _sweep_orphans(
+    directory: Path, live: set, *, cutoff: datetime, purged: set[int]
+) -> int:
     """Remove artifact files older than the window that no manifest claims.
 
     A file is identified by the batch id in its NAME, never by reading it: a
@@ -802,7 +821,6 @@ def _sweep_orphans(live: set, *, cutoff: datetime, purged: set[int]) -> int:
     ``purged`` are the owners whose SRS evidence has been deleted on request.
     Their files skip the age rule entirely — see :func:`_purged_users`.
     """
-    directory = export_dir()
     if not directory.is_dir():
         return 0
     removed = 0

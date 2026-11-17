@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.database_url import is_deploy_platform
 from app.srs_math import as_utc
 
 # Bump when the canonical encoding below changes in any way that alters the
@@ -169,11 +170,56 @@ def canonical_rowset_hash(
 
 
 def export_dir() -> Path:
-    """Where artifacts live. Created on demand, never guessed at read time."""
+    """Where artifacts live. Created on demand, never guessed at read time.
+
+    On a managed deployment the directory must be configured, and absolute: the
+    built-in default and any relative path both resolve inside the deploy image,
+    which a redeploy replaces. Passing this check does not prove the path is
+    durable. The rollout runbook verifies the mount.
+    """
     configured = os.environ.get(EXPORT_DIR_ENV)
+    deployed = is_deploy_platform()
     if configured:
+        if deployed and not Path(configured).is_absolute():
+            raise FoldExportError(
+                f"{EXPORT_DIR_ENV}={configured!r} is relative, so it resolves inside "
+                "the deploy image; deployed services need an absolute path on "
+                "durable private storage"
+            )
         return Path(configured)
+    if deployed:
+        raise FoldExportError(
+            f"{EXPORT_DIR_ENV} must point to durable private storage on deployed "
+            "services; refusing the in-image recovery export directory"
+        )
     return Path(__file__).resolve().parents[1] / DEFAULT_EXPORT_DIRNAME
+
+
+def probe_export_storage() -> Path:
+    """Prove this process can create files where exports go. Sweeps call it first.
+
+    :func:`export_dir` refuses the unset and relative cases. This also refuses a
+    configured directory the process cannot write, such as a volume mounted with
+    the wrong owner or read-only. Both are configuration: every attempt would
+    prepare a batch and fail its export the same way. The directory is created
+    exactly as :func:`write_export` creates it.
+
+    It proves neither durability nor free space. An empty file fits on a full
+    disk, so a full disk still fails each export and stays transient. The probe
+    is named like a partial export, so if a crash strands one between create and
+    unlink, the expiry sweep removes it on age.
+    """
+    directory = export_dir()
+    probe = directory / f"fold-probe-{uuid.uuid4()}.partial"
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        probe.unlink()
+    except OSError as err:
+        raise FoldExportError(
+            f"cannot create files in fold export directory {directory}: {err}"
+        ) from err
+    return directory
 
 
 def artifact_path(batch_id: uuid.UUID, *, user_id: int) -> Path:

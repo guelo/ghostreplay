@@ -237,6 +237,8 @@ and
 [`backend/test_opportunity_lifecycle_pg.py`](backend/test_opportunity_lifecycle_pg.py),
 with the boundary and purge reference in
 [`backend/scripts/RETAIN_SRS_OPPORTUNITIES.md`](backend/scripts/RETAIN_SRS_OPPORTUNITIES.md).
+Deployment checks, durable recovery storage and the activation sequence live in
+[`backend/scripts/ROLLOUT_SRS_RETENTION.md`](backend/scripts/ROLLOUT_SRS_RETENTION.md).
 
 Retention can remove a practice target, but it never fails an opponent move.
 Publishing a new target and folding a user's evidence serialize on that user's
