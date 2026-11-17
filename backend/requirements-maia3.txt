@@ -1,0 +1,24 @@
+# The local Maia3 engine (g-maia3-local-engine): torch and upstream maia3, which
+# the API runs only as a separate UCI subprocess (app/maia3_client.py; AGPL-3.0,
+# see THIRD_PARTY_NOTICES.md). Installed for dev, the CI maia3-engine job and the
+# release test, together with the runtime and dev files:
+#
+#   pip install -r requirements.txt -r requirements-dev.txt -r requirements-maia3.txt \
+#       -c requirements.production.constraints.txt
+#
+# NOT installed by Railway yet: its install command reads requirements.txt only,
+# so production builds don't download torch for an engine that is off.
+# g-maia3-railway-deploy moves these lines into requirements.txt and the
+# constraints below into requirements.production.constraints.txt.
+#
+# Torch: a hashed CPU wheel for linux/x86_64 (no --extra-index-url, which would
+# let pip take any package from the PyTorch index) and the PyPI wheel on macOS.
+# Keep the two versions equal; test_dependency_pins.py checks it. Other platforms
+# (linux/arm64, Windows) are unsupported.
+# maia3: pinned by upstream commit (app/maia3_pins.py UPSTREAM_COMMIT); the
+# archive needs no git. Its unpinned torch dependency is satisfied by the line
+# above.
+-c requirements-maia3.constraints.txt
+torch @ https://download.pytorch.org/whl/cpu/torch-2.15.0%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=0955c7e3446326293f48af18fad67872fa31dee5a36a87690eb9e5be8b465be3 ; sys_platform == "linux" and platform_machine == "x86_64"
+torch==2.15.0 ; sys_platform == "darwin"
+maia3 @ https://github.com/CSSLab/maia3/archive/1e13597c42d4858b7cfd7cfdae01e297263364b2.zip

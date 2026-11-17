@@ -77,3 +77,8 @@ backend/scripts/fixtures/cohort_provenance.json.tmp-*
 # production rows with a seven-day life; they are operational state, never review
 # material, and a deployment points the variable at durable storage instead.
 /backend/.srs_fold_exports/
+
+# Maia3 checkpoints, fetched and verified by backend/scripts/prepare_maia3_engine.py
+# (pins in backend/app/maia3_pins.py). Never committed; .railwayignore also keeps
+# them out of a manual `railway up`.
+backend/maia3_weights/

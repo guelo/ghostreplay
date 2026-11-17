@@ -49,6 +49,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
+          # Only this job's files. setup-python's cache key has no job in it,
+          # so the maia3-engine job (which also hashes the maia3 files) gets a
+          # different key and neither job restores the other's cache.
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+            backend/requirements.production.constraints.txt
       # Install the runtime closure at the versions Railway installs. Without -c
       # this resolves whatever is newest on the day the job runs, which is not
       # what production serves (g-test-deps-pinning: SQLAlchemy 2.1 and
@@ -100,3 +108,49 @@ jobs:
       # enforces required-mode fail-closed behaviour.
       - name: Run tests
         run: pytest -v
+
+  # The real Maia3 engine on Linux (g-maia3-real-engine): torch, the pinned
+  # weights and the engine wrapper, which the job above only tests against fake
+  # engines. Production does not install or run the engine yet.
+  maia3-engine:
+    runs-on: ubuntu-latest
+    env:
+      # The smoke and its fail-the-build exit status only run when enabled.
+      MAIA3_ENABLED: '1'
+      # Fail closed: a missing maia3 install or missing weights fails the pin
+      # and release tests instead of skipping them, so this job cannot go green
+      # without running the engine.
+      GHOSTREPLAY_REQUIRE_MAIA3_TESTS: '1'
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      # Keyed on the pins: a new revision or model re-downloads, and
+      # prepare_maia3_engine.py verifies size and sha256 of whatever is restored.
+      - name: Cache Maia3 weights
+        uses: actions/cache@v4
+        with:
+          path: backend/maia3_weights
+          key: maia3-weights-${{ hashFiles('backend/app/maia3_pins.py') }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt -r requirements-maia3.txt -c requirements.production.constraints.txt
+          pip check
+      # On Linux the Maia3 pins must equal what requirements-maia3.txt installs.
+      - name: Check dependency pins
+        run: python -W error -m pytest -c pytest.ini test_dependency_pins.py -rs
+      # Fetch and verify the weights, then start the real engine, play one move
+      # and stop it. Prints "maia3 smoke ok ... child_hwm_kb=..." (native Linux
+      # peak memory of the engine child). --require-smoke exits 1 if
+      # MAIA3_ENABLED=1 is ever dropped, instead of skipping the smoke.
+      - name: Prepare and smoke-test the engine
+        run: python scripts/prepare_maia3_engine.py --require-smoke
+      - name: Engine release test
+        run: python -W error -m pytest -c pytest.ini -m release_seal test_maia3_engine_release.py -v -rs

@@ -161,8 +161,9 @@ if [ ! -x backend/.venv/bin/python ]; then
   overall_status=1
 else
   # `-m "not release_seal"`: the production-shape PostgreSQL delta-lane benchmark takes
-  # minutes and requires its deliberately provisioned disposable database. It is a release
-  # validation, not an ordinary pre-push test; the summary below names what did not run.
+  # minutes and requires its deliberately provisioned disposable database, and the Maia3
+  # engine release test needs torch and the fetched weights. They are release validations,
+  # not ordinary pre-push tests; the summary below names what did not run.
   run_gate \
     "Backend tests" \
     "Backend tests (warnings are errors; release-only benchmark deselected)" \
@@ -173,6 +174,7 @@ else
 fi
 
 release_seal_command='backend/.venv/bin/python -m pytest -c backend/pytest.ini backend -m release_seal'
+maia3_release_command='backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini -m release_seal backend/test_maia3_engine_release.py'
 
 printf '\nTest Results\n------------\n'
 for index in "${!result_names[@]}"; do
@@ -185,8 +187,12 @@ done
 # Say what was NOT run, every time. A deselection nobody is reminded of is a deselection that
 # quietly becomes "we deleted those tests".
 printf '\nNot run by this gate: @release_seal (the production-shape delta-lane benchmark,\n'
-printf 'and any case that reads host state such as a restored dump or a private-store capture).\n'
+printf 'the Maia3 engine release test, and any case that reads host state such as a restored\n'
+printf 'dump or a private-store capture).\n'
 printf 'Run it when validating that release-only benchmark:\n  %s\n' "$release_seal_command"
+printf 'Run the Maia3 engine release test after changing the torch or maia3 pins, the weights\n'
+printf 'pins or app/maia3_client.py (CI maia3-engine job runs it on every backend push):\n  %s\n' \
+  "$maia3_release_command"
 
 if ((overall_status != 0)); then
   printf '\nOne or more pre-push checks failed.\n' >&2

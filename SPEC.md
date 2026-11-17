@@ -142,6 +142,8 @@ steering is unavailable for that move.
 
 Maia3 is AGPL-3.0 and runs unmodified, at a pinned upstream commit, only as a
 separate process that FastAPI drives over UCI; the API process never imports it.
+The license notice and the code and weights pins are in `THIRD_PARTY_NOTICES.md`;
+the engine's dev setup is in `backend/README.md`.
 
 ## Core domain model
 

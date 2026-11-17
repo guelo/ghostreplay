@@ -28,7 +28,7 @@ If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backe
 ## Testing Guidance
 - Avoid overly detailed UI/interface tests (exact layout structure, cosmetic copy, or styling-specific assertions).
 - Prefer testing behavior contracts, data flow, and critical user outcomes instead of pixel-level or nav-chrome details.
-- A test that needs minutes of wall clock, or that reads host state other agents are editing, does not belong in the pre-push gate. Mark it `@pytest.mark.release_seal` (registered in `backend/pytest.ini`; `.githooks/pre-push` deselects it and prints what it skipped) and document when it must be run. Today that marker covers the production-shape PostgreSQL delta-lane benchmark — see `backend/scripts/BENCH_OPENING_SCORE_DELTA_LANE.md`.
+- A test that needs minutes of wall clock, or that reads host state other agents are editing, does not belong in the pre-push gate. Mark it `@pytest.mark.release_seal` (registered in `backend/pytest.ini`; `.githooks/pre-push` deselects it and prints what it skipped) and document when it must be run. Today that marker covers the production-shape PostgreSQL delta-lane benchmark — see `backend/scripts/BENCH_OPENING_SCORE_DELTA_LANE.md` — and the Maia3 engine release test (`backend/test_maia3_engine_release.py`, real torch engine and weights). Run the Maia3 test after changing the torch or maia3 pins, the weights pins or `app/maia3_client.py`; the CI `maia3-engine` job runs it on every backend push.
 
 ## Multi-Agent Workspace Rules
 

@@ -12,6 +12,32 @@ export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/ghost
 uvicorn app.main:app --reload --port 8000 --no-access-log
 ```
 
+### Maia3 engine (opponent moves)
+
+Bot moves come from a local Maia3 engine that the API runs as a separate UCI
+process (`app/maia3_client.py`; license: `THIRD_PARTY_NOTICES.md`). It is off
+unless `MAIA3_ENABLED=1`, and it needs torch, upstream maia3 and the pinned
+weights. The supported dev platforms are macOS (arm64) and Linux x86_64:
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt -r requirements-maia3.txt -c requirements.production.constraints.txt
+MAIA3_ENABLED=1 python scripts/prepare_maia3_engine.py   # once: fetch, verify, smoke
+MAIA3_ENABLED=1 uvicorn app.main:app --reload --port 8000 --no-access-log
+```
+
+`prepare_maia3_engine.py` downloads the checkpoint (maia3-23m, about 92 MB) into
+the git-ignored `maia3_weights/` at its pinned revision and checks its size and
+sha256. It then starts the engine, plays one move and ends with
+`maia3 smoke ok ... child_hwm_kb=...`. Without the weights, or with
+`MAIA3_ENABLED=0` (the default), opponent moves answer 503 and the browser plays
+its local Stockfish instead. `MAIA3_MODEL=maia3-5m` selects the smaller
+checkpoint. The other `MAIA3_*` settings are in `app/maia3_client.py`
+(`Maia3Settings`).
+
+Railway does not install `requirements-maia3.txt` yet (g-maia3-railway-deploy).
+Its pins are in `requirements-maia3.constraints.txt`, which the requirements file
+applies itself.
+
 ## Database migrations (Alembic)
 
 ```bash
@@ -29,7 +55,11 @@ libraries production runs. When the constraints file changes, rerun the install
 above in every existing venv: `test_dependency_pins.py` fails the suite (and so
 the pre-push gate and CI) when the venv's runtime versions differ from the pins,
 or when a runtime dependency has no pin. To bump a dependency, change its pin,
-reinstall, and run the full suite under `-W error` before deploying.
+reinstall, and run the full suite under `-W error` before deploying. A venv
+with `requirements-maia3.txt` installed is also held to
+`requirements-maia3.constraints.txt` and to the torch pin. After changing either,
+run the Maia3 engine release test (`test_maia3_engine_release.py`; its docstring
+gives the command).
 
 ## Testing
 
