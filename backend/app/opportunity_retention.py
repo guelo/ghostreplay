@@ -42,6 +42,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import (
     ColumnElement,
     DateTime,
+    Float,
     Interval,
     func,
     insert,
@@ -228,13 +229,27 @@ def database_clock(db: Session) -> ColumnElement[datetime]:
 def shifted_clock(db: Session, delta: timedelta) -> ColumnElement[datetime]:
     """``database_clock - delta`` as a SQL expression, per dialect.
 
-    PostgreSQL subtracts a bound INTERVAL. SQLite has no interval arithmetic on
-    its TIMESTAMP text, so the shift is pushed into the same ``strftime`` call
-    that produces the clock sample — one expression, one sample, same textual
-    shape as the stored column so the comparison stays a valid ordering.
+    PostgreSQL subtracts ``make_interval(secs => ...)``: exact elapsed time,
+    never a bound ``timedelta``. psycopg sends a timedelta as an interval with a
+    separate DAYS field, and PostgreSQL subtracts interval days from a
+    timestamptz as calendar days in the session TimeZone. In a zone that
+    observes daylight saving, a window spanning a clock change would then be
+    an hour longer or shorter than ``delta``, while :func:`frozen_by_age` uses
+    exact Python arithmetic. On a spring-forward change that hour is the whole
+    default G: the fold cutoff would land on the publication freeze instant.
+    An interval with no days part is zone-independent.
+
+    SQLite has no interval arithmetic on its TIMESTAMP text, so the shift is
+    pushed into the same ``strftime`` call that produces the clock sample — one
+    expression, one sample, same textual shape as the stored column so the
+    comparison stays a valid ordering.
     """
     if db.get_bind().dialect.name == "postgresql":
-        return database_clock(db) - literal(delta, type_=Interval())
+        exact = func.make_interval(
+            0, 0, 0, 0, 0, 0, literal(delta.total_seconds(), type_=Float()),
+            type_=Interval(),
+        )
+        return database_clock(db) - exact
     seconds = int(delta.total_seconds())
     return type_coerce(
         func.strftime(

@@ -165,6 +165,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_srs_retention_integration_pg.py::test_pg_computation_outliving_grace_falls_back_after_real_fold",
     "test_srs_retention_integration_pg.py::test_pg_endpoint_waits_for_actual_fold_then_rechecks_or_degrades",
     "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia",
+    "test_srs_retention_integration_pg.py::test_pg_retention_cutoffs_are_exact_in_a_daylight_saving_session_zone",
     "test_opportunity_cleanup_pg.py::test_pg_activity_hint_is_database_stamped_coalesced_and_never_waits_for_upload",
     "test_opportunity_cleanup_pg.py::test_pg_activity_arriving_during_export_defers_normal_but_not_forced_transfer",
     "test_opportunity_cleanup_pg.py::test_pg_backlog_age_uses_same_pin_and_legacy_predicates_as_fold",
@@ -177,6 +178,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opponent_session_expiry.py::test_pg_deleted_root_proof_fails_closed",
     "test_opponent_session_expiry.py::test_pg_expiry_rechecked_after_existing_session_lock",
     "test_opponent_session_expiry.py::test_pg_replay_and_normal_record_do_not_wait_for_upload_lock",
+    "test_opponent_session_expiry.py::test_pg_expiry_arithmetic_is_exact_in_a_daylight_saving_session_zone",
 
     "test_opening_score_storage_pg.py::test_pg_current_schema_model_and_migration_parity",
     "test_opening_score_storage_pg.py::test_pg_conversion_retirement_and_downgrade_guard",
@@ -237,6 +239,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opportunity_lifecycle_pg.py::test_an_old_session_delete_is_rejected_once_freezing_is_enabled",
     "test_opportunity_lifecycle_pg.py::test_a_recent_session_delete_still_succeeds_under_freezing",
     "test_opportunity_lifecycle_pg.py::test_the_session_guard_uses_the_database_clock_not_transaction_start",
+    "test_opportunity_lifecycle_pg.py::test_the_freeze_boundary_is_exact_elapsed_time_in_a_daylight_saving_zone",
     "test_opportunity_lifecycle_pg.py::test_deleting_a_frozen_event_row_directly_is_rejected",
     "test_opportunity_lifecycle_pg.py::test_the_fold_transfer_marker_allows_the_controlled_deletion",
     "test_opportunity_lifecycle_pg.py::test_deleting_the_parent_blunder_cascades_through_the_frozen_guard",
@@ -605,6 +608,12 @@ REQUIRED_PG_GATE_PARAM_CASES = frozenset({
     "test_srs_retention_integration_pg.py::test_pg_endpoint_waits_for_actual_fold_then_rechecks_or_degrades[timeout]",
     "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia[policy]",
     "test_srs_retention_integration_pg.py::test_pg_missing_authority_serves_legal_replay_without_maia[targeted_history]",
+    "test_srs_retention_integration_pg.py::test_pg_retention_cutoffs_are_exact_in_a_daylight_saving_session_zone[fall_back]",
+    "test_srs_retention_integration_pg.py::test_pg_retention_cutoffs_are_exact_in_a_daylight_saving_session_zone[spring_forward]",
+    "test_opponent_session_expiry.py::test_pg_expiry_arithmetic_is_exact_in_a_daylight_saving_session_zone[fall_back]",
+    "test_opponent_session_expiry.py::test_pg_expiry_arithmetic_is_exact_in_a_daylight_saving_session_zone[spring_forward]",
+    "test_opportunity_lifecycle_pg.py::test_the_freeze_boundary_is_exact_elapsed_time_in_a_daylight_saving_zone[America/Los_Angeles]",
+    "test_opportunity_lifecycle_pg.py::test_the_freeze_boundary_is_exact_elapsed_time_in_a_daylight_saving_zone[Australia/Sydney]",
     # Both builder seams are distinct publication windows: the edge case splices
     # wave 1 into wave 2, the position case races the final fence. And the
     # bounded-read plan has to hold for the marker format that does NOT own the

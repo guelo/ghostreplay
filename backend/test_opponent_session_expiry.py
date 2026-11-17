@@ -445,3 +445,47 @@ def test_pg_replay_and_normal_record_do_not_wait_for_upload_lock(pg_client, pg_s
             assert not pool.submit(record).result(timeout=5)[1]
         finally:
             holder.rollback()
+
+
+@pg_required
+@pytest.mark.parametrize("clock_change", ["fall_back", "spring_forward"])
+def test_pg_expiry_arithmetic_is_exact_in_a_daylight_saving_session_zone(
+    pg_session_factory, monkeypatch, clock_change,
+):
+    from app import opponent_cleanup
+
+    # Both the 30-day fact window and a 60-day retention cross a US clock change
+    # (2026-11-01 fall back, 2027-03-14 spring forward). Calendar-day or
+    # wall-clock arithmetic in a Pacific session would move each instant by an
+    # hour, which on spring forward is the whole insurance margin D.
+    now = {
+        "fall_back": datetime(2026, 11, 16, 12, tzinfo=timezone.utc),
+        "spring_forward": datetime(2027, 4, 1, 12, tzinfo=timezone.utc),
+    }[clock_change]
+    retention_window = timedelta(days=60)
+    monkeypatch.setattr(opponent_cleanup, "database_clock",
+                        lambda db: literal(now, type_=DateTime(timezone=True)))
+    monkeypatch.setenv("OPPONENT_DECISION_RETENTION_SECONDS",
+                       str(int(retention_window.total_seconds())))
+    with pg_session_factory() as db:
+        db.execute(text("SET LOCAL TimeZone = 'America/Los_Angeles'"))
+        envelope, fact = db.execute(select(
+            opponent_cleanup.envelope_cutoff(db), opponent_cleanup.fact_cutoff(db),
+        )).one()
+        assert as_utc(envelope) == now - opponent_cleanup.DELETION_MARGIN
+        assert as_utc(fact) == now - (opponent_cleanup.FACT_WINDOW
+                                      + opponent_cleanup.DELETION_MARGIN)
+
+        db.add(User(id=123))
+        db.flush()
+        session = GameSession(
+            id=uuid.uuid4(), user_id=123, started_at=now - retention_window,
+            status="active", engine_elo=1500, player_color="white",
+        )
+        db.add(session)
+        retention.initialize_deadline(db, session)
+        db.flush()
+        deadline = db.scalar(select(GameSession.opponent_decisions_expires_at)
+                             .where(GameSession.id == session.id))
+        assert as_utc(deadline) == now
+        db.rollback()

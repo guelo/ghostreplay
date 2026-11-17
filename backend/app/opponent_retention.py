@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.models import GameSession, OpponentDecision
+from app.srs_math import as_utc
 
 
 def retention_seconds() -> int | None:
@@ -51,8 +52,11 @@ def initialize_deadline(db: Session, session: GameSession) -> None:
     # Refresh the persisted value, including the model's server-default path.
     db.refresh(session, ["started_at", "opponent_decisions_expires_at"])
     if session.opponent_decisions_expires_at is None:
+        # UTC first: psycopg returns started_at in the session TimeZone, and
+        # adding a timedelta to a zone-aware datetime is wall-clock arithmetic,
+        # an hour off across a daylight-saving change.
         session.opponent_decisions_expires_at = (
-            session.started_at + timedelta(seconds=seconds)
+            as_utc(session.started_at) + timedelta(seconds=seconds)
         )
 
 

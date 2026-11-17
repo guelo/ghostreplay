@@ -421,3 +421,39 @@ def test_pg_state_creation_failure_rolls_back_before_legal_fallback(
         with pg_engine.begin() as conn:
             conn.execute(text('DROP TRIGGER srs_qualification_reject_state ON user_opportunity_retention_state'))
             conn.execute(text('DROP FUNCTION srs_qualification_reject_state()'))
+
+
+@pytest.mark.parametrize('clock_change', ['fall_back', 'spring_forward'])
+def test_pg_retention_cutoffs_are_exact_in_a_daylight_saving_session_zone(
+    pg_session_factory, qualification_clock, clock_change,
+):
+    from datetime import datetime, timezone
+    from sqlalchemy import select, text
+    from app.opportunity_retention import (
+        RetentionPolicy, foldable_cutoff, frozen_by_age, mutable_cutoff,
+    )
+    from app.srs_math import as_utc
+
+    # 60 days back from each instant crosses a US clock change (2026-11-01 fall
+    # back, 2027-03-14 spring forward). Calendar-day interval arithmetic in a
+    # Pacific session would move both SQL cutoffs by an hour, which is the whole
+    # default G: on spring forward the fold cutoff would reach the instant
+    # publication's exact frozen_by_age freezes at.
+    now = {
+        'fall_back': datetime(2026, 11, 16, 12, tzinfo=timezone.utc),
+        'spring_forward': datetime(2027, 4, 1, 12, tzinfo=timezone.utc),
+    }[clock_change]
+    qualification_clock[0] = now
+    policy = RetentionPolicy()
+    with pg_session_factory() as db:
+        db.execute(text("SET LOCAL TimeZone = 'America/Los_Angeles'"))
+        mutable, foldable = db.execute(select(
+            mutable_cutoff(db, policy=policy), foldable_cutoff(db, policy=policy),
+        )).one()
+        db.rollback()
+    assert as_utc(mutable) == now - policy.mutable_age
+    assert as_utc(foldable) == now - policy.foldable_age
+    # The SQL freeze boundary and publication's Python one are the same instant.
+    assert frozen_by_age(as_utc(mutable), now=now, policy=policy)
+    assert not frozen_by_age(as_utc(mutable) + timedelta(microseconds=1),
+                             now=now, policy=policy)

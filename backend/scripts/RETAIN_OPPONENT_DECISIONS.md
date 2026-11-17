@@ -536,9 +536,12 @@ from **one** clock reading, so the not-before is neither hand arithmetic nor two
 `clock_timestamp()` calls microseconds apart:
 
 ```sql
-SELECT a AS activation_at, a + interval '7 days' AS cleanup_not_before
+SELECT a AS activation_at, a + make_interval(secs => 7 * 86400) AS cleanup_not_before
 FROM (SELECT clock_timestamp() AS a) t;
 ```
+
+Exact seconds, not `interval '7 days'`: interval days are added as calendar
+days in the session TimeZone, an hour off across a daylight-saving change.
 
 Record both verbatim (offset-carrying ISO 8601, e.g.
 `2026-10-05T18:22:31.418+00:00`). Copying `psql`'s own rendering works —

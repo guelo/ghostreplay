@@ -11,6 +11,7 @@ from app.opportunity_cleanup import backlog, recently_active, scheduled_sweep
 from app.opportunity_fold import FoldOutcome
 from app.opportunity_retention import database_clock
 from app.session_activity import stamp_activity
+from app.srs_math import as_utc
 from test_opportunity_compaction_pg import _seed, USER_ID
 from test_opportunity_compaction_migration import config
 
@@ -99,7 +100,9 @@ def test_pg_backlog_age_uses_same_pin_and_legacy_predicates_as_fold(
     monkeypatch.setenv('OPPONENT_TARGET_SOURCE', 'facts')
     bid = _seed(pg_session_factory, rows=1)
     with pg_session_factory() as db:
-        now = db.scalar(select(database_clock(db)))
+        # UTC first: a timedelta added to the session-zone datetime psycopg
+        # returns is wall-clock arithmetic, an hour off across a DST change.
+        now = as_utc(db.scalar(select(database_clock(db))))
         sid = db.scalar(select(GameSession.id))
         db.add(OpponentTargetFact(session_id=sid, blunder_id=bid,
                                  last_served_at=now - timedelta(days=30, hours=13)))

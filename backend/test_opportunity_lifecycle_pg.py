@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select, text
@@ -320,6 +321,82 @@ def test_the_session_guard_uses_the_database_clock_not_transaction_start(
         assert transaction_start is not None
     finally:
         actor.close()
+
+
+def _days_spanning_last_clock_change(now: datetime, zone: ZoneInfo) -> int:
+    """Whole days M whose window ``[now - M days, now]`` holds exactly one change.
+
+    The guards read the real ``clock_timestamp()``, so a fixed date cannot be
+    injected; instead the window is sized to reach just past the zone's most
+    recent daylight-saving change. Changes are at least ~4 months apart, so the
+    one before it stays outside the window.
+    """
+    offset = now.astimezone(zone).utcoffset()
+    probe = now
+    while probe.astimezone(zone).utcoffset() == offset:
+        probe -= timedelta(hours=1)
+    return (now - probe).days + 1
+
+
+def _delete_in_zone(factory, sql: str, params: dict, zone: str) -> str | None:
+    """Run one DELETE in a session with that TimeZone; the guard error, or None."""
+    db = factory()
+    try:
+        db.execute(text(f"SET LOCAL TimeZone = '{zone}'"))
+        db.execute(text(sql), params)
+        db.commit()
+        return None
+    except TRIGGER_ERRORS as exc:
+        db.rollback()
+        return str(exc)
+    finally:
+        db.close()
+
+
+# The window reaches each zone's most recent change. The hemispheres' changes
+# alternate, so for most of the year one zone covers fall back and the other
+# spring forward.
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", "Australia/Sydney"])
+def test_the_freeze_boundary_is_exact_elapsed_time_in_a_daylight_saving_zone(
+    pg_session_factory, zone,
+):
+    """M days means M x 86400 s in every session TimeZone, matching the app.
+
+    Calendar-day interval arithmetic across the window's clock change would move
+    the guards' boundary an hour: older on fall back (onto the app's M + G fold
+    cutoff when G is an hour), younger on spring forward. Probes 30 minutes
+    either side of the exact boundary catch both directions.
+    """
+    now = datetime.now(timezone.utc)
+    window_days = _days_spanning_last_clock_change(now, ZoneInfo(zone))
+    boundary = now - timedelta(days=window_days)
+    db = pg_session_factory()
+    try:
+        frozen, frozen_blunder = _seed(
+            db, user_id=7031, started_at=boundary - timedelta(minutes=30))
+        mutable, mutable_blunder = _seed(
+            db, user_id=7032, started_at=boundary + timedelta(minutes=30))
+        _policy(db, readiness=True, freeze_enabled=True,
+                mutation_window_days=window_days)
+        frozen_id, mutable_id = frozen.id, mutable.id
+        ids = {"frozen": frozen_blunder.id, "mutable": mutable_blunder.id}
+        db.commit()
+    finally:
+        db.close()
+
+    events = "DELETE FROM blunder_opportunity_events WHERE blunder_id = :b"
+    sessions = "DELETE FROM game_sessions WHERE id = :id"
+    assert "mutation boundary" in (
+        _delete_in_zone(pg_session_factory, events, {"b": ids["frozen"]}, zone) or "")
+    assert "mutation boundary" in (
+        _delete_in_zone(pg_session_factory, sessions, {"id": frozen_id}, zone) or "")
+    assert _delete_in_zone(
+        pg_session_factory, events, {"b": ids["mutable"]}, zone) is None
+    assert _delete_in_zone(
+        pg_session_factory, sessions, {"id": mutable_id}, zone) is None
+    with pg_session_factory() as check:
+        assert _session_exists(check, frozen_id)
+        assert not _session_exists(check, mutable_id)
 
 
 # --------------------------------------------------------------------------

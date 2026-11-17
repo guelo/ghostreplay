@@ -35,7 +35,9 @@ import time
 from typing import Callable
 import uuid
 
-from sqlalchemy import DateTime, and_, delete, func, or_, select, type_coerce
+from sqlalchemy import (
+    DateTime, Float, Interval, and_, delete, func, literal, or_, select, type_coerce,
+)
 from sqlalchemy.orm import Session
 
 from app.models import GameSession, OpponentDecision, OpponentTargetFact
@@ -156,7 +158,15 @@ def database_now(db: Session):
 
 def _clock_minus(db: Session, delta: timedelta):
     if db.get_bind().dialect.name == "postgresql":
-        return database_now(db) - delta
+        # Exact elapsed seconds, never a bound timedelta: psycopg sends that as
+        # an interval with a DAYS field, which PostgreSQL subtracts as calendar
+        # days in the session TimeZone. Across a spring-forward change in a
+        # daylight-saving zone that would cut D (one hour) out of fact_cutoff.
+        exact = func.make_interval(
+            0, 0, 0, 0, 0, 0, literal(delta.total_seconds(), type_=Float()),
+            type_=Interval(),
+        )
+        return database_now(db) - exact
     seconds = delta.total_seconds()
     return type_coerce(
         func.strftime("%Y-%m-%d %H:%M:%f", "now", f"-{seconds} seconds").concat("000"),
