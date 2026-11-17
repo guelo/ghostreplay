@@ -44,6 +44,25 @@ those operation sequences and restoration are covered by the synthetic
 PostgreSQL qualification. The switches were not changed. This snapshot does
 not establish old-writer drain or alert delivery.
 
+## Recheck after the export guard — 2026-11-17
+
+Read-only again; the switches were not changed.
+
+| Check | Result |
+| --- | --- |
+| Successful active API deployment | `a2c9ade`, which contains the export guard `f4df754`; all older deployments removed |
+| Alembic revision | `20261116_01` (head) |
+| Drain | 2 other database connections, both idle and opened after the deployment; no open transaction |
+| Guard check | `export directory: UNAVAILABLE (...)` |
+| `reconcile_srs_review_basis.py --check` | `missing_summaries=0 basis_mismatches=0` |
+| No-fold baseline | 1,243 summaries, none folded; zero prefixes; first fold never; freeze off |
+| Reader parity (`compare_srs_reader_parity.py`) | 13,555 comparisons, zero mismatches; 1,243 blunders, 16 owners, 71 session exclusions |
+| Database session TimeZone | `Etc/UTC` |
+
+The only change to the readers' dependencies since the baseline is `de2fffe`,
+which computes retention windows as exact elapsed time. In a UTC session that
+is the same instant as before.
+
 ## Preparation before activation review
 
 1. Deploy the reviewed export guard, then verify the actual successful Railway
@@ -62,9 +81,10 @@ not establish old-writer drain or alert delivery.
    synthetic file survives a redeploy before any real export is trusted. Keep
    the directory exclusive to this database. Never place it in the deploy image
    or attach it to a separate service that the API cannot access.
-3. Verify one API process owns maintenance. Select and test external delivery
-   for the error events in the scheduling runbook, using a synthetic alert.
-   No destination has been selected or delivery tested as of the baseline.
+3. Verify one API process owns maintenance. Test external delivery for the
+   error events in the scheduling runbook, using a synthetic alert. The
+   destination is healthchecks.io with email, the same as the VPS monitoring
+   in `g-3ap0e`. The job does not ping it yet: that is `g-srs-job-heartbeat`.
 4. With cleanup still false, enable the hourly job on that process. Verify its
    disabled sweep and expiry run at startup and again on the hourly cadence.
    Verify expiry on synthetic artifacts only; do not invent production manifests.
@@ -72,6 +92,10 @@ not establish old-writer drain or alert delivery.
    reconcile under the documented procedure and recheck before readiness.
    Confirm summaries/prefixes and first-fold anchor still match the no-fold
    baseline; repeat reader parity if facts or reader code changed materially.
+   `compare_srs_reader_parity.py` does both: it prints the no-fold baseline,
+   then runs the comparison described above and exits 1 on any mismatch. Run it
+   in the API container like the guard check. It refuses (exit 2) once freezing
+   is on or anything is folded, so run it before freezing.
 
 ## Export storage guard
 

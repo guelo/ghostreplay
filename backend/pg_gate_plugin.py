@@ -170,6 +170,7 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_opportunity_cleanup_pg.py::test_pg_activity_arriving_during_export_defers_normal_but_not_forced_transfer",
     "test_opportunity_cleanup_pg.py::test_pg_backlog_age_uses_same_pin_and_legacy_predicates_as_fold",
     "test_opportunity_cleanup_pg.py::test_pg_activity_migration_is_nullable_indexed_and_reversible",
+    "test_compare_srs_reader_parity.py::test_pg_comparison_runs_in_one_read_only_repeatable_read_snapshot",
 
     "test_opponent_session_expiry.py::test_pg_default_start_and_fresh_database_publication",
     "test_opponent_session_expiry.py::test_pg_enforcement_uses_real_clock_after_transaction_start",
