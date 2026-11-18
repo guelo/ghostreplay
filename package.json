@@ -59,6 +59,7 @@
     "globals": "^16.5.0",
     "jsdom": "^28.0.0",
     "postcss": "^8.5.26",
+    "railway": "3.17.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^7.2.4",
