@@ -34,6 +34,13 @@ its local Stockfish instead. `MAIA3_MODEL=maia3-5m` selects the smaller
 checkpoint. The other `MAIA3_*` settings are in `app/maia3_client.py`
 (`Maia3Settings`).
 
+`scripts/probe_maia3.py` measures how strongly the engine plays at each Elo,
+top-move (T=0) and sampled (T=1), against Lichess blitz players of the same
+rating, on the positions in `scripts/fixtures/maia3_probe_positions.json`. It
+also measures cold start, per-move latency and child memory (`--latency`). It
+needs Stockfish (`STOCKFISH_PATH`, or `brew install stockfish`); its docstring
+gives the commands, and its cache lives in the git-ignored `.maia3_probe/`.
+
 Railway does not install `requirements-maia3.txt` yet (g-maia3-railway-deploy).
 Its pins are in `requirements-maia3.constraints.txt`, which the requirements file
 applies itself.

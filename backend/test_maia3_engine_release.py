@@ -53,38 +53,22 @@ from app.maia3_client import (
     maia3_settings,
     position_for,
 )
+from scripts.probe_maia3 import BANDS as PROBE_BANDS
+from scripts.probe_maia3 import load_fixture, natural_by_band
 
 BACKEND = Path(__file__).resolve().parent
 READY_S = 30.0
-# Opening-book positions at plies 8-20 (sequences of UCI moves from the start).
-# g-maia3-strength-probe repoints the 600/2600 check at its probe fixture.
-DISAGREEMENT_LINES = [
-    # Ruy Lopez, Closed (ply 10)
-    "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7",
-    # Sicilian Najdorf (ply 10)
-    "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6",
-    # Queen's Gambit Declined (ply 8)
-    "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 f8e7",
-    # King's Indian, Classical (ply 12)
-    "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8 f1e2 e7e5",
-    # Italian Game, Giuoco Piano (ply 12)
-    "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d3 d7d6 e1g1 e8g8",
-    # French, Winawer (ply 8)
-    "e2e4 e7e6 d2d4 d7d5 b1c3 f8b4 e4e5 c7c5",
-    # Caro-Kann, Classical (ply 10)
-    "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5 e4g3 f5g6",
-    # English, Symmetrical (ply 8)
-    "c2c4 c7c5 b1c3 b8c6 g2g3 g7g6 f1g2 f8g7",
-    # Slav (ply 10)
-    "d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 d5c4 a2a4 c8f5",
-    # Scotch (ply 14)
-    "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6 d4c6 b7c6 e4e5 d8e7 d1e2 f6d5",
-    # Nimzo-Indian, Rubinstein (ply 16)
-    "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 e2e3 e8g8 f1d3 d7d5 g1f3 c7c5 e1g1 b8c6 a2a3 b4c3",
-    # Grünfeld, Exchange (ply 20)
-    "d2d4 g8f6 c2c4 g7g6 b1c3 d7d5 c4d5 f6d5 e2e4 d5c3 b2c3 f8g7 f1c4 c7c5 "
-    "g1e2 b8c6 c1e3 e8g8 e1g1 c5d4",
-]
+# The 600/2600 check uses the probe fixture (g-maia3-strength-probe): the first
+# DISAGREEMENT_PER_BAND headline-1 positions of each band, public Lichess blitz
+# positions at plies 16-60.
+DISAGREEMENT_PER_BAND = 10
+
+
+def _disagreement_lines() -> list[str]:
+    _header, positions = load_fixture()
+    by_band = natural_by_band(positions)
+    return [p.key for band in PROBE_BANDS for p in by_band[band][:DISAGREEMENT_PER_BAND]]
+
 
 pytestmark = [
     pytest.mark.release_seal,
@@ -220,7 +204,7 @@ def test_600_and_2600_disagree_at_temperature_0(make_service):
     assert svc.wait_ready(READY_S, stop_on_failure=True), svc.last_spawn_error
 
     disagreements = []
-    for line in DISAGREEMENT_LINES:
+    for line in _disagreement_lines():
         board = _board(line)
         low, high = svc.play(board, 600), svc.play(board, 2600)
         assert low in board.legal_moves and high in board.legal_moves

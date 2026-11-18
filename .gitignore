@@ -82,3 +82,7 @@ backend/scripts/fixtures/cohort_provenance.json.tmp-*
 # (pins in backend/app/maia3_pins.py). Never committed; .railwayignore also keeps
 # them out of a manual `railway up`.
 backend/maia3_weights/
+
+# The Maia3 strength probe's resumable cache and reports (backend/scripts/probe_maia3.py).
+# Rebuilt from the committed fixture; the results go into docs/analysis instead.
+backend/.maia3_probe/
