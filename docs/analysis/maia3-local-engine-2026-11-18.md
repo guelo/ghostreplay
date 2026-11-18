@@ -245,6 +245,46 @@ These were measured in step 1 with `--latency`, at T=1.
     not inflate it.
   - Emulated latency (p50 437 ms for 23m) means nothing for production.
 
+## Production on Railway
+
+Measured on 2026-11-18 on deployment `69ffa93e` (commit `11714af`), with
+maia3-23m, one thread and T=1. The engine is on through the service variable
+`MAIA3_ENABLED=1`. The CPU reports as `Intel Xeon Processor (Icelake)`.
+
+| Run | Moves | p50 | p95 | Max |
+|---|---|---|---|---|
+| `--latency`, a second engine, 500 moves per rating | 2,500 | 116.2 ms | 136.5 ms | 195.9 ms |
+| Real games, from the `maia3 move` log lines | 74 | 119.5 ms | 143 ms | 169 ms |
+
+- **Start:** the build smoke started in 1,692 ms and played its move in 97 ms.
+  The live engine was ready 3,813 ms after it was spawned. The `--latency`
+  engine finished its warm-up move after 2,525 ms.
+- **Engine memory (VmRSS):**
+  - The live engine held 354,500 KiB three minutes after start and 354,884 KiB
+    after two games. Its peak (VmHWM) is 424,368 KiB, which it reached before
+    the first game.
+  - The `--latency` engine ended 2,500 moves at 355,896 KiB (364 MB), which is
+    136 MB under the 500 MB budget. This is one end reading, so it bounds the
+    growth over the run rather than tracing it.
+  - The emulated 300-move run read 474,468 KiB, about 121 MB higher.
+- **Cost:** at $10 per GB-month, 364 MB is about $3.64 a month. Railway's memory
+  metric rose from 148 MB before the deployment to 411 MB two minutes after it,
+  about 263 MB or $2.63 a month. That is less than the child's VmRSS, and the
+  reason is not established.
+- **Container after use:** `memory.current` was 695 MB after the games, and the
+  API process had grown from 168,116 KiB to 371,752 KiB. That growth is the
+  API's, with opening score recomputes logged in the same window, and the engine
+  did not grow. Railway's metric peaked at 955 MB while the second engine ran.
+- **Disk:** the container's root filesystem holds 2,243 MB. The size before the
+  engine was not captured.
+- **Games:** one game at 600 (21 engine moves) and one at 2600 (53) were played
+  by hand, and both felt like the right difficulty. No move was abandoned or
+  slow, and the HTTP log for the deployment shows no 4xx or 5xx response.
+- **`MAIA3_MIN_PLAY_BUDGET_S`:** twice the measured p95 is 273 ms, which rounds
+  up to 0.3 s, against a code default of 0.5 s. The service variable was set to
+  0.3 after the measurements above, which produced deployment `c61ba175`. Its
+  engine was ready in 2,381 ms. No game has been measured at this setting.
+
 ## Caveats
 
 - **Time of day.** The common bands span 14-34 minutes after midnight UTC, and
