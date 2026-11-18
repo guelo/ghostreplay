@@ -6,10 +6,9 @@
 #   pip install -r requirements.txt -r requirements-dev.txt -r requirements-maia3.txt \
 #       -c requirements.production.constraints.txt
 #
-# NOT installed by Railway yet: its install command reads requirements.txt only,
-# so production builds don't download torch for an engine that is off.
-# g-maia3-railway-deploy moves these lines into requirements.txt and the
-# constraints below into requirements.production.constraints.txt.
+# Railway installs this file through the service's NIXPACKS_INSTALL_CMD, which
+# adds -r requirements-maia3.txt. It stays separate from requirements.txt so the
+# backend test suite and its CI job run without torch.
 #
 # Torch: a hashed CPU wheel for linux/x86_64 (no --extra-index-url, which would
 # let pip take any package from the PyTorch index) and the PyPI wheel on macOS.

@@ -21,12 +21,13 @@ Linux, the platform production runs on and CI runs, the pins must equal the
 closure exactly.
 
 The Maia3 engine's dependencies (``requirements-maia3.txt``: torch and maia3)
-are not installed by Railway yet, so their pins live in a second file,
-``requirements-maia3.constraints.txt``, which requirements-maia3.txt applies
-itself. In a venv that has them installed (dev, the CI maia3-engine job) they
-are held to those pins the same way; elsewhere those checks skip, unless
-``GHOSTREPLAY_REQUIRE_MAIA3_TESTS=1`` (the CI maia3-engine job), which makes a
-missing install fail instead.
+reach Railway through ``-r requirements-maia3.txt`` in that install command. They
+stay out of ``requirements.txt`` so the backend suite runs without torch, and
+their pins live in a second file, ``requirements-maia3.constraints.txt``, which
+requirements-maia3.txt applies itself. In a venv that has them installed (dev,
+the CI maia3-engine job) they are held to those pins the same way; elsewhere
+those checks skip, unless ``GHOSTREPLAY_REQUIRE_MAIA3_TESTS=1`` (the CI
+maia3-engine job), which makes a missing install fail instead.
 """
 
 from __future__ import annotations

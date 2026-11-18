@@ -27,7 +27,9 @@ import anyio
 import chess
 import chess.engine
 import pytest
+from fastapi.testclient import TestClient
 
+import app.api.health as health_api
 import app.main as main
 import app.maia3_client as mc
 from app import maia3_pins
@@ -1487,6 +1489,46 @@ def test_lifespan_with_missing_weights_boots_without_the_engine(
     mocks["start_engine"].assert_not_called()
     mocks["shutdown_engine"].assert_called_once_with()
     assert boot_weights_error() is not None
+
+
+def test_lifespan_on_a_deploy_platform_with_missing_weights_fails_health(
+    monkeypatch, tmp_path
+):
+    mocks = _patch_lifespan_dependencies(monkeypatch)
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("MAIA3_ENABLED", "1")
+    monkeypatch.setenv("MAIA3_WEIGHTS_DIR", str(tmp_path / "empty"))
+
+    _run_lifespan()
+
+    mocks["start_engine"].assert_not_called()
+    assert TestClient(main.app).get("/health").status_code == 503
+
+
+@pytest.mark.parametrize(
+    ("weights_error", "on_platform", "expected_status", "expected_body"),
+    [
+        (
+            "FileNotFoundError: missing",
+            True,
+            503,
+            {"status": "error", "reason": "maia3 weights missing"},
+        ),
+        ("FileNotFoundError: missing", False, 200, {"status": "ok"}),
+        (None, True, 200, {"status": "ok"}),
+        (None, False, 200, {"status": "ok"}),
+    ],
+)
+def test_health_fails_only_on_a_deploy_platform_with_bad_boot_weights(
+    monkeypatch, weights_error, on_platform, expected_status, expected_body
+):
+    monkeypatch.setattr(health_api, "is_deploy_platform", lambda: on_platform)
+    monkeypatch.setattr(mc, "_boot_weights_error", weights_error)
+
+    response = TestClient(main.app).get("/health")
+
+    assert response.status_code == expected_status
+    assert response.json() == expected_body
 
 
 def test_lifespan_with_verified_weights_starts_the_engine(monkeypatch, weights_dir):

@@ -1,15 +1,24 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.database_url import is_deploy_platform
 from app.db import get_db
+from app.maia3_client import boot_weights_error
 from app.opening_roots import is_opening_roots_warm
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-def health_check() -> dict:
+def health_check(response: Response) -> dict:
+    # Railway calls this only while a deployment starts, so a 503 holds back an
+    # image without valid Maia3 weights and the previous deployment keeps serving.
+    # It never restarts a live deployment. This reads a module value and does no
+    # I/O, so it can't use up the 30 s healthcheck window.
+    if is_deploy_platform() and boot_weights_error() is not None:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "error", "reason": "maia3 weights missing"}
     return {"status": "ok"}
 
 

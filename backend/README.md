@@ -41,9 +41,13 @@ also measures cold start, per-move latency and child memory (`--latency`). It
 needs Stockfish (`STOCKFISH_PATH`, or `brew install stockfish`); its docstring
 gives the commands, and its cache lives in the git-ignored `.maia3_probe/`.
 
-Railway does not install `requirements-maia3.txt` yet (g-maia3-railway-deploy).
-Its pins are in `requirements-maia3.constraints.txt`, which the requirements file
-applies itself.
+On Railway, the service's `NIXPACKS_INSTALL_CMD` adds `-r requirements-maia3.txt`,
+and the build command in `.railway/railway.ts` runs `prepare_maia3_engine.py`, so
+the weights are baked into the image. With `MAIA3_ENABLED=1` on the service, any
+failure there, including the smoke test, fails the build. A deployment that still
+boots without valid weights answers 503 on `/health`, so Railway's deploy
+healthcheck keeps the previous deployment. The pins are in
+`requirements-maia3.constraints.txt`, which the requirements file applies itself.
 
 ## Database migrations (Alembic)
 

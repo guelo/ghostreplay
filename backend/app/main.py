@@ -117,8 +117,9 @@ async def lifespan(app: FastAPI):
     # Start the local Maia3 engine (g-maia3-local-engine). The weights check is
     # one sha256 of the checkpoint and never aborts boot: a failure logs an ERROR
     # and leaves the engine off, so opponent moves answer 503 and the browser
-    # plays its local engine, as with MAIA3_ENABLED=0. The spawn itself runs in
-    # the background and must never delay /health.
+    # plays its local engine, as with MAIA3_ENABLED=0. On a deploy platform it
+    # also makes /health answer 503, which holds the deployment back. The spawn
+    # itself runs in the background and must never delay /health.
     try:
         check_maia3_weights_at_boot(maia3, is_deploy_platform())
         if boot_weights_error() is None:
