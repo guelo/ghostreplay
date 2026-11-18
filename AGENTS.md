@@ -30,6 +30,20 @@ If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backe
 - Prefer testing behavior contracts, data flow, and critical user outcomes instead of pixel-level or nav-chrome details.
 - A test that needs minutes of wall clock, or that reads host state other agents are editing, does not belong in the pre-push gate. Mark it `@pytest.mark.release_seal` (registered in `backend/pytest.ini`; `.githooks/pre-push` deselects it and prints what it skipped) and document when it must be run. Today that marker covers the production-shape PostgreSQL delta-lane benchmark — see `backend/scripts/BENCH_OPENING_SCORE_DELTA_LANE.md` — and the Maia3 engine release test (`backend/test_maia3_engine_release.py`, real torch engine and weights). Run the Maia3 test after changing the torch or maia3 pins, the weights pins or `app/maia3_client.py`; the CI `maia3-engine` job runs it on every backend push.
 
+## Railway Config
+
+The API service's build and deploy settings live in `.railway/railway.ts`. Railway does not read that file during deploys, so **a push does not change them**, and nothing detects drift. To check for drift:
+
+    npm install
+    railway config plan --detailed-exit-code   # 0 clean, 2 changes pending
+
+To change the settings, commit the edit to `.railway/`, then apply the exact plan you reviewed. A plain `railway config apply` re-evaluates the file instead. Keep the plan file outside `.railway/`, because apply refuses if the checked-out tree differs from the planned one:
+
+    railway config plan --out /tmp/railway-plan.json
+    railway config apply --plan /tmp/railway-plan.json --yes   # after reviewing the plan
+
+Removing a resource declared in the file deletes it on the next apply. Do not pass `--confirm-destructive` without the user's approval, even if apply refuses without it or Railway's docs show the flag. Service variables are not managed here. Keep `.railway/` out of the tsconfigs: typechecking must not depend on the SDK being installed, and the SDK's types reject `variables: { managed: false }`, which the CLI needs.
+
 ## Multi-Agent Workspace Rules
 
 This repo may be edited by multiple agents/users at the same time.

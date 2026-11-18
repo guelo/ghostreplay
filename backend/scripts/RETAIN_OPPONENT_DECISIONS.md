@@ -751,17 +751,11 @@ A **new** Railway service in the same project, same repo and branch, same image
 and same primary database, running on a `0 * * * *` cron schedule. It is called
 the *cleanup service* throughout this runbook.
 
-**Configure it in the service's settings, not in a config file.** Railway's
-Config as Code (`railway.toml` / `railway.json`) is deprecated: per Railway's
-Infrastructure as Code documentation, "Config as Code is still read from your
-service repository during deploy for existing (legacy) services … **New services
-cannot opt into Config as Code**", and existing files "stop being read on
-**2026-12-01** (hard cutoff)". So a `railway.cron.toml` pointed at this service
-would never be read, and the root `railway.toml` does not reach it either. The
-project-level replacement is `.railway/railway.ts`, applied by
-`railway config plan` / `railway config apply`; adopting it migrates **every**
-service in the project at once ("A service cannot be managed by both systems at
-the same time"), which is its own change, not part of this rollout.
+**Configure it in the service's settings.** New Railway services cannot use
+Config as Code, and this repo no longer has a `railway.toml`. This repo's
+`.railway/railway.ts` is a named partial that declares only the API service, so
+services it does not declare are left alone. The cleanup service can stay in the
+dashboard or be added to that file.
 
 What must be set on the service, and why each one:
 
@@ -771,9 +765,10 @@ What must be set on the service, and why each one:
 if [ -d backend ]; then cd backend; fi; /opt/venv/bin/python scripts/retain_opponent_decisions.py --apply
 ```
 
-Without an explicit start command the build's own start runs
-(`nixpacks.toml [start]`: `alembic upgrade head && uvicorn …`), which migrates,
-never exits, and so makes Railway skip every later execution.
+Without an explicit start command nothing starts this job correctly. With root
+directory `/backend`, as on the API service, the root `nixpacks.toml` is outside
+the build context and is not read, and `backend/` has no `Procfile` or `main.py`.
+The API's start command is set on the API service and does not apply here.
 
 **Cron Schedule** `0 * * * *`. Railway skips a scheduled execution while the
 previous one is still running, which is safe here: the remaining rows are the
@@ -786,11 +781,11 @@ to its retry count every hour and turn a refusal into a restart loop.
 **Healthcheck** none. A short-lived job has nothing to health-check.
 
 `/opt/venv/bin/python` rather than a bare `python`: the interpreter is the
-nixpacks venv, not a `python` on `PATH`. The `cd backend` guard mirrors the API
-service's start command and covers both image layouts (nixpacks normally
-flattens `backend/` into `/app`); the script puts its own parent directory on
-`sys.path`, so it does not depend on the working directory for imports. Confirm
-the actual layout and the command that ran from the deployment logs.
+nixpacks venv, not a `python` on `PATH`. The `cd backend` guard covers both image
+layouts (nixpacks normally flattens `backend/` into `/app`); the script puts its
+own parent directory on `sys.path`, so it does not depend on the working
+directory for imports. Confirm the actual layout and the command that ran from
+the deployment logs.
 
 Variables **on this service**: `OPPONENT_DECISION_CLEANUP_ENABLED=1` and
 `OPPONENT_DECISION_CLEANUP_NOT_BEFORE=<recorded instant>` live here and nowhere

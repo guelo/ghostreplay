@@ -9,12 +9,12 @@ maximum wait).
 IMPORTANT — single-process assumption:
     The scheduler coalesces only within **one process of one replica**. It holds
     all pending state in memory and runs recomputes on a single daemon thread.
-    The deployment configs (railway.toml, render.yaml, nixpacks.toml) start
-    ``uvicorn app.main:app`` with no ``--workers`` flag (1 worker) and set no
-    replica/scaling counts, so a single instance is the current default. Both
-    **one worker AND one replica** are load-bearing here. Adding workers or
-    horizontal replicas reverts coalescing to per-process and needs shared-state
-    (advisory-lock / external queue) coordination instead.
+    The deployment configs (.railway/railway.ts, render.yaml, nixpacks.toml)
+    start ``uvicorn app.main:app`` with no ``--workers`` flag (1 worker), and
+    .railway/railway.ts pins one replica, so a single instance is the current
+    default. Both **one worker AND one replica** are load-bearing here. Adding
+    workers or horizontal replicas reverts coalescing to per-process and needs
+    shared-state (advisory-lock / external queue) coordination instead.
 
 Read side (stale-while-revalidate):
     Reader endpoints go through ``opening_cache``. A WARM reader (a batch already
