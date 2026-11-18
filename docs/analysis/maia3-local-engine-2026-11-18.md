@@ -275,8 +275,12 @@ maia3-23m, one thread and T=1. The engine is on through the service variable
   API process had grown from 168,116 KiB to 371,752 KiB. That growth is the
   API's, with opening score recomputes logged in the same window, and the engine
   did not grow. Railway's metric peaked at 955 MB while the second engine ran.
-- **Disk:** the container's root filesystem holds 2,243 MB. The size before the
-  engine was not captured.
+- **Disk (`du -m`, MiB):** the container's root filesystem holds 2,243 MiB. Torch
+  takes 809 MiB and the weights 88 MiB, together 897 MiB or 40% of it. The size
+  before the engine was not captured, so 897 MiB is the engine's main share and
+  not the exact increase. It leaves out maia3 and its other dependencies.
+- **Choice:** maia3-23m, one thread and T=1, all approved by the user on
+  2026-11-18.
 - **Games:** one game at 600 (21 engine moves) and one at 2600 (53) were played
   by hand, and both felt like the right difficulty. No move was abandoned or
   slow, and the HTTP log for the deployment shows no 4xx or 5xx response.
