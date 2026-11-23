@@ -200,6 +200,9 @@ def test_a_legal_move_from_the_start_at_600_and_2600(make_service):
 
 
 def test_600_and_2600_disagree_at_temperature_0(make_service):
+    # The child starts at upstream's temperature 1 and each move sets the
+    # option, so this also fails if the per-move Temperature never reaches the
+    # real engine: a sampled 600 move would not repeat in every position.
     svc = make_service(temperature=0.0)
     assert svc.wait_ready(READY_S, stop_on_failure=True), svc.last_spawn_error
 
@@ -214,6 +217,24 @@ def test_600_and_2600_disagree_at_temperature_0(make_service):
             disagreements.append((line, low.uci(), high.uci()))
 
     assert disagreements, "600 and 2600 played the same move in every position"
+
+
+def test_a_curve_changes_the_temperature_between_moves_of_one_engine(make_service):
+    # 600 plays the top move and 2600 samples, alternating on one child.
+    svc = make_service(temperature_curve=((600, 0.0), (2600, 1.0)))
+    assert svc.wait_ready(READY_S, stop_on_failure=True), svc.last_spawn_error
+
+    sampled_differently = 0
+    for line in _disagreement_lines():
+        board = _board(line)
+        low = svc.play(board, 600)
+        highs = {svc.play(board, 2600) for _ in range(3)}
+        assert all(move in board.legal_moves for move in highs | {low})
+        # Back at temperature 0 right after sampling: the top move again.
+        assert svc.play(board, 600) == low
+        sampled_differently += len(highs) > 1
+    # A false failure needs every position to repeat one move three times.
+    assert sampled_differently, "2600 never varied its move: it is not sampling"
 
 
 def test_an_abandoned_move_finishes_and_the_same_engine_serves_the_next(make_service):

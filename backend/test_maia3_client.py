@@ -43,10 +43,13 @@ from app.maia3_client import (
     check_maia3_weights_at_boot,
     clamp_elo,
     engine_command,
+    format_temperature_curve,
     get_move,
     maia3_settings,
+    parse_temperature_curve,
     position_for,
     start_engine,
+    temperature_at,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -118,23 +121,29 @@ class FakeHandle:
         self.kills = 0
         self.warmed = False
         self.plays: list[tuple[int, list[str], str]] = []  # request moves only
+        self.temperatures: list[float] = []  # request moves only
+        self.warmup_temperature: float | None = None
 
     async def ping(self) -> None:
         self.engine.events.append("ping")
         if self.engine.on_ping is not None:
             await self.engine.on_ping(self)
 
-    async def play(self, board: chess.Board, elo: int) -> chess.Move | None:
+    async def play(
+        self, board: chess.Board, elo: int, temperature: float
+    ) -> chess.Move | None:
         if self.exited.done():
             raise chess.engine.EngineTerminatedError("engine process dead")
         stack = [move.uci() for move in board.move_stack]
         if not self.warmed:
             self.warmed = True
+            self.warmup_temperature = temperature
             self.engine.events.append(("warmup", elo, stack))
             self.engine.warmup_started.set()
             behavior = self.engine.on_warmup
         else:
             self.plays.append((elo, stack, board.fen()))
+            self.temperatures.append(temperature)
             self.engine.events.append(("move", elo))
             self.engine.move_started.set()
             behavior = self.engine.on_move
@@ -1293,11 +1302,12 @@ def test_engine_command_is_the_contract_with_the_child(monkeypatch, tmp_path):
         "--no-use-amp",
         f"--checkpoint-path {weights}",
         "--model maia3-23m",
-        "--temperature 0.0",
         "--top-p 0.9",
         "--seed 1234",
     ):
         assert flag in joined
+    # The temperature travels with each move, never on the command line.
+    assert "--temperature" not in argv
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["OMP_NUM_THREADS"] == env["MKL_NUM_THREADS"] == "2"
     assert env["PATH"] == "/usr/bin:/bin"
@@ -1318,7 +1328,8 @@ def test_settings_defaults():
         enabled=False,
         model="maia3-23m",
         weights_dir=maia3_pins.default_weights_dir(),
-        temperature=1.0,
+        temperature=None,
+        temperature_curve=None,
         top_p=1.0,
         threads=1,
         move_timeout_s=5.0,
@@ -1344,6 +1355,21 @@ def test_maia3_enabled_parsing(raw, enabled):
         {"MAIA3_TEMPERATURE": "-0.1"},
         {"MAIA3_TEMPERATURE": "warm"},
         {"MAIA3_TEMPERATURE": "nan"},
+        {"MAIA3_TEMPERATURE": "2.5"},
+        {"MAIA3_TEMPERATURE": ""},
+        {"MAIA3_TEMPERATURE_CURVE": ""},
+        {"MAIA3_TEMPERATURE_CURVE": "600"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:1,"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:1:2"},
+        {"MAIA3_TEMPERATURE_CURVE": "abc:1"},
+        {"MAIA3_TEMPERATURE_CURVE": "600.5:1"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:warm"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:nan"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:-0.1"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:2.5"},
+        {"MAIA3_TEMPERATURE_CURVE": "1500:1,600:0.8"},
+        {"MAIA3_TEMPERATURE_CURVE": "600:1,600:0.8"},
         {"MAIA3_TOP_P": "0"},
         {"MAIA3_TOP_P": "1.5"},
         {"MAIA3_THREADS": "0"},
@@ -1358,6 +1384,174 @@ def test_maia3_enabled_parsing(raw, enabled):
 def test_invalid_settings_raise_value_error(env):
     with pytest.raises(ValueError):
         maia3_settings(env)
+
+
+# ---------------------------------------------------------------------------
+# Temperature per Elo
+# ---------------------------------------------------------------------------
+
+THREE_ANCHORS = ((600, 0.75), (1100, 0.7), (1500, 1.0))
+# Anchors beyond the ladder on both sides, so a clamped Elo and an unclamped
+# one read different temperatures.
+WIDE_CURVE = ((100, 0.0), (600, 0.2), (2600, 1.0), (3000, 2.0))
+
+
+@pytest.mark.parametrize(
+    "elo, expected",
+    [
+        (300, 0.75),  # below the first anchor
+        (600, 0.75),
+        (850, 0.725),  # halfway between two anchors
+        (1100, 0.7),
+        (1300, 0.85),
+        (1500, 1.0),
+        (2600, 1.0),  # above the last anchor
+    ],
+)
+def test_a_curve_is_linear_between_anchors_and_flat_outside(elo, expected):
+    assert temperature_at(THREE_ANCHORS, elo) == expected
+
+
+@pytest.mark.parametrize("elo", [600, 1500, 2600])
+def test_a_one_anchor_curve_is_the_same_temperature_everywhere(elo):
+    assert temperature_at(((1500, 0.4),), elo) == 0.4
+
+
+def test_the_temperature_is_rounded_to_four_decimals():
+    assert temperature_at(((600, 0.0), (900, 1.0)), 700) == 0.3333
+
+
+def test_a_curve_string_parses_with_spaces_and_formats_back():
+    curve = parse_temperature_curve(" 600:0.75 , 1100 : 0.7,1500:1 ")
+
+    assert curve == THREE_ANCHORS
+    assert parse_temperature_curve(format_temperature_curve(curve)) == curve
+    assert maia3_settings({"MAIA3_TEMPERATURE_CURVE": "600:0.75"}).curve == ((600, 0.75),)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"temperature_curve": ()},
+        {"temperature_curve": ((600, 1.0), (600, 0.8))},
+        {"temperature_curve": ((1500, 1.0), (600, 0.8))},
+        {"temperature_curve": ((600, float("nan")),)},
+        {"temperature_curve": ((600.0, 1.0),)},
+        {"temperature_curve": [(600, 1.0)]},
+        {"temperature": float("nan")},
+        {"temperature": 2.5},
+        {"temperature": -0.1},
+    ],
+)
+def test_settings_refuse_an_unusable_temperature(overrides):
+    with pytest.raises(ValueError):
+        Maia3Settings(**overrides)
+
+
+def test_a_flat_temperature_wins_over_the_curve():
+    settings = maia3_settings(
+        {"MAIA3_TEMPERATURE": "0.4", "MAIA3_TEMPERATURE_CURVE": "600:0.2,2600:1.0"}
+    )
+
+    assert [settings.temperature_for(elo) for elo in (600, 2600)] == [0.4, 0.4]
+    label = settings.temperature_label()
+    assert label.startswith("flat 0.4 (MAIA3_TEMPERATURE;") and "ignored" in label
+    flat_only = maia3_settings({"MAIA3_TEMPERATURE": "0"})
+    assert flat_only.temperature_label() == "flat 0.0 (MAIA3_TEMPERATURE)"
+
+
+def test_a_default_curve_belongs_to_one_model(monkeypatch):
+    monkeypatch.setitem(mc.DEFAULT_TEMPERATURE_CURVES, "maia3-23m", ((600, 0.2), (2600, 1.0)))
+    measured = Maia3Settings(model="maia3-23m")
+    unmeasured = Maia3Settings(model="maia3-5m")
+
+    assert [measured.temperature_for(elo) for elo in (600, 1600, 2600)] == [0.2, 0.6, 1.0]
+    assert [unmeasured.temperature_for(elo) for elo in (600, 1500, 2600)] == [1.0, 1.0, 1.0]
+    assert "default for maia3-23m" in measured.temperature_label()
+    assert "maia3-5m" in unmeasured.temperature_label()
+    # An explicit curve applies to whichever model is configured.
+    for model in ("maia3-23m", "maia3-5m"):
+        explicit = Maia3Settings(model=model, temperature_curve=((600, 0.5),))
+        assert explicit.temperature_for(2000) == 0.5
+        assert "(MAIA3_TEMPERATURE_CURVE)" in explicit.temperature_label()
+
+
+def test_only_the_measured_model_may_have_a_default_curve():
+    assert set(mc.DEFAULT_TEMPERATURE_CURVES) <= {"maia3-23m"}
+    for model, curve in mc.DEFAULT_TEMPERATURE_CURVES.items():
+        assert model in maia3_pins.MODEL_PINS
+        # A default passes the same validation as an explicit curve.
+        Maia3Settings(model=model, temperature_curve=curve)
+    unmeasured = Maia3Settings(model="maia3-5m")
+    assert {unmeasured.temperature_for(elo) for elo in ELO_BINS} == {1.0}
+
+
+def test_each_request_is_played_at_its_elos_temperature(make_service):
+    engine = FakeEngine()
+    svc = make_service(engine, temperature_curve=((600, 0.2), (2600, 1.0)))
+    handle = ready(svc)
+
+    for elo in (600, 1600, 2600):
+        svc.play(after_e4(), elo)
+
+    assert handle.temperatures == [0.2, 0.6, 1.0]
+    assert handle.warmup_temperature == 0.56  # the curve at the warm-up's 1500
+
+
+def test_a_flat_temperature_reaches_the_warm_up_and_every_request(make_service):
+    engine = FakeEngine()
+    svc = make_service(engine, temperature=0.0, temperature_curve=WIDE_CURVE)
+    handle = ready(svc)
+
+    for elo in (600, 2600):
+        svc.play(after_e4(), elo)
+
+    assert handle.temperatures == [0.0, 0.0]
+    assert handle.warmup_temperature == 0.0
+
+
+def test_the_probes_latency_wrapper_passes_the_temperature_through(
+    weights_dir, tmp_path, monkeypatch
+):
+    """``probe_maia3.py --latency`` wraps every handle the service opens.
+
+    A wrapper whose ``play`` lacks the temperature stops the warm-up, and the
+    engine never starts. This fails when the service and the probe's wrapper
+    are not changed in the same commit.
+    """
+    from scripts import probe_maia3 as probe
+
+    engine = FakeEngine()
+    monkeypatch.setattr(probe, "open_uci", engine.opener)
+    timing = probe.SpawnTiming()
+    svc = Maia3EngineService(
+        fast_settings(weights_dir, temperature=0.4),
+        opener=timing.opener,
+        proc_root=tmp_path / "no-proc",
+    )
+    try:
+        assert svc.wait_ready(3.0, stop_on_failure=True), svc.last_spawn_error
+        svc.play(after_e4(), 1500)
+    finally:
+        svc.shutdown()
+
+    assert engine.handles[0].warmup_temperature == 0.4
+    assert engine.handles[0].temperatures == [0.4]
+    assert {"spawn", "uciok", "readyok", "warmup"} <= set(timing.marks)
+
+
+@pytest.mark.parametrize("elo, expected", [(100, 0.2), (3000, 1.0), (1600, 0.6)])
+def test_get_move_clamps_the_elo_before_it_reads_the_curve(
+    elo, expected, make_service, monkeypatch
+):
+    engine = FakeEngine()
+    svc = make_service(engine, temperature_curve=WIDE_CURVE)
+    monkeypatch.setenv("MAIA3_ENABLED", "1")
+    monkeypatch.setattr(mc, "_get_service", lambda: svc)
+
+    get_move(AFTER_E4_FEN, ["e2e4"], elo)
+
+    assert engine.handles[0].temperatures == [expected]
 
 
 # ---------------------------------------------------------------------------

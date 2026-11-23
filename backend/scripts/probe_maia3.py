@@ -1960,8 +1960,8 @@ class _TimedHandle:
         await self._inner.ping()
         self._marks.setdefault("readyok", time.monotonic())
 
-    async def play(self, board: chess.Board, elo: int):
-        move = await self._inner.play(board, elo)
+    async def play(self, board: chess.Board, elo: int, temperature: float):
+        move = await self._inner.play(board, elo, temperature)
         self._marks.setdefault("warmup", time.monotonic())
         return move
 

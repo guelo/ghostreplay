@@ -24,6 +24,8 @@ Shape of the service (``Maia3EngineService``):
   engine error retires the engine.
 * Every engine death costs exactly one backoff step, and a retry timer brings
   the engine back without waiting for a request.
+* Every move sets its own sampling temperature, the UCI ``Temperature`` option,
+  read from the settings' curve at the move's Elo (``temperature_for``).
 
 ``MAIA3_ENABLED`` defaults to 0. Disabled, ``get_move`` raises at once and
 nothing spawns, so the endpoint answers 503 and the browser plays its local
@@ -112,6 +114,97 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+# A temperature curve: (Elo, temperature) anchors with strictly increasing Elo.
+# The temperature is linear between two anchors and flat outside them, so one
+# anchor is the same temperature at every Elo.
+TemperatureCurve = tuple[tuple[int, float], ...]
+
+# 0 plays the engine's top move; nothing above 2 is accepted.
+MAX_TEMPERATURE = 2.0
+
+FLAT_TEMPERATURE_CURVE: TemperatureCurve = ((1500, 1.0),)
+
+# The measured curve per model (g-maia3-elo-temp). A curve is a default only
+# for the model it was measured on: a model without an entry plays
+# FLAT_TEMPERATURE_CURVE unless MAIA3_TEMPERATURE_CURVE or MAIA3_TEMPERATURE
+# says otherwise.
+DEFAULT_TEMPERATURE_CURVES: dict[str, TemperatureCurve] = {}
+
+
+def _valid_temperature(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0 <= value <= MAX_TEMPERATURE
+    )
+
+
+def _check_temperature_curve(curve: object) -> None:
+    """Raise ValueError unless ``curve`` is a usable temperature curve."""
+    name = "MAIA3_TEMPERATURE_CURVE"
+    _require(
+        isinstance(curve, tuple) and len(curve) > 0,
+        f"{name} needs at least one elo:temperature anchor",
+    )
+    previous: int | None = None
+    for anchor in curve:
+        _require(
+            isinstance(anchor, tuple) and len(anchor) == 2,
+            f"{name} anchors must be (elo, temperature) pairs, got {anchor!r}",
+        )
+        elo, temperature = anchor
+        _require(
+            isinstance(elo, int) and not isinstance(elo, bool),
+            f"{name} Elo must be an integer, got {elo!r}",
+        )
+        _require(
+            previous is None or elo > previous,
+            f"{name} Elos must be strictly increasing, got {elo} after {previous}",
+        )
+        _require(
+            _valid_temperature(temperature),
+            f"{name} temperatures must be between 0 and {MAX_TEMPERATURE:g}, "
+            f"got {temperature!r} at {elo}",
+        )
+        previous = elo
+
+
+def parse_temperature_curve(raw: str) -> TemperatureCurve:
+    """Parse ``"600:0.75, 1500:1.0"`` into anchors. The settings validate them."""
+    anchors: list[tuple[int, float]] = []
+    for item in raw.split(","):
+        elo, colon, temperature = item.partition(":")
+        try:
+            if not colon:
+                raise ValueError(item)
+            anchors.append((int(elo), float(temperature)))
+        except ValueError:
+            raise ValueError(
+                "MAIA3_TEMPERATURE_CURVE must be comma-separated elo:temperature "
+                f"anchors such as 600:0.75,1500:1.0, got {raw!r}"
+            ) from None
+    return tuple(anchors)
+
+
+def temperature_at(curve: TemperatureCurve, elo: int) -> float:
+    """The curve's temperature at ``elo``, rounded to 4 decimals."""
+    value = curve[-1][1]
+    if elo <= curve[0][0]:
+        value = curve[0][1]
+    else:
+        for (low_elo, low), (high_elo, high) in zip(curve, curve[1:]):
+            if elo <= high_elo:
+                value = low + (high - low) * (elo - low_elo) / (high_elo - low_elo)
+                break
+    return round(float(value), 4)
+
+
+def format_temperature_curve(curve: TemperatureCurve) -> str:
+    """The canonical string of a curve; ``parse_temperature_curve`` reads it back."""
+    return ",".join(f"{elo}:{float(temperature)!r}" for elo, temperature in curve)
+
+
 @dataclass(frozen=True)
 class Maia3Settings:
     """Engine settings. Field defaults are the production defaults."""
@@ -119,7 +212,10 @@ class Maia3Settings:
     enabled: bool = False
     model: str = "maia3-23m"
     weights_dir: Path = field(default_factory=default_weights_dir)
-    temperature: float = 1.0
+    # None for both means this model's default curve. A flat ``temperature``
+    # wins over any curve.
+    temperature: float | None = None
+    temperature_curve: TemperatureCurve | None = None
     top_p: float = 1.0
     threads: int = 1
     move_timeout_s: float = 5.0
@@ -134,14 +230,20 @@ class Maia3Settings:
             f"got {self.model!r}",
         )
         for name in (
-            "temperature", "top_p", "move_timeout_s", "min_play_budget_s",
+            "top_p", "move_timeout_s", "min_play_budget_s",
             "infer_timeout_s", "start_timeout_s",
         ):
             _require(
                 math.isfinite(getattr(self, name)),
                 f"MAIA3_{name.upper()} must be finite",
             )
-        _require(self.temperature >= 0, "MAIA3_TEMPERATURE must be >= 0")
+        _require(
+            self.temperature is None or _valid_temperature(self.temperature),
+            f"MAIA3_TEMPERATURE must be between 0 and {MAX_TEMPERATURE:g}, "
+            f"got {self.temperature!r}",
+        )
+        if self.temperature_curve is not None:
+            _check_temperature_curve(self.temperature_curve)
         _require(0 < self.top_p <= 1, "MAIA3_TOP_P must be in (0, 1]")
         _require(self.threads >= 1, "MAIA3_THREADS must be >= 1")
         _require(self.min_play_budget_s > 0, "MAIA3_MIN_PLAY_BUDGET_S must be > 0")
@@ -160,15 +262,49 @@ class Maia3Settings:
     def weights_path(self) -> Path:
         return Path(self.weights_dir) / self.pin.filename
 
+    @property
+    def curve(self) -> TemperatureCurve:
+        """The curve in force when no flat temperature is set."""
+        if self.temperature_curve is not None:
+            return self.temperature_curve
+        return DEFAULT_TEMPERATURE_CURVES.get(self.model, FLAT_TEMPERATURE_CURVE)
 
-def _env_float(env: Mapping[str, str], name: str, default: float) -> float:
+    def temperature_for(self, elo: int) -> float:
+        """The sampling temperature for a move at ``elo``."""
+        if self.temperature is not None:
+            return float(self.temperature)
+        return temperature_at(self.curve, elo)
+
+    def temperature_label(self) -> str:
+        """The temperature in force and where it came from, for the logs."""
+        if self.temperature is not None:
+            ignored = "" if self.temperature_curve is None else (
+                "; MAIA3_TEMPERATURE_CURVE is ignored"
+            )
+            return f"flat {float(self.temperature)!r} (MAIA3_TEMPERATURE{ignored})"
+        if self.temperature_curve is not None:
+            curve = format_temperature_curve(self.temperature_curve)
+            return f"curve {curve} (MAIA3_TEMPERATURE_CURVE)"
+        default = DEFAULT_TEMPERATURE_CURVES.get(self.model)
+        if default is not None:
+            return f"curve {format_temperature_curve(default)} (default for {self.model})"
+        flat = FLAT_TEMPERATURE_CURVE[0][1]
+        return f"flat {flat!r} (no measured curve for {self.model})"
+
+
+def _env_optional_float(env: Mapping[str, str], name: str) -> float | None:
     raw = env.get(name)
     if raw is None:
-        return default
+        return None
     try:
         return float(raw)
     except ValueError:
         raise ValueError(f"{name} must be a number, got {raw!r}") from None
+
+
+def _env_float(env: Mapping[str, str], name: str, default: float) -> float:
+    value = _env_optional_float(env, name)
+    return default if value is None else value
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -188,12 +324,14 @@ def maia3_settings(env: Mapping[str, str] | None = None) -> Maia3Settings:
     if enabled not in {"0", "1"}:
         raise ValueError("MAIA3_ENABLED must be 0 or 1")
     weights_dir = env.get("MAIA3_WEIGHTS_DIR")
+    curve = env.get("MAIA3_TEMPERATURE_CURVE")
     defaults = Maia3Settings()
     return Maia3Settings(
         enabled=enabled == "1",
         model=env.get("MAIA3_MODEL", defaults.model),
         weights_dir=Path(weights_dir) if weights_dir else defaults.weights_dir,
-        temperature=_env_float(env, "MAIA3_TEMPERATURE", defaults.temperature),
+        temperature=_env_optional_float(env, "MAIA3_TEMPERATURE"),
+        temperature_curve=None if curve is None else parse_temperature_curve(curve),
         top_p=_env_float(env, "MAIA3_TOP_P", defaults.top_p),
         threads=_env_int(env, "MAIA3_THREADS", defaults.threads),
         move_timeout_s=_env_float(env, "MAIA3_MOVE_TIMEOUT_S", defaults.move_timeout_s),
@@ -270,7 +408,11 @@ def position_for(fen: str, moves: list[str]) -> tuple[chess.Board, int]:
 def engine_command(
     settings: Maia3Settings, weights_path: Path, seed: int
 ) -> tuple[list[str], dict[str, str]]:
-    """The child's argv and its allowlisted environment."""
+    """The child's argv and its allowlisted environment.
+
+    No ``--temperature``: the child starts at upstream's 1.0 and every move
+    sets the ``Temperature`` option for its Elo.
+    """
     argv = [
         sys.executable, "-m", "maia3.uci",
         "--model", settings.model,
@@ -279,7 +421,6 @@ def engine_command(
         "--no-use-amp",
         "--use-uci-history",
         "--multipv", "1",
-        "--temperature", str(float(settings.temperature)),
         "--top-p", str(float(settings.top_p)),
         "--seed", str(seed),
     ]
@@ -309,7 +450,9 @@ class EngineHandle(Protocol):
 
     async def ping(self) -> None: ...
 
-    async def play(self, board: chess.Board, elo: int) -> chess.Move | None: ...
+    async def play(
+        self, board: chess.Board, elo: int, temperature: float
+    ) -> chess.Move | None: ...
 
     async def quit(self) -> None: ...
 
@@ -336,9 +479,18 @@ class _UciHandle:
     async def ping(self) -> None:
         await self._protocol.ping()
 
-    async def play(self, board: chess.Board, elo: int) -> chess.Move | None:
+    async def play(
+        self, board: chess.Board, elo: int, temperature: float
+    ) -> chess.Move | None:
+        # The keys must be spelled exactly as upstream advertises them. After
+        # these options python-chess re-applies every advertised default whose
+        # name is not among them, and that comparison is case-sensitive:
+        # "temperature" would be followed by the default in the same pass. A
+        # line is sent only when the value differs from the previous move's.
         result = await self._protocol.play(
-            board, chess.engine.Limit(nodes=1), options={"Elo": elo}
+            board,
+            chess.engine.Limit(nodes=1),
+            options={"Elo": elo, "Temperature": repr(float(temperature))},
         )
         return result.move
 
@@ -582,7 +734,9 @@ class Maia3EngineService:
             await handle.ping()  # forces the model load
             warmup = chess.Board()
             warmup.push_uci("e2e4")
-            move = await handle.play(warmup, WARMUP_ELO)
+            move = await handle.play(
+                warmup, WARMUP_ELO, settings.temperature_for(WARMUP_ELO)
+            )
             if not move:
                 raise Maia3Error("warm-up returned no move")
             self._set_oom_score_adj(handle.pid)
@@ -605,7 +759,7 @@ class Maia3EngineService:
             raise
         logger.info(
             "maia3 engine ready pid=%s model=%s revision=%s upstream=%s seed=%s "
-            "threads=%s start_ms=%.0f",
+            "threads=%s start_ms=%.0f temperature=%s",
             handle.pid,
             settings.model,
             pin.revision,
@@ -613,6 +767,7 @@ class Maia3EngineService:
             seed,
             settings.threads,
             (time.monotonic() - started) * 1000,
+            settings.temperature_label(),
         )
 
     def _set_oom_score_adj(self, pid: int) -> None:
@@ -681,6 +836,7 @@ class Maia3EngineService:
         """
         settings = self.settings
         deadline = time.monotonic() + settings.move_timeout_s
+        temperature = settings.temperature_for(elo)
         with self._cond:
             if self.closed:
                 raise Maia3Error("engine shut down")
@@ -715,7 +871,7 @@ class Maia3EngineService:
                 loop = self.loop
             if deadline - time.monotonic() < settings.min_play_budget_s:
                 raise Maia3Error("engine busy")
-            coro = self._play_on_loop(handle, board, elo, req)
+            coro = self._play_on_loop(handle, board, elo, temperature, req)
             try:
                 fut = asyncio.run_coroutine_threadsafe(coro, loop)
             except RuntimeError as exc:
@@ -762,6 +918,7 @@ class Maia3EngineService:
         handle: EngineHandle,
         board: chess.Board,
         elo: int,
+        temperature: float,
         req: _MoveRequest,
     ) -> chess.Move | None:
         """Loop only. Never cancelled: shutdown ends a move by killing the engine.
@@ -773,7 +930,7 @@ class Maia3EngineService:
         started = time.monotonic()
         try:
             move = await asyncio.wait_for(
-                handle.play(board, elo), self.settings.infer_timeout_s
+                handle.play(board, elo, temperature), self.settings.infer_timeout_s
             )
         except BaseException as exc:
             # Respawns on the retry timer after the backoff, not immediately.
@@ -795,8 +952,10 @@ class Maia3EngineService:
                 with self._cond:
                     self.backoff_s = self._backoff_base_s
                 logger.info(
-                    "maia3 move elo=%d plies=%d history_used=%d ms=%.0f abandoned=%s",
+                    "maia3 move elo=%d temp=%s plies=%d history_used=%d ms=%.0f "
+                    "abandoned=%s",
                     elo,
+                    temperature,
                     board.ply(),
                     len(board.move_stack),
                     elapsed_ms,
@@ -959,7 +1118,11 @@ def start_engine() -> None:
     if not settings.enabled:
         logger.info("maia3 engine disabled")
         return
-    logger.info("maia3 engine starting model=%s", settings.model)
+    logger.info(
+        "maia3 engine starting model=%s temperature=%s",
+        settings.model,
+        settings.temperature_label(),
+    )
     with _service_lock:
         if _service is None or _service.closed:
             _service = Maia3EngineService(settings)

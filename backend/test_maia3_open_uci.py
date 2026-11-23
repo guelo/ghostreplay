@@ -16,7 +16,8 @@ fails here most of the time.
 
 The second test runs the service against a stub engine that speaks UCI and logs
 what it receives: spawn, a move, a SIGKILL, the respawn, another move and
-shutdown.
+shutdown. The third reads from that log which ``Temperature`` was in force at
+each ``go``.
 
 Warnings are recorded explicitly, so neither test depends on the gate's
 ``-W error``.
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 import gc
 import hashlib
 import os
@@ -51,9 +53,9 @@ from app.maia3_client import (
 
 CHILD = [sys.executable, "-c", "import time; time.sleep(60)"]
 
-# A UCI engine in a dozen lines: it answers the handshake, declares the Elo
-# option the service sets, plays the first legal move in UCI order, and logs
-# "<pid> <line>" for every line it receives.
+# A UCI engine in a dozen lines: it answers the handshake, declares the options
+# the service sets as upstream declares them, plays the first legal move in UCI
+# order, and logs "<pid> <line>" for every line it receives.
 STUB_ENGINE = """\
 import os
 import sys
@@ -77,6 +79,8 @@ for raw in sys.stdin:
         say(
             "id name StubMaia3",
             "option name Elo type spin default 1500 min 600 max 2600",
+            "option name Temperature type string default 1.0",
+            "option name TopP type string default 1.0",
             "uciok",
         )
     elif line == "isready":
@@ -221,9 +225,8 @@ def stub_settings(tmp_path, monkeypatch) -> Maia3Settings:
     )
 
 
-def test_the_service_drives_a_real_uci_child_through_a_kill_and_a_respawn(
-    tmp_path, stub_settings, child_pids
-):
+def _stub_opener(tmp_path: Path):
+    """An opener that starts the stub engine, and the log the stub writes."""
     script = tmp_path / "stub_uci.py"
     script.write_text(STUB_ENGINE)
     log = tmp_path / "uci.log"
@@ -232,6 +235,13 @@ def test_the_service_drives_a_real_uci_child_through_a_kill_and_a_respawn(
     async def opener(argv: list[str], env: dict[str, str]):
         return await open_uci([sys.executable, str(script), str(log)], env)
 
+    return opener, log
+
+
+def test_the_service_drives_a_real_uci_child_through_a_kill_and_a_respawn(
+    tmp_path, stub_settings, child_pids
+):
+    opener, log = _stub_opener(tmp_path)
     svc = Maia3EngineService(
         stub_settings,
         opener=opener,
@@ -281,3 +291,34 @@ def test_the_service_drives_a_real_uci_child_through_a_kill_and_a_respawn(
         assert lines.count("go nodes 1") == 2
     assert "quit" not in received[first]  # SIGKILLed
     assert received[second][-1] == "quit"  # shut down cleanly
+
+
+def test_each_go_reaches_the_child_at_its_elos_temperature(tmp_path, stub_settings):
+    opener, log = _stub_opener(tmp_path)
+    settings = dataclasses.replace(
+        stub_settings, temperature_curve=((600, 0.25), (2600, 1.0))
+    )
+    svc = Maia3EngineService(settings, opener=opener, proc_root=tmp_path / "no-proc")
+    board = chess.Board()
+    board.push_uci("e2e4")
+
+    try:
+        assert svc.wait_ready(10.0)  # the warm-up move, at 1500
+        for elo in (600, 2600, 600, 600):
+            svc.play(board.copy(), elo)
+    finally:
+        svc.shutdown()
+
+    (lines,) = _lines_by_pid(log).values()
+    prefix = "setoption name Temperature value "
+    in_force = 1.0  # the default the child advertises
+    at_each_go = []
+    for line in lines:
+        if line.startswith(prefix):
+            in_force = float(line.removeprefix(prefix))
+        elif line.startswith("go"):
+            at_each_go.append(in_force)
+    assert at_each_go == [0.5875, 0.25, 1.0, 0.25, 0.25]
+    # One line per change: none when the value repeats, and none putting the
+    # advertised default back after ours.
+    assert sum(line.startswith(prefix) for line in lines) == 4
