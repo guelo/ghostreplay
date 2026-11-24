@@ -13,6 +13,9 @@ the user to decide.
 **Decision (user, 2026-11-18):** keep T=1, which is already the default, so no
 env change. No follow-up is filed for the 2600 band.
 
+**Since 2026-11-23** the temperature follows the target rating on a measured
+curve: `maia3-temperature-curve-2026-11-23.md`.
+
 | | Value |
 |---|---|
 | D1: T=1's mean distance from its labels | 211 Elo (noise floor F1 = 73) |

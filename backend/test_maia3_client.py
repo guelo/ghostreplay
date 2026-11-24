@@ -1486,6 +1486,46 @@ def test_only_the_measured_model_may_have_a_default_curve():
     assert {unmeasured.temperature_for(elo) for elo in ELO_BINS} == {1.0}
 
 
+# The curve validated on 2026-11-23
+# (docs/analysis/maia3-temperature-curve-2026-11-23.md), and what it gives each
+# bot level.
+VALIDATED_23M_CURVE = "600:0.72,1300:1.0,1500:1.0,2000:0.94,2300:0.7,2600:0.49"
+VALIDATED_23M_LEVELS = {
+    600: 0.72, 800: 0.8, 1000: 0.88, 1100: 0.92, 1200: 0.96, 1300: 1.0,
+    1400: 1.0, 1500: 1.0, 1600: 0.988, 1700: 0.976, 1800: 0.964, 1900: 0.952,
+    2000: 0.94, 2200: 0.78, 2400: 0.63, 2600: 0.49,
+}
+
+
+def test_the_validated_curve_is_the_default_for_maia3_23m():
+    settings = maia3_settings({})
+
+    assert settings.model == "maia3-23m"
+    assert format_temperature_curve(settings.curve) == VALIDATED_23M_CURVE
+    assert {elo: settings.temperature_for(elo) for elo in ELO_BINS} == VALIDATED_23M_LEVELS
+    # 2300 is an anchor but not a bot level.
+    assert settings.temperature_for(2300) == 0.7
+    assert settings.temperature_label() == (
+        f"curve {VALIDATED_23M_CURVE} (default for maia3-23m)"
+    )
+
+
+@pytest.mark.parametrize("elo", [600, 1500, 2600])
+def test_maia3_5m_still_plays_at_temperature_1_by_default(elo):
+    settings = maia3_settings({"MAIA3_MODEL": "maia3-5m"})
+
+    assert settings.temperature_for(elo) == 1.0
+    assert settings.temperature_label() == "flat 1.0 (no measured curve for maia3-5m)"
+
+
+def test_maia3_temperature_1_turns_the_default_curve_off():
+    """The documented rollback: one service variable, no deploy of code."""
+    settings = maia3_settings({"MAIA3_TEMPERATURE": "1"})
+
+    assert {settings.temperature_for(elo) for elo in ELO_BINS} == {1.0}
+    assert settings.temperature_label() == "flat 1.0 (MAIA3_TEMPERATURE)"
+
+
 def test_each_request_is_played_at_its_elos_temperature(make_service):
     engine = FakeEngine()
     svc = make_service(engine, temperature_curve=((600, 0.2), (2600, 1.0)))

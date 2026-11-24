@@ -34,9 +34,28 @@ its local Stockfish instead. `MAIA3_MODEL=maia3-5m` selects the smaller
 checkpoint. The other `MAIA3_*` settings are in `app/maia3_client.py`
 (`Maia3Settings`).
 
-`scripts/probe_maia3.py` measures how strongly the engine plays at each Elo,
-top-move (T=0) and sampled (T=1), against Lichess blitz players of the same
-rating, on the positions in `scripts/fixtures/maia3_probe_positions.json`. It
+The sampling temperature follows the target rating, and the API sends it with
+every move:
+
+- **Default.** maia3-23m plays on a measured curve
+  (`DEFAULT_TEMPERATURE_CURVES` in `app/maia3_client.py`; the measurement is
+  `docs/analysis/maia3-temperature-curve-2026-11-23.md`). maia3-5m was not
+  measured and plays at temperature 1.
+- **`MAIA3_TEMPERATURE_CURVE`** replaces the curve for whichever model is
+  configured. It takes `elo:temperature` anchors such as `600:0.75,1500:1.0`;
+  the temperature is linear between two anchors and flat outside them.
+- **`MAIA3_TEMPERATURE`** sets one temperature (0 to 2) for every rating and
+  wins over any curve. `MAIA3_TEMPERATURE=1` turns the curve off.
+
+An unusable value stops the API at startup. The `maia3 engine ready` log line
+names the temperature in force and where it came from.
+
+`scripts/probe_maia3.py` measures how strongly the engine plays at each Elo
+against Lichess blitz players of the same rating, on the positions in
+`scripts/fixtures/maia3_probe_*.json`. `--run` and `--report` compare top-move
+(T=0) and sampled (T=1) play. `--sweep`, `--fit`, `--ladder` and `--validate`
+fit a temperature curve on one set of positions and check it on another, and
+`--speed-counts` compares blitz, rapid and classical players of one rating. It
 also measures cold start, per-move latency and child memory (`--latency`). It
 needs Stockfish (`STOCKFISH_PATH`, or `brew install stockfish`); its docstring
 gives the commands, and its cache lives in the git-ignored `.maia3_probe/`.

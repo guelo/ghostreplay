@@ -128,7 +128,14 @@ FLAT_TEMPERATURE_CURVE: TemperatureCurve = ((1500, 1.0),)
 # for the model it was measured on: a model without an entry plays
 # FLAT_TEMPERATURE_CURVE unless MAIA3_TEMPERATURE_CURVE or MAIA3_TEMPERATURE
 # says otherwise.
-DEFAULT_TEMPERATURE_CURVES: dict[str, TemperatureCurve] = {}
+DEFAULT_TEMPERATURE_CURVES: dict[str, TemperatureCurve] = {
+    # Validated on 2026-11-23 against Lichess blitz players:
+    # docs/analysis/maia3-temperature-curve-2026-11-23.md. Changing an anchor
+    # needs a new validation pool; MAIA3_TEMPERATURE=1 turns the curve off.
+    "maia3-23m": (
+        (600, 0.72), (1300, 1.0), (1500, 1.0), (2000, 0.94), (2300, 0.7), (2600, 0.49),
+    ),
+}
 
 
 def _valid_temperature(value: object) -> bool:
