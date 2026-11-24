@@ -3,8 +3,8 @@
 Status: measured locally on 2026-11-22 and 2026-11-23 under `g-maia3-elo-temp`.
 The flatness rule was approved by the user on 2026-11-22, before any run, and
 did not change afterwards. The user chose the candidate curve on 2026-11-23,
-before the validation run, and approved its adoption after it. The production
-checks are appended after the deployment.
+before the validation run, and approved its adoption after it. It was deployed
+on 2026-11-23; the checks are under "Production on Railway".
 
 It follows `maia3-local-engine-2026-11-18.md`, which found that sampled play
 (T=1) is close to its label at 1500 and 2000, somewhat weak at 600 and 1100,
@@ -447,6 +447,58 @@ established:
   a T=1 ladder only when R4 fails.
 
 Sizes on common positions are indicative: R4 reads only the sign.
+
+## Production on Railway
+
+Read on 2026-11-24 between 00:56 and 01:29 UTC (the evening of 2026-11-23 in
+Pacific time), on deployment `260ee80b` built from commit `b80e9f9`. It
+replaced `73452b67` (commit `9bb3ae3`), which played at T=1.
+
+- **Variables:** the service has `MAIA3_ENABLED=1` and
+  `MAIA3_MIN_PLAY_BUDGET_S=0.3`. It has no `MAIA3_TEMPERATURE`,
+  `MAIA3_TEMPERATURE_CURVE`, `MAIA3_MODEL` or `MAIA3_TOP_P`, before and after
+  the deployment, so nothing overrides the default curve.
+- **The live engine's log line**, at 01:00:00 UTC:
+  `maia3 engine ready pid=16 model=maia3-23m ... threads=1 start_ms=2307
+  temperature=curve 600:0.72,1300:1.0,1500:1.0,2000:0.94,2300:0.7,2600:0.49
+  (default for maia3-23m)`.
+- **Move lines of real games:** the user played one game at 600 and one at
+  2600 by hand. All 19 engine moves at 600 logged `temp=0.72`, and all 34 at
+  2600 logged `temp=0.49`. No move was abandoned. The deployment's HTTP log
+  holds 493 responses, all between 01:16 and 01:29 UTC and every one 2xx.
+
+Latency. `--latency` ran in the container on a second engine with one thread:
+500 moves at each of 600, 1100, 1500, 2000 and 2600 in turn, so the
+temperature changes on every move. The mode printed the same temperature label
+as the live engine. The real games' figures are the `ms=` of the `maia3 move`
+log lines.
+
+| Run | CPU | Moves | p50 | p95 | Max |
+|---|---|---|---|---|---|
+| 2026-11-24, the curve, `--latency` | Intel Xeon 6975P-C | 2,500 | 62.6 ms | 69.0 ms | 85.9 ms |
+| 2026-11-24, the curve, real games | Intel Xeon 6975P-C | 53 | 68 ms | 77 ms | 84 ms |
+| 2026-11-18, T=1, `--latency` | Intel Xeon Processor (Icelake) | 2,500 | 116.2 ms | 136.5 ms | 195.9 ms |
+| 2026-11-18, T=1, real games | Intel Xeon Processor (Icelake) | 74 | 119.5 ms | 143 ms | 169 ms |
+
+- **The two days are on different hosts,** so the halving is the CPU and says
+  nothing about the curve. The temperature is one more UCI option sent with
+  each move, next to the Elo. Locally the curve cost nothing visible: p50 31.2
+  ms over 10 moves under the curve, against 31.7 ms over 200 at T=1 on
+  2026-11-18.
+- **Against the budgets:** on both hosts every move is under the 0.3 s minimum
+  play budget and far under the 5 s request budget. The slowest move in the
+  four rows is 195.9 ms.
+- **Start:** the live engine was ready 2,307 ms after it was spawned (3,813 ms
+  on 2026-11-18). The `--latency` engine finished its warm-up move after 1,252
+  ms (2,525 ms).
+- **Engine memory (VmRSS):** the live engine held 358,956 KiB before the run
+  and 358,948 KiB after it, with a peak (VmHWM) of 423,564 KiB. The `--latency`
+  engine ended at 357,400 KiB with a peak of 420,972 KiB. The live engine is
+  within 2% of its 2026-11-18 readings (354,500 and 424,368 KiB); the model is
+  the same.
+- **Container:** `memory.current` was 429 MB before and after the run.
+  `memory.peak` read 828 MB afterwards. It was not read before the run, so it
+  is likely, but not shown, that the second engine accounts for the rise.
 
 ## Caveats
 
